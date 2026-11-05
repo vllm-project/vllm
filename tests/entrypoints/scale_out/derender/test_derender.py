@@ -19,8 +19,9 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
@@ -522,6 +523,7 @@ def _make_completion_generate_response(
     request_id: str,
     kv_transfer_params: dict | None = None,
     logprobs: dict | None = None,
+    prompt_logprobs: list | None = None,
 ) -> dict:
     return {
         "request_id": request_id,
@@ -533,7 +535,7 @@ def _make_completion_generate_response(
                 "logprobs": logprobs,
             }
         ],
-        "prompt_logprobs": None,
+        "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
     }
 
@@ -735,6 +737,81 @@ async def test_derender_completion_logprobs(client):
     assert isinstance(logprobs["token_logprobs"][0], float)
     assert len(logprobs["text_offset"]) == 1
     assert logprobs["text_offset"][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_prompt_logprobs_passthrough(client):
+    """Each GenerateResponse's prompt_logprobs reaches that prompt's choices.
+
+    Regression test: /v1/completions/derender used to drop the prompt
+    logprobs the engine had already computed and returned, while the direct
+    /v1/completions endpoint attaches them to every choice of the prompt.
+    """
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+    tok = get_tokenizer(MODEL_NAME)
+    # A --tokens-only generate server has no tokenizer: decoded_token is null.
+    plp1 = [None, {str(gr1["token_ids"][0]): {"logprob": -0.5, "rank": 1}}]
+    plp2 = [None, {str(gr2["token_ids"][0]): {"logprob": -0.25, "rank": 2}}]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    gr1["token_ids"][:3], gr1["request_id"], prompt_logprobs=plp1
+                ),
+                _make_completion_generate_response(
+                    gr2["token_ids"][:3], gr2["request_id"], prompt_logprobs=plp2
+                ),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    choices = response.json()["choices"]
+    assert len(choices) == 2
+    for choice, gr, plp in zip(choices, (gr1, gr2), (plp1, plp2)):
+        tid = gr["token_ids"][0]
+        (text,) = convert_ids_list_to_tokens(tok, [tid])
+        entry = choice["prompt_logprobs"][1][str(tid)]
+        assert plp[1] is not None
+        assert choice["prompt_logprobs"][0] is None
+        assert entry["decoded_token"] == text
+        assert entry["logprob"] == plp[1][str(tid)]["logprob"]
+        assert entry["rank"] == plp[1][str(tid)]["rank"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_prompt_logprobs_decoded_token(client):
+    """Null decoded_token is filled (unknown ids as ""); given ones and empty
+    entries are kept."""
+    gen_req = await _render_chat(client)
+    ids = gen_req["token_ids"][:3]
+    tok = get_tokenizer(MODEL_NAME)
+    plp = [
+        None,
+        {str(ids[0]): {"logprob": -0.5, "rank": 1}},
+        {str(ids[1]): {"logprob": -0.1, "rank": 1, "decoded_token": "kept"}},
+        {},
+        {str(len(tok) + 1000): {"logprob": -1.0, "rank": 1}},
+    ]
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(ids, prompt_logprobs=plp),
+        },
+    )
+    assert response.status_code == 200
+    out = response.json()["prompt_logprobs"]
+    assert (
+        out[1][str(ids[0])]["decoded_token"]
+        == (convert_ids_list_to_tokens(tok, [ids[0]])[0])
+    )
+    assert out[2][str(ids[1])]["decoded_token"] == "kept"
+    assert out[3] == {}
+    assert out[4][str(len(tok) + 1000)]["decoded_token"] == ""
 
 
 @pytest.mark.asyncio
@@ -1024,10 +1101,11 @@ async def _e2e_render_chat(
     client: httpx.AsyncClient,
     model: str,
     messages: list[dict],
+    **extra,
 ) -> dict:
     resp = await client.post(
         "/v1/chat/completions/render",
-        json={"model": model, "messages": messages},
+        json={"model": model, "messages": messages, **extra},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -1308,6 +1386,62 @@ async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
     )
     assert resp.status_code == 400
     assert "chat_request" in resp.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# E2E: Qwen3 reasoning parser, which reads the prompt
+# ---------------------------------------------------------------------------
+
+QWEN3_MODEL = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def qwen3_server():
+    args = ["--reasoning-parser", "qwen3"]
+    with RemoteLaunchRenderServer(QWEN3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def qwen3_client(qwen3_server):
+    async with httpx.AsyncClient(
+        base_url=qwen3_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
+    """The parser reads the caller's prompt_token_ids, so output after a
+    prompt that already closes reasoning is content. Generate omits
+    prompt_token_ids unless return_token_ids is set."""
+    messages = [
+        {"role": "user", "content": "What is 6*7?"},
+        {"role": "assistant", "content": "<think>\nEasy.\n</think>\n\nThe answer"},
+    ]
+    continuation = {"add_generation_prompt": False, "continue_final_message": True}
+    gen_req = await _e2e_render_chat(
+        qwen3_client, QWEN3_MODEL, messages, **continuation
+    )
+    output_ids = _encode(get_tokenizer(QWEN3_MODEL), " is 42.")
+
+    resp = await qwen3_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": QWEN3_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": {
+                "model": QWEN3_MODEL,
+                "messages": messages,
+                **continuation,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert message["content"] == " is 42."
+    assert message["reasoning"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1618,7 +1752,7 @@ def _derender_hermes_chat(
         )
     )
 
-    (choice,) = derenderer._derender_chat(response, request)
+    (choice,), _ = derenderer._derender_chat(response, request)
     return choice
 
 
@@ -1777,7 +1911,7 @@ def test_derender_batch_trims_stop_like_engine(
             messages=[{"role": "user", "content": "Count"}],
             **request_kwargs,
         )
-        (choice,) = derenderer._derender_chat(response, request)
+        (choice,), _ = derenderer._derender_chat(response, request)
         output_text = choice.message.content
     else:
         request = CompletionRequest(model=MODEL_NAME, prompt="Count", **request_kwargs)

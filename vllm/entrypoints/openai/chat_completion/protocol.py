@@ -77,7 +77,9 @@ class ChatMessage(OpenAIBaseModel):
     role: str
     content: str | None = None
     refusal: str | None = None
-    annotations: OpenAIAnnotation | None = None
+    annotations: list[OpenAIAnnotation] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     audio: OpenAIChatCompletionAudio | None = None
     function_call: FunctionCall | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -977,13 +979,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Reject empty tools array, matching OpenAI API behavior
-        if data.get("tools") == []:
-            raise VLLMValidationError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely.",
-                parameter="tools",
-            )
+        # OpenAI treats an empty tools array like an omitted one: "auto" and
+        # "required" have nothing to call and fall back to "none". A named
+        # tool keeps the empty list so the lookup below reports the mismatch.
+        if data.get("tools") == [] and not isinstance(data.get("tool_choice"), dict):
+            data["tools"] = None
+            if data.get("tool_choice") in ("auto", "required"):
+                data["tool_choice"] = "none"
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
@@ -1049,8 +1051,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         break
                 if not valid_tool:
                     raise VLLMValidationError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`",
+                        f"The tool `{function_name}` specified in `tool_choice`"
+                        " does not match any of the specified `tools`",
                         parameter="tool_choice",
                     )
         return data

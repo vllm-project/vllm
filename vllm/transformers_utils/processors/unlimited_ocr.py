@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Image processor for Unlimited-OCR (baidu/Unlimited-OCR)."""
+"""Image processors for Unlimited-OCR and Unlimited-OCR-2."""
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
@@ -43,4 +43,15 @@ class UnlimitedOCRProcessor(DeepseekOCRProcessor):
             cropping = False
         return super().tokenize_with_images(
             conversation, images, bos=bos, eos=eos, cropping=cropping
+        )
+
+
+class UnlimitedOCR2Processor(DeepseekOCRProcessor):
+    """Preserve page aspect ratios and allow cropping for multi-image input."""
+
+    def _prepare_global_view(self, image: Image.Image, cropping: bool) -> Image.Image:
+        return ImageOps.pad(
+            image,
+            (self.base_size, self.base_size),
+            color=tuple(int(x * 255) for x in self.image_transform.mean),
         )

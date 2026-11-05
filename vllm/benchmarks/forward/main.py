@@ -66,10 +66,13 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     )
     parser.add_argument(
         "--routing",
-        choices=["auto", "real", "balanced"],
+        choices=["auto", "real", "balanced", "zipf"],
         default="auto",
         help="MoE routing. balanced: fixed routing with equal load per EP rank. "
-        "auto: balanced with dummy weights, else real.",
+        "zipf: fixed weighted sampling without replacement (alpha=1.25), "
+        "with expert popularity shuffled per layer. "
+        "auto: zipf with dummy weights, else real; falls back to real when "
+        "the synthetic fixture is unsupported.",
     )
     parser.add_argument(
         "--exclude-drafter",
@@ -153,6 +156,10 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
     from vllm.benchmarks.forward.routing import install_routing
 
     context = runner.vllm_config.compilation_config.static_forward_context
+    kv_caches = {
+        name: getattr(layer, "kv_cache", None) for name, layer in context.items()
+    }
+    attn_groups = [group for groups in runner.attn_groups for group in groups]
     kv_config = runner.kv_cache_config
     dcp_size = runner.parallel_config.decode_context_parallel_size
     rng = np.random.default_rng([args.seed, runner.dp_rank])
@@ -175,7 +182,7 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         dcp_size,
         lookahead,
     )
-    zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
+    zero_kv_blocks(kv_caches, attn_groups, batch, kv_config.num_blocks)
     profile_prefix = None
     if args.profile_dir:
         from vllm.distributed.parallel_state import get_world_group
@@ -194,8 +201,8 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         args.iters,
         args.samples,
         touched_kv_views(
-            context,
-            kv_config.kv_cache_groups,
+            kv_caches,
+            attn_groups,
             batch,
             kv_config.num_blocks,
             dcp_size,
@@ -205,17 +212,17 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         profile_prefix,
         include_drafter=include_drafter,
     )
-    routing, balanced = install_routing(
+    routing, fixture = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
     )
     try:
         result = bench.run()
-        if balanced is not None:
-            balanced.check_applied()
+        if fixture is not None:
+            fixture.check_applied()
     finally:
         runner.execute_model(batch.finish())
-        if balanced is not None:
-            balanced.remove()
+        if fixture is not None:
+            fixture.remove()
     return {
         "num_tokens": batch.num_tokens,
         "kv_blocks": batch.num_blocks,

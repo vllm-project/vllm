@@ -101,10 +101,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
 )
-from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
-
-from ...ops.cute_dsl.all_reduce_mhc import ACTIVE_STAGE, NEXT_STAGE
-from ...ops.cute_dsl.primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     VEC_BF16,
     _asm,
     current_cu_stream,
@@ -113,6 +110,9 @@ from ...ops.cute_dsl.primitives import (
     shuffle_sync_idx_u32,
     stmc_bf16x8,
 )
+from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
+
+from ...ops.cute_dsl.all_reduce_mhc import ACTIVE_STAGE, NEXT_STAGE
 from .. import LOW_BATCH_MAX_ROWS
 from ..attention.mxfp8 import Tactic, mxfp8_eligible
 from .all_reduce import BoundaryAllReduce
@@ -460,11 +460,17 @@ class PublishingMxfp8Linear:
         self._compiled: dict[tuple[Tactic, int], object] = {}
 
     def supports(self, linear: torch.nn.Module, num_tokens: int) -> bool:
-        """Whether ``linear`` on ``num_tokens`` rows runs the publishing GEMM."""
+        """Whether ``linear`` on ``num_tokens`` rows runs the publishing GEMM.
+        It publishes into the LL mailbox, so it takes no call of the all-reduce's
+        BT sizes."""
+        all_reduce = self.all_reduce
+        max_rows = min(
+            LOW_BATCH_MAX_ROWS, all_reduce.capacity, all_reduce.bt_min_rows - 1
+        )
         return (
             mxfp8_eligible(linear)
-            and 0 < num_tokens <= min(LOW_BATCH_MAX_ROWS, self.all_reduce.capacity)
-            and linear.weight.shape[1] == self.all_reduce.hidden_size
+            and 0 < num_tokens <= max_rows
+            and linear.weight.shape[1] == all_reduce.hidden_size
             and getattr(linear, "bias", None) is None
         )
 

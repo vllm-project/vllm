@@ -30,7 +30,6 @@ def parse_args():
         model="Qwen/Qwen3-ForcedAligner-0.6B",
         runner="pooling",
         enforce_eager=True,
-        hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     )
     return parser.parse_args()
 

@@ -5,9 +5,11 @@
 #ifndef TOPK_HISTOGRAM_4096_CUH_
 #define TOPK_HISTOGRAM_4096_CUH_
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <type_traits>
 
 namespace vllm {
 namespace topk_histogram_4096 {
@@ -66,6 +68,39 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
   v3 = __uint_as_float(r3);
 }
 
+__device__ __forceinline__ float to_float(float x) { return x; }
+__device__ __forceinline__ float to_float(__nv_bfloat16 x) {
+  return __bfloat162float(x);
+}
+
+__device__ __forceinline__ float4 load_score4(const float* ptr) {
+  return *reinterpret_cast<const float4*>(ptr);
+}
+__device__ __forceinline__ float4 load_score4(const __nv_bfloat16* ptr) {
+  const uint2 raw = *reinterpret_cast<const uint2*>(ptr);
+  return make_float4(
+      __uint_as_float(raw.x << 16), __uint_as_float(raw.x & 0xFFFF0000u),
+      __uint_as_float(raw.y << 16), __uint_as_float(raw.y & 0xFFFF0000u));
+}
+__device__ __forceinline__ float2 load_score2(const float* ptr) {
+  return *reinterpret_cast<const float2*>(ptr);
+}
+__device__ __forceinline__ float2 load_score2(const __nv_bfloat16* ptr) {
+  const uint32_t raw = *reinterpret_cast<const uint32_t*>(ptr);
+  return make_float2(__uint_as_float(raw << 16),
+                     __uint_as_float(raw & 0xFFFF0000u));
+}
+
+__device__ __forceinline__ void load_float4_predicated(const __nv_bfloat16* ptr,
+                                                       int base, int seq_len,
+                                                       float& v0, float& v1,
+                                                       float& v2, float& v3) {
+  v0 = base < seq_len ? to_float(ptr[0]) : __uint_as_float(0xFF800000u);
+  v1 = base + 1 < seq_len ? to_float(ptr[1]) : __uint_as_float(0xFF800000u);
+  v2 = base + 2 < seq_len ? to_float(ptr[2]) : __uint_as_float(0xFF800000u);
+  v3 = base + 3 < seq_len ? to_float(ptr[3]) : __uint_as_float(0xFF800000u);
+}
+
 // converts the float32 score to a 32-bit ordered unsigned integer — the full
 // precision key for radix sorting
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
@@ -86,6 +121,76 @@ __device__ __forceinline__ uint32_t extract_coarse_bin_N(float x) {
   uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
                                  : static_cast<uint16_t>(bits | 0x8000);
   return key >> (16 - kBits);
+}
+
+// Coarse bins of the two BF16 scores in `w` (low half first): the bins
+// extract_coarse_bin_N gives, from one packed FP16 conversion and key flip.
+template <uint32_t kBits>
+__device__ __forceinline__ uint2 extract_coarse_bins_bf16x2(uint32_t w) {
+  const __half2 h = __floats2half2_rn(__uint_as_float(w << 16),
+                                      __uint_as_float(w & 0xFFFF0000u));
+  const uint32_t bits = *reinterpret_cast<const uint32_t*>(&h);
+  const uint32_t sign = bits & 0x80008000u;
+  // Per half: ~bits if negative, else bits | 0x8000.
+  const uint32_t key = bits ^ ((sign - (sign >> 15)) | 0x80008000u);
+  return make_uint2((key & 0xFFFFu) >> (16 - kBits), key >> (32 - kBits));
+}
+
+// Four consecutive scores held in registers: FP32 as float4, BF16 packed in a
+// uint2 until binned.
+template <typename InT>
+using ScoreVec4 = std::conditional_t<sizeof(InT) == 2, uint2, float4>;
+
+__device__ __forceinline__ float vec_score(const float4& v, uint32_t e) {
+  return reinterpret_cast<const float*>(&v)[e];
+}
+__device__ __forceinline__ float vec_score(const uint2& v, uint32_t e) {
+  const uint32_t w = e < 2 ? v.x : v.y;
+  return __uint_as_float(e % 2 ? w & 0xFFFF0000u : w << 16);
+}
+
+// Coarse bin of score e: BF16 bins all four scores up front with two packed
+// conversions (`packed`), FP32 bins each score when it is used.
+template <uint32_t kBits>
+__device__ __forceinline__ uint4 packed_bins(const float4&) {
+  return {};
+}
+template <uint32_t kBits>
+__device__ __forceinline__ uint4 packed_bins(const uint2& v) {
+  const uint2 lo = extract_coarse_bins_bf16x2<kBits>(v.x);
+  const uint2 hi = extract_coarse_bins_bf16x2<kBits>(v.y);
+  return make_uint4(lo.x, lo.y, hi.x, hi.y);
+}
+template <uint32_t kBits>
+__device__ __forceinline__ uint32_t vec_bin(const float4& v, const uint4&,
+                                            uint32_t e) {
+  return extract_coarse_bin_N<kBits>(vec_score(v, e));
+}
+template <uint32_t kBits>
+__device__ __forceinline__ uint32_t vec_bin(const uint2&, const uint4& packed,
+                                            uint32_t e) {
+  return reinterpret_cast<const uint32_t*>(&packed)[e];
+}
+
+__device__ __forceinline__ void load_vec4(const float* ptr, float4& v) {
+  v = *reinterpret_cast<const float4*>(ptr);
+}
+__device__ __forceinline__ void load_vec4(const __nv_bfloat16* ptr, uint2& v) {
+  v = *reinterpret_cast<const uint2*>(ptr);
+}
+// Scores at or past `length` load as -inf.
+__device__ __forceinline__ void load_vec4_predicated(const float* ptr, int base,
+                                                     int length, float4& v) {
+  load_float4_predicated(ptr, base, length, v.x, v.y, v.z, v.w);
+}
+__device__ __forceinline__ void load_vec4_predicated(const __nv_bfloat16* ptr,
+                                                     int base, int length,
+                                                     uint2& v) {
+  const auto* raw = reinterpret_cast<const uint16_t*>(ptr);
+  uint32_t h[4];
+#pragma unroll
+  for (int e = 0; e < 4; e++) h[e] = base + e < length ? raw[e] : 0xFF80u;
+  v = make_uint2(h[0] | (h[1] << 16), h[2] | (h[3] << 16));
 }
 
 // running sum within each warp — thread 0 gets its own value, thread 1 gets
@@ -119,12 +224,35 @@ __device__ __forceinline__ uint32_t warp_reduce_sum_full(uint32_t v) {
 #endif
 }
 
+// Bitwise OR across the warp.
+__device__ __forceinline__ uint32_t warp_reduce_or_full(uint32_t v) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __reduce_or_sync(0xFFFFFFFF, v);
+#else
+  #pragma unroll
+  for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
+    v |= __shfl_xor_sync(0xFFFFFFFF, v, mask);
+  }
+  return v;
+#endif
+}
+
+// The first and last radix-256 rounds (round r covers key bits 31-8r..24-8r)
+// that can split ties whose keys differ from a reference key in `diff`: the
+// ties agree on every other bit. Equal keys take one round, to place them.
+__device__ __forceinline__ uint2 tie_rounds(uint32_t diff) {
+  return diff ? make_uint2(__clz(diff) / 8, (32 - __ffs(diff)) / 8)
+              : make_uint2(0, 0);
+}
+
 // ============================================================================
-// Tie refinement (single CTA): 4-round radix-256 topK on the full FP32 ordered
-// key Each round narrows by 8 bits until ties are fully resolved
+// Tie refinement (single CTA): radix-256 topK on the full FP32 ordered key.
+// Each round narrows by 8 bits until ties are fully resolved. With
+// kSkipSharedRounds, rounds over bits all ties share are skipped (BF16 scores
+// widen to keys ending in 16 zeros).
 // ============================================================================
 
-template <uint32_t TopK>
+template <uint32_t TopK, bool kSkipSharedRounds = true>
 __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
                            uint32_t num_above, int32_t* output, void* _smem) {
   struct TS {
@@ -141,18 +269,19 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
   const bool has = tx < num_ties;
   const auto tie = has ? ties[tx] : Tie{0, 0.0f};
   const uint32_t key = convert_to_uint32_v2(tie.score);
+  const uint32_t ref =
+      kSkipSharedRounds ? convert_to_uint32_v2(ties[0].score) : 0;
 
   bool active = has;  // tracks whether this thread's tie is still a candidate.
   uint32_t remain =
       TopK - num_above;  // decreases each round as ties are resolved.
   uint32_t wpos = TopK;  // wpos will hold the final output position.
   s->counter = 0;
-  __syncthreads();
+  __syncthreads();  // ties are in registers; `s` may overlap them
 
-  // The 4-round radix loop - each round narrows by 8 bits until ties are fully
-  // resolved
-#pragma unroll
-  for (int r = 0; r < 4; r++) {
+  // One radix round over key bits 31-8r..24-8r; returns whether all ties are
+  // resolved.
+  auto round = [&](uint32_t r, bool last) {
     uint32_t sh = 24 - r * 8;  // round 0: bits 31-24, round 1: 23-16, etc.
     uint32_t bin = (key >> sh) & 0xFF;  // this tie's 8-bit bin for this round
 
@@ -191,12 +320,26 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
         active = false;
       } else if (bin < thr)
         active = false;  // below -> discard
-      else if (r == 3)
+      else if (last)
         wpos = TopK - atomicAdd(&s->match.equal_count,
                                 -1u);  // last round: place remaining
     }
     remain -= na;
-    if (!remain) break;  // all ties resolved early
+    return remain == 0;
+  };
+  if constexpr (kSkipSharedRounds) {
+    const uint32_t warp_diff = warp_reduce_or_full(has ? key ^ ref : 0);
+    if (li == 0) s->warp_sum[wi] = warp_diff;
+    __syncthreads();
+    const uint2 rounds = tie_rounds(warp_reduce_or_full(s->warp_sum[li]));
+    for (uint32_t r = rounds.x; r <= rounds.y; r++) {
+      if (round(r, r == rounds.y)) break;
+    }
+  } else {
+#pragma unroll
+    for (uint32_t r = 0; r < 4; r++) {
+      if (round(r, r == 3)) break;
+    }
   }
   // Final write
   if (wpos < TopK) output[wpos] = tie.idx;
@@ -226,12 +369,15 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
   uint32_t keys[kPerThread];
   bool active[kPerThread];
 
+  const uint32_t ref = convert_to_uint32_v2(ties[0].score);
+  uint32_t diff = 0;
   for (uint32_t e = 0; e < kPerThread; e++) {
     uint32_t idx = e * kBlockSize + tx;
     if (idx < num_ties) {
       my_ties[e] = ties[idx];
       keys[e] = convert_to_uint32_v2(ties[idx].score);
       active[e] = true;
+      diff |= keys[e] ^ ref;
     } else {
       my_ties[e] = {0, 0.0f};
       keys[e] = 0;
@@ -241,9 +387,13 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
 
   uint32_t remain = TopK - num_above;
   s->counter = 0;
+  __syncthreads();  // ties are in registers; `s` may overlap them
+  const uint32_t warp_diff = warp_reduce_or_full(diff);
+  if (li == 0) s->warp_sum[wi] = warp_diff;
   __syncthreads();
+  const uint2 rounds = tie_rounds(warp_reduce_or_full(s->warp_sum[li]));
 
-  for (int r = 0; r < 4; r++) {
+  for (uint32_t r = rounds.x; r <= rounds.y; r++) {
     uint32_t sh = 24 - r * 8;
     if (tx < RADIX) {
       s->histogram[tx] = 0;
@@ -295,7 +445,7 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
         active[e] = false;
       } else if (bin < thr) {
         active[e] = false;
-      } else if (r == 3) {
+      } else if (r == rounds.y) {
         uint32_t wpos = TopK - atomicAdd(&s->match.equal_count, -1u);
         if (wpos < TopK) {
           output[wpos] = my_ties[e].idx;
@@ -333,9 +483,9 @@ struct Histogram4096Smem {
 
 // Defined in topk_histogram_4096_overflow.cuh. Only kFp32Rescan instantiations
 // call it, and their callers include that header.
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize, typename InT>
 __device__ __noinline__ void exact_topk_rescan_cold(
-    const float* __restrict__ scores, int32_t* __restrict__ output,
+    const InT* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem);
 
 // kRegisterValues refines from the values already held in registers and
@@ -343,22 +493,25 @@ __device__ __noinline__ void exact_topk_rescan_cold(
 enum class OverflowRecovery { kFp32Rescan, kRegisterValues };
 
 // Defined in topk_histogram_4096_overflow.cuh, like exact_topk_rescan_cold.
-template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
+template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread,
+          typename Vec>
 __device__ __forceinline__ bool exact_topk_refine_registers(
-    const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
+    const Vec (&vecs)[VecsPerThread], int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem);
 
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize,
-          uint32_t StartRound, uint32_t FinalCandidateCapacity>
-__device__ void exact_topk_rescan(const float* __restrict__ scores,
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize = 1,
+          uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0,
+          typename InT>
+__device__ void exact_topk_rescan(const InT* __restrict__ scores,
                                   int32_t* __restrict__ output, uint32_t length,
-                                  void* _smem, uint32_t initial_prefix,
-                                  uint32_t initial_remaining);
+                                  void* _smem, uint32_t initial_prefix = 0,
+                                  uint32_t initial_remaining = TopK);
 
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
-          bool UsePredicatedLoads = false, OverflowRecovery Recovery>
-__device__ void histogram_4096_topk(const float* __restrict__ scores,
+          bool UsePredicatedLoads = false, OverflowRecovery Recovery,
+          typename InT>
+__device__ void histogram_4096_topk(const InT* __restrict__ scores,
                                     int32_t* __restrict__ output,
                                     uint32_t length, void* _smem) {
   constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
@@ -373,8 +526,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   const auto warp_id = tx / kWarpSize;
 
   // Phase 1: Load all data into RF + build histogram
-  float4
-      vecs[VECS_PER_THREAD];  // 4 vectors x 4 floats = 16 elements per thread
+  ScoreVec4<InT> vecs[VECS_PER_THREAD];  // 4 vectors x 4 = 16 elements/thread
   if constexpr (ITEMS_PER_THREAD >= 4) {
     // Zero the histogram (SMEM writes)
     for (uint32_t i = 0; i < ITEMS_PER_THREAD / 4; i++)
@@ -388,18 +540,18 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
     smem->counter_gt = 0;
     smem->counter_eq = 0;
   }
-  if constexpr (UsePredicatedLoads) {
-    const bool row_aligned = (reinterpret_cast<uintptr_t>(scores) & 0xFu) == 0;
+  if constexpr (UsePredicatedLoads || sizeof(InT) == 2) {
+    const bool row_aligned =
+        (reinterpret_cast<uintptr_t>(scores) % sizeof(vecs[0])) == 0;
 #pragma unroll
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
       const uint32_t base = (tx + v * kBlockSize) * 4;
       if (base < length) {
         if (row_aligned && base + 3 < length) {
-          vecs[v] = *reinterpret_cast<const float4*>(scores + base);
+          load_vec4(scores + base, vecs[v]);
         } else {
-          load_float4_predicated(scores + base, static_cast<int>(base),
-                                 static_cast<int>(length), vecs[v].x, vecs[v].y,
-                                 vecs[v].z, vecs[v].w);
+          load_vec4_predicated(scores + base, static_cast<int>(base),
+                               static_cast<int>(length), vecs[v]);
         }
       }
     }
@@ -408,7 +560,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
       const uint32_t base = (tx + v * kBlockSize) * 4;
       if (base < length) {
-        vecs[v] = *reinterpret_cast<const float4*>(scores + base);
+        load_vec4(scores + base, vecs[v]);
       }
     }
   }
@@ -418,15 +570,14 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   bool done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
+    const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
 #pragma unroll
     for (uint32_t e = 0; e < 4 && !done; e++) {
       const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
       if (idx >= length) {
         done = true;
       } else {
-        atomicAdd(&smem->histogram[extract_coarse_bin_N<HIST_BITS>(elems[e])],
-                  1);
+        atomicAdd(&smem->histogram[vec_bin<HIST_BITS>(vecs[v], bins, e)], 1);
       }
     }
   }
@@ -496,14 +647,14 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
+    const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
 #pragma unroll
     for (uint32_t e = 0; e < 4 && !done; e++) {
       const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
       if (idx >= length) {
         done = true;
       } else {
-        const uint32_t bin = extract_coarse_bin_N<HIST_BITS>(elems[e]);
+        const uint32_t bin = vec_bin<HIST_BITS>(vecs[v], bins, e);
         if (bin > thr_bin) {
           output[atomicAdd(&smem->counter_gt, 1)] =
               idx;  // above -> output directly
@@ -515,7 +666,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
             }
           } else {
             if (pos < TopK) {
-              smem->tie_buffer[pos] = {idx, elems[e]};
+              smem->tie_buffer[pos] = {idx, vec_score(vecs[v], e)};
             }
           }
         }
@@ -584,9 +735,12 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
         output[num_above + r0 + r1] = target.idx;
     }
   } else {
-    // Large tie count: fall back to 4-round radix-256 sort
+    // Large tie count: fall back to the radix-256 tie refinement
     if constexpr (TopK <= kBlockSize) {
-      tie_handle<TopK>(smem->tie_buffer, num_ties, num_above, output, smem);
+      // FP32 keeps all four rounds here: the key-OR pass slowed this path by up
+      // to 0.9% even where it refines no ties.
+      tie_handle<TopK, sizeof(InT) == 2>(smem->tie_buffer, num_ties, num_above,
+                                         output, smem);
     } else {
       tie_handle_large<TopK>(smem->tie_buffer, num_ties, num_above, output,
                              smem);
@@ -596,9 +750,9 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
 
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
-          OverflowRecovery Recovery>
+          OverflowRecovery Recovery, typename InT>
 __device__ __noinline__ void histogram_4096_topk_predicated(
-    const float* __restrict__ scores, int32_t* __restrict__ output,
+    const InT* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* _smem) {
   histogram_4096_topk<TopK, HIST_BITS, VECS_PER_THREAD, true, Recovery>(
       scores, output, length, _smem);

@@ -98,6 +98,7 @@ def test_processor_pixel_values(
 
     # Verify pixel_values shape
     pixel_values = mm_data_result["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
     assert pixel_values.dim() == 5  # [batch, num_crops, C, H, W]
     assert pixel_values.shape[2] == 3  # RGB channels
     assert pixel_values.shape[3] == 378  # crop height
@@ -413,7 +414,9 @@ def test_processor_apply_accepts_non_pil_image_inputs(
     assert image_placeholders[0].length == EXPECTED_IMAGE_TOKENS
 
     mm_kwargs = processed_inputs["mm_kwargs"].get_data()
-    assert mm_kwargs["pixel_values"].shape[2:] == (3, 378, 378)
+    pixel_values = mm_kwargs["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
+    assert pixel_values.shape[2:] == (3, 378, 378)
 
 
 class TestMoondream3TilingLogic:

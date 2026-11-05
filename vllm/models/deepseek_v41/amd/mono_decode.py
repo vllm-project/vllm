@@ -354,8 +354,8 @@ class MonoDecodeLayer:
         why = None
         if get_cdna_version() not in CDNA_VERSIONS:
             why = f"needs CDNA{'/'.join(map(str, CDNA_VERSIONS))}"
-        elif get_tensor_model_parallel_world_size() not in (2, 4):
-            why = "needs tensor parallel size 2 or 4"
+        elif get_tensor_model_parallel_world_size() not in (2, 4, 8):
+            why = "needs tensor parallel size 2, 4 or 8"
         else:
             why = _unsupported_moe(layer, vllm_config)
         if why is None:

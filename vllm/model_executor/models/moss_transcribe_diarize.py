@@ -454,7 +454,7 @@ class MossTranscribeDiarizeMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
 
         dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         num_audios = mm_counts.get("audio", 0)
         if num_audios > 0:

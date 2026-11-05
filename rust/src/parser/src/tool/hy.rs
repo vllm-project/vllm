@@ -213,10 +213,9 @@ impl ToolParser for HyToolParser {
         match self.mode {
             HyMode::Text => output.push_text(&self.buffer),
             HyMode::ToolBlock { .. } => {
-                return Err(parsing_failed!(
-                    "incomplete {} tool call",
-                    self.dialect.label()
-                ));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: self.dialect.label(),
+                });
             }
             HyMode::Done => {}
         }
@@ -711,8 +710,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete HY3 tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete HY3 tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -785,8 +783,7 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete HY4 tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete HY4 tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]

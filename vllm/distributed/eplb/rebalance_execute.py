@@ -171,6 +171,35 @@ def get_ep_ranks_with_experts_batch(
     return ranks_to_send_map, ranks_to_recv_map
 
 
+def _first_rows(local_expert_ids: np.ndarray) -> dict[int, int]:
+    """Map each expert to its first local row in ``local_expert_ids``."""
+    rows: dict[int, int] = {}
+    for row, expert_id in enumerate(local_expert_ids.tolist()):
+        if expert_id != -1:
+            rows.setdefault(expert_id, row)
+    return rows
+
+
+def _recv_masks(
+    old_local_expert_ids: np.ndarray, new_local_expert_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rows keeping their expert, and rows filled without a remote receive."""
+    is_unchanged = old_local_expert_ids == new_local_expert_ids
+    can_recv_local = np.isin(new_local_expert_ids, old_local_expert_ids)
+    is_received_locally = is_unchanged | ((new_local_expert_ids != -1) & can_recv_local)
+    return is_unchanged, is_received_locally
+
+
+def _remote_recv_rows(
+    old_local_expert_ids: np.ndarray, new_local_expert_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Experts a rank receives from peers (sorted), and the first row needing each."""
+    _, is_received_locally = _recv_masks(old_local_expert_ids, new_local_expert_ids)
+    need_recv = ~is_received_locally & (new_local_expert_ids != -1)
+    experts, first = np.unique(new_local_expert_ids[need_recv], return_index=True)
+    return experts, np.flatnonzero(need_recv)[first]
+
+
 def _execute_migration_batch(
     batch: list[MigrationFlow],
     old_indices: np.ndarray,
@@ -181,10 +210,11 @@ def _execute_migration_batch(
     expert_weights_buffers: Sequence[torch.Tensor],
     communicator: EplbCommunicator,
     layer_idx: int,
+    recv_rows: list[dict[int, int]] | None,
 ) -> None:
     """Execute one batch of rank-pair-disjoint expert transfers."""
     # NIXL drains its transfer context in execute(), so each batch restores it.
-    communicator.set_transfer_context(old_indices, layer_idx)
+    communicator.set_transfer_context(old_indices, layer_idx, recv_rows)
     for flow in batch:
         if flow.src_rank == ep_rank:
             for expert_id in flow.expert_ids:
@@ -228,16 +258,15 @@ def _execute_migration_batches(
                 num_local_experts, old_indices, new_indices
             )
     base = ep_rank * num_local_experts
-    old_local = old_indices[base : base + num_local_experts]
-    new_local = new_indices[base : base + num_local_experts]
-    old_rows: dict[int, int] = {}
-    new_rows: dict[int, int] = {}
-    for row, expert_id in enumerate(old_local):
-        if expert_id != -1:
-            old_rows.setdefault(int(expert_id), row)
-    for row, expert_id in enumerate(new_local):
-        if expert_id != -1:
-            new_rows.setdefault(int(expert_id), row)
+    old_rows = _first_rows(old_indices[base : base + num_local_experts])
+    new_rows = _first_rows(new_indices[base : base + num_local_experts])
+    # Batched receives land in each expert's first new row (see new_rows).
+    recv_rows = None
+    if communicator.needs_recv_rows:
+        recv_rows = [
+            _first_rows(new_indices[b : b + num_local_experts])
+            for b in range(0, new_indices.shape[0], num_local_experts)
+        ]
     for batch in batches:
         _execute_migration_batch(
             batch=batch,
@@ -249,6 +278,7 @@ def _execute_migration_batches(
             expert_weights_buffers=expert_weights_buffers,
             communicator=communicator,
             layer_idx=layer_idx,
+            recv_rows=recv_rows,
         )
 
 
@@ -321,16 +351,8 @@ def move_to_buffer(
     old_local_expert_ids = old_indices[local_global]
     new_local_expert_ids = new_indices[local_global]
 
-    # Unchanged mask
-    is_unchanged = old_local_expert_ids == new_local_expert_ids
-
-    # Local receive eligibility
-    new_valid = new_local_expert_ids != -1
-    can_recv_local = np.isin(
-        new_local_expert_ids, old_local_expert_ids, assume_unique=False
-    )
-    is_received_locally = np.logical_or(
-        is_unchanged, np.logical_and(new_valid, can_recv_local)
+    is_unchanged, is_received_locally = _recv_masks(
+        old_local_expert_ids, new_local_expert_ids
     )
 
     # Send map: first src row per unique expert present locally in old mapping
@@ -347,17 +369,13 @@ def move_to_buffer(
         send_src_rows[:send_count] = src_rows
 
     # Recv map: primary dst per unique expert needed remotely
-    recv_count = 0
-    need_recv_mask = np.logical_and(~is_received_locally, new_valid)
-    if np.any(need_recv_mask):
-        desired_experts = new_local_expert_ids[need_recv_mask]
-        desired_dsts = local_rows[need_recv_mask]
-        uniq_recv_experts, uniq_indices = np.unique(desired_experts, return_index=True)
-        dst_rows = desired_dsts[uniq_indices]
-        recv_count = int(uniq_recv_experts.shape[0])
-        recv_expert_ids[:recv_count] = uniq_recv_experts
-        recv_dst_rows[:recv_count] = dst_rows
-        recv_primary_mask[dst_rows] = True
+    uniq_recv_experts, dst_rows = _remote_recv_rows(
+        old_local_expert_ids, new_local_expert_ids
+    )
+    recv_count = int(uniq_recv_experts.shape[0])
+    recv_expert_ids[:recv_count] = uniq_recv_experts
+    recv_dst_rows[:recv_count] = dst_rows
+    recv_primary_mask[dst_rows] = True
 
     eligible_local_buffer_mask = np.logical_and(~is_unchanged, is_received_locally)
 
@@ -398,7 +416,16 @@ def move_to_buffer(
         )
         return transfer_metadata
 
-    communicator.set_transfer_context(old_indices, layer_idx)
+    recv_rows: list[dict[int, int]] | None = None
+    if communicator.needs_recv_rows:
+        recv_rows = []
+        for start in range(0, old_indices.shape[0], num_local_experts):
+            experts, rows = _remote_recv_rows(
+                old_indices[start : start + num_local_experts],
+                new_indices[start : start + num_local_experts],
+            )
+            recv_rows.append(dict(zip(experts.tolist(), rows.tolist())))
+    communicator.set_transfer_context(old_indices, layer_idx, recv_rows)
 
     # 2. Post sends
     if send_count > 0:

@@ -31,6 +31,7 @@ vLLM currently supports the following reasoning models:
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
 | [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
+| [ZAYA1 series](https://huggingface.co/Zyphra/ZAYA1-8B) | `zaya` | `json`, `regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
@@ -307,6 +308,8 @@ curl http://localhost:8000/v1/chat/completions \
     "thinking_token_budget": 10
   }'
 ```
+
+The Responses API (`/v1/responses`) accepts the same `thinking_token_budget` field.
 
 ### Offline Inference
 

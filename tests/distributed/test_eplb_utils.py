@@ -157,3 +157,28 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_commit_eplb_maps_for_layer_does_not_sync_host():
+    """Async EPLB commits a layer from the main thread every step, so the commit
+    must not synchronize the host with the GPU."""
+    num_layers, num_logical, max_replicas = 2, 3, 2
+    model_state = _make_model_state(
+        phy2log=torch.zeros(num_layers, 4, dtype=torch.long, device="cuda"),
+        log2phy=torch.full(
+            (num_layers, num_logical, max_replicas),
+            -1,
+            dtype=torch.long,
+            device="cuda",
+        ),
+        logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long, device="cuda"),
+    )
+    new_phy2log = torch.tensor([0, 1, 2, 0], dtype=torch.long)
+
+    prev_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
+    finally:
+        torch.cuda.set_sync_debug_mode(prev_mode)

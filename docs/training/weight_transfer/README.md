@@ -131,10 +131,11 @@ parameter is usually itself a collective among its owners (an FSDP
 `full_tensor()` all-gather, a Megatron export) that would deadlock if some of
 them skipped it. Which ranks own which parameter is declared in
 [`ParamMeta.owners`](base.md#parammeta-ownership-and-layout).
-Only [sharded RDT](sharded_rdt.md) accepts ranks that own different parameters,
-such as pipeline stages. Pipeline-parallel support for NCCL and IPC is in
-progress; until then they, like NCCL M2N, need every parameter owned by rank 0
-or by every rank (see each backend's Limitations).
+Only [sharded RDT](sharded_rdt.md) and [NCCL](nccl.md#broadcasting-ranks)
+accept ranks that own different parameters, such as pipeline stages.
+Pipeline-parallel support for IPC is in progress; until then it, like NCCL M2N,
+needs every parameter owned by rank 0 or by every rank (see each backend's
+Limitations).
 
 Pass each process's own `rank` on the init info. It is explicit rather than read
 from a global process group, which is ambiguous once several groups (FSDP / TP /
@@ -148,6 +149,21 @@ engine = WeightTransferTrainerFactory.trainer_init(
 )
 engine.send_weights()  # called on every rank
 ```
+
+## Verifying a New Model Without a Trainer
+
+To check that weight updates work for a new model before wiring up an RL
+framework, the [checkpoint publisher and weight-update verifier](https://github.com/vllm-project/vllm/tree/vllm-state-transition-verifier/tools/state_transition_verifier) on the
+`vllm-state-transition-verifier` branch pushes a local Hugging Face checkpoint
+into a running `vllm serve` over NCCL, without a trainer, and compares
+fixed-token outputs and GSM8K accuracy before and after the update. Get it with:
+
+```bash
+git fetch origin vllm-state-transition-verifier
+git checkout FETCH_HEAD -- tools/state_transition_verifier
+```
+
+and start from `tools/state_transition_verifier/README.md`.
 
 ## API Endpoints
 

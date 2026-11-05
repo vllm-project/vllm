@@ -165,9 +165,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_graph_buffers=register,
             )
 
-        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
+        # AITER requires a torch.distributed-registered group and exchanges IPC
+        # handles via the default store; stateless groups satisfy neither.
+        # Only StatelessGroupCoordinator passes tcp_store_group, so this checks
+        # the property AITER depends on rather than the feature that currently
+        # creates stateless groups (elastic EP).
         if (
             "dp" in unique_name
+            and tcp_store_group is None
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
             and rocm_aiter_ops.is_custom_all_reduce_enabled()
@@ -218,10 +224,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = DeepEPLLAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "mori" and self._mori_ep_v2():
+                from .all2all import MoriEPv2All2AllManager
+
+                self.all2all_manager = MoriEPv2All2AllManager(self.cpu_group)
             elif self.all2all_backend in (
                 "mori_high_throughput",
                 "mori_low_latency",
+                "mori",
             ):
+                if self.all2all_backend != "mori":
+                    logger.warning_once(
+                        "'%s' is deprecated and will be removed in a future release. "
+                        "Use 'mori', which picks the MoRI kernels automatically.",
+                        self.all2all_backend,
+                    )
                 from .all2all import MoriAll2AllManager
 
                 self.all2all_manager = MoriAll2AllManager(
@@ -282,6 +299,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager.__class__.__name__,
                 scope="global",
             )
+
+    @staticmethod
+    def _mori_ep_v2() -> bool:
+        config = get_current_vllm_config_or_none()
+        return config is not None and bool(config.parallel_config.mori_ep_v2)
 
     def _log_all_reduce_backend_selection(self) -> None:
         """Log the all-reduce backends that are active for this group.

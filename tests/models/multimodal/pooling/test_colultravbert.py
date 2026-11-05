@@ -8,7 +8,7 @@ from transformers import Idefics3ImageProcessor
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 from vllm.model_executor.models.colultravbert import get_capped_longest_edge
 
-MODEL_NAME = "athrael-soju/ColUltraVBERT"
+MODEL_NAME = "vllm-project/ColUltraVBERT"
 DTYPE = "bfloat16"
 PAGE_PROMPT = "User:<image>Describe the image.<end_of_utterance>\nAssistant:"
 IMAGE_SEQ_LEN = 64

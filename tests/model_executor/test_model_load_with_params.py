@@ -15,7 +15,7 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
-MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "intfloat/multilingual-e5-base")
+MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "vllm-project/multilingual-e5-base")
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 
@@ -92,7 +92,7 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.pooler_config.use_activation
 
         # asserts on the tokenizer loaded
-        assert model_config.tokenizer == "intfloat/multilingual-e5-base"
+        assert model_config.tokenizer == "vllm-project/multilingual-e5-base"
         assert model_tokenizer.model_max_length == 512
 
         def check_model(model):

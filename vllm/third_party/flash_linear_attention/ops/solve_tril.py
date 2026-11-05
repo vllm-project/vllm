@@ -65,8 +65,8 @@ def solve_tril_16x16_kernel(
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
 
-    A = A + (bos * H + i_h) * BT
-    Ai = Ai + (bos * H + i_h) * 16
+    A = A + (bos * H + i_h).to(tl.int64) * BT
+    Ai = Ai + (bos * H + i_h).to(tl.int64) * 16
 
     offset = (i_t * 16) % BT
     o_t = (i_t * 16 + o_i).to(tl.int64)
@@ -83,7 +83,7 @@ def solve_tril_16x16_kernel(
 
     for i in range(2, min(16, T - i_t * 16)):
         # [16]
-        b_a = -tl.load(A + (i_t * 16 + i) * H * BT + o_i + offset)
+        b_a = -tl.load(A + (i_t * 16 + i).to(tl.int64) * H * BT + o_i + offset)
         b_a = b_a + tl.sum(b_a[:, None] * b_A, 0)
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
@@ -138,8 +138,8 @@ def merge_16x16_to_32x32_inverse_kernel(
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
-    A += (bos * H + i_h) * BT
-    Ai += (bos * H + i_h) * BT
+    A += (bos * H + i_h).to(tl.int64) * BT
+    Ai += (bos * H + i_h).to(tl.int64) * BT
 
     o_t = (i_t * BT + o_i).to(tl.int64)
     if not USE_TMA:
@@ -160,11 +160,11 @@ def merge_16x16_to_32x32_inverse_kernel(
     b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
 
     for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
+        b_a_11 = -tl.load(A + (i_t * BT + i).to(tl.int64) * H * BT + o_i)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
     for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
+        b_a_22 = -tl.load(A + (i_t * BT + i).to(tl.int64) * H * BT + o_i + 16)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
 
@@ -254,8 +254,8 @@ def merge_16x16_to_64x64_inverse_kernel(
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
-    A += (bos * H + i_h) * BT
-    Ai += (bos * H + i_h) * BT
+    A += (bos * H + i_h).to(tl.int64) * BT
+    Ai += (bos * H + i_h).to(tl.int64) * BT
 
     o_t = (i_t * BT + o_i).to(tl.int64)
     if not USE_TMA:
@@ -288,19 +288,19 @@ def merge_16x16_to_64x64_inverse_kernel(
     b_Ai_44 = -tl.where(m_A, b_Ai_44, 0)
 
     for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
+        b_a_11 = -tl.load(A + (i_t * BT + i).to(tl.int64) * H * BT + o_i)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
     for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
+        b_a_22 = -tl.load(A + (i_t * BT + i).to(tl.int64) * H * BT + o_i + 16)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
     for i in range(32 + 2, min(48, T - i_t * BT)):
-        b_a_33 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 32)
+        b_a_33 = -tl.load(A + (i_t * BT + i).to(tl.int64) * H * BT + o_i + 32)
         b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
         b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
     for i in range(48 + 2, min(64, T - i_t * BT)):
-        b_a_44 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 48)
+        b_a_44 = -tl.load(A + (i_t * BT + i).to(tl.int64) * H * BT + o_i + 48)
         b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
         b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
     b_Ai_11 += m_I

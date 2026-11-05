@@ -169,6 +169,14 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
             CONFIG_MAPPING._extra_content["qwen3_5_moe"] = registered_config
 
 
+def test_hub_id_tokenizer_class_survives_local_snapshot():
+    # Transformers picks TokenizersBackend for this checkpoint by its Hub ID;
+    # the class declared on the Hub (LlamaTokenizerFast) drops every space
+    tokenizer = get_tokenizer("deepseek-ai/deepseek-coder-1.3b-base")
+    text = "key 96727 value 4922"
+    assert tokenizer.decode(tokenizer.encode(text, add_special_tokens=False)) == text
+
+
 @pytest.fixture
 def config_tokenizer_backend(monkeypatch):
     """Keep config helpers and dispatch real; replace Hub/backend loading."""

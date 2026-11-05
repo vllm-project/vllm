@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
+    has_flashinfer_swiglustep_activation,
     quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -32,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -41,6 +42,32 @@ logger = init_logger(__name__)
 
 class TrtLlmNvFp4ExpertsBase:
     """NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface."""
+
+    # process_weights_after_loading registers them as layer parameters; quant
+    # methods that skip it (Quark) keep the constructor's tensors this way
+    kept_constants: tuple[str, ...] = (
+        "g1_scale_c",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "gemm1_clamp_limit",
+    )
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if (
+            moe_config.activation == MoEActivation.SWIGLUSTEP
+            and activation_key == kNvfp4DynamicToken
+        ):
+            return False, "SWIGLUSTEP requires per-tensor NVFP4 activation scales"
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
 
     def __init__(
         self,
@@ -53,6 +80,8 @@ class TrtLlmNvFp4ExpertsBase:
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
+        if per_token_activation and moe_config.activation == MoEActivation.SWIGLUSTEP:
+            raise ValueError("SWIGLUSTEP requires per-tensor NVFP4 activation scales")
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -92,6 +121,13 @@ class TrtLlmNvFp4ExpertsBase:
         beta = quant_config.gemm1_beta
         if beta is None:
             beta = getattr(moe_config, "swiglu_beta", None)
+
+        if moe_config.activation == MoEActivation.SWIGLUSTEP:
+            # StepFun clamps after SiLU and accepts no alpha/beta modifiers.
+            if alpha is not None or beta is not None:
+                raise ValueError("SWIGLUSTEP does not support swiglu alpha/beta")
+            if clamp is None:
+                clamp = 7.0
 
         if moe_config.is_act_and_mul:
             self.gemm1_clamp_limit = _per_expert(clamp)
@@ -156,11 +192,7 @@ class TrtLlmNvFp4ExpertsBase:
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
-        g1_scale_c = self._compute_g1_scale_c()
-        layer.register_parameter(
-            "g1_scale_c",
-            torch.nn.Parameter(g1_scale_c, requires_grad=False),
-        )
+        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
         self.g1_scale_c = layer.g1_scale_c
 
         # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
@@ -174,10 +206,7 @@ class TrtLlmNvFp4ExpertsBase:
         clamp_limit = self._gemm1_clamp_limit_unfolded
         if clamp_limit is not None and not self.is_situ:
             gemm1_clamp_limit = clamp_limit / self.quant_config.g1_alphas
-            layer.register_parameter(
-                "gemm1_clamp_limit",
-                torch.nn.Parameter(gemm1_clamp_limit, requires_grad=False),
-            )
+            replace_parameter(layer, "gemm1_clamp_limit", gemm1_clamp_limit)
             self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
         # beta shifts the raw GEMM1 accumulator, so fold by g1_alphas like the
@@ -187,17 +216,11 @@ class TrtLlmNvFp4ExpertsBase:
         beta = self._gemm1_beta_unfolded
         if beta is not None:
             gemm1_beta = beta if self.is_situ else beta / self.quant_config.g1_alphas
-            layer.register_parameter(
-                "gemm1_beta",
-                torch.nn.Parameter(gemm1_beta, requires_grad=False),
-            )
+            replace_parameter(layer, "gemm1_beta", gemm1_beta)
             self.gemm1_beta = layer.gemm1_beta
 
         if self.gemm1_alpha is not None:
-            layer.register_parameter(
-                "gemm1_alpha",
-                torch.nn.Parameter(self.gemm1_alpha, requires_grad=False),
-            )
+            replace_parameter(layer, "gemm1_alpha", self.gemm1_alpha)
             self.gemm1_alpha = layer.gemm1_alpha
 
     @staticmethod
@@ -231,6 +254,8 @@ class TrtLlmNvFp4ExpertsBase:
         """Supports SITU only when the installed FlashInfer exposes it."""
         if activation == MoEActivation.SITU:
             return has_flashinfer_situ_activation()
+        if activation == MoEActivation.SWIGLUSTEP:
+            return has_flashinfer_swiglustep_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,

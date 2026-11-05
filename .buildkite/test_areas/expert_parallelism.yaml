@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) EPLB Algorithm"
   key: eplb-algorithm
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -18,6 +19,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) EPLB Algorithm"
       dind: false
       device: mi355_dpx
@@ -32,6 +34,7 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] EPLB Execution"
   key: eplb-execution
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 25
@@ -46,6 +49,7 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
   mirror:
     amd:
+      automatic_shard: true
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) EPLB Execution"

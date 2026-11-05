@@ -14,7 +14,7 @@ from tests.utils import RemoteOpenAIServer
 # Use a small embeddings model for faster startup and smaller memory footprint.
 # Since we are not testing any chat functionality,
 # using a chat capable model is overkill.
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 
 
 @pytest.fixture(scope="module")

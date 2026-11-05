@@ -101,6 +101,11 @@ NKM_FACTORS_WVSPLITK = [
     (1, 64, 8),
     (2, 128, 8),
     (4, 256, 8),
+    # K % 16 != 0: the gfx1150/gfx1151 rows fall back to A_CHUNK = 8
+    (1, 4096 + 8, 4096 + 1),
+    (5, 1000, 2048),
+    # Speculative-decode batch
+    (5, 2048, 2560),
 ]
 
 # N is bucketed up to its next ^2 (16/32/64/128) and the remainder is masked

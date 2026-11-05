@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{deserialize_query_bool, utility_call_error};
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ResetPrefixCacheParams {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_query_bool")]
     reset_running_requests: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_query_bool")]
     reset_external: bool,
 }
 

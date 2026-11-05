@@ -82,6 +82,26 @@ def maybe_create_all_gather_dual_norm(
     return _create_on_all_tp_ranks("unpooler all-gather + residual boundary", create)
 
 
+def maybe_create_all_reduce_dual_norm(hidden_size: int, max_tokens: int) -> Any | None:
+    """One-shot all-reduce fused into the attention -> FFN boundary."""
+
+    def create() -> Any:
+        from vllm.models.muse_spark.nvidia.ops.all_reduce_dual_norm import (
+            AllReduceDualNorm,
+        )
+
+        tp_group = get_tp_group()
+        return AllReduceDualNorm(
+            hidden_size=hidden_size,
+            tp_size=tp_group.world_size,
+            rank=tp_group.rank_in_group,
+            capacity_m=max_tokens,
+            group=tp_group.device_group,
+        )
+
+    return _create_on_all_tp_ranks("o_proj all-reduce + residual boundary", create)
+
+
 def maybe_create_all_gather_norm_quant(hidden_size: int, max_tokens: int) -> Any | None:
     """FlashInfer ``MNNVLCuteDSLAllGatherNormQuantWorkspace`` for the TP group."""
 

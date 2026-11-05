@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, cast
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
@@ -15,6 +14,7 @@ from vllm.utils.import_utils import import_plugin
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.entrypoints.generate.base.protocol import DeltaMessage
+    from vllm.entrypoints.mcp.tool_server import ToolServer
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
@@ -216,7 +216,7 @@ class ReasoningParser:
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_server: ToolServer | None,
+        tool_server: "ToolServer | None",
     ) -> str | None:
         """Instance method that is implemented for preparing the structured tag"""
         return original_tag

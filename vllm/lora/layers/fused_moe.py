@@ -233,6 +233,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def _ep_check(self):
         if self.use_ep:
+            placement = self.base_layer.expert_placement_strategy
+            if placement != "linear":
+                raise ValueError(
+                    "Fused MoE LoRA with EP requires linear expert placement: "
+                    "adapter loading assumes a contiguous range of experts "
+                    f"on each rank, got '{placement}'. "
+                    "Set expert_placement_strategy='linear' to use MoE LoRA "
+                    "with expert parallelism."
+                )
             moe_config = self.moe_config
             all2all_backend = moe_config.moe_parallel_config.all2all_backend
             assert all2all_backend == "allgather_reducescatter", (

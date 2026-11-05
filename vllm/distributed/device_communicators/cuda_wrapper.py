@@ -78,6 +78,8 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # cudaError_t cudaIpcCloseMemHandle ( void* devPtr )
+        Function("cudaIpcCloseMemHandle", cudaError_t, [ctypes.c_void_p]),
         # cudaError_t cudaHostRegister ( void* ptr, size_t size, unsigned int flags )
         Function(
             "cudaHostRegister",
@@ -102,6 +104,7 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
+        "cudaIpcCloseMemHandle": "hipIpcCloseMemHandle",
         "cudaHostRegister": "hipHostRegister",
         "cudaHostUnregister": "hipHostUnregister",
         "cudaGetLastError": "hipGetLastError",
@@ -198,6 +201,9 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaIpcCloseMemHandle(self, devPtr: ctypes.c_void_p) -> None:
+        self.CUDART_CHECK(self.funcs["cudaIpcCloseMemHandle"](devPtr))
 
     def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
         """Return the raw error code instead of raising, since callers can

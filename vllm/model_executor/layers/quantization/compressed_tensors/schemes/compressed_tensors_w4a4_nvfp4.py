@@ -17,7 +17,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import move_parameter, replace_parameter
 
 logger = init_logger(__name__)
 
@@ -94,8 +94,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename CT checkpoint names to standardized names
-        layer.weight = layer.weight_packed
-        del layer.weight_packed
+        move_parameter(layer, "weight_packed", "weight")
 
         # Check for mismatched weight global scales
         if torch.unique(layer.weight_global_scale).numel() != 1:

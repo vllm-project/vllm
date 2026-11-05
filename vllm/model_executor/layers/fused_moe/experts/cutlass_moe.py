@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -280,6 +281,13 @@ def run_cutlass_moe_fp8(
 
 
 class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "ab_strides1",
+        "ab_strides2",
+        "c_strides1",
+        "c_strides2",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -702,6 +710,8 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            return
         # Fuse activation scales into w_scale_2 in-place so that
         # g1/g2_alphas (which reference the same tensor) stay in sync
         # when EPLB rearranges the parameter.
@@ -717,7 +727,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         p = current_platform
         return p.is_cuda() and (
             p.is_device_capability_family(100)
-            or p.is_device_capability_family(110)
+            # SM110 excluded: grouped NVFP4 kernel is sm100-only
             or p.is_device_capability_family(120)
         )
 
@@ -1309,6 +1319,17 @@ def run_cutlass_moe_w4a8_fp8(
 
 
 class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "a_strides1",
+        "a_strides2",
+        "b_strides1",
+        "b_strides2",
+        "c_strides1",
+        "c_strides2",
+        "s_strides1",
+        "s_strides2",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

@@ -26,6 +26,7 @@ import pytest
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
+from vllm.config import VllmConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
@@ -70,6 +71,7 @@ def _make_async_llm(
 ) -> AsyncLLM:
     """Create a bare AsyncLLM with just the attributes needed for scheduling."""
     llm = AsyncLLM.__new__(AsyncLLM)
+    llm.vllm_config = VllmConfig()
     llm.scheduler_config = SimpleNamespace(
         max_num_queued_reqs=max_num_queued_reqs,
         max_num_queued_tokens=max_num_queued_tokens,
@@ -145,9 +147,6 @@ def _make_request_test_llm(
         add_request_async=AsyncMock(side_effect=add_request_async),
         abort_requests_async=AsyncMock(),
         shutdown=MagicMock(),
-    )
-    llm.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
     )
     llm.output_handler = None
     llm.log_requests = False

@@ -157,6 +157,47 @@ impl ChatContent {
         })
     }
 
+    /// Append the content of a following message, as when two messages are
+    /// merged into one. Text on either side of the boundary is joined with a
+    /// blank line, as Python vLLM merges system messages; parts keep their
+    /// order. Empty content adds nothing.
+    pub(crate) fn append(&mut self, other: ChatContent) {
+        const SEPARATOR: &str = "\n\n";
+        if other.is_empty() && !other.has_multimodal() {
+            return;
+        }
+        if self.is_empty() && !self.has_multimodal() {
+            *self = other;
+            return;
+        }
+        match (&mut *self, other) {
+            (Self::Text(text), Self::Text(other)) => {
+                text.push_str(SEPARATOR);
+                text.push_str(&other);
+            }
+            (_, other) => {
+                let mut parts = std::mem::replace(self, Self::Text(String::new())).into_parts();
+                let mut other = other.into_parts().into_iter();
+                if let Some(ChatContentPart::Text { text }) = parts.last_mut()
+                    && let Some(ChatContentPart::Text { text: next }) = other.as_slice().first()
+                {
+                    text.push_str(SEPARATOR);
+                    text.push_str(next);
+                    other.next();
+                }
+                parts.extend(other);
+                *self = Self::Parts(parts);
+            }
+        }
+    }
+
+    fn into_parts(self) -> Vec<ChatContentPart> {
+        match self {
+            Self::Text(text) => vec![ChatContentPart::Text { text }],
+            Self::Parts(parts) => parts,
+        }
+    }
+
     /// Return whether there's no text content or only empty text blocks.
     pub fn is_empty(&self) -> bool {
         match self {
@@ -609,6 +650,11 @@ pub struct ChatRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Whether to report the rendered prompt text through
+    /// [`ChatEventStream::prompt_text`](crate::ChatEventStream::prompt_text)
+    /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
+    #[serde(default)]
+    pub return_prompt_text: bool,
 }
 
 impl ChatRequest {
@@ -630,6 +676,7 @@ impl ChatRequest {
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,
+            return_prompt_text: false,
         }
     }
 
@@ -736,6 +783,7 @@ impl ChatRole {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{json, to_value};
 
     use super::{
@@ -791,6 +839,38 @@ mod tests {
             ChatContent::from("hello".to_string()),
             ChatContent::Text("hello".to_string())
         );
+    }
+
+    #[test]
+    fn chat_content_append_joins_text_at_the_boundary() {
+        let image = || ChatContentPart::image_url("data:image/png;base64,a");
+        let append = |mut content: ChatContent, other: ChatContent| {
+            content.append(other);
+            match content {
+                ChatContent::Text(text) => format!("{text:?}"),
+                ChatContent::Parts(parts) => {
+                    let parts = parts.iter().map(|part| match part {
+                        ChatContentPart::Text { text } => format!("{text:?}"),
+                        _ => "<image>".to_string(),
+                    });
+                    format!("[{}]", parts.collect::<Vec<_>>().join(", "))
+                }
+            }
+        };
+        let appended = [
+            append("a".into(), "b".into()),
+            append("a".into(), vec![ChatContentPart::text("b"), image()].into()),
+            append(vec![ChatContentPart::text("a"), image()].into(), "b".into()),
+            append("".into(), vec![image()].into()),
+            append("a".into(), "".into()),
+        ];
+        expect![[r#"
+            "a\n\nb"
+            ["a\n\nb", <image>]
+            ["a", <image>, "b"]
+            [<image>]
+            "a""#]]
+        .assert_eq(&appended.join("\n"));
     }
 
     #[test]

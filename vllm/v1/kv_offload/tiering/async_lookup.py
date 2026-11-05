@@ -33,7 +33,8 @@ batch per step.
 Results are drained on the first lookup after each flush, at flush(), and
 after worker shutdown. In-flight lookups with no remaining request references
 are retained until their results are drained, allowing new requests to share
-the same probe.
+the same probe; a successful store drops such an orphan instead (see
+mark_present()).
 """
 
 import queue
@@ -61,8 +62,9 @@ class LookupPhase(Enum):
 class LookupState:
     generation: int
     phase: LookupPhase = LookupPhase.PENDING
-    # None while pending/in flight; True if the key exists; False if absent or
-    # explicitly marked missing after a failed load.
+    # None while pending/in flight; True if the key is known to exist (a probe
+    # found it, or this instance stored it); False if absent or explicitly
+    # marked missing after a failed load.
     result: bool | None = None
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
@@ -109,7 +111,7 @@ class AsyncLookupManager(ABC):
             list[tuple[OffloadKey, ReqContext, int]] | None
         ] = queue.SimpleQueue()
 
-        # Worker → scheduler: completed result batches.
+        # Worker → scheduler: completed request-group result batches.
         # Each item is a list of (key, generation, found) triples.
         # SimpleQueue is explicitly thread-safe for one writer / one reader.
         self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int, bool]]] = (
@@ -229,6 +231,34 @@ class AsyncLookupManager(ABC):
             if state is not None and state.phase is LookupPhase.RESOLVED:
                 state.result = False
 
+    def mark_present(self, keys: Collection[OffloadKey]) -> None:
+        """Record that keys were successfully stored to this tier.
+
+        Unlike mark_miss(), which leaves a newer probe alone (#59096), a store
+        completion is newer information than any probe started before it, so
+        this supersedes them: advancing the generation makes a stale pending
+        batch entry fail flush()'s generation check and a stale in-flight
+        result fail drain_results()'s, before either phase assert is reached.
+
+        Keys with no cached entry are skipped, since a verdict with no owning
+        request could never be reclaimed. An in-flight entry whose requests all
+        finished is dropped; cleanup() already removed the reverse-index
+        entries, so its late result is simply ignored.
+        """
+        for key in keys:
+            state = self._lookup_state.get(key)
+            if state is None or state.result is True:
+                continue
+            if not state.request_ids:
+                del self._lookup_state[key]
+                continue
+            # Generations are opaque identity tokens compared for equality
+            # only, so bumping one key cannot affect another key's results.
+            state.generation = self._next_generation
+            self._next_generation += 1
+            state.result = True
+            state.phase = LookupPhase.RESOLVED
+
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
 
@@ -268,7 +298,6 @@ class AsyncLookupManager(ABC):
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, int, bool]] = []
             for req_context, entries in batches.values():
                 keys = [key for key, _ in entries]
                 try:
@@ -282,9 +311,11 @@ class AsyncLookupManager(ABC):
                     )
                     hits = (False for _ in keys)
 
+                group_results: list[tuple[OffloadKey, int, bool]] = []
                 for (key, generation), hit in zip(entries, hits):
-                    results.append((key, generation, hit))
+                    group_results.append((key, generation, hit))
 
-            # Post the entire batch as one item — no lock needed.
-            if results:
-                self._pending_results.put(results)
+                # Post each completed request group before processing the next
+                # group. The list is not modified after it is enqueued.
+                if group_results:
+                    self._pending_results.put(group_results)

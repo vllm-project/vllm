@@ -482,6 +482,9 @@ class LoRAModelManager:
             return module_name.rpartition(".")[0]
 
         wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+        # Layers that share a suffix with a LoRA layer but are not wrapped,
+        # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
+        self.unsupported_lora_modules: set[str] = set()
 
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -495,6 +498,11 @@ class LoRAModelManager:
                     module,
                     self.supported_lora_modules,
                 ):
+                    if (
+                        module_name.rsplit(".", 1)[-1] in self.supported_lora_modules
+                        and self._get_punica_wrapper(module_name) is not None
+                    ):
+                        self.unsupported_lora_modules.add(module_name)
                     continue
             elif not self._match_target_modules(module_name) and not is_classifier_head:
                 # Full classification heads bypass the A/B LoRA target filter.
@@ -618,7 +626,7 @@ class LoRAModelManager:
                 continue
             self.register_module(module_name, new_module)
 
-            self._register_packed_modules(module_name)
+            self._register_packed_modules(module_name, module)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(punica_wrapper)
 
@@ -833,10 +841,17 @@ class LoRAModelManager:
 
         return None
 
-    def _register_packed_modules(self, module_full_name: str) -> None:
+    def _register_packed_modules(
+        self, module_full_name: str, module: nn.Module
+    ) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]
-        replacements = self.packed_modules_mapping.get(module_name, [])
+        # A base layer may set `lora_packed_modules` to override the leaf-name
+        # mapping for that layer only, e.g. Gemma4 k_eq_v layers pack
+        # [q_proj, k_proj, k_proj].
+        replacements = getattr(
+            module, "lora_packed_modules", None
+        ) or self.packed_modules_mapping.get(module_name, [])
         # When replacements is less than or equal to 1, it indicates that this
         # module is not a packed module.
         if len(replacements) <= 1:

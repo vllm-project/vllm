@@ -8,7 +8,6 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES,
     apply_gptq_marlin_linear,
-    marlin_act_int8_process_scales,
     marlin_make_empty,
     marlin_pad_dim,
     marlin_pad_qweight,
@@ -21,8 +20,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -37,6 +36,9 @@ class MarlinLinearKernel(MPLinearKernel):
         # Marlin uses inline PTX, so it can only be compatible with Nvidia
         if not current_platform.is_cuda():
             return False, "Marlin only supported on CUDA"
+
+        if c.act_type.itemsize == 1:
+            return False, "Marlin does not support 8-bit activations"
 
         quant_types = query_marlin_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
@@ -74,18 +76,6 @@ class MarlinLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = getattr(layer, self.w_q_name).device
         c = self.config
-        is_a_8bit = c.act_type is not None and c.act_type.itemsize == 1
-
-        if is_a_8bit:
-            assert c.weight_type == scalar_types.uint4b8, (
-                "W8A8 is not supported by marlin kernel."
-            )
-
-        if c.act_type == torch.float8_e4m3fn:
-            ops.marlin_int4_fp8_preprocess(getattr(layer, self.w_q_name), inplace=True)
-            getattr(layer, self.w_s_name).data = (
-                getattr(layer, self.w_s_name).data * 512
-            )
 
         size_k, size_n = c.partition_weight_shape
         padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
@@ -105,7 +95,6 @@ class MarlinLinearKernel(MPLinearKernel):
                 size_k=padded_k,
                 size_n=padded_n,
                 num_bits=c.weight_type.size_bits,
-                is_a_8bit=is_a_8bit,
             )
             return x
 
@@ -124,22 +113,7 @@ class MarlinLinearKernel(MPLinearKernel):
                 size_k=padded_k,
                 size_n=padded_n,
                 group_size=c.group_size,
-                is_a_8bit=is_a_8bit,
             )
-
-            if c.group_size == -1:
-                num_groups = 1
-            else:
-                num_groups = c.partition_weight_shape[0] // c.group_size
-
-            if c.act_type == torch.int8 and num_groups > 1:
-                x.data, input_global_scale = marlin_act_int8_process_scales(x.data)
-                layer.register_parameter(
-                    "input_global_scale",
-                    torch.nn.Parameter(input_global_scale, requires_grad=False),
-                )
-            else:
-                layer.input_global_scale = None
             return x
 
         if c.zero_points:
@@ -165,17 +139,21 @@ class MarlinLinearKernel(MPLinearKernel):
                     size_k=padded_grouped_k,
                     size_n=padded_n,
                     num_bits=c.weight_type.size_bits,
-                    is_a_8bit=is_a_8bit,
                 ),
             )
         else:
-            setattr(layer, self.w_zp_name, marlin_make_empty(device))
+            # Marlin takes an empty zp; a loaded unused one keeps its data.
+            self._retire_unused_zp(layer)
+            self.w_zp_name = "w_zp"
+            replace_parameter(layer, self.w_zp_name, marlin_make_empty(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
         if hasattr(layer, "bias") and layer.bias is not None:
-            layer.bias.data = marlin_permute_bias(
-                marlin_pad_dim(layer.bias, size_n, padded_n)
+            replace_parameter(
+                layer,
+                "bias",
+                marlin_permute_bias(marlin_pad_dim(layer.bias, size_n, padded_n)),
             )
 
     def apply_weights(
@@ -195,7 +173,5 @@ class MarlinLinearKernel(MPLinearKernel):
             wtype=c.weight_type,
             input_size_per_partition=c.partition_weight_shape[0],
             output_size_per_partition=c.partition_weight_shape[1],
-            input_global_scale=getattr(layer, "input_global_scale", None),
             bias=bias,
-            input_dtype=c.act_type,
         )

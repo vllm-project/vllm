@@ -50,7 +50,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
-    draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+    draft_model = "vllm-project/EAGLE-LLaMA3.1-Instruct-8B"
 
     engine_args = AsyncEngineArgs(
         model=target_model,

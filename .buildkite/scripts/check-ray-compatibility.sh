@@ -20,6 +20,9 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     ROCM_VER=$(python3 -c "import torch; print(torch.version.hip.rsplit('.', 1)[0])")
+    # The image's own stack builds (TheRock torch, triton, amdsmi) are on no public index,
+    # download.pytorch.org's rocm<ver> one included.
+    LOCAL_BUILDS=1
     CANDIDATE_URL="https://download.pytorch.org/whl/rocm${ROCM_VER}"
     if curl -fsSL --head "${CANDIDATE_URL}/" >/dev/null 2>&1; then
         TORCH_INDEX_URL="${CANDIDATE_URL}"
@@ -109,6 +112,14 @@ with open(out_path, "w") as f:
 
 print(f"Wrote {len(lines)} constraints to {out_path}")
 PYEOF
+
+if [[ -n "${LOCAL_BUILDS:-}" ]]; then
+    # Compare them at their public release. Dropped: amdsmi has none (TheRock ships it as
+    # sources) and triton is the stack's own, which its torch is repacked to require.
+    echo ">>> Pinning local builds to their public release:"
+    grep -E '==[^ ;]*\+|\[device-' "${WORK_DIR}/vllm-constraints.txt" || true
+    sed -i -E -e '/^(amdsmi|triton)([=<>!~ ;[]|$)|\[device-/d' -e 's/(==[^ ;+]+)\+[^ ;]*/\1/' "${WORK_DIR}/vllm-constraints.txt"
+fi
 
 echo ">>> Installed vllm deps (first 20 lines):"
 head -20 "${WORK_DIR}/vllm-constraints.txt"

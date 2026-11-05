@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 pub mod cli;
+pub mod data_parallel;
 mod process;
 
 pub use process::{ManagedEngineConfig, ManagedEngineHandle, allocate_handshake_port};

@@ -140,6 +140,7 @@ class ECCPUScheduler:
             ProducerSession,
         )
         from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+        from vllm.utils.network_utils import get_ip
         from vllm.version import __version__ as VLLM_VERSION
 
         if NixlWrapper is None or nixl_agent_config is None:
@@ -149,6 +150,7 @@ class ECCPUScheduler:
             )
         engine_id = self._ec_config.engine_id
         assert engine_id is not None
+        dp_index = vllm_config.parallel_config.data_parallel_index
         # How long a consumer waits for an XferAck. The producer answers from
         # its scheduler step, so its reply latency scales with the encoder's
         # batch size: a deployment whose steps run longer must raise this.
@@ -163,24 +165,31 @@ class ECCPUScheduler:
             dtype=str(self._dtype),
             block_size_bytes=self._region.block_size_bytes,
         )
-        if self._is_producer:
-            self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
-            self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
-
         self._data = NixlDataTransport(
-            agent_name=engine_id,
+            agent_name=f"{engine_id}_dp{dp_index}",
             base_ptr=self._region.blocks.data_ptr(),
             num_blocks=self._region.num_blocks,
             block_size_bytes=self._region.block_size_bytes,
             total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
         )
         if self._is_producer:
-            assert self._peer_host is not None
-            assert self._peer_port is not None
+            self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST or get_ip()
+            if self._peer_host in ("0.0.0.0", "::", "*"):
+                raise ValueError(
+                    "Set VLLM_EC_SIDE_CHANNEL_HOST or VLLM_HOST_IP to a "
+                    "reachable address, not a wildcard."
+                )
+            base_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
+            port = base_port + dp_index if base_port else 0
+            if base_port < 0 or not 0 <= port <= 65535:
+                raise ValueError(
+                    "VLLM_EC_SIDE_CHANNEL_PORT + data_parallel_index "
+                    "must be between 1 and 65535, or use port 0 for auto allocation."
+                )
+            transport = ZmqServerTransport(host=self._peer_host, port=port)
+            self._peer_port = transport.port
             self._producer_session = ProducerSession(
-                transport=ZmqServerTransport(
-                    host=self._peer_host, port=self._peer_port
-                ),
+                transport=transport,
                 data=self._data,
                 cache=self._cache,
                 compat_hash=self._compat_hash,

@@ -7,7 +7,10 @@ import torch.nn.functional as F
 
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import (
+    NULL_BLOCK_ID,
+    compute_causal_conv1d_metadata,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="AITER fused conv1d is ROCm-only"
@@ -161,3 +164,71 @@ def test_fused_split_qkv_conv1d_matches_reference(seqlens, has_initial_state, bl
     untouched[cache_indices.long()] = False
     assert untouched[NULL_BLOCK_ID]
     assert torch.equal(state_f[untouched], conv_state[untouched])
+
+
+@pytest.mark.parametrize(
+    "seqlens", [[1024], [8, 1, 300], [64, 64, 64], [513, 64, 1, 1200]]
+)
+def test_prebuilt_block_m_128_schedule(seqlens):
+    """Matches AITER's schedule, keeps the BLOCK_M=8 entry, no D2H sync."""
+    from types import SimpleNamespace
+
+    from aiter.ops.triton.gated_delta_net.causal_conv1d_prefill import (
+        _build_chunk_schedule,
+    )
+
+    from vllm.models.kimi_k3.amd.kda_metadata import (
+        PREFILL_CONV_BLOCK_M,
+        build_conv1d_chunk_schedule,
+    )
+
+    fused_fn = _fused_fn()
+    mixed_qkv, weight, conv_state, cache_indices, qsl, has_initial = _make_inputs(
+        seqlens, has_initial_state=True
+    )
+    proj = mixed_qkv.shape[1] // 3
+    qsl_cpu = qsl.cpu()
+
+    nums_dict, _, _ = compute_causal_conv1d_metadata(qsl_cpu, device=qsl.device)
+    entry_8 = {k: v.clone() for k, v in nums_dict[8].items() if torch.is_tensor(v)}
+    nums_dict[PREFILL_CONV_BLOCK_M] = build_conv1d_chunk_schedule(
+        qsl_cpu, PREFILL_CONV_BLOCK_M, qsl.device
+    )
+    torch.accelerator.synchronize()
+
+    tot, batch_ptr, offset_ptr = _build_chunk_schedule(qsl, PREFILL_CONV_BLOCK_M)
+    entry = nums_dict[PREFILL_CONV_BLOCK_M]
+    assert entry["tot"] == tot
+    assert torch.equal(entry["batch_ptr"], batch_ptr)
+    assert torch.equal(entry["token_chunk_offset_ptr"], offset_ptr)
+    for k, v in entry_8.items():
+        assert torch.equal(nums_dict[8][k], v), k
+
+    def run(state, metadata):
+        return fused_fn(
+            mixed_qkv.transpose(0, 1),
+            weight,
+            None,
+            state,
+            qsl,
+            proj,
+            proj,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial,
+            activation="silu",
+            block_m=PREFILL_CONV_BLOCK_M,
+            metadata=metadata,
+            preserve_input_dtype=True,
+        )
+
+    state_ref, state_pre = conv_state.clone(), conv_state.clone()
+    ref = run(state_ref, None)
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        out = run(state_pre, SimpleNamespace(nums_dict=nums_dict))
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert nums_dict[PREFILL_CONV_BLOCK_M] is entry
+    for a, b in zip(out, ref):
+        assert torch.equal(a, b)
+    assert torch.equal(state_pre, state_ref)

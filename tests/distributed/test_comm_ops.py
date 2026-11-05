@@ -467,22 +467,30 @@ def test_flashinfer_standalone_workspace_size(
 
 
 @pytest.mark.parametrize(
-    ("node_count", "is_blackwell", "expected"),
+    ("node_count", "is_blackwell", "hisparse", "expected"),
     [
-        (1, False, ("mnnvl", True)),
-        (1, True, ("mnnvl", True)),
-        (2, False, (None, False)),
-        (2, True, ("mnnvl", False)),
+        (1, False, False, ("mnnvl", True)),
+        (1, True, False, ("mnnvl", True)),
+        (2, False, False, (None, False)),
+        (2, True, False, ("mnnvl", False)),
+        (1, True, True, ("trtllm", False)),
+        (2, True, True, (None, False)),
     ],
 )
 def test_flashinfer_auto_backend_uses_group_topology(
     monkeypatch: pytest.MonkeyPatch,
     node_count: int,
     is_blackwell: bool,
+    hisparse: bool,
     expected: tuple[str | None, bool],
 ) -> None:
     monkeypatch.setattr(
         flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
+    )
+    config = Mock()
+    config.attention_config.hisparse_config = Mock() if hisparse else None
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: config
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
     monkeypatch.setattr(

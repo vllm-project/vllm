@@ -3,19 +3,16 @@
 
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
-    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
-        && !served_model_names.iter().any(|name| name == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    served_model_names.check(request.model.as_deref())?;
 
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {
@@ -101,20 +98,6 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    // TODO: return the chat-templated prompt as `prompt_text`.
-    if request.return_prompt_text == Some(true) {
-        bail_invalid_request!(
-            param = "return_prompt_text",
-            "return_prompt_text is not supported."
-        );
-    }
-    // TODO: return the per-choice `weight_versions` spans.
-    if request.return_weight_versions == Some(true) {
-        bail_invalid_request!(
-            param = "return_weight_versions",
-            "return_weight_versions is not supported."
-        );
-    }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
@@ -160,14 +143,15 @@ mod tests {
     use validator::Validate as _;
 
     use super::validate_request_compat;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
         ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
     };
 
-    fn served(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served(names: &[&str]) -> ServedModelNames {
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
     }
 
     fn non_streaming_request(stream_options: serde_json::Value) -> ChatCompletionRequest {
@@ -326,42 +310,6 @@ mod tests {
 
         let request = ChatCompletionRequest {
             length_penalty: Some(2.0),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_return_prompt_text() {
-        for return_prompt_text in [None, Some(false)] {
-            let request = ChatCompletionRequest {
-                return_prompt_text,
-                ..base_request()
-            };
-            validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-                .expect("an unset or false return_prompt_text should be accepted");
-        }
-
-        let request = ChatCompletionRequest {
-            return_prompt_text: Some(true),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_return_weight_versions() {
-        for return_weight_versions in [None, Some(false)] {
-            let request = ChatCompletionRequest {
-                return_weight_versions,
-                ..base_request()
-            };
-            validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-                .expect("an unset or false return_weight_versions should be accepted");
-        }
-
-        let request = ChatCompletionRequest {
-            return_weight_versions: Some(true),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());

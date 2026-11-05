@@ -16,9 +16,9 @@ from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
-    "Alice": "charent/self_cognition_Alice",
-    "Bob": "charent/self_cognition_Bob",
-    "Cat": "charent/self_cognition_Bob",  # same as Bob
+    "Alice": "vllm-project/self_cognition_Alice",
+    "Bob": "vllm-project/self_cognition_Bob",
+    "Cat": "vllm-project/self_cognition_Bob",  # same as Bob
 }
 
 LORA_NAME_ID_MAP = {}

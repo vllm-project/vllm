@@ -32,7 +32,6 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     vision_tower: "MiniMaxVLVisionModel"
     multimodal_config: "MultiModalConfig | None"
-    _encoder_cg_pad_totals: dict[int, int] = {}
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -73,20 +72,12 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 "(ROCm), or disable cudagraph_mm_encoder."
             )
 
-        pad_totals = self._encoder_cg_pad_totals
-
         def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Varlen attention requires cu_seqlens[-1] to equal the number of
-            # rows actually passed in. The captured buffers are sized for the
-            # full token budget, so a smaller real batch has to be completed
-            # with one trailing padding sequence; declaring fewer rows than the
-            # buffer holds is undefined behaviour and returns NaN on FlashAttn.
-            total = pad_totals.get(dst.data_ptr())
-            if total is None:
-                raise RuntimeError("cu_seqlens replay buffer was not registered")
+            # Zero-length padding (same as Qwen): tail slots repeat the last
+            # real offset, so FlashAttn schedules no work for padding rows.
             n = src.shape[0]
-            dst[:n].copy_(src[:n])
-            dst[n:] = total
+            dst[:n].copy_(src)
+            dst[n:] = src[-1]
 
         def pad_rope_planes(dst: torch.Tensor, src: torch.Tensor) -> None:
             # cos/sin planes are (3, N, half_rot_dim): the row axis is dim 1,
@@ -219,18 +210,15 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             dtype=self.vision_tower.dtype,
         )
 
-        # The padding sequence can contain nearly all captured rows when a
-        # small image replays this graph. Leave one spare cu_seqlens slot.
         metadata = self.vision_tower.vision_model.prepare_encoder_metadata(
             grid_thw_list,
             device=device,
-            max_batch_size=max_batch_size + 1,
+            max_batch_size=max_batch_size,
             max_seqlen_override=total_patches,
         )
 
         values: dict[str, torch.Tensor] = {"pixel_values": dummy_pixel_values}
         values.update({k: v for k, v in metadata.items() if v is not None})
-        self._encoder_cg_pad_totals[values["cu_seqlens"].data_ptr()] = total_patches
         return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -245,8 +233,8 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         )
 
         pixel_values = self._get_pixel_values(mm_kwargs)
-        # Unpadded: pad_cu_seqlens completes the tail with the padding sequence
-        # so cu_seqlens[-1] matches the captured buffer's row count.
+        # Unpadded: the manager zero-pads the row buffers and pad_cu_seqlens
+        # leaves the padding rows outside every sequence.
         metadata = self.vision_tower.vision_model.prepare_encoder_metadata(
             self._get_grid_thw_list(mm_kwargs),
             device=pixel_values.device,

@@ -123,6 +123,7 @@ def _build_layer(
     layer.kv_cache = (conv_state, ssm_state)
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",

@@ -29,12 +29,14 @@ import json
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
+from vllm.tool_parsers import schema_types
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 from vllm.tool_parsers.muse_tool_parser import MuseToolParser
 
@@ -558,16 +560,24 @@ def test_channel_boundaries_match_streaming(raw, reasoning, content):
 
 
 @pytest.mark.parametrize(
-    "value", ["25", "true", "null", "[1,2]", '{"x":1}', "3%", "1,500", " 25 "]
+    "value", ["25", "true", "null", "[1,2]", '{"x":1}', '"q"', "3%", "1,500", " 25 "]
 )
 @pytest.mark.parametrize("request_kind", ["chat", "responses"])
 @pytest.mark.parametrize("parser_class", [MuseToolParser, MuseGlimmerToolParser])
-def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_class):
+@pytest.mark.parametrize("nullable", [False, True])
+def test_string_parameter_schema_preserves_raw_text(
+    monkeypatch, value, request_kind, parser_class, nullable
+):
     """String schemas disambiguate ATEM values; Glimmer keeps legacy decoding."""
+    walks = MagicMock(wraps=schema_types.parameter_types)
+    monkeypatch.setattr(schema_types, "parameter_types", walks)
+    text_schema: dict = {"type": "string"}
+    if nullable:
+        text_schema = {"anyOf": [text_schema, {"type": "null"}]}
     parameters = {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
+            "text": text_schema,
             "count": {"type": "integer"},
             "items": {"type": "array", "items": {"type": "integer"}},
         },
@@ -588,12 +598,12 @@ def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_
         '<atem:parameter name="items">[1,2]</atem:parameter>'
         "</atem:invoke></atem:function_calls><|eot|>"
     )
-    expected_text = value
+    expected_text = None if nullable and value == "null" else value
     if parser_class is MuseGlimmerToolParser:
         with suppress(ValueError):
             expected_text = json.loads(value)
     expected = {"text": expected_text, "count": 25, "items": [1, 2]}
-    parser = parser_class(object())
+    parser = parser_class(object(), request.tools)
     calls = parser.extract_tool_calls(raw, request).tool_calls
     assert len(calls) == 1
     assert calls[0].function.name == "echo"
@@ -613,6 +623,8 @@ def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_
         name, arguments = _fn_of(calls[0])
         assert name == "echo"
         assert json.loads(arguments) == expected
+    # One schema walk per parser on first use, none on construction or for Glimmer.
+    assert walks.call_count == (4 if parser_class is MuseToolParser else 0)
 
 
 # --------------------------------------------------- reasoning token counting

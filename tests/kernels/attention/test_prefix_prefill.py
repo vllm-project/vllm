@@ -1130,6 +1130,9 @@ NONSTANDARD_BLOCK_SIZE_SHAPES = [
     (64, 1, 128, 544),
     (8, 4, 256, 1040),
     (8, 4, 256, 1056),
+    # gfx12, KV cache < 2 GiB: GPU memory fault with the default
+    # 4-warp / 2-stage decode launch (#62697).
+    (32, 4, 128, 528),
 ]
 
 

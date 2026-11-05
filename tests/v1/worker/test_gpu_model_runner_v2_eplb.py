@@ -58,7 +58,9 @@ class FakeEplbState:
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.model_config = SimpleNamespace(model="test-model", logits_processors=None)
+    runner.model_config = SimpleNamespace(
+        model="test-model", logits_processors=None, enable_sleep_mode=False
+    )
     runner.req_states = SimpleNamespace(
         device=runner.device,
         max_num_reqs=8,
@@ -202,6 +204,7 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
         def __init__(self):
             self.model = draft_model
             self.eplb_state = None
+            self.draft_logits = None
 
         def load_model(self, target_model):
             return None
