@@ -400,8 +400,10 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "inductor_partition"
 
-- label: ':amd: (MI355) Fusion E2E TP2 AR-RMS (Dynamo Partition)'
+- label: ':amd: (MI355) [Nightly] Fusion E2E TP2 AR-RMS (Dynamo Partition)'
   key: fusion-e2e-tp2-ar-rms-dynamo-partition-amd
+  # Nightly only: the per-PR Inductor Partition step makes the same fusion checks.
+  optional: true
   automatic_shard: true
   dind: false
   device: mi355_2
