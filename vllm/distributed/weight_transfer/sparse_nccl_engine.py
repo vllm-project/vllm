@@ -258,12 +258,16 @@ class SparseNCCLTrainerWeightTransferEngine(
             return engine
 
         payload = cls._build_worker_init_payload(init_info)
-        run_trainer_rendezvous(
-            init_worker=lambda: engine.client.init_weight_transfer_engine(payload),
-            init_trainer=lambda: setattr(
-                engine, "model_update_group", open_trainer_endpoint(init_info)
-            ),
-        )
+        try:
+            run_trainer_rendezvous(
+                init_worker=lambda: engine.client.init_weight_transfer_engine(payload),
+                init_trainer=lambda: setattr(
+                    engine, "model_update_group", open_trainer_endpoint(init_info)
+                ),
+            )
+        except BaseException:
+            engine.shutdown()  # init failed (e.g. the workers refused): free the group
+            raise
 
         return engine
 

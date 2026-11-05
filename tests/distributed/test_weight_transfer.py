@@ -2661,6 +2661,38 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     }
 
 
+class _RefusingClient(RecordingClient):
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        raise ValueError("the workers refused")
+
+
+@pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
+def test_trainer_init_destroys_its_group_when_the_workers_refuse(monkeypatch, backend):
+    """A worker refusal reaches the trainer after it opened its endpoint; the
+    trainer destroys that group before raising, so a retry starts clean."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    group = MagicMock()
+    sparse = backend == "sparse_nccl"
+    monkeypatch.setattr(
+        sparse_mod if sparse else nccl_engine_mod,
+        "open_trainer_endpoint",
+        (lambda info: group) if sparse else (lambda info, rank: group),
+    )
+    common = dict(master_address="127.0.0.1", master_port=29500, world_size=2, rank=0)
+    if sparse:
+        kwargs = dict(init_info=SparseNCCLTrainerInitInfo(**common))
+    else:
+        kwargs = dict(
+            init_info=NCCLTrainerInitInfo(**common, use_load_plan=True),
+            source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+        )
+    with pytest.raises(ValueError, match="the workers refused"):
+        WeightTransferTrainerFactory.trainer_init(client=_RefusingClient(), **kwargs)
+    group.destroy.assert_called_once()
+
+
 def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
     """One-shot send drives start, update, and finish in order."""
     client = RecordingClient()
