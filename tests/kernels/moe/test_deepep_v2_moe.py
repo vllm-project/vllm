@@ -13,7 +13,7 @@ from torch.distributed import ProcessGroup
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -110,7 +110,6 @@ def make_modular_kernel(
     q_dtype: torch.dtype | None,
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
-    use_cudagraph: bool = False,
 ) -> FusedMoEKernel:
     v2_args = DeepEPV2Args(
         num_local_experts=num_local_experts,
@@ -126,7 +125,6 @@ def make_modular_kernel(
         pgi=pgi,
         dp_size=dp_size,
         v2_args=v2_args,
-        use_cudagraph=use_cudagraph,
     )
 
     moe_config = make_dummy_moe_config(
@@ -482,7 +480,6 @@ def _deep_ep_v2_moe_backends(
     pgi: ProcessGroupInfo,
     dp_size: int,
     config: TestConfig,
-    use_cudagraph: bool,
     experts_backend: str,
 ):
     import tempfile
@@ -585,28 +582,48 @@ def _deep_ep_v2_moe_backends(
             pgi=pgi,
             dp_size=dp_size,
             v2_args=v2_args,
-            use_cudagraph=use_cudagraph,
         )
         mk_kernel = FusedMoEKernel(
             prepare_finalize=a2a,
             fused_experts=fused_experts,
         )
 
-        with set_forward_context(None, vllm_cfg):
-            for _ in range(3):
-                out = mk_kernel.apply(
-                    hidden_states=test_tensors.rank_tokens,
-                    w1=w1_ep,
-                    w2=w2_ep,
-                    topk_weights=test_tensors.topk_weights,
-                    topk_ids=test_tensors.topk,
-                    activation=MoEActivation.SILU,
-                    global_num_experts=config.num_experts,
-                    expert_map=None,
-                    apply_router_weight_on_input=False,
-                )
+        def apply():
+            return mk_kernel.apply(
+                hidden_states=test_tensors.rank_tokens,
+                w1=w1_ep,
+                w2=w2_ep,
+                topk_weights=test_tensors.topk_weights,
+                topk_ids=test_tensors.topk,
+                activation=MoEActivation.SILU,
+                global_num_experts=config.num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
 
-    torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
+        for mode in (
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.NONE,
+        ):
+            with set_forward_context(None, vllm_cfg, cudagraph_runtime_mode=mode):
+                out = apply()
+                if mode == CUDAGraphMode.FULL:
+                    torch.accelerator.synchronize()
+                    torch.distributed.barrier(group=pg)
+                    graph = torch.cuda.CUDAGraph()
+                    # Capture after eager dispatch, then return to eager execution.
+                    with (
+                        set_forward_context(
+                            None, vllm_cfg, cudagraph_runtime_mode=CUDAGraphMode.NONE
+                        ),
+                        torch.cuda.graph(graph),
+                    ):
+                        out = apply()
+                    graph.replay()
+
+            torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
@@ -614,7 +631,6 @@ def _deep_ep_v2_moe_backends(
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
-@pytest.mark.parametrize("use_cudagraph", [True, False])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 @pytest.mark.skipif(
@@ -629,7 +645,6 @@ def test_deep_ep_v2_moe_backends(
     topk: int,
     world_dp_size: tuple[int, int],
     experts_backend: str,
-    use_cudagraph: bool,
     workspace_init,
 ):
     set_random_seed(7)
@@ -650,6 +665,5 @@ def test_deep_ep_v2_moe_backends(
         _deep_ep_v2_moe_backends,
         dp_size,
         config,
-        use_cudagraph,
         experts_backend,
     )
