@@ -452,14 +452,14 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 
 - `gpu`: no offloading (GPU prefix caching only).
 - `cpu`: `CPUOffloadingSpec`, sized by `CPU_BYTES`.
-- `cpu_fs`: `TieringOffloadingSpec` with a CPU tier of `CPU_BYTES` and an FS tier in a new directory under `FS_DIR`.
+- `cpu_fs`: `TieringOffloadingSpec` with a CPU tier of `CPU_BYTES` and an FS tier in a new directory under `FS_DIR`, which must already exist.
 
 ```bash
 MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 CPU_BYTES=12884901888 FS_DIR=/mnt/nvme/kv \
     bash benchmarks/kv_offload/run_offloading_multiturn.sh
 ```
 
-The workload is set with `CONCURRENCY`, `TURNS`, `PREFIX_TOKENS`, `PREFIX_COUNT`, `PROMPT_TOKENS`, `OUTPUT_TOKENS` and `DURATION`; the defaults are 64 concurrent conversations of 5 turns with 20,000-token prefixes and 4,096 new prompt tokens per turn for 700 s. Extra server arguments go in `SERVE_ARGS`. Without `TARGET`, the `vllm` CLI must be on `PATH`; set `TARGET=http://host:port` to benchmark an already running server instead. All variables and their defaults are at the top of the script.
+The workload is set with `CONCURRENCY`, `TURNS`, `PREFIX_TOKENS`, `PREFIX_COUNT`, `PROMPT_TOKENS`, `OUTPUT_TOKENS` and `DURATION`; the defaults are 64 concurrent conversations of 5 turns with 20,000-token prefixes and 4,096 new prompt tokens per turn for 700 s. Extra server arguments go in `SERVE_ARGS`, split on whitespace, so no argument can contain spaces. Without `TARGET`, the `vllm` CLI must be on `PATH`; set `TARGET=http://host:port` to benchmark an already running server instead. All variables and their defaults are at the top of the script.
 
 ## Per-Request Selective Offload
 

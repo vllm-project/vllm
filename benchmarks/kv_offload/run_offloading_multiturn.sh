@@ -19,7 +19,7 @@
 # Example (the setup from #60128: gpt-oss-120b, TP=2 on 2xH100):
 #   MODEL=openai/gpt-oss-120b TP_SIZE=2 CPU_BYTES=25769803776 \
 #   FS_DIR=/mnt/nvme/kv CONFIGS="cpu cpu_fs" N_READ_THREADS=4 N_WRITE_THREADS=4 \
-#   KV_EXTRA='"enable_cross_layers_blocks": "True", "block_size": 1024' \
+#   KV_EXTRA='"block_size": 1024' \
 #   SERVE_ARGS="--gpu-memory-utilization 0.7 --no-disable-hybrid-kv-cache-manager" \
 #   bash benchmarks/kv_offload/run_offloading_multiturn.sh
 #
@@ -45,7 +45,7 @@ TARGET=${TARGET%/}
 MODEL=${MODEL:-}
 TP_SIZE=${TP_SIZE:-1}
 PORT=${PORT:-8000}
-SERVE_ARGS=${SERVE_ARGS:-}
+SERVE_ARGS=${SERVE_ARGS:-}   # split on whitespace; no argument may contain spaces
 CONFIGS=${CONFIGS:-"gpu cpu cpu_fs"}
 CPU_BYTES=${CPU_BYTES:-}
 FS_DIR=${FS_DIR:-}
@@ -68,24 +68,51 @@ STOP_TIMEOUT=${STOP_TIMEOUT:-180}
 RESULTS_DIR=${RESULTS_DIR:-"offloading_multiturn_$(date +%Y%m%d_%H%M%S)"}
 
 command -v guidellm >/dev/null || { echo "guidellm not found (uv pip install guidellm)" >&2; exit 1; }
+for tool in curl setsid timeout; do
+    command -v "$tool" >/dev/null || { echo "$tool not found" >&2; exit 1; }
+done
+[ -n "$TARGET" ] || command -v vllm >/dev/null || {
+    echo "vllm not found; run inside the vLLM virtualenv or the vLLM image" >&2; exit 1; }
+for var in TP_SIZE PORT N_READ_THREADS N_WRITE_THREADS TURNS PREFIX_TOKENS PROMPT_TOKENS \
+           OUTPUT_TOKENS DURATION SEED READY_TIMEOUT STOP_TIMEOUT CPU_BYTES PREFIX_COUNT; do
+    [[ ${!var} =~ ^[0-9]*$ ]] || { echo "$var must be an integer, got '${!var}'" >&2; exit 1; }
+done
+for streams in $CONCURRENCY; do
+    [[ $streams =~ ^[1-9][0-9]*$ ]] || { echo "CONCURRENCY values must be positive integers, got '$streams'" >&2; exit 1; }
+done
 command -v "$PYTHON" >/dev/null || { echo "$PYTHON not found; run inside the vLLM virtualenv or set PYTHON" >&2; exit 1; }
-mkdir -p "$RESULTS_DIR"
 
 # Check every configuration before the first run starts.
 if [ -z "$TARGET" ]; then
-    command -v setsid >/dev/null || { echo "setsid not found (util-linux)" >&2; exit 1; }
     for cfg in $CONFIGS; do
         case "$cfg" in
             gpu) ;;
             cpu) : "${CPU_BYTES:?set CPU_BYTES for the cpu configuration}" ;;
-            cpu_fs) : "${CPU_BYTES:?set CPU_BYTES for cpu_fs}" "${FS_DIR:?set FS_DIR for cpu_fs}" ;;
+            cpu_fs)
+                : "${CPU_BYTES:?set CPU_BYTES for cpu_fs}" "${FS_DIR:?set FS_DIR for cpu_fs}"
+                [ -d "$FS_DIR" ] && [ -w "$FS_DIR" ] || {
+                    echo "FS_DIR=$FS_DIR is not a writable directory" >&2; exit 1; }
+                ;;
             *) echo "unknown configuration: $cfg" >&2; exit 1 ;;
         esac
     done
 fi
 
 SERVER_PID=""
+CLIENT_PID=""
 FS_RUN_DIR=""
+
+stop_client() {
+    [ -n "$CLIENT_PID" ] || return 0
+    kill -TERM -- "-$CLIENT_PID" 2>/dev/null || true
+    for _ in $(seq 10); do
+        kill -0 "$CLIENT_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -KILL -- "-$CLIENT_PID" 2>/dev/null || true
+    wait "$CLIENT_PID" 2>/dev/null || true
+    CLIENT_PID=""
+}
 
 stop_server() {
     [ -n "$SERVER_PID" ] || return 0
@@ -111,21 +138,36 @@ stop_server() {
         port_in_use || return 0
         sleep 1
     done
+    port_in_use || return 0
     echo "Port $PORT is still in use after stopping the server" >&2
-    exit 1
+    return 1
 }
 
-cleanup() {
-    # The server is not in the terminal's process group, so a second Ctrl-C
-    # while it stops kills its group instead of leaving it running.
-    trap '[ -z "$SERVER_PID" ] || kill -KILL -- "-$SERVER_PID" 2>/dev/null || true; exit 130' INT TERM
-    stop_server
-    # Only the per-run directory this script created is removed.
+kill_groups() {
+    local pid
+    for pid in $CLIENT_PID $SERVER_PID; do
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    done
+}
+
+# Only the per-run directory this script created is removed.
+remove_fs_run_dir() {
     if [ -n "$FS_RUN_DIR" ] && [ -d "$FS_RUN_DIR" ]; then
         rm -rf -- "$FS_RUN_DIR" || echo "Could not remove $FS_RUN_DIR" >&2
     fi
     FS_RUN_DIR=""
+}
+
+cleanup() {
+    # The server and client are not in the terminal's process group, so a
+    # second Ctrl-C while they stop kills their groups instead of leaving them.
+    trap 'kill_groups; remove_fs_run_dir; exit 130' INT TERM
+    stop_client
+    local rc=0
+    stop_server || rc=$?
+    remove_fs_run_dir
     trap 'exit 130' INT TERM
+    [ "$rc" -eq 0 ] || exit 1
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -176,9 +218,11 @@ start_server() {
     local args=(serve "$MODEL" --port "$PORT" --tensor-parallel-size "$TP_SIZE"
                 --enable-prefix-caching)
     [ -n "$kv" ] && args+=(--kv-transfer-config "$kv")
-    # shellcheck disable=SC2206
-    [ -n "$SERVE_ARGS" ] && args+=($SERVE_ARGS)
-    echo "$kv" > "${log%.log}_kv_transfer_config.json"
+    # Split on whitespace only: no quote removal and no pathname expansion.
+    local extra=()
+    read -r -d '' -a extra <<< "$SERVE_ARGS" || true
+    args+=(${extra[@]+"${extra[@]}"})
+    [ -z "$kv" ] || echo "$kv" > "${log%.log}_kv_transfer_config.json"
     setsid vllm "${args[@]}" > "$log" 2>&1 &
     SERVER_PID=$!
     local start=$SECONDS
@@ -209,6 +253,9 @@ scrape_metrics() {
     echo "Could not read $1/metrics; offloading counters will be N/A" >&2
 }
 
+# guidellm runs in the background while the script waits for it, so that a
+# signal to this script is handled at once instead of after guidellm exits, and
+# in its own process group (setsid), so that its worker processes stop with it.
 run_guidellm() {
     local target=$1 streams=$2 out=$3 prefix_count
     prefix_count=${PREFIX_COUNT:-$(( 4 * streams > 256 ? 4 * streams : 256 ))}
@@ -217,21 +264,39 @@ run_guidellm() {
         "$PROMPT_TOKENS" "$OUTPUT_TOKENS" "$TURNS" "$prefix_count" "$PREFIX_TOKENS")
     local tok=()
     [ -n "$TOKENIZER" ] && tok=(--tokenizer "kind=huggingface_auto,model=$TOKENIZER")
-    guidellm run ${tok[@]+"${tok[@]}"} \
+    setsid guidellm run ${tok[@]+"${tok[@]}"} \
         --backend "kind=openai_http,target=$target,request_format=/v1/completions" \
         --profile "kind=concurrent,streams=$streams" \
         --constraint "kind=max_duration,seconds=$DURATION" \
         --seed "kind=static,value=$SEED" \
         --data "$data" \
         --output "kind=json,path=$out" \
-        --disable-progress > "${out%.json}_guidellm.log" 2>&1
+        --disable-progress > "${out%.json}_guidellm.log" 2>&1 &
+    CLIENT_PID=$!
+    local rc=0
+    wait "$CLIENT_PID" || rc=$?
+    CLIENT_PID=""
+    [ "$rc" -eq 0 ] || echo "guidellm exited with status $rc, see ${out%.json}_guidellm.log" >&2
+    return "$rc"
 }
 
+if [ -z "$TARGET" ]; then
+    # Validate the generated JSON (CPU_BYTES, KV_EXTRA, FS_DIR) before any server starts.
+    for cfg in $CONFIGS; do
+        kv=$(FS_RUN_DIR=$FS_DIR kv_transfer_config "$cfg")
+        [ -z "$kv" ] || "$PYTHON" -c 'import json, sys; json.loads(sys.argv[1])' "$kv" 2>/dev/null || {
+            printf 'Invalid --kv-transfer-config for %s (check CPU_BYTES, KV_EXTRA, FS_DIR):\n%s\n' "$cfg" "$kv" >&2
+            exit 1; }
+    done
+fi
+mkdir -p "$RESULTS_DIR"
 [ -n "$TARGET" ] && CONFIGS=external
 for cfg in $CONFIGS; do
     for streams in $CONCURRENCY; do
         run="$RESULTS_DIR/${cfg}_c${streams}"
         echo "=== $cfg, concurrency $streams"
+        # A reused RESULTS_DIR must not pair this run with an earlier one's files.
+        rm -f -- "$run.json" "${run}_metrics_before.txt" "${run}_metrics_after.txt"
         if [ -n "$TARGET" ]; then
             target=$TARGET
         else
@@ -240,6 +305,12 @@ for cfg in $CONFIGS; do
         fi
         scrape_metrics "$target" "${run}_metrics_before.txt"
         run_guidellm "$target" "$streams" "${run}.json"
+        if [ -z "$TARGET" ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "Server exited during the run, last lines of ${run}_server.log:" >&2
+            tail -n 30 "${run}_server.log" >&2
+            rm -f -- "$run.json"
+            exit 1
+        fi
         scrape_metrics "$target" "${run}_metrics_after.txt"
         [ -n "$TARGET" ] || cleanup
     done
