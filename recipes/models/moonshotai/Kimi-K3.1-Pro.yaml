@@ -9,7 +9,7 @@ meta:
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint"
+  performance_headline: "MXFP4: TP8 on two GB300 trays, one B300 node, or one MI355X node; TP32/EP32 on two Zhenwu 810E nodes; TP8/DP4/EP32 on four Zhenwu M890 nodes"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -25,6 +25,9 @@ model:
   # the renderer reads "nightly" as 0.0.0 and would offer a `kimi-k31-cu129` tag
   # that doesn't exist.
   min_vllm_version: "0.34.0"
+  platform_builds:
+    810e: { base_version: "0.32.0", build_type: custom }
+    m890: { base_version: "0.32.0", build_type: custom }
   nightly_required: true
   # Day-0 images published with the release. NVIDIA's is a CUDA 13 (cu130) build
   # only; AMD's is ROCm 10.0.
