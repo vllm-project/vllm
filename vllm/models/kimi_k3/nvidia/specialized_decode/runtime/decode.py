@@ -18,6 +18,7 @@ from vllm.utils.math_utils import round_up
 from ..cutedsl.attn_res.prepared import PreparedAttnRes
 from ..cutedsl.common.embedding import PreparedEmbedding
 from ..cutedsl.common.twoshot import TwoShot
+from ..cutedsl.kda.prepared import PreparedKda
 from ..cutedsl.moe.dense import PreparedDenseMLP
 from ..cutedsl.moe.experts_runtime import PersistentExperts
 from ..cutedsl.moe.front import SharedFront
@@ -134,6 +135,7 @@ class SpecializedDecode:
         packed = {
             d.layer_idx: pack_front(d.mlp, rank, tp) for d in layers if d.is_moe_layer
         }
+        self.packed = packed
         prefetch = self.prefetch = PrefetchController(self, layers, packed)
         state = MoEScratch(tp, device, batches)
         mailbox, tail_box, moe_layers = (
@@ -175,6 +177,24 @@ class SpecializedDecode:
                 small_batch, module, experts, tail, index, beta, linear_beta, prefetch
             )
             self.feed_forward[index] = moe
+
+    @torch.no_grad()
+    def process_weights_after_loading(self):
+        """After a weight reload: re-derive, in place, the copies built from the
+        weights. Everything else reads the backbone's tensors directly, which a
+        reload refills at the same addresses."""
+        for layer in self.layers:
+            if layer.is_moe_layer:
+                fresh = pack_front(layer.mlp, self.rank, self.tp)
+                self.packed[layer.layer_idx].copy_(fresh)
+            else:
+                self.feed_forward[layer.layer_idx].process_weights_after_loading(
+                    layer.mlp
+                )
+            core = self.attention[layer.layer_idx].core
+            # KDA keeps derived copies; MLA reads the backbone's tensors
+            if isinstance(core, PreparedKda):
+                core.process_weights_after_loading(layer.self_attn)
 
     def prepare_kv(self):
         """Compile each layer's cores for its bound KV cache layout (the profiling

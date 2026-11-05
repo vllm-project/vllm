@@ -547,17 +547,18 @@ class DotsMoEVitModel(PreTrainedModel):
         return self.patch_embed.proj.weight.device
 
     def process_weights_after_loading(self) -> None:
-        for block in self.blocks:
-            if isinstance(block.mlp, MoESwiGLUFFNFP8):
-                block.mlp.process_weights_after_loading()
         if self.config.enable_torch_compile:
             self.compile_block_modules()
 
     def compile_block_modules(self, **compile_kwargs: Any) -> None:
+        # In-place compile keeps checkpoint parameter names (no ``_orig_mod``);
+        # post-load processing reruns on every reload, so compile once.
+        if getattr(self, "_blocks_compiled", False):
+            return
         for block in self.blocks:
-            block.attn = torch.compile(block.attn, **compile_kwargs)
-            block.norm_1 = torch.compile(block.norm_1, **compile_kwargs)
-            block.norm_2 = torch.compile(block.norm_2, **compile_kwargs)
+            for module in (block.attn, block.norm_1, block.norm_2):
+                module.compile(**compile_kwargs)
+        self._blocks_compiled = True
 
     def get_pos_ids_by_grid(self, grid_thw_cpu: torch.Tensor):
         # Mirrors ``cybertron`` ``AIMv2NativeModel.rot_pos_emb``: when ``pre_pixel_shuffle``
