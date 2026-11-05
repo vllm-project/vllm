@@ -6,7 +6,7 @@
   "trust_remote_code": false,
   "transformers": "5.19.0",
   "tokenizers": "0.23.3",
-  "corpus_sha256": "eb621bacec73bb5dd1648229a66b60e3a2c83e2fb1ae0eef2a7a21b001ecedf7",
+  "corpus_sha256": "6133189cc7f0097d6d6f21df75cb163f62565c7eab0f9a9ceaa381d153c69564",
   "special_token": "<｜hy_eos:opensource｜>",
   "ids": {
     "whitespace_runs": [206, 51460, 206, 2385, 206, 13158],
