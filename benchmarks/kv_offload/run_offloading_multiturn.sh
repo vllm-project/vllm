@@ -106,7 +106,7 @@ stop_client() {
     [ -n "$CLIENT_PID" ] || return 0
     kill -TERM -- "-$CLIENT_PID" 2>/dev/null || true
     for _ in $(seq 10); do
-        kill -0 "$CLIENT_PID" 2>/dev/null || break
+        kill -0 -- "-$CLIENT_PID" 2>/dev/null || break
         sleep 1
     done
     kill -KILL -- "-$CLIENT_PID" 2>/dev/null || true
@@ -275,7 +275,8 @@ run_guidellm() {
     CLIENT_PID=$!
     local rc=0
     wait "$CLIENT_PID" || rc=$?
-    CLIENT_PID=""
+    # Workers can outlive guidellm (e.g. if it is killed), so stop its group.
+    stop_client
     [ "$rc" -eq 0 ] || echo "guidellm exited with status $rc, see ${out%.json}_guidellm.log" >&2
     return "$rc"
 }
