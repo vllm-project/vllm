@@ -1670,6 +1670,8 @@ class NixlBaseConnectorWorker:
                 )
                 continue
             group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            # Peers pair regions by the name the layer takes in transfers.
+            transfer_name = self.kv_cache_config.transfer_layer_names[layer_name]
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
             physical_page_size = (
@@ -1777,7 +1779,7 @@ class NixlBaseConnectorWorker:
                     ]
                     offset = cache.data_ptr() - storage_addr
                     assert offset >= 0 and offset + physical_page_size <= block_stride
-                    packed_member_layouts[layer_name] = (offset, physical_page_size)
+                    packed_member_layouts[transfer_name] = (offset, physical_page_size)
                 elif storage_is_block_major and (
                     not page_contiguous
                     and (
@@ -1825,8 +1827,14 @@ class NixlBaseConnectorWorker:
                 # Overlaid groups can page the same bytes with different page
                 # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
                 # one address share a region only if their block_len matches.
-                # A packed PP producer keeps one region per layer.
-                region_key = (base_addr, block_len)
+                # A packed PP producer keeps one region per layer. A group that
+                # transfers under other names keeps its own regions: the peer
+                # may hold those layers apart.
+                region_key = (
+                    base_addr,
+                    block_len,
+                    group_id if group.transfer_layer_names is not None else None,
+                )
                 if region_key in seen_region_keys and not split_packed_rows:
                     region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
@@ -1852,9 +1860,9 @@ class NixlBaseConnectorWorker:
                     region_mem_types.append(mem_type)
 
                 if region_index == len(region_layers):
-                    region_layers.append([layer_name])
+                    region_layers.append([transfer_name])
                 else:
-                    region_layers[region_index].append(layer_name)
+                    region_layers[region_index].append(transfer_name)
 
                 if isinstance(layer_spec, MambaSpec):
                     if layer_spec.tp_replicated:

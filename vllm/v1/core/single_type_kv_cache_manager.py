@@ -2313,17 +2313,12 @@ class HiSparseSourceManager(FullAttentionManager):
     ) -> None:
         if num_external_computed_tokens <= 0:
             return
-        # The connector writes these pages; only a successful receive makes
-        # them readable, not advancing the request's computed-token count.
+        # The connector writes imported pages into resident GPU pages. Their
+        # host pages come with the request's new blocks and are written back
+        # like a locally computed prefix.
         assert self.coordinator is not None
-        self.coordinator.record_pending_host_import(
+        self.coordinator.record_gpu_import(
             request_id, num_local_computed_tokens + num_external_computed_tokens
-        )
-        super().allocate_external_computed_blocks(
-            request_id,
-            num_local_computed_tokens,
-            num_external_computed_tokens,
-            record_for_zeroing,
         )
         self.coordinator.update_import_reservation(
             request_id, len(self.req_to_blocks[request_id])
@@ -2436,14 +2431,13 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         prefill_end: int = 0,
     ) -> int:
         assert not new_computed_blocks
-        # A hot region is needed to read host-backed history: an external
-        # import, a new request resuming a host prefix, or one already asked
-        # to transition. Running requests keep their earlier answer.
-        host_import = total_computed_tokens > num_local_computed_tokens
+        # A hot region is needed to read host-backed history: a new request
+        # resuming a host prefix, or one already asked to transition. Running
+        # requests keep their earlier answer.
         resumes_host_prefix = (
             num_local_computed_tokens > 0 and request_id not in self.num_cached_block
         )
-        if host_import or resumes_host_prefix or request_id in self.hot_required:
+        if resumes_host_prefix or request_id in self.hot_required:
             return self.get_num_required_blocks(request_id)
         return 0
 
@@ -2473,7 +2467,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        self.require_hot(request_id)
+        # Imports land in resident pages, so they need no hot region.
+        return
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -2517,19 +2512,12 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     ) -> int:
         del num_tokens_main_model
         assert not new_computed_blocks
-        if total_computed_tokens > num_local_computed_tokens:
-            # Keep the last imported page writable, including the last-token
-            # replay on a full prompt hit. Only earlier pages stay host-only.
-            imported_pages = cdiv(total_computed_tokens, self.block_size)
-            existing = len(self.req_to_blocks.get(request_id, ()))
-            needs_tail = self.get_resident_page(request_id, imported_pages - 1) is None
-            return int(needs_tail) + max(
-                cdiv(num_tokens, self.block_size) - max(imported_pages, existing), 0
-            )
         existing = len(self.req_to_blocks.get(request_id, ()))
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap:
+        # An import lands whole in resident pages, so it is not capped to the
+        # in-flight window a chunked prefill holds.
+        if apply_admission_cap and total_computed_tokens <= num_local_computed_tokens:
             required = min(required, self.max_admission_blocks_per_request)
         return max(required - max(existing, host_pages), 0)
 
@@ -2540,15 +2528,14 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        """Reserve a writable final page; earlier imported pages stay on host."""
+        """Back every imported page: the connector writes them in place."""
         assert num_external_computed_tokens > 0
-        num_tokens = num_local_computed_tokens + num_external_computed_tokens
-        blocks = self.req_to_blocks[request_id]
-        tail_page = (num_tokens - 1) // self.block_size
-        if len(blocks) <= tail_page:
-            blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
-        if self.get_resident_page(request_id, tail_page) is None:
-            blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
+        super().allocate_external_computed_blocks(
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+            record_for_zeroing,
+        )
 
     def add_local_computed_blocks(
         self,

@@ -154,13 +154,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )
-                    # Blocks covered by the local prefix cache, per KV cache group.
-                    # Each count fixes where that group's DCP slice starts, which the
-                    # worker needs to line up with the remote's slice.
+                    # Where each KV cache group's pulled blocks start: the blocks
+                    # before them are covered locally, by a prefix cache hit or by
+                    # another tier (null). The worker lines these positions up with
+                    # the remote's blocks.
                     local_num_computed_blocks = tuple(
-                        sum(
-                            block.block_hash is not None and not block.is_null
-                            for block in group
+                        next(
+                            (
+                                position
+                                for position, block in enumerate(group)
+                                if block.block_hash is None and not block.is_null
+                            ),
+                            len(group),
                         )
                         for group in blocks.blocks
                     )

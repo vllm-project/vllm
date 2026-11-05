@@ -767,10 +767,12 @@ class HiSparseConnectorWorker:
         )
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
-        if self.cache_handles[0].runtime.eager_host_mirror:
-            self._record_transfer_completion(transfers)
-        else:
+        if not self.cache_handles[0].runtime.eager_host_mirror:
             self._enqueue_transfers(transfers)
+            return
+        self._record_transfer_completion([t for t in transfers if not t.unmirrored])
+        if unmirrored := [t for t in transfers if t.unmirrored]:
+            self._enqueue_transfers(unmirrored)
 
     def _enqueue_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if not transfers or not self.is_host_writer:
