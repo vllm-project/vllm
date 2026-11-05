@@ -656,9 +656,7 @@ async def run_request(
         body = bytes(response.body)
         data_start = body.find(b'"data":')
         data_end = body.rfind(b'"usage":')
-        # Parsing the body back into the response models and dumping it again
-        # only rewrites what the handler serialized. orjson writes NaN and Inf
-        # as null, which the models reject, so those bodies are still parsed.
+        # orjson writes NaN and Inf as null. Parse those so they still fail.
         if (
             request.url == "/v1/embeddings"
             and response.status_code == HTTPStatus.OK
