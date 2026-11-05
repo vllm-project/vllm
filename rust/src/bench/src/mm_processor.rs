@@ -19,7 +19,7 @@ use vllm_chat::{
     load_model_backends,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_managed_engine::cli::ManagedEngineArgs;
 use vllm_managed_engine::{ManagedEngineConfig, ManagedEngineHandle};
 use vllm_text::TextLlm;
@@ -241,7 +241,7 @@ async fn run_mm_processor_with_engine(
     .context("failed to connect to engine core")?;
 
     let chat = ChatLlm::new(
-        TextLlm::new(Llm::new(client), backends.text_backend),
+        TextLlm::new(EngineCoreLlm::new(client), backends.text_backend),
         backends.chat_backend,
     );
 
