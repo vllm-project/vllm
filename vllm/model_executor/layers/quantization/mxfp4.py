@@ -160,7 +160,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         self.max_capture_size = moe.max_capture_size
 
-        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
         # Used for triton kernel precision configs
@@ -355,7 +354,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                _cache_permute_indices=self._cache_permute_indices,
+                _cache_permute_indices={},
             )
         )
 
@@ -392,8 +391,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        # Level-2 sleep discards the storage behind cached indices; rebuild them.
-        self._cache_permute_indices.clear()
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -687,7 +684,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.max_capture_size = moe.max_capture_size
 
-        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
         # Used for triton kernel precision configs
@@ -933,7 +929,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                _cache_permute_indices=self._cache_permute_indices,
+                _cache_permute_indices={},
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
                 activation_key=self.activation_key,
@@ -1028,8 +1024,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        # Level-2 sleep discards the storage behind cached indices; rebuild them.
-        self._cache_permute_indices.clear()
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             return
 
