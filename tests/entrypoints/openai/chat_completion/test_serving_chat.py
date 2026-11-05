@@ -46,7 +46,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
 from vllm.exceptions import GenerationError, QueueOverflowError, VLLMValidationError
-from vllm.inputs import TokensPrompt
+from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -1615,6 +1615,99 @@ async def test_serving_chat_returns_correct_model_name(
     # Test that full name is returned when no model is specified
     req = ChatCompletionRequest(messages=messages)
     assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_call_id", [None, "", "call_unknown"])
+async def test_serving_chat_rejects_orphan_tool_result(
+    monkeypatch: pytest.MonkeyPatch, tool_call_id: str | None
+):
+    serving_chat = _build_serving_chat(_build_mock_engine())
+    monkeypatch.setattr(
+        serving_chat.online_renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+    tool_message = {"role": "tool", "content": "orphan"}
+    if tool_call_id is not None:
+        tool_message["tool_call_id"] = tool_call_id
+
+    result = await serving_chat.create_chat_completion(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_known",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                },
+                tool_message,
+            ],
+        )
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
+    assert result.error.param == "tool_call_id"
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_accepts_parallel_and_multi_turn_tool_results(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving_chat = _build_serving_chat(_build_mock_engine())
+    monkeypatch.setattr(
+        serving_chat.online_renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+    monkeypatch.setattr(
+        serving_chat,
+        "chat_completion_full_generator",
+        AsyncMock(return_value="accepted"),
+    )
+    result = await serving_chat.create_chat_completion(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "one", "arguments": "{}"},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "two", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_2", "content": "two"},
+                {"role": "tool", "tool_call_id": "call_1", "content": "one"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_3",
+                            "type": "function",
+                            "function": {"name": "three", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_3", "content": "three"},
+            ],
+        )
+    )
+
+    assert result == "accepted"
 
 
 @pytest.mark.asyncio

@@ -259,7 +259,11 @@ class OnlineRenderer:
         try:
             validate_chat_tool_call_ids(request.messages)
         except VLLMValidationError as exc:
-            return self.create_error_response(exc)
+            return self.create_error_response(
+                str(exc),
+                err_type="invalid_request_error",
+                param=exc.parameter,
+            )
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
 
@@ -350,9 +354,10 @@ class OnlineRenderer:
         previous_response_outputs: list[ResponseOutputItem] | None = None,
         tool_server: "ToolServer | None" = None,
         skip_mm_cache: bool = False,
+        validate_tool_call_ids: bool = True,
     ) -> ResponsesRenderResult | ErrorResponse:
         """Render a Responses request using only explicitly supplied history."""
-        if not getattr(self, "use_harmony", False):
+        if validate_tool_call_ids and not getattr(self, "use_harmony", False):
             try:
                 validate_responses_tool_call_ids(
                     previous_messages=previous_messages or (),
@@ -362,7 +367,11 @@ class OnlineRenderer:
                     ),
                 )
             except VLLMValidationError as exc:
-                return self.create_error_response(exc)
+                return self.create_error_response(
+                    str(exc),
+                    err_type="invalid_request_error",
+                    param=exc.parameter,
+                )
 
         template_error = self.validate_chat_template(
             request_chat_template=None,

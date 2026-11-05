@@ -186,6 +186,7 @@ async def test_chat_renderer_rejects_orphan_result_before_preprocessing():
     )
     result = await renderer.render_chat(request)
     assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
     assert result.error.param == "tool_call_id"
 
 

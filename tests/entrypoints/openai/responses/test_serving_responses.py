@@ -506,7 +506,40 @@ async def test_online_renderer_rejects_empty_responses_call_id():
     )
 
     assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
     assert result.error.param == "call_id"
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_skips_validation_for_internal_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    monkeypatch.setattr(
+        renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_x",
+                    "content": "internal output",
+                }
+            ],
+            tools=[],
+        ),
+        validate_tool_call_ids=False,
+    )
+
+    assert not isinstance(result, ErrorResponse)
 
 
 @pytest.mark.asyncio
@@ -905,6 +938,7 @@ async def test_online_renderer_rejects_orphan_function_call_output():
     result = await renderer.render_responses(request)
 
     assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
     assert result.error.param == "call_id"
 
 
@@ -1183,6 +1217,12 @@ class TestInitializeToolSessions:
         assert render_request.input == turn_messages
         assert render_request.instructions is None
         assert render_request.cache_salt == "request-salt"
+        assert (
+            serving_responses_instance.online_renderer.render_responses.call_args.kwargs[
+                "validate_tool_call_ids"
+            ]
+            is False
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.cpu_test
