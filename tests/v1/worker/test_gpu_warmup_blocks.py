@@ -110,6 +110,7 @@ def _make_runner(
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens,
             is_mm_encoder_only=False,
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         kv_block_zeroer=None,
@@ -355,6 +356,15 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
     )
 
 
+def _row_length_config(dcp_world_size: int = 1) -> SimpleNamespace:
+    """What `max_num_blocks_per_req` reads; align-mode Mamba specs return
+    before the row clamp."""
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
+    )
+
+
 def test_reserved_block_count_matches_real_kv_cache_manager():
     """`_reserved_block_count` must predict exactly what the real
     `KVCacheManager.allocate_slots` consumes, for every group, at every step
@@ -405,6 +415,7 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
             expected = _reserved_block_count(
                 num_tokens,
                 spec,
+                vllm_config=_row_length_config(),
                 num_lookahead_tokens=num_lookahead_tokens,
                 max_model_len=MAX_MODEL_LEN,
                 max_encoder_len=0,
@@ -457,6 +468,7 @@ def test_reserved_block_count_scales_dcp_sharded_blocks():
     assert len(held) == _reserved_block_count(
         num_tokens,
         spec,
+        vllm_config=_row_length_config(dcp_world_size),
         num_lookahead_tokens=0,
         max_model_len=MAX_MODEL_LEN,
         max_encoder_len=0,

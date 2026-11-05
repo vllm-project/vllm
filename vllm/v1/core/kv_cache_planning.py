@@ -1752,7 +1752,11 @@ def shrink_kv_cache_configs(
     for kv_cache_config in kv_cache_configs:
         assert num_blocks <= kv_cache_config.num_blocks
         kv_cache_config.kv_cache_tensors = [
-            replace(tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks)
+            tensor
+            if tensor.host_resident
+            else replace(
+                tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks
+            )
             for tensor in kv_cache_config.kv_cache_tensors
         ]
         groups = kv_cache_config.kv_cache_groups
