@@ -32,7 +32,7 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     # only for requests with "FAIL" in the first token
     def conditional_failing_preprocess(self, request: EngineCoreRequest):
         # Fail if the first token id is 333
-        if request.prompt_token_ids and request.prompt_token_ids[0] == 333:
+        if request.prompt_token_ids is not None and request.prompt_token_ids[0] == 333:
             raise ValueError("Simulated preprocessing error!")
         return original_preprocess(self, request)
 
