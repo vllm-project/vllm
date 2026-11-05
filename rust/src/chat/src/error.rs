@@ -50,6 +50,8 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error("{0}")]
+    LocalMedia(#[message] String),
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -145,6 +147,7 @@ impl Error {
             | Self::UnsupportedContentPart(_)
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::LocalMedia(_)
             | Self::MmLimitExceeded { .. } => true,
 
             _ => false,

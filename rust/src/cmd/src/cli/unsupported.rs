@@ -178,17 +178,6 @@ pub struct TopLevelUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
-    /// Allowing API requests to read local images or videos from directories
-    /// specified by the server file system. This is a security risk. Should
-    /// only be enabled in trusted environments.
-    #[arg(long)]
-    pub allowed_local_media_path: Option<Unsupported>,
-
-    /// If set, only media URLs that belong to this domain can be used for
-    /// multi-modal inputs.
-    #[arg(long)]
-    pub allowed_media_domains: Option<Unsupported>,
-
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///
