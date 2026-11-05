@@ -215,10 +215,10 @@ def test_init_speculator():
         (_vllm_config(NotASpeculatorConfig), TypeError, "must be a subclass of"),
         (
             SimpleNamespace(
-                speculative_config=fake_speculative_config(method="suffix")
+                speculative_config=fake_speculative_config(method="custom_class")
             ),
             NotImplementedError,
-            "suffix is not supported",
+            "custom_class is not supported",
         ),
     ],
 )

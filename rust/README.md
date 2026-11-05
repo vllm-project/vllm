@@ -64,6 +64,12 @@ SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
 `vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
 gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
+### gRPC health checks
+
+The gRPC listener also serves `grpc.health.v1.Health`. Kubernetes probes should
+use the `liveness` service for liveness and `readiness` for readiness; see
+[Rust frontend gRPC health checks](../docs/deployment/k8s.md#rust-frontend-grpc-health-checks).
+
 ### RL weight synchronization
 
 With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer

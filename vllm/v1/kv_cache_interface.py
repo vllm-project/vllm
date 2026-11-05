@@ -106,17 +106,6 @@ class KVQuantMode(IntEnum):
         """True for the UltraQuant 4-bit KV-cache format."""
         return self == KVQuantMode.ULTRAQUANT_4BIT
 
-    @property
-    def is_custom_mode(self) -> bool:
-        """True when a platform backend fully self-manages kernel dispatch.
-
-        The attention selector should defer to the backend's own kernel
-        selection rather than a generic per-token-head / fp8 / turboquant
-        path. Distinct from NONE (which means non-quantized): CUSTOM is
-        quantized, just with no generic kernel mode.
-        """
-        return self == KVQuantMode.CUSTOM
-
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -566,6 +555,10 @@ class AttentionSpec(KVCacheSpec):
     """
     state_content_bytes: int | None = None
     """C in bytes when packed; None means dense K/V content."""
+    kv_head_major_slots: bool = False
+    """Whether ``num_head_slots`` slots are grouped by KV head (``H2ND``: head
+    ``h``'s K and V slots are adjacent), so every KV head is one contiguous run
+    of the page and the page re-shards across TP by byte offset."""
     tokens_per_state: int | Fraction = 1
     """Tokens covered by one stored state. Ints > 1 compress multiple tokens
     into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
@@ -692,6 +685,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             tokens_per_state=specs[0].tokens_per_state,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
@@ -783,6 +777,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             cache_dtype_str=cache_dtype_str_set.pop(),
             topk_buffer_width=topk_buffer_width_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
@@ -849,6 +844,7 @@ class RSWASpec(FullAttentionSpec):
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
+            kv_head_major_slots=base.kv_head_major_slots,
             tokens_per_state=base.tokens_per_state,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
@@ -1072,6 +1068,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
@@ -1095,6 +1092,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
+    state_alignment: int = 1
+    """Byte alignment of each state within a page."""
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -1107,10 +1106,17 @@ class MambaSpec(KVCacheSpec):
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.page_size_padded is not None:
+            assert self.page_size_padded % self.state_alignment == 0, (
+                "page_size_padded must be aligned to state_alignment"
+            )
+
     @property
     def state_content_size_bytes(self) -> int:
         return sum(
-            prod(shape) * get_dtype_size(dtype)
+            round_up(prod(shape) * get_dtype_size(dtype), self.state_alignment)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
@@ -1120,10 +1126,7 @@ class MambaSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        page_size = sum(
-            prod(shape) * get_dtype_size(dtype)
-            for (shape, dtype) in zip(self.shapes, self.dtypes)
-        )
+        page_size = self.state_content_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded
@@ -1162,6 +1165,7 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
+            and spec.state_alignment == self.state_alignment
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
@@ -1267,6 +1271,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
@@ -1559,6 +1564,17 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    needs_kv_cache_zeroing: bool = field(init=False)
+    """Whether newly allocated attention blocks must be zeroed before use.
+
+    Resolved across workers before scheduler projection and worker initialization.
+    """
+
+    def __post_init__(self) -> None:
+        self.needs_kv_cache_zeroing = (
+            self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        )
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
@@ -1648,14 +1664,3 @@ class KVCacheConfig:
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1
-
-    @property
-    def needs_kv_cache_zeroing(self) -> bool:
-        """Whether newly allocated KV cache blocks must be zeroed before use.
-
-        Required for Mamba layers, whose state is read before it is fully written
-        (#35219), and for mixed-precision caches, where a block reused across
-        groups can be reinterpreted under a different precision and decode stale
-        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
-        """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache

@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+from vllm.v1.token_buffer import token_slice
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
@@ -168,8 +170,8 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # Deferred frees may contain blocks from multiple pools.
-    pool: "BlockPool | None" = field(
+    # Deferred frees may contain blocks from multiple pools. Weak to avoid ref cycles.
+    pool: "weakref.ref[BlockPool] | None" = field(
         default=None, repr=False, compare=False, kw_only=True
     )
     # The hash key (block hash + group id) of the block, only available
@@ -1023,8 +1025,10 @@ def get_request_block_hasher(
                     request, start_token_idx, end_token_idx, curr_mm_idx
                 )
 
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            # Compute the hash of the current block.
+            block_tokens = token_slice(
+                request._all_token_ids, start_token_idx, end_token_idx
+            )
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )
@@ -1046,7 +1050,8 @@ def frontend_block_hashes(
     block_hashes = request.block_hashes
     if block_hashes is None:
         return None
-    prompt_len = len(request.prompt_token_ids) if request.prompt_token_ids else 0
+    prompt_ids = request.prompt_token_ids
+    prompt_len = len(prompt_ids) if prompt_ids is not None else 0
     # The engine hashes a block once its lookahead tokens exist too.
     if prefix_hash_config is None or len(block_hashes) != (
         max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)
@@ -1128,8 +1133,8 @@ def generate_scheduler_kv_cache_config(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
         for cfg in kv_cache_configs
     )
-    # All workers have the same kv_cache_config except layer names, so use
-    # an arbitrary one to initialize the scheduler.
+    # Worker configs share scheduler geometry and the resolved zeroing
+    # decision, so use an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
