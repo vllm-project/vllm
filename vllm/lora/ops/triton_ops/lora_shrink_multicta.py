@@ -104,8 +104,19 @@ def _lora_shrink_tile(
         )
     cur_lora_ptr += lora_id.to(gl.int64) * lora_d0_stride
 
-    if USE_ASYNC:
-        cur_lora_ptr = gl.multiple_of(cur_lora_ptr, 16)
+    if USE_ASYNC and SLICE_NUM > 1:
+        async_aligned = cur_lora_ptr.to(gl.int64) % 16 == 0
+    else:
+        async_aligned = USE_ASYNC
+    if async_aligned:
+        if SLICE_NUM > 1:
+            # Keep the alignment hint off the original fallback pointer.
+            async_lora_ptr = (cur_lora_ptr.to(gl.int64) & -16).to(
+                gl.pointer_type(input_ptr.dtype.element_ty)
+            )
+        else:
+            async_lora_ptr = cur_lora_ptr
+        async_lora_ptr = gl.multiple_of(async_lora_ptr, 16)
         a_smem = gl.allocate_shared_memory(
             input_ptr.dtype.element_ty,
             (SPLIT_K, BLOCK_M, K_STEP),
@@ -120,7 +131,7 @@ def _lora_shrink_tile(
         offset_k_b = offset_sk_b[:, None, None] * BLOCK_K + offset_bk[None, :, None]
         a_ptr = input_ptr + ram[None, :, None] * K + offset_k_a
         b_ptr = (
-            cur_lora_ptr
+            async_lora_ptr
             + offset_n[None, None, :] * lora_d1_stride
             + offset_k_b * lora_d2_stride
         )
@@ -153,7 +164,7 @@ def _lora_shrink_tile(
                 )
                 a_ptr = input_ptr + ram[None, :, None] * K + offset_k_a
                 b_ptr = (
-                    cur_lora_ptr
+                    async_lora_ptr
                     + offset_n[None, None, :] * lora_d1_stride
                     + offset_k_b * lora_d2_stride
                 )
@@ -471,6 +482,8 @@ def launch_lora_shrink_multicta(
         NUM_SLICES,
         min(num_active_loras, lora_ids.numel() - 1),
     )
+    # Multi-slice staging needs enough work to support an N32 tile.
+    async_work = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, 32) * NUM_SLICES * NUM_CTAS
     _lora_shrink_multicta_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -495,7 +508,7 @@ def launch_lora_shrink_multicta(
         REDUCE_CGA_LAYOUT,
         use_adaptive,
         use_adaptive
-        and NUM_SLICES == 1
+        and (NUM_SLICES == 1 or async_work >= sm_count)
         and inputs.data_ptr() % 16 == 0
         and lora_ptr_tensor.data_ptr() % 16 == 0
         and K % 8 == 0
