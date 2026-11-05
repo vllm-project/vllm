@@ -782,6 +782,57 @@ def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
     assert impl.fa4_hd256 == (expected == 4)
 
 
+@contextmanager
+def _without_fa2():
+    with patch(
+        "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
+        side_effect=lambda fa_version: fa_version != 2,
+    ):
+        yield
+
+
+@blackwell_only
+@pytest.mark.parametrize("head_size,supported", [(128, True), (160, False)])
+def test_flash_attn_deselected_when_fa2_not_built(head_size, supported):
+    """FA2 is not built by default for SM9x/SM10x; configs that need it must
+    fall through to another backend."""
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    with _blackwell(_hd256_config(head_size=head_size)), _without_fa2():
+        reason = FlashAttentionBackend.supports_combination(
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=None,
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            device_capability=DeviceCapability(10, 0),
+        )
+    assert (reason is None) == supported
+
+
+@blackwell_only
+def test_flash_attn_impl_requires_fa2_for_alibi():
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+    with (
+        set_current_vllm_config(VllmConfig()),
+        _without_fa2(),
+        pytest.raises(NotImplementedError, match="VLLM_BUILD_FA2"),
+    ):
+        FlashAttentionImpl(
+            num_heads=8,
+            head_size=128,
+            scale=0.0625,
+            num_kv_heads=8,
+            alibi_slopes=[0.5] * 8,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+        )
+
+
 @pytest.fixture
 def blackwell_selection():
     with (

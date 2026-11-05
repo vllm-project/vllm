@@ -209,8 +209,8 @@ def get_flash_attn_version(
             fa_version = 2
 
         if not is_fa_version_supported(fa_version):
-            logger.error(
-                "Cannot use FA version %d is not supported due to %s",
+            logger.warning_once(
+                "Cannot use FA version %d, it is not supported due to %s",
                 fa_version,
                 fa_version_unsupported_reason(fa_version),
             )
