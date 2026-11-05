@@ -260,10 +260,8 @@ class TopKTopPSampler(nn.Module):
             )
         elif current_platform.is_cpu():
             arch = current_platform.get_cpu_architecture()
-            # Fall back to native implementation for POWERPC and RISCV.
-            # On PowerPC argmax produces incorrect output with torch.compile.
-            # PR: https://github.com/vllm-project/vllm/pull/26987
-            if arch in (CpuArchEnum.RISCV, CpuArchEnum.POWERPC):
+            # Fall back to native implementation for RISCV.
+            if arch == CpuArchEnum.RISCV:
                 self.forward = self.forward_native
             else:
                 self.forward = self.forward_cpu
@@ -366,7 +364,11 @@ class TopKTopPSampler(nn.Module):
         if k is not None or p is not None:
             if HAS_TRITON:
                 logits = apply_top_k_top_p_triton(logits, k, p)
-            elif current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+            elif current_platform.get_cpu_architecture() in (
+                CpuArchEnum.ARM,
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.S390X,
+            ):
                 logits = apply_top_k_top_p_cpu(logits, k, p)
             else:
                 logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
@@ -531,6 +533,13 @@ def apply_top_k_top_p(
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
         )
+
+    if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+        CpuArchEnum.ARM,
+        CpuArchEnum.POWERPC,
+        CpuArchEnum.S390X,
+    ):
+        return apply_top_k_top_p_cpu(logits, k, p)
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
