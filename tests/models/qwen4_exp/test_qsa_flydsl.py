@@ -46,15 +46,15 @@ class FakeQSA:
         self.k1_calls = []
         self.k2_calls = []
 
-    def qsa_k1_selection_serves(self, token_topk, compress_ratio):
+    def qsa_indexer_selection_supported(self, token_topk, compress_ratio):
         if (token_topk, compress_ratio) != (TOKEN_TOPK, COMPRESS_RATIO):
             return "FlyDSL K1 selects 512 blocks at compress ratio 4"
         return None
 
-    def qsa_k1_serves(self, q, k_cache, page_table):
+    def qsa_indexer_supported(self, q, k_cache, page_table):
         return self.k1_reason
 
-    def qsa_k1_block_ids(
+    def qsa_indexer_block_ids(
         self,
         q,
         k_cache,
@@ -71,10 +71,10 @@ class FakeQSA:
         out.fill_(len(self.k1_calls))
         return out
 
-    def qsa_k2_serves(self, q, k_cache, v_cache, indices, page_table):
+    def flydsl_qsa_paged_gqa_supported(self, q, k_cache, v_cache, indices, page_table):
         return self.k2_reason
 
-    def qsa_k2(self, q, k_cache, v_cache, indices, page_table, token_to_req, out):
+    def flydsl_qsa_paged_gqa(self, q, k_cache, v_cache, indices, page_table, token_to_req, out):
         self.k2_calls.append(q.shape[0])
         out.fill_(1)
         return out
