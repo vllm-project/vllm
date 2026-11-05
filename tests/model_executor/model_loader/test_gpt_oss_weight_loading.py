@@ -144,12 +144,13 @@ def _model_with_w2_bias(monkeypatch, tp_rank: int) -> tuple[GptOssModel, torch.T
     monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: False)
 
     experts = _TestExperts("w2_bias", (2, 3), tp_rank=tp_rank)
-    del experts.w2_bias.weight_loader  # loaded with default_weight_loader
+    experts.w2_bias.weight_loader = lambda param, weight, **kwargs: param.copy_(weight)
 
     model = GptOssModel.__new__(GptOssModel)
     torch.nn.Module.__init__(model)
     model.config = SimpleNamespace(num_local_experts=2, intermediate_size=64)
     model.parallel_config = SimpleNamespace(enable_expert_parallel=False)
+    model.get_expert_mapping = lambda: []  # type: ignore[method-assign]
     layer = torch.nn.Module()
     layer.mlp = torch.nn.Module()
     layer.mlp.experts = torch.nn.Module()

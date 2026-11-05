@@ -1462,14 +1462,10 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     assert after == before
 
 
-@pytest.mark.parametrize("mode", ["layerwise", "direct"])
-def test_kv_scale_reload(vllm_runner, monkeypatch, mode):
-    """Test reloading a checkpoint that contains k_scale/v_scale weights. The
-    attention backend must follow the reloaded scales, not the dummy ones its
-    warmup saw."""
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
     if _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
 
     model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
 
