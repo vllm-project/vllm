@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+from vllm.v1.token_buffer import token_slice
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
@@ -1016,8 +1017,10 @@ def get_request_block_hasher(
                     request, start_token_idx, end_token_idx, curr_mm_idx
                 )
 
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            # Compute the hash of the current block.
+            block_tokens = token_slice(
+                request._all_token_ids, start_token_idx, end_token_idx
+            )
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )
@@ -1039,7 +1042,8 @@ def frontend_block_hashes(
     block_hashes = request.block_hashes
     if block_hashes is None:
         return None
-    prompt_len = len(request.prompt_token_ids) if request.prompt_token_ids else 0
+    prompt_ids = request.prompt_token_ids
+    prompt_len = len(prompt_ids) if prompt_ids is not None else 0
     # The engine hashes a block once its lookahead tokens exist too.
     if prefix_hash_config is None or len(block_hashes) != (
         max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)
