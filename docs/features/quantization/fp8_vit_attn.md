@@ -40,6 +40,13 @@ vllm serve $MODEL \
     --mm-encoder-attn-dtype fp8
 ```
 
+On ROCm, `VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128` zero-pads head_dims below 128
+to 128 so AITER runs its assembly FP8 head_dim-128 kernel instead of its
+CK-tile kernel. The attention result is the same (padded columns are zero and
+are sliced off). It is opt-in because it has only been validated on MI355X
+(gfx950) with head_dim 80, where it halves the attention time of large images;
+padding a smaller head_dim such as 64 or 72 nearly doubles the work.
+
 By default (no scale file), **dynamic scaling** is used: a 16-entry circular
 buffer of observed Q/K/V amax values drives per-forward scale updates. This
 matches BF16 accuracy without any calibration but adds a small per-forward
