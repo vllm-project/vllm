@@ -5,7 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 import numpy as np
@@ -91,6 +91,22 @@ class FinishReason(enum.IntEnum):
 
 
 @dataclass
+class PrefixHashConfig:
+    """What a frontend needs to compute a request's prompt block hashes itself
+    (see `EngineCoreRequest.block_hashes`)."""
+
+    # The --prefix-caching-hash-algo name, e.g. "sha256".
+    hash_algo: str
+    # Tokens per hashed block.
+    hash_block_size: int
+    # Parent hash of the first block.
+    none_hash: bytes
+    # Tokens after each block that its hash also covers (as extra keys), so a
+    # block is hashed only once they exist.
+    num_lookahead_tokens: int = 0
+
+
+@dataclass
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -132,6 +148,12 @@ class EngineCoreReadyResponse:
     # `/server_info` without holding the config themselves (the Rust frontend).
     # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
     vllm_config: dict[str, Any] | None = None
+    # Set when the engine hashes request blocks (prefix caching or a KV
+    # connector), so that a frontend can send prompt block hashes.
+    prefix_hash_config: PrefixHashConfig | None = None
+    # `CacheConfig.metrics_info()` after initialization, the labels of the
+    # frontend's `vllm:cache_config_info`.
+    cache_config_info: dict[str, str] | None = None
 
 
 class EngineCoreRequest(
@@ -141,7 +163,13 @@ class EngineCoreRequest(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    prompt_token_ids: list[int] | None
+    if TYPE_CHECKING:
+        prompt_token_ids: list[int] | None
+    else:
+        # Both frontends send a 32-bit int ndarray, out of band when long, which
+        # decodes as a view of the received frame; Request copies it into a
+        # TokenBuffer. In-process clients pass the list.
+        prompt_token_ids: np.ndarray | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
@@ -187,6 +215,10 @@ class EngineCoreRequest(
 
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+
+    # Prompt block hashes computed by the frontend with the engine's
+    # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
+    block_hashes: list[bytes] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -269,6 +301,11 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
+
+    # Whether the sampler watermarks this request, after EngineCore enforcement.
+    # Sent once, on the first output, when watermark_config is set. Appended last
+    # for array_like compatibility.
+    watermarking: bool | None = None
 
     @property
     def finished(self) -> bool:

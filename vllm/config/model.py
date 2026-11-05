@@ -214,8 +214,10 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.
     - "float" is shorthand for FP32 precision.
     - "float32" for FP32 precision."""
-    seed: int = 0
+    seed: int = Field(default=0, ge=0, le=2**32 - 1)
     """Random seed for reproducibility.
+
+    The seed must be in the range [0, 2**32 - 1].
 
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,

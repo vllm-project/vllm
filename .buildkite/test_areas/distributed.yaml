@@ -17,6 +17,7 @@ steps:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_cpu_all_reduce.py
+  - pytest -v -s distributed/test_flashinfer_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
@@ -278,7 +279,7 @@ steps:
 #   # way, but every trainer rank builds the model before sharding it, and the
 #   # default does not fit an L4.
 #   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-#   - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+#   - RDT_MODEL=vllm-project/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
 #   mirror:
 #     amd:
 #       # Run on PRs even when the L4 step is optional (nightly only).
@@ -316,7 +317,7 @@ steps:
 #       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
 #       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
 #       - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-#       - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+#       - RDT_MODEL=vllm-project/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
 
 - label: ":nvidia: (L4) [Nightly] Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
@@ -508,8 +509,52 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
   - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
+- label: ":nvidia: (H100) [Nightly] Distributed Features Examples"
+  key: distributed-examples-2xh100
+  timeout_in_minutes: 30
+  device: h100
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  commands:
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+    - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+  mirror:
+    amd:
+      label: ':amd: (MI355) Distributed Features Examples'
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 30
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - examples/features/data_parallel/data_parallel_offline.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - csrc/rocm/quickreduce/
+      - vllm/model_executor/layers/
+      - vllm/entrypoints/llm.py
+      - vllm/config/parallel.py
+      - vllm/v1/engine/
+      - vllm/v1/executor/
+      - vllm/v1/worker/
+      - vllm/_custom_ops.py
+      - vllm/envs.py
+      - examples/rl/rlhf_async_new_apis.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
+      commands:
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
+
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   optional: true
@@ -518,14 +563,14 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
-    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
-    - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+    - pytest -v -s tests/v1/attention/test_shardq.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
   mirror:
     amd:
+      automatic_shard: true
       label: ':amd: (MI355) Distributed Features'
       dind: false
       device: mi355_2
@@ -540,7 +585,6 @@ steps:
       - vllm/v1/attention/selector.py
       - tests/v1/distributed/test_dbo.py
       - tests/distributed/test_context_parallel.py
-      - examples/features/data_parallel/data_parallel_offline.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - csrc/rocm/quickreduce/
@@ -558,7 +602,6 @@ steps:
       - tests/distributed/test_aiter_rms_fallback.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
-      - examples/rl/rlhf_async_new_apis.py
       - tests/distributed/test_weight_transfer.py
       - tests/distributed/test_packed_tensor.py
       - tests/v1/attention/test_rocm_mla_dcp_context.py
@@ -566,9 +609,6 @@ steps:
       commands:
       - pytest -v -s tests/distributed/test_context_parallel.py
       - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
-      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
-      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
       - pytest -v -s tests/v1/distributed/test_dbo.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
       - pytest -v -s tests/distributed/test_packed_tensor.py
@@ -698,6 +738,9 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
+  - vllm/v1/core/kv_cache_planning.py
+  - vllm/v1/core/kv_cache_utils.py
+  - vllm/v1/kv_cache_interface.py
   - vllm/model_executor/models/
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
@@ -726,6 +769,9 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
+      - vllm/v1/core/kv_cache_planning.py
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/kv_cache_interface.py
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
       - vllm/v1/attention/backends/
