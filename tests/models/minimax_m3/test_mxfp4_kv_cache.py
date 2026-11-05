@@ -512,7 +512,9 @@ def test_gfx942_index_only_mxfp4_requires_fp8_main_cache(monkeypatch):
     assert model.use_gfx942_mxfp4_indexer("fp8_e4m3", "mxfp4")
     assert not model.use_gfx942_mxfp4_indexer("auto", "mxfp4")
     assert not model.use_gfx942_mxfp4_indexer("fp8", "bf16")
-    assert not model.use_gfx942_mxfp4_indexer("mxfp4", "mxfp4")
+    # MXFP4 main K/V on gfx942 needs the MXFP4 indexer (its attend reads the
+    # page table the indexer emits), so this pairing is enabled, not rejected.
+    assert model.use_gfx942_mxfp4_indexer("mxfp4", "mxfp4")
 
 
 def test_kv_cache_dtype_name():

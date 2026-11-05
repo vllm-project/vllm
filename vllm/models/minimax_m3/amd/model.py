@@ -172,16 +172,20 @@ logger = init_logger(__name__)
 
 
 def use_gfx942_mxfp4_indexer(kv_cache_dtype: str, indexer_kv_dtype: str) -> bool:
-    """gfx942 MXFP4 index cache alongside an fp8 main K/V cache."""
+    """gfx942 MXFP4 index cache alongside an fp8 or MXFP4 main K/V cache."""
+    mode = get_kv_quant_mode(kv_cache_dtype)
     return (
         on_gfx942()
-        and get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.FP8_PER_TENSOR
+        and (mode == KVQuantMode.FP8_PER_TENSOR or mode.is_mxfp4)
         and indexer_kv_dtype == "mxfp4"
     )
 
 
 # The fused QK-norm/RoPE/KV-insert HIP op segfaults on gfx942.
 _USE_GFX942_NATIVE_QKNORM_ROPE = on_gfx942()
+# Decode-sized batches take the single-launch gfx942 MXFP4 write path; it
+# is launch-latency bound, prefill-sized ones are faster split per op.
+_GFX942_ONE_LAUNCH_MAX_TOKENS = 256
 
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
@@ -805,6 +809,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # index cache.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
         self.use_mxfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_mxfp4
+        if self.use_mxfp4_kv and on_gfx942() and self.indexer_kv_dtype != "mxfp4":
+            # The gfx942 attend reads the page table the MXFP4 indexer emits.
+            raise ValueError(
+                "--kv-cache-dtype mxfp4 on gfx942 needs "
+                '--attention-config \'{"indexer_kv_dtype": "mxfp4"}\', got '
+                f"indexer_kv_dtype={self.indexer_kv_dtype!r}"
+            )
         # Indexer and main attention are separate impls. This indexer is
         # ROCm-only, so the model selects it rather than the neutral
         # MiniMaxM3Indexer, which knows nothing about it and would pick its own.
@@ -1077,7 +1088,47 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             dim=-1,
         )
 
+        main_slot_mapping = fwd_slot_mapping[self.layer_name]
         main_rope = self.rotary_emb
+        index_rope = self.index_rotary_emb
+        if (
+            num_tokens <= _GFX942_ONE_LAUNCH_MAX_TOKENS
+            and self.use_mxfp4_kv
+            and not self.skip_index_topk
+            and self.indexer_kv_dtype == "mxfp4"
+            and main_rope is index_rope
+            and main_rope.is_neox_style
+            and type(main_rope).forward_native is RotaryEmbedding.forward_native
+            and qkv.stride(-1) == 1
+            and self.kv_cache.numel() != 0
+            and self.indexer.index_cache.kv_cache.numel() != 0
+        ):
+            from vllm.models.minimax_m3.amd.ops.qkv_index_store_gfx942 import (
+                qkv_index_store_gfx942,
+            )
+
+            # Decode: main q/k norm + RoPE, MXFP4 K/V pages, index q/k norm +
+            # RoPE and the MXFP4 index-K page in ONE launch (bit-identical).
+            q, index_q = qkv_index_store_gfx942(
+                qkv,
+                positions,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.index_q_norm.weight,
+                self.index_k_norm.weight,
+                main_rope.cos_sin_cache,
+                self.indexer.index_cache.kv_cache,
+                fwd_slot_mapping[self.indexer.index_cache.prefix],
+                self.kv_cache,
+                main_slot_mapping,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                num_index_heads=self.num_idx_heads,
+                head_dim=self.head_dim,
+                rotary_dim=main_rope.rotary_dim,
+                eps=self.q_norm.variance_epsilon,
+            )
+            return q, index_q.to(self.indexer.index_cache.query_dtype)
         if (
             main_rope.is_neox_style
             and type(main_rope).forward_native is RotaryEmbedding.forward_native
@@ -1108,8 +1159,62 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             assert k is not None
             q = q.reshape(num_tokens, self.q_size)
 
-        main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        if self.kv_cache.numel() != 0 and self.use_aiter_sparse_pa:
+        rope = self.index_rotary_emb
+        mxfp4_index = self.indexer_kv_dtype == "mxfp4"
+        index_cache = self.indexer.index_cache.kv_cache
+        index_slot_mapping = fwd_slot_mapping.get(self.indexer.index_cache.prefix)
+        fused_index_rope = (
+            not self.skip_index_topk
+            and mxfp4_index
+            and rope.is_neox_style
+            and type(rope).forward_native is RotaryEmbedding.forward_native
+        )
+        if (
+            fused_index_rope
+            and self.use_mxfp4_kv
+            and self.kv_cache.numel() != 0
+            and index_cache.numel() != 0
+        ):
+            from vllm.models.minimax_m3.amd.ops.index_kv_store_gfx942 import (
+                index_kv_store_gfx942,
+            )
+
+            # MXFP4 K/V + MXFP4 index cache: index Q, index K and main K/V
+            # pages in one launch (bit-identical to the two-launch path).
+            index_q = index_kv_store_gfx942(
+                qkv,
+                positions,
+                self.index_q_norm.weight,
+                self.index_k_norm.weight,
+                rope.cos_sin_cache,
+                index_cache,
+                index_slot_mapping,
+                self.kv_cache,
+                main_slot_mapping,
+                k.reshape(num_tokens, self.num_kv_heads, self.head_dim),
+                v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                q_start=self.q_size + 2 * self.kv_size,
+                num_heads=self.num_idx_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.idx_head_dim,
+                rotary_dim=rope.rotary_dim,
+                eps=self.index_q_norm.variance_epsilon,
+            )
+            return q, index_q.reshape(num_tokens, self.index_q_size).to(
+                self.indexer.index_cache.query_dtype
+            )
+        if self.kv_cache.numel() != 0 and self.use_mxfp4_kv:
+            from vllm.models.minimax_m3.amd.ops.mxfp4_attn_gfx942 import (
+                store_kv_mxfp4_gfx942,
+            )
+
+            store_kv_mxfp4_gfx942(
+                k.reshape(num_tokens, self.num_kv_heads, self.head_dim),
+                v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                self.kv_cache,
+                main_slot_mapping,
+            )
+        elif self.kv_cache.numel() != 0 and self.use_aiter_sparse_pa:
             # The AITER sparse PA attend reads its own page-16 x-packed layout;
             # write K/V the way the fused path does, not as a flash cache.
             key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
@@ -1143,15 +1248,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if self.skip_index_topk:
             return q, None
 
-        rope = self.index_rotary_emb
-        mxfp4_index = self.indexer_kv_dtype == "mxfp4"
-        index_cache = self.indexer.index_cache.kv_cache
-        index_slot_mapping = fwd_slot_mapping.get(self.indexer.index_cache.prefix)
-        if (
-            mxfp4_index
-            and rope.is_neox_style
-            and type(rope).forward_native is RotaryEmbedding.forward_native
-        ):
+        if fused_index_rope:
             from vllm.models.minimax_m3.amd.ops.index_norm_rope_store_gfx942 import (
                 index_norm_rope_store_gfx942,
             )
@@ -1313,7 +1410,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             # Memory-profiling run: caches not yet bound, slot_mapping is empty.
             return qkv.new_zeros((num_tokens, self.hidden_size))
 
-        if _USE_GFX942_NATIVE_QKNORM_ROPE:
+        # gfx942 MXFP4 K/V: the fused HIP insert writes gfx950's packed fp4 with
+        # OCP converts, so the K/V pages are written by the native path.
+        if _USE_GFX942_NATIVE_QKNORM_ROPE or (self.use_mxfp4_kv and on_gfx942()):
             q, index_q = self._native_gfx942_qknorm_rope_cache(
                 qkv, positions, fwd_slot_mapping
             )
@@ -1831,8 +1930,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 vllm_config.cache_config.cache_dtype, indexer_kv_dtype
             )
             emits_table = impl_cls is not None or gfx942_mxfp4_index
-            if emits_table and minimax_m3_use_aiter_sparse_pa(
-                num_kv_heads, emits_sparse_block_table=True
+            # The gfx942 MXFP4 attend always reads the table its indexer emits.
+            gfx942_mxfp4_kv = on_gfx942() and kv_quant_mode.is_mxfp4
+            if emits_table and (
+                gfx942_mxfp4_kv
+                or minimax_m3_use_aiter_sparse_pa(
+                    num_kv_heads, emits_sparse_block_table=True
+                )
             ):
                 # One row per (token, kv head): the table addresses the attend's
                 # cache, not the index cache. Allocated here with the selection

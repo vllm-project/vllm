@@ -551,7 +551,7 @@ def select_main_backend_and_impl_cls(
         if not current_platform.is_rocm():
             raise ValueError(
                 "MiniMax M3 sparse attention supports an MXFP4 KV cache only on "
-                "ROCm gfx950"
+                "ROCm gfx942 and gfx950"
             )
         from vllm.models.minimax_m3.amd.sparse_attention_mxfp4 import (
             MiniMaxM3SparseRocmMxfp4Backend,

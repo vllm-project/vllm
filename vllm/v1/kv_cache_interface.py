@@ -61,7 +61,7 @@ class KVQuantMode(IntEnum):
     OCTAVE_K3V4 = 12
     OCTAVE_K3V3 = 13
     OCTAVE_K3V3_COMPACT = 14
-    MXFP4 = 16  # packed e2m1 data + e8m0 scales per 32 values (ROCm gfx950)
+    MXFP4 = 16  # packed e2m1 data + e8m0 scales per 32 values (ROCm gfx942, gfx950)
 
     # Backend self-manages kernel dispatch. Reads as quantized but matches no
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
