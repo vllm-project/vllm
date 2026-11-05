@@ -25,7 +25,7 @@ pub struct ReadyMessage {
 /// KV-event publisher configuration reported by EngineCore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvEventsConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub enable_source_attribution: bool,
     pub enable_kv_cache_events: bool,
     pub publisher: String,
@@ -200,6 +200,7 @@ mod tests {
         });
         let config: KvEventsConfig = serde_json::from_value(legacy.clone()).unwrap();
         assert!(!config.enable_source_attribution);
+        assert_eq!(serde_json::to_value(config).unwrap(), legacy);
         let mut attributed = legacy;
         attributed["enable_source_attribution"] = serde_json::json!(true);
         let config: KvEventsConfig = serde_json::from_value(attributed.clone()).unwrap();

@@ -657,6 +657,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for index, (connector, config) in enumerate(
             zip(self._connectors, self._ktc_kv_transfer_config, strict=True)
         ):
+            assert config is not None
             child_source = EventSource(
                 source_id=f"{source.source_id}/{index}",
                 kind="connector",

@@ -131,3 +131,111 @@ def test_log_stats(vllm_runner):
 
         # disable_log_stats is False, every output should have metrics
         assert all(output.metrics is not None for output in outputs)
+
+
+@pytest.fixture(scope="module", params=[False, True], ids=["disabled", "enabled"])
+def kv_event_model(vllm_runner, request):
+    from vllm.utils.network_utils import get_open_port
+
+    replay_endpoint = f"tcp://127.0.0.1:{get_open_port()}"
+    config = {
+        "enable_kv_cache_events": True,
+        "endpoint": "tcp://127.0.0.1:0",
+        "replay_endpoint": replay_endpoint,
+        "buffer_steps": 100,
+    }
+    if request.param:
+        config["enable_source_attribution"] = True
+    with vllm_runner(
+        "facebook/opt-125m",
+        enforce_eager=True,
+        block_size=32,
+        max_model_len=128,
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+        enable_prefix_caching=True,
+        kv_events_config=config,
+    ) as model:
+        yield model, replay_endpoint, request.param
+
+
+def test_kv_event_sources_preserves_legacy_defaults(kv_event_model):
+    """Default discovery still decodes with the pre-attribution strict schema."""
+    import msgspec
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from vllm.entrypoints.serve.instrumentator.basic import router
+
+    model, replay_endpoint, enabled = kv_event_model
+
+    class LegacyConfig(
+        msgspec.Struct,
+        forbid_unknown_fields=True,  # type: ignore[call-arg]
+    ):
+        enable_kv_cache_events: bool
+        publisher: str
+        endpoint: str
+        replay_endpoint: str | None
+        buffer_steps: int
+        hwm: int
+        max_queue_size: int
+        topic: str
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.engine_client = model.llm.llm_engine.engine_core
+    with TestClient(app) as client:
+        discovery = client.get("/kv_event_sources")
+        assert discovery.status_code == 200
+        fields = discovery.json()["0"]
+        if enabled:
+            assert fields.pop("enable_source_attribution") is True
+        legacy = msgspec.json.decode(msgspec.json.encode(fields), type=LegacyConfig)
+        assert legacy.enable_kv_cache_events
+        assert legacy.publisher == "zmq"
+        assert legacy.replay_endpoint == replay_endpoint
+        assert legacy.buffer_steps == 100
+
+
+def test_native_source_attribution_through_llm(kv_event_model):
+    """Real engine execution publishes native stores with optional source in replay."""
+    import time
+
+    import msgspec
+    import zmq
+
+    from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
+
+    model, replay_endpoint, enabled = kv_event_model
+    output = model.generate_greedy([[42] * 64], max_tokens=1)
+    assert len(output[0][0]) == 65
+    replay = zmq.Context.instance().socket(zmq.DEALER)
+    replay.connect(replay_endpoint)
+    try:
+        stores: list[BlockStored] = []
+        deadline = time.monotonic() + 10
+        # Wait for the asynchronous publisher to drain its event queue.
+        while not stores and time.monotonic() < deadline:
+            replay.send_multipart([b"", (0).to_bytes(8, "big")])
+            while time.monotonic() < deadline:
+                assert replay.poll(1000), "publisher replay did not respond"
+                delimiter, topic, sequence, payload = replay.recv_multipart()
+                assert delimiter == b""
+                if sequence == ZmqEventPublisher.END_SEQ:
+                    break
+                batch = msgspec.msgpack.decode(payload, type=KVEventBatch)
+                stores.extend(e for e in batch.events if isinstance(e, BlockStored))
+        assert stores, "native BlockStored event missing"
+        if enabled:
+            assert all(
+                e.source is not None
+                and e.source.source_id == "cache_manager"
+                and e.source.kind == "native"
+                for e in stores
+            )
+        else:
+            assert all(getattr(e, "source", None) is None for e in stores)
+    finally:
+        replay.close(linger=0)

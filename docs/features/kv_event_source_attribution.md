@@ -60,6 +60,10 @@ infer that only records with the same source should be cleared.
 The default wire encoding is unchanged. New decoders accept absent or null
 `source` as unknown. Existing msgspec map decoders ignore the new field; strict
 consumers that reject unknown fields need an update before enabling the flag.
+The `/kv_event_sources` response also retains its legacy fields when attribution
+is disabled; `enable_source_attribution: true` is reported only when enabled.
+Registered custom publishers keep their existing constructor arguments when
+attribution is disabled. Opting in forwards `enable_source_attribution=True`.
 Replay preserves the original encoded payload including the inline metadata.
 Event structs gain one optional reference slot even with the flag disabled.
 The flag adds a shallow event copy per published event and a descriptor per

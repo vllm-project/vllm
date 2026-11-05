@@ -139,7 +139,7 @@ class Capture:
 
     def replay_all(self):
         self.replay.send_multipart([b"", (0).to_bytes(8, "big")])
-        frames = []
+        frames: list[tuple[bytes, bytes]] = []
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             assert self.replay.poll(1000), "replay frame missing"

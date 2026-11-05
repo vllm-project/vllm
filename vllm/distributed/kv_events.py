@@ -53,7 +53,11 @@ MEDIUM_CPU = "CPU"
 MEDIUM_STORAGE = "STORAGE"
 
 
-class EventSource(msgspec.Struct, frozen=True, omit_defaults=True):
+class EventSource(
+    msgspec.Struct,
+    frozen=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+):
     """Logical event producer within one scheduler's fixed configuration."""
 
     source_id: str
@@ -614,6 +618,10 @@ class EventPublisherFactory:
             return NullEventPublisher()
 
         config_dict = asdict(config)
+        # Preserve the constructor contract for publishers registered before
+        # source attribution was introduced.
+        if not config_dict["enable_source_attribution"]:
+            config_dict.pop("enable_source_attribution")
 
         kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")

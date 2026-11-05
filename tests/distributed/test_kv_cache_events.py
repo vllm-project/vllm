@@ -280,11 +280,13 @@ def test_source_is_optional_and_legacy_decoders_preserve_payload(event_type):
 def test_source_on_clear_is_origin_only_and_strict_consumers_need_opt_in():
     from vllm.distributed.kv_events import AllBlocksCleared, EventSource
 
-    class LegacyClear(msgspec.Struct, tag="AllBlocksCleared"):
+    class LegacyClear(msgspec.Struct, tag="AllBlocksCleared"):  # type: ignore[call-arg]
         pass
 
     class StrictClear(
-        msgspec.Struct, tag="AllBlocksCleared", forbid_unknown_fields=True
+        msgspec.Struct,
+        tag="AllBlocksCleared",  # type: ignore[call-arg]
+        forbid_unknown_fields=True,  # type: ignore[call-arg]
     ):
         pass
 
