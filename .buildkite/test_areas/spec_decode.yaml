@@ -630,7 +630,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL MTP + Other Acceptance"
   key: spec-decode-mtp-other-acceptance-nightly
   automatic_shard: true
-  timeout_in_minutes: 75
+  timeout_in_minutes: 35
   device: h200_35gb
   optional: true
   source_file_dependencies:
