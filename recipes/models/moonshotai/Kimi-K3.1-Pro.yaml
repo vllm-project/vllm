@@ -338,7 +338,7 @@ presets:
   # The exact configuration vllm-project/vllm-torchtpu#2775 validated on a
   # 2x2x4 TPU v7x slice (TP32 / EP32, 4 hosts, 16 chips, 32 devices).
   v7x_validated:
-    label: "Validated TP32/EP32 (v7x)"
+    label: "Validated TEP32 (v7x)"
     hardware: ironwood
     strategy: multi_node_tep
     workload: "Accuracy validation (GSM8K)"
@@ -371,11 +371,11 @@ presets:
   # indexer-key caches across the TP group, holding about 8x the KV tokens per
   # device at some decode-speed cost.
   v7x_dcp8:
-    label: "Validated TP32 + DCP8 (v7x)"
+    label: "Validated TEP32 + DCP8 (v7x)"
     hardware: ironwood
     strategy: multi_node_tep
     workload: "Accuracy validation (GSM8K)"
-    description: "TP32 + DCP8 on the same 2x2x4 v7x slice: complete GSM8K at 97.42%. Pick it when KV capacity, not decode speed, is the limit. DSpark does not support DCP on TPU, so this preset keeps Spec decoding off."
+    description: "TEP32 + DCP8 on the same 2x2x4 v7x slice: complete GSM8K at 97.42%. Pick it when KV capacity, not decode speed, is the limit. DSpark does not support DCP on TPU, so this preset keeps Spec decoding off."
     select:
       nodes: 4
       features: { spec_decoding: false }
@@ -571,8 +571,8 @@ guide: |
   (TP32 + DCP8), prefix-cache hits returned identical tokens and logprobs, and the BEAM-1M
   long-context benchmark matched the GPU reference. The run-specific sizing of that validation
   (10K context, 16 sequences, compile sizes) is not the TPU default — it lives in the two
-  **Validated** presets: [TP32/EP32](#preset-v7x_validated) and
-  [TP32 + DCP8](#preset-v7x_dcp8) for KV-capacity-bound workloads.
+  **Validated** presets: [TEP32](#preset-v7x_validated) and
+  [TEP32 + DCP8](#preset-v7x_dcp8) for KV-capacity-bound workloads.
 
   **Spec decoding is gated off on TPU for now**: DSpark with `--async-scheduling` (always on in
   this configuration) needs [vllm-torchtpu#2770](https://github.com/vllm-project/vllm-torchtpu/pull/2770),
