@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 from vllm.v1.worker import ubatching
-from vllm.v1.worker.gpu.ubatch_common import compute_ubatch_slices
+from vllm.v1.worker.gpu.ubatch_utils import compute_ubatch_slices
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_token_offset,
     make_ubatch_contexts,

@@ -6,7 +6,7 @@ import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 # Re-exported for the V1 model runner.
-from vllm.v1.worker.gpu.ubatch_common import (  # noqa: F401
+from vllm.v1.worker.gpu.ubatch_utils import (  # noqa: F401
     SMControlContextManager,
     UBatchSlice,
     UBatchSlices,
