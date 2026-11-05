@@ -20,7 +20,7 @@ from .base import Base
 from .multimodal import MultiModalProcessingInfo
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.config.speech_to_text import SpeechToTextParams
     from vllm.inputs import PromptType
 
@@ -34,10 +34,16 @@ def _decode(text: str, model_config: "ModelConfig", return_format: str) -> Any:
     return processor.decode(ids, return_format=return_format)
 
 
-class TranscriptionMixin(SupportsTranscription):
+class TranscriptionMixin(SupportsTranscription, Base):
     supports_diarized_transcription = True
     # HF processors take no language, so whether one works is up to the model
     supported_languages = LANGUAGES
+
+    def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        # Skip SupportsTranscription.__init__ and call the next class in MRO
+        super(SupportsTranscription, self).__init__(
+            vllm_config=vllm_config, prefix=prefix
+        )
 
     @classmethod
     def get_speech_to_text_config(

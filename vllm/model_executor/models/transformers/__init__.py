@@ -158,7 +158,7 @@ class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin): ...
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
 class TransformersMultiModalForTranscription(
-    MultiModalMixin, CausalMixin, TranscriptionMixin
+    TranscriptionMixin, MultiModalMixin, CausalMixin
 ): ...
 
 
