@@ -4,7 +4,6 @@
 NVFP4 KV cache)."""
 
 import math
-from dataclasses import fields, replace
 from types import SimpleNamespace
 
 import pytest
@@ -45,7 +44,6 @@ from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
     MiniMaxM3SparseMSAMetadataBuilder,
     MiniMaxM3SparseMSANvfp4Backend,
     MiniMaxM3SparseMSANvfp4Impl,
-    MiniMaxM3SparseMSAPrefillMetadata,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -343,37 +341,34 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     assert metadata.decode.msa_cutlass is expected_metadata
 
 
-@pytest.mark.parametrize("is_sm107", [True, False])
-def test_msa_metadata_builder_reserves_prefill_workspace_only_on_sm107(
-    monkeypatch: pytest.MonkeyPatch,
-    is_sm107: bool,
+def test_msa_nvfp4_impls_share_one_reserved_prefill_workspace(
+    default_vllm_config,
 ) -> None:
-    monkeypatch.setattr(
-        MiniMaxM3SparseMetadataBuilder, "__init__", lambda *args, **kwargs: None
+    """Every NVFP4 impl reserves the Q8KV4 prefill split partials at init
+    (model-load time) for the largest batch — memory profiling skips
+    attention, so a workspace allocated per call after the KV cache is
+    sized would exceed gpu_memory_utilization (#60791) — and the per-layer
+    impls share one workspace rather than reserving one each."""
+    _skip_without_q8kv4_prefill(16, 1)
+    max_num_batched_tokens = 256
+    default_vllm_config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    common = dict(
+        num_heads=16,
+        head_size=HEAD_DIM,
+        scale=SM_SCALE,
+        num_kv_heads=1,
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
     )
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability",
-        lambda capability: is_sm107 and capability == 107,
-    )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(
-                num_attention_heads=16,
-                sparse_attention_config={"sparse_topk_blocks": TOPK},
-            )
-        ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
-        cache_config=SimpleNamespace(cache_dtype="nvfp4"),
-        attention_config=SimpleNamespace(minimax_m3_msa_decode_backend="cutlass"),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=256),
-    )
+    impl = MiniMaxM3SparseMSANvfp4Impl(**common)
+    other = MiniMaxM3SparseMSANvfp4Impl(**common)
 
-    builder = MiniMaxM3SparseMSAMetadataBuilder(
-        SimpleNamespace(num_kv_heads=1), [], vllm_config, torch.device("cuda")
+    workspace = impl._prefill_workspace
+    assert workspace is other._prefill_workspace
+    assert workspace._partials is not None
+    assert workspace._partials.numel() >= workspace.required_bytes(
+        TOPK, max_num_batched_tokens, 16
     )
-
-    assert (builder.prefill_workspace is not None) == is_sm107
 
 
 def test_msa_cutlass_plan_cache_keys_query_len(
@@ -1120,6 +1115,7 @@ def _skip_without_q8kv4_prefill(num_q_heads: int, num_kv_heads: int) -> None:
 def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
     num_q_heads: int,
     num_kv_heads: int,
+    default_vllm_config,
 ) -> None:
     """MSA prefill reads NVFP4 pages as their exact dequantized values,
     including chunked prefill over cached context, with the fp8 q the fused
@@ -1181,85 +1177,6 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
         )
     current_platform.synchronize()
     _assert_close_fp8_prefill(actual, expected)
-
-
-@pytest.mark.parametrize(
-    ("num_q_heads", "num_kv_heads"),
-    [pytest.param(64, 4, id="tp1"), pytest.param(16, 1, id="tp4")],
-)
-def test_msa_prefill_nvfp4_uses_the_builders_workspace(
-    num_q_heads: int,
-    num_kv_heads: int,
-) -> None:
-    """The NVFP4 prefill hands the builder's split workspace to ``run_prefill``:
-    a workspace reserved for the step's token budget is neither replaced nor
-    grown by the call, and the output equals the per-call-allocation path's."""
-    from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
-
-    _skip_without_q8kv4_prefill(num_q_heads, num_kv_heads)
-    torch.manual_seed(0)
-    q_lens = [300, 128, 77]
-    seq_lens_list = [300, 640, 1100]
-    block_table, num_pages = _make_paged_layout(seq_lens_list)
-    k_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    kv_cache, _ = _make_nvfp4_kv_cache(
-        num_pages, num_kv_heads, "nvfp4", k_scale, v_scale
-    )
-    metadata, topk = _make_prefill_metadata(
-        q_lens, seq_lens_list, block_table, num_kv_heads
-    )
-    total_q = sum(q_lens)
-    max_num_batched_tokens = 2048
-    workspace = PrefillWorkspace(torch.device("cuda"), block_scale_shift=0)
-    workspace.split_buffers(TOPK, max_num_batched_tokens, num_q_heads)
-    reserved = workspace.split_buffers(TOPK, total_q, num_q_heads)[0].data_ptr()
-    assert isinstance(metadata.prefill, MiniMaxM3SparsePrefillMetadata)
-    with_workspace = replace(
-        metadata,
-        prefill=MiniMaxM3SparseMSAPrefillMetadata(
-            **{
-                f.name: getattr(metadata.prefill, f.name)
-                for f in fields(metadata.prefill)
-            },
-            workspace=workspace,
-        ),
-    )
-
-    layer_name = "model.layers.0.self_attn.attn"
-    layer = SimpleNamespace(
-        layer_name=layer_name,
-        topk_indices_buffer=topk,
-        _q_scale_float=1.0,
-        _k_scale=k_scale,
-        _v_scale=v_scale,
-    )
-    query_fp8 = torch.randn(
-        total_q, num_q_heads * HEAD_DIM, dtype=torch.bfloat16, device="cuda"
-    ).to(torch.float8_e4m3fn)
-    impl = MiniMaxM3SparseMSANvfp4Impl(
-        num_heads=num_q_heads,
-        head_size=HEAD_DIM,
-        scale=SM_SCALE,
-        num_kv_heads=num_kv_heads,
-        topk_blocks=TOPK,
-        sparse_block_size=BLOCK_SIZE,
-    )
-    outputs = []
-    for md in (metadata, with_workspace):
-        forward_context = ForwardContext(
-            no_compile_layers={},
-            attn_metadata={layer_name: md},
-            slot_mapping={},
-        )
-        output = torch.zeros(
-            total_q, num_q_heads * HEAD_DIM, dtype=torch.bfloat16, device="cuda"
-        )
-        with override_forward_context(forward_context):
-            outputs.append(impl.forward(layer, query_fp8, kv_cache, output))
-    current_platform.synchronize()
-    assert torch.equal(outputs[0], outputs[1])
-    assert workspace.split_buffers(TOPK, total_q, num_q_heads)[0].data_ptr() == reserved
 
 
 @pytest.mark.parametrize(

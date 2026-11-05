@@ -511,7 +511,7 @@ def _stub_marlin_ops(monkeypatch):
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
-        lambda w, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+        lambda w, size_k, size_n, num_bits: torch.zeros(
             size_k // 16, size_n * 2, dtype=torch.int32
         ),
     )
@@ -598,7 +598,7 @@ def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
-        lambda b_q_weight, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+        lambda b_q_weight, size_k, size_n, num_bits: torch.zeros(
             size_k // 16, size_n * 2, dtype=torch.int32
         ),
     )
@@ -1004,6 +1004,70 @@ def test_online_processing_waits_for_late_registered_bias():
     layer.bias.weight_loader(layer.bias, loaded_bias)
     assert quant_method.bias_at_process is not None
     assert torch.equal(quant_method.bias_at_process, loaded_bias)
+
+
+@pytest.mark.parametrize("num_heads", [96, 128])
+@pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_kda_online_loading_releases_sources_and_zeros_padding(
+    monkeypatch, default_vllm_config, num_heads, tp_rank, reverse
+):
+    """Finish KDA's merged projection after six inputs, before model finalization."""
+    from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=8, rank_in_group=tp_rank),
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.float32)
+    config = KimiLinearConfig(
+        hidden_size=16,
+        linear_attn_config={
+            "kda_layers": [0],
+            "full_attn_layers": [],
+            "head_dim": 128,
+            "num_heads": num_heads,
+            "short_conv_kernel_size": 4,
+            "use_full_rank_gate": True,
+        },
+    )
+    attention = KimiK3DeltaAttention(
+        config, default_vllm_config, prefix="model.layers.0.self_attn"
+    )
+    projection = attention.in_proj_qkvgfab
+    # Exercise online loading on CPU without selecting a GPU quantization kernel.
+    projection.weight = to_meta_tensor(projection.weight)
+    projection.quant_method = None
+    initialize_online_processing(projection)
+
+    empty_strided = torch.empty_strided
+
+    def poisoned_empty(*args, **kwargs):
+        return empty_strided(*args, **kwargs).fill_(float("nan"))
+
+    monkeypatch.setattr(torch, "empty_strided", poisoned_empty)
+    widths = [128 * num_heads] * 4 + [128, num_heads]
+    expected = {}
+    sources = []
+    for shard in reversed(range(6)) if reverse else range(6):
+        source = torch.arange(widths[shard] * 16, dtype=torch.float32).reshape(-1, 16)
+        sources.append(ref(source))
+        local_width = widths[shard] if shard == 4 else widths[shard] // 8
+        start = 0 if shard == 4 else tp_rank * local_width
+        expected[shard] = source[start : start + local_width].clone()
+        assert projection.weight.is_meta
+        projection.weight.weight_loader(projection.weight, source, shard)
+        del source
+
+    assert not projection.weight.is_meta
+    assert all(source() is None for source in sources)
+    expected_weight = torch.cat([expected[shard] for shard in range(6)])
+    torch.testing.assert_close(
+        projection.weight[: len(expected_weight)], expected_weight
+    )
+    padding = projection.weight[len(expected_weight) :]
+    assert torch.equal(padding, torch.zeros_like(padding))
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
@@ -1426,7 +1490,9 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    lora_path = hf_api().snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+    lora_path = hf_api().snapshot_download(
+        repo_id="vllm-project/qwen3-moe-text2sql-spider"
+    )
     prompts = [
         "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"

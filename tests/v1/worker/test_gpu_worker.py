@@ -33,6 +33,36 @@ def test_v2_gpu_worker_requires_triton(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "fallback,free_memory,requested",
+    [(False, 100, 72), (True, 100, 92), (True, 80, 92)],
+)
+def test_disabling_extensible_cache_keeps_fallback_budget(
+    fallback, free_memory, requested
+):
+    """Re-sizing after a disk fallback must not re-charge the daemon's weights."""
+    from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+    from vllm.utils.mem_utils import MemorySnapshot
+
+    worker = gpu_worker.Worker(
+        VllmConfig(), local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    worker.cache_config.enable_extensible_kv_cache = True
+    worker.init_snapshot = MemorySnapshot(
+        total_memory=100, free_memory=free_memory, device="cpu", auto_measure=False
+    )
+    with worker._external_weight_charges.track():
+        record_external_weight_charge("weights.sock", False, 20)
+        if fallback:
+            record_external_weight_fallback("weights.sock", False)
+    worker.disable_extensible_kv_cache()
+    assert worker.requested_memory == requested
+
+
 def test_sleep_preservation_restores_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
@@ -79,6 +109,10 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
 
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+    )
+
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
     monkeypatch.setattr(
@@ -92,6 +126,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _external_weight_charges=ExternalWeightCharges(),
     )
     original_threads = torch.get_num_threads()
     try:
@@ -526,6 +561,7 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     worker = SimpleNamespace(
         cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
@@ -590,8 +626,8 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
         log.append("get_mem_pool_context")
         return connector_pool
 
-    def commit(num_blocks, **kwargs):
-        log.append(f"commit:{num_blocks}")
+    def commit(num_blocks, defragment, **kwargs):
+        log.append(f"commit:{num_blocks}:defragment={defragment}")
         raise Committed
 
     monkeypatch.setattr(
@@ -614,14 +650,21 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
             commit=commit,
         ),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
-        vllm_config=SimpleNamespace(kv_transfer_config=object()),
+        # A connector that registers the KV cache needs one chunk per segment.
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(registers_kv_cache_memory=lambda: True)
+        ),
     )
     kv_cache_config = SimpleNamespace(num_blocks=16, kv_cache_tensors=[])
 
     if connector_pool is None:
         with pytest.raises(Committed):
             extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
-        assert log == ["ensure_kv_transfer:8", "get_mem_pool_context", "commit:8"]
+        assert log == [
+            "ensure_kv_transfer:8",
+            "get_mem_pool_context",
+            "commit:8:defragment=True",
+        ]
     else:
         with pytest.raises(ValueError, match="own memory pool"):
             extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
