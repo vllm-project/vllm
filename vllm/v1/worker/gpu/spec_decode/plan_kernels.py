@@ -13,17 +13,12 @@ MAX_PLAN_ROWS = 64
 """Rows per request a plan can have: one bit per row in an int64 ancestor set."""
 
 
-def chain_parents(
-    max_num_reqs: int, max_rows: int, device: torch.device
+def arange_table(
+    max_num_reqs: int, max_rows: int, device: torch.device, start: int = 0
 ) -> torch.Tensor:
-    """The ``[R, C]`` parent table of a chain: ``parent[r, i] == i - 1``."""
-    rows = torch.arange(-1, max_rows - 1, dtype=torch.int32, device=device)
-    return rows.expand(max_num_reqs, max_rows).contiguous()
-
-
-def chain_path(max_num_reqs: int, max_rows: int, device: torch.device) -> torch.Tensor:
-    """The ``[R, C]`` accepted path of a chain: ``path[r, j] == j``."""
-    rows = torch.arange(max_rows, dtype=torch.int32, device=device)
+    """``[R, C]`` int32 ``table[r, i] == start + i``: a chain's path, or with
+    ``start=-1`` its parents."""
+    rows = torch.arange(start, start + max_rows, dtype=torch.int32, device=device)
     return rows.expand(max_num_reqs, max_rows).contiguous()
 
 

@@ -6,10 +6,10 @@ the workers."""
 from dataclasses import dataclass
 from typing import Literal, get_args
 
-PlanKind = Literal["none", "chain", "tree"]
-"""The plans a model verifies, in increasing order: ``"none"`` (no speculative
-decoding), ``"chain"`` (each row follows the one before it), ``"tree"`` (each
-row names its parent row and sees its ancestors)."""
+PlanKind = Literal["chain", "tree"]
+"""The plans a model verifies, in increasing order: ``"chain"`` (each row
+follows the one before it), ``"tree"`` (each row names its parent row and sees
+its ancestors)."""
 
 PLAN_KINDS: tuple[PlanKind, ...] = get_args(PlanKind)
 

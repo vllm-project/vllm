@@ -260,28 +260,23 @@ class CudaGraphManager:
         )
 
     def _decode_query_lens(self) -> list[int]:
-        """The uniform decode query lengths to capture.
-
-        A manager whose decode query length follows the drafts (it is above K:
-        the target's verify forward, a drafter's prefill) captures one length
-        per uniform shape the speculator declares (`SpecResources`). A uniform
-        count c is c - 1 drafts plus the tokens sampled per step.
-        """
+        """The uniform decode query lengths to capture: one per declared
+        `capture_rows` entry when the decode query length follows the drafts."""
         speculative_config = self.vllm_config.speculative_config
         num_speculative_tokens = self.vllm_config.num_speculative_tokens
-        if speculative_config is None or not (
-            self.decode_query_len > num_speculative_tokens
+        if (
+            speculative_config is None
+            or self.decode_query_len <= num_speculative_tokens
         ):
             return [self.decode_query_len]
         resources = self.spec_resources or (
             speculative_config.speculator_config.resources(self.max_num_reqs)
         )
         num_new_sampled_tokens_per_step = self.decode_query_len - num_speculative_tokens
-        lens = [
+        return [
             n - 1 + num_new_sampled_tokens_per_step
             for n in sorted(set(resources.capture_rows))
         ]
-        return lens or [self.decode_query_len]
 
     def set_spec_resources(self, resources: "SpecResources") -> None:
         """Capture the decode shapes of ``resources`` (before any capture)."""

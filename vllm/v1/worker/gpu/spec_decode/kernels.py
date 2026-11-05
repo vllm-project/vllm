@@ -159,35 +159,19 @@ class SpecKernelProvider(Protocol):
         ...
 
 
-ABOVE_NONE: frozenset[PlanKind] = frozenset(PLAN_KINDS[1:])
-"""Every plan kind with verify rows: a commit reads only the accepted path."""
-
-
-class ReferenceKernels:
-    """The in-tree kernels, which run every key no provider overrides: the KV
-    commit of attention layers.
-
-    There is no ``mamba:*/verify`` or ``layout:mamba_state@*/commit``: a
-    recurrent layer runs its own chain kernels, and verifies trees only with a
-    provider's verify and state commit kernels. Nor is there a
-    ``layout:paged_split_scale/commit`` yet.
-    """
-
-    name = "reference"
-
-    def kernels(self) -> dict[KernelKey, SpecKernel]:
-        from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
-
-        return {("layout:paged_token", "commit"): KvCompactor()}
-
-
 class KernelRegistry:
-    """:class:`ReferenceKernels` overlaid by ``providers`` in order: a later
+    """The in-tree kernels overlaid by ``providers`` in order: a later
     provider wins a key, and each override is logged once. Built once per
     worker and bound once, before capture."""
 
     def __init__(self, providers: Iterable[SpecKernelProvider] = ()):
-        self._kernels: dict[KernelKey, SpecKernel] = ReferenceKernels().kernels()
+        from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
+
+        # In tree: the attention KV commit only. Recurrent layers verify trees
+        # only with a provider's verify and state commit kernels.
+        self._kernels: dict[KernelKey, SpecKernel] = {
+            ("layout:paged_token", "commit"): KvCompactor()
+        }
         for provider in providers:
             for key, kernel in provider.kernels().items():
                 if key[1] not in get_args(Op):
@@ -260,8 +244,6 @@ class KernelRegistry:
                 found = (kind, f"{type(kernel).__name__} verifies {kind}")
             if plan_kind_rank(found[0]) < plan_kind_rank(best[0]):
                 best = found
-        if plan_kind_rank(best[0]) < plan_kind_rank("chain"):
-            best = ("chain", best[1])
         return best
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
@@ -274,8 +256,6 @@ class KernelRegistry:
         for layer in layers:
             if layer.kind.family == "mamba":
                 layer.module.spec_verify_kernel = None
-            if ctx.plan_kind == "none":
-                continue
             for key in self.required_keys(layer):
                 if key[1] == "commit" and not commits:
                     continue

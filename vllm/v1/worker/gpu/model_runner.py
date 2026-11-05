@@ -1873,17 +1873,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens,
         )
 
-        if accepted_row is None:
-            self.model_state.postprocess_state(
-                idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
-            )
-        else:
-            self.model_state.postprocess_state(
-                idx_mapping,
-                num_sampled,
-                self.req_states.num_computed_tokens.gpu,
-                accepted_row=accepted_row,
-            )
+        # Only pass accepted_row when set: overrides may lack the kwarg.
+        extra = {} if accepted_row is None else {"accepted_row": accepted_row}
+        self.model_state.postprocess_state(
+            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu, **extra
+        )
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput

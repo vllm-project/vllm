@@ -45,8 +45,7 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
 )
 from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     PlanLayout,
-    chain_parents,
-    chain_path,
+    arange_table,
 )
 from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
@@ -175,7 +174,7 @@ def test_layout_matches_reference(kind, seed):
     if kind in ("tree", "bad-tree"):
         parent = _random_tree(gen, num_reqs, max_rows)
     else:
-        parent = chain_parents(num_reqs, max_rows, DEVICE).cpu().numpy()
+        parent = arange_table(num_reqs, max_rows, DEVICE, start=-1).cpu().numpy()
     tokens = gen.integers(100, 1000, (num_reqs, max_rows)).astype(np.int32)
     if kind == "runner-chain":
         plan = VerifyPlan(parent=_t(parent), is_chain=True)
@@ -449,7 +448,9 @@ def test_mamba_resumes_from_the_last_accepted_row(seed):
     idx[gen.random(num_reqs) < 0.2] = -1
     sampled = torch.zeros(num_reqs, max_rows, dtype=torch.int64, device=DEVICE)
     tree = AcceptResult(_t(path), _t(path_len), sampled)
-    chain = AcceptResult(chain_path(num_reqs, max_rows, DEVICE), _t(path_len), sampled)
+    chain = AcceptResult(
+        arange_table(num_reqs, max_rows, DEVICE), _t(path_len), sampled
+    )
     states = {}
     for name, result in [("tree", tree), ("chain", chain), ("today", None)]:
         states[name] = _mamba_state(num_slots)

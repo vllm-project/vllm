@@ -69,16 +69,6 @@ class SpecCapabilities:
         )
 
 
-def reduce_spec_capabilities(
-    capabilities: Sequence[SpecCapabilities],
-) -> SpecCapabilities:
-    """Combine the reports of every rank: pipeline-parallel ranks hold
-    different layers, so the model verifies the lowest plan kind of any rank."""
-    return SpecCapabilities.from_limits(
-        limit for caps in capabilities for limit in caps.limits
-    )
-
-
 def spec_layers(
     attn_groups: Iterable[Iterable["AttentionGroup"]], layers: Mapping[str, Any]
 ) -> Iterator[tuple["AttentionGroup", str, Any, Any]]:
@@ -202,7 +192,10 @@ def resolve_spec_resources(
 ) -> "SpecResources":
     """The speculator's declared resources adapted to what every rank verifies
     (``capabilities``, one per worker); logs each lowering."""
-    caps = reduce_spec_capabilities(capabilities)
+    # Pipeline ranks hold different layers: the model verifies the lowest.
+    caps = SpecCapabilities.from_limits(
+        limit for rank in capabilities for limit in rank.limits
+    )
     lowering = [
         limit
         for limit in caps.limits

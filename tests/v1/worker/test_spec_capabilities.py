@@ -51,7 +51,6 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecLayerKind,
     SpecLimit,
     layer_spec_limits,
-    reduce_spec_capabilities,
     resolve_spec_resources,
 )
 from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
@@ -445,10 +444,12 @@ def test_engine_core_adapts_only_branching_resources(tree):
 
 def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
     """PP ranks hold different layers: rank 0 the trees, rank 1 a SWA layer."""
-    reduced = reduce_spec_capabilities([_TREE, _CHAIN])
-    assert reduced.plan_kind == "chain"
-    assert reduced.limits == _CHAIN.limits
-    assert reduce_spec_capabilities([_TREE, _TREE]).plan_kind == "tree"
+    config = _TreeConfig()
+    declared = config.resources(8)
+    assert (
+        resolve_spec_resources(config, declared, [_TREE, _CHAIN]).plan_kind == "chain"
+    )
+    assert resolve_spec_resources(config, declared, [_TREE, _TREE]) == declared
 
 
 # --- the spec kernel registry ------------------------------------------------
@@ -609,8 +610,6 @@ def test_bind_commit_capture():
     assert verify.binds == [["m.0", "m.1"]] and not state.binds and not kv.binds
     registry.capture(_ctx("chain"))
     assert not state.steps and not kv.steps
-    registry.bind(_ctx("none"), layers)
-    assert layers[0].module.spec_verify_kernel is None
 
     shapes = (4, 2)
     ctx = _ctx("tree", shapes)

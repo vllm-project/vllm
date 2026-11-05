@@ -28,11 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
     KernelRegistry,
     SpecLayerSpec,
 )
-from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
-    PlanLayout,
-    chain_parents,
-    chain_path,
-)
+from vllm.v1.worker.gpu.spec_decode.plan_kernels import PlanLayout, arange_table
 from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, PlanInputs, VerifyPlan
 
 if TYPE_CHECKING:
@@ -72,38 +68,26 @@ class SpecRound:
         # The plan of a step that verifies drafts without a speculator plan:
         # a chain, with its tokens in the runner's draft buffer.
         self.chain_plan = VerifyPlan(
-            parent=chain_parents(max_num_reqs, self.max_rows, device), is_chain=True
+            parent=arange_table(max_num_reqs, self.max_rows, device, start=-1),
+            is_chain=True,
         )
         # The accepted path of every chain round, path[r, j] == j.
-        self.chain_path = chain_path(max_num_reqs, self.max_rows, device)
+        self.chain_path = arange_table(max_num_reqs, self.max_rows, device)
         self.layout: PlanLayout | None = None
         # What speculation holds (rows, decode graphs, branching), declared by
         # the speculator's config. Memory is sized for it; set_resources lowers
         # it to what the model's layers verify before capture.
         self.resources = resources
         self.capabilities: SpecCapabilities | None = None
-        # Above 1 the speculator verifies trees: every verify batch (chains and
-        # capture batches too) is laid out, so the attention metadata always
-        # carries tree_parents / tree_ancestors and one graph serves every plan.
-        self.max_branching = self.resources.max_branching
-        # The rows each request verifies, from its query length, for the layout
-        # and the commit (max_branching > 1).
+        # With max_branching > 1 every verify batch (chains and capture batches
+        # too) is laid out, so one graph serves every plan. The rows each
+        # request verifies, from its query length, for the layout and the commit.
         self.rows: torch.Tensor | None = None
-        if self.max_branching > 1:
+        if resources.max_branching > 1:
             self.rows = torch.ones(max_num_reqs, dtype=torch.int32, device=device)
         # The spec verify and commit kernels (registry), bound by set_resources.
         self.kernels: KernelRegistry | None = None
         self.kernel_context: KernelContext | None = None
-
-    def init_tree_verify(self, input_buffers: "InputBuffers") -> None:
-        """Buffers of a speculator whose plans branch. Built by set_resources,
-        after the spec kernels are bound: until then (the memory profile) the
-        dummy batches verify chains, which the layers' own kernels run."""
-        if self.max_branching == 1:
-            return
-        self.layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
-        input_buffers.tree_parents = self.layout.tree_parents
-        input_buffers.tree_ancestors = self.layout.tree_ancestors
 
     def registry(self) -> KernelRegistry:
         """The speculator's spec kernels, built once per worker."""
@@ -153,9 +137,8 @@ class SpecRound:
         the declared ones to what every rank verifies, and bind the spec kernels
         to ``layers``. The memory stays sized for the declared resources."""
         self.resources = resources
-        if resources.max_branching == 1 < self.max_branching:
-            # Lowered to chains: batches keep the chain layout.
-            self.max_branching = 1
+        if resources.max_branching == 1:
+            # Chains (perhaps lowered to): batches keep the chain layout.
             self.rows = None
         self.kernel_context = KernelContext(
             device=self.device,
@@ -165,7 +148,12 @@ class SpecRound:
             capture_rows=resources.capture_rows,
         )
         self.registry().bind(self.kernel_context, layers)
-        self.init_tree_verify(input_buffers)
+        # Built after binding: until then (the memory profile) dummy batches
+        # verify chains, which the layers' own kernels run.
+        if resources.max_branching > 1:
+            self.layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
+            input_buffers.tree_parents = self.layout.tree_parents
+            input_buffers.tree_ancestors = self.layout.tree_ancestors
 
     def capture(self) -> None:
         """Capture the bound spec kernels' graphs, if they have any."""
@@ -227,7 +215,7 @@ class SpecRound:
         (a branching plan must be its request's whole query), structured output
         (the grammar bitmask of row ``i`` assumes the rows before it as its
         prefix), or logits processing that reads each row's prefix."""
-        if self.max_branching == 1:
+        if self.resources.max_branching == 1:
             return True
         if has_prefill or scheduler_output.has_structured_output_requests:
             return True

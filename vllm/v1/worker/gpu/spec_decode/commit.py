@@ -11,10 +11,9 @@ from dataclasses import dataclass
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.spec_decode.resources import PlanKind
+from vllm.v1.spec_decode.resources import PLAN_KINDS, PlanKind
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.spec_decode.kernels import (
-    ABOVE_NONE,
     CommitStep,
     KernelContext,
     SpecKernel,
@@ -71,7 +70,10 @@ def kv_cache_layout(kv_cache: torch.Tensor, num_blocks: int) -> KvCacheLayout:
         )
     if stride[-1] != 1:
         raise NotImplementedError("KV compaction needs contiguous head dims")
-    _check_dtype(kv_cache.dtype)
+    if not copies_dtype(kv_cache.dtype):
+        raise NotImplementedError(
+            f"KV compaction does not copy {kv_cache.dtype} caches"
+        )
     if kv_cache.dim() == 3:
         return KvCacheLayout(
             stride[0], stride[1], 0, shape[1], 1, shape[2], kv_cache.dtype
@@ -153,7 +155,7 @@ class KvCompactor(SpecKernel):
         cache = getattr(layer.module, "kv_cache", None)
         if isinstance(cache, torch.Tensor) and not copies_dtype(cache.dtype):
             return frozenset()
-        return ABOVE_NONE
+        return frozenset(PLAN_KINDS)
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
         # layout -> (caches, block tables, table strides, tokens per block)
@@ -214,8 +216,3 @@ _BITS = {1: "int8", 2: "int16", 4: "int32"}
 def copies_dtype(dtype: torch.dtype) -> bool:
     """Whether the compactor copies caches of ``dtype``."""
     return dtype.itemsize in _BITS
-
-
-def _check_dtype(dtype: torch.dtype) -> None:
-    if not copies_dtype(dtype):
-        raise NotImplementedError(f"KV compaction does not copy {dtype} caches")

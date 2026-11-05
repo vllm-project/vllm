@@ -535,8 +535,10 @@ class Scheduler(SchedulerInterface):
         V2 runner shortens its block table rows."""
         return self._dynamic_spec_blocks_supported and self.use_v2_model_runner
 
-    def _budget_view(self, num_scheduled_reqs: int) -> BudgetView:
-        return BudgetView(
+    def _candidate_budget(self, num_scheduled_reqs: int) -> int:
+        """Ask the speculator's config for this step's candidate budget."""
+        assert self.speculator_config is not None
+        view = BudgetView(
             num_scheduled_reqs=num_scheduled_reqs,
             num_running=len(self.running),
             num_waiting=len(self.waiting),
@@ -544,13 +546,7 @@ class Scheduler(SchedulerInterface):
             max_num_seqs=self.scheduler_config.max_num_seqs,
             block_size=self.block_size,
         )
-
-    def _candidate_budget(self, num_scheduled_reqs: int) -> int:
-        """Ask the speculator's config for this step's candidate budget."""
-        assert self.speculator_config is not None
-        budget = self.speculator_config.candidate_budget(
-            self._budget_view(num_scheduled_reqs)
-        )
+        budget = self.speculator_config.candidate_budget(view)
         if not 1 <= budget <= self.num_spec_tokens + 1:
             raise ValueError(
                 f"candidate_budget returned {budget}, outside "

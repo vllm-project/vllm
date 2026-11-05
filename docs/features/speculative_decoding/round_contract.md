@@ -41,14 +41,8 @@ The default is a chain of up to K drafts: `capture_rows` is `(K + 1,)`, with one
 recurrent-state row per draft. `SpecResources.plan_kind` follows from the fields:
 `"tree"` when `max_branching > 1`, else `"chain"`.
 
-### Plan kinds
-
-Plan kinds are ordered `"none" < "chain" < "tree"` (`PlanKind` in
-`capabilities.py`):
-
-- `"none"`: no speculative decoding.
-- `"chain"`: each verify row follows the one before it.
-- `"tree"`: each row has a parent and sees its ancestors.
+A plan kind (`PlanKind`) is `"chain"` (each verify row follows the one before
+it) or `"tree"` (each row has a parent and sees its ancestors).
 
 ### Startup rule
 
@@ -231,7 +225,7 @@ written as `"<layer kind>/<op>"` in logs:
 
 `@slots` is the recurrent-state mode.
 
-`ReferenceKernels` holds the in-tree kernels: the attention KV commit. A speculator
+`KernelRegistry` holds the in-tree kernels: the attention KV commit. A speculator
 names provider factories in `SpeculatorConfig.spec_kernel_providers`, a tuple of
 qualified names. Providers overlay the reference kernels in order: a later provider
 wins a key, and each override is logged once. A provider is constructed with
