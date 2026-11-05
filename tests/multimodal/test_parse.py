@@ -5,6 +5,7 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
@@ -52,6 +53,44 @@ def test_audio_metadata_checks_supplied_embedding_lengths():
     data["audio_num_tokens"] = torch.tensor([3, 4])
     with pytest.raises(ValueError, match="does not match"):
         parser.parse_mm_data({"audio": data})
+
+
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_parse_audio_tensor_detaches_before_numpy(requires_grad):
+    """Audio tensors are accepted even when they require gradients."""
+    parser = MultiModalDataParser()
+    audio = torch.tensor([0.1, 0.2], requires_grad=requires_grad)
+
+    items = parser.parse_mm_data({"audio": audio})["audio"]
+
+    np.testing.assert_array_equal(items.get(0), audio.detach().numpy())
+
+
+@pytest.mark.parametrize(
+    "modality,shape",
+    [
+        ("image", (3, 8, 8)),
+        ("video", (2, 8, 8, 3)),
+        ("audio", (1, 4, 8)),
+    ],
+)
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_hash_parsed_tensor_with_grad(modality, shape, device):
+    """Image, video, and embedding tensors remain hashable with gradients."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Requires CUDA")
+
+    tensor = torch.arange(np.prod(shape), device=device).reshape(shape).float()
+    tensor.requires_grad_()
+    data = {modality: [tensor]} if modality == "image" else {modality: tensor}
+    items = MultiModalDataParser().parse_mm_data(data)[modality]
+    item = items.get_all_items_for_hash()[0]
+    assert isinstance(item, torch.Tensor)
+
+    actual = MultiModalHasher.hash_kwargs("blake3", **{modality: item})
+    expected = MultiModalHasher.hash_kwargs("blake3", **{modality: item.detach()})
+
+    assert actual == expected
 
 
 @pytest.mark.parametrize(

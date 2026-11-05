@@ -153,7 +153,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        self.logical_output_size: int | None = None
+        self.logical_output_size = c.weight_shape[0]
         super().__init__(c, layer_param_names)
 
     @classmethod
