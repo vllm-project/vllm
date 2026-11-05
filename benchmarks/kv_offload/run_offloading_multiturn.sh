@@ -30,7 +30,8 @@
 # gets a fresh server. Results from earlier runs in the same RESULTS_DIR are
 # included in the summary table.
 #
-# Run inside the vLLM virtualenv (so `vllm` and `python` resolve to it).
+# Run inside the vLLM virtualenv or the vLLM image, so that `vllm` and `python3`
+# resolve to it (set PYTHON to use another interpreter).
 # Requires guidellm (tested with 0.8.1; uv pip install guidellm).
 #
 # Note: until #57422 lands, the cpu_fs configuration leaves its CPU tier
@@ -51,6 +52,7 @@ FS_DIR=${FS_DIR:-}
 N_READ_THREADS=${N_READ_THREADS:-16}
 N_WRITE_THREADS=${N_WRITE_THREADS:-16}
 KV_EXTRA=${KV_EXTRA:-}
+PYTHON=${PYTHON:-python3}
 TOKENIZER=${TOKENIZER:-}   # defaults to the served model name
 
 CONCURRENCY=${CONCURRENCY:-64}
@@ -66,11 +68,12 @@ STOP_TIMEOUT=${STOP_TIMEOUT:-180}
 RESULTS_DIR=${RESULTS_DIR:-"offloading_multiturn_$(date +%Y%m%d_%H%M%S)"}
 
 command -v guidellm >/dev/null || { echo "guidellm not found (uv pip install guidellm)" >&2; exit 1; }
-command -v python >/dev/null || { echo "python not found; run inside the vLLM virtualenv" >&2; exit 1; }
+command -v "$PYTHON" >/dev/null || { echo "$PYTHON not found; run inside the vLLM virtualenv or set PYTHON" >&2; exit 1; }
 mkdir -p "$RESULTS_DIR"
 
 # Check every configuration before the first run starts.
 if [ -z "$TARGET" ]; then
+    command -v setsid >/dev/null || { echo "setsid not found (util-linux)" >&2; exit 1; }
     for cfg in $CONFIGS; do
         case "$cfg" in
             gpu) ;;
@@ -96,27 +99,33 @@ stop_server() {
         done
         if kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "Server $SERVER_PID did not stop on SIGTERM, sending SIGKILL" >&2
-            kill -KILL "$SERVER_PID" 2>/dev/null || true
         fi
-        wait "$SERVER_PID" 2>/dev/null || true
     fi
+    # The server leads its own process group (setsid); kill whatever is left
+    # of it, including engine processes, before the next configuration.
+    kill -KILL -- "-$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
-    # The next configuration must not find this server still answering.
+    # The next configuration must not find this server still listening.
     for _ in $(seq "$STOP_TIMEOUT"); do
         port_in_use || return 0
         sleep 1
     done
-    echo "Port $PORT still answers after stopping the server" >&2
+    echo "Port $PORT is still in use after stopping the server" >&2
     exit 1
 }
 
 cleanup() {
+    # The server is not in the terminal's process group, so a second Ctrl-C
+    # while it stops kills its group instead of leaving it running.
+    trap '[ -z "$SERVER_PID" ] || kill -KILL -- "-$SERVER_PID" 2>/dev/null || true; exit 130' INT TERM
     stop_server
     # Only the per-run directory this script created is removed.
     if [ -n "$FS_RUN_DIR" ] && [ -d "$FS_RUN_DIR" ]; then
         rm -rf -- "$FS_RUN_DIR" || echo "Could not remove $FS_RUN_DIR" >&2
     fi
     FS_RUN_DIR=""
+    trap 'exit 130' INT TERM
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -145,8 +154,12 @@ EOF
     esac
 }
 
+# True if anything listens on the port, however slow it is to answer HTTP.
 port_in_use() {
-    curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/v1/models"
+    local rc=0
+    timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null || rc=$?
+    # A timeout (124) means a listener that is not accepting yet: in use.
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]
 }
 
 start_server() {
@@ -166,7 +179,7 @@ start_server() {
     # shellcheck disable=SC2206
     [ -n "$SERVE_ARGS" ] && args+=($SERVE_ARGS)
     echo "$kv" > "${log%.log}_kv_transfer_config.json"
-    vllm "${args[@]}" > "$log" 2>&1 &
+    setsid vllm "${args[@]}" > "$log" 2>&1 &
     SERVER_PID=$!
     local start=$SECONDS
     until curl -sf --max-time 5 "http://127.0.0.1:$PORT/v1/models" > /dev/null; do
@@ -181,6 +194,12 @@ start_server() {
         fi
         sleep 5
     done
+    # Fail if the launched server exited just before the port answered.
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "Server exited after the port answered, last lines of $log:" >&2
+        tail -n 30 "$log" >&2
+        exit 1
+    fi
 }
 
 # A failed scrape leaves no file, so the summary reports N/A instead of 0.
@@ -226,7 +245,7 @@ for cfg in $CONFIGS; do
     done
 done
 
-python - "$RESULTS_DIR" <<'EOF'
+"$PYTHON" - "$RESULTS_DIR" <<'EOF'
 import glob, json, os, sys
 
 def counters(path):
