@@ -264,8 +264,10 @@ dynamic per-token FP8 E4M3 activations. Install a FlyDSL build that provides
 `flydsl.kernels.gemm.rdna4_mxfp4`; vLLM imports the implementation from that
 package. Weight preparation runs once during model loading and retains
 compressed weights. GEMM uses native FP8 WMMA with FP32 accumulation.
-The [FlyDSL kernel source and deployment guide](https://github.com/big-yellow-duck/FlyDSL/tree/121e29927474770f38a129a3a85eb0e0be710db5/kernels/gemm/rdna4_mxfp4)
-provide the implementation and its analytical host selector.
+The [FlyDSL kernel source and deployment guide](https://github.com/big-yellow-duck/FlyDSL/tree/ce625eb6be6d521eab3b0226703c6a03346d470d/kernels/gemm/rdna4_mxfp4)
+provide the implementation and its analytical host selector. The refined selector
+uses padding, wave coverage and legal K lookahead to reduce configuration cliffs
+across unfamiliar shapes while keeping the register and hybrid strategies.
 
 ```bash
 vllm serve amd/Qwen3.8-27B-Quark-AWQ-MXFP4 \
@@ -316,6 +318,12 @@ adapted for kernel tests; this does not establish vLLM loader compatibility.
 The [analytical selector evidence](https://github.com/big-yellow-duck/FlyDSL/blob/121e29927474770f38a129a3a85eb0e0be710db5/tests/perf/data/rdna4_mxfp4_analytical.json)
 records paired kernel timings, individual regressions, independent cohort
 provenance, startup coverage, ISA resources and model evaluation scope.
+The separate [selector refinement evidence](https://github.com/big-yellow-duck/FlyDSL/blob/ce625eb6be6d521eab3b0226703c6a03346d470d/tests/perf/data/rdna4_mxfp4_refinement.json)
+reports the subsequent host-rule changes, consumed development cohorts, final
+unseen-shape validation and remaining regressions. Qwen TP1/TP2 retain identical
+rotating-policy configurations for every row count from 1 through 8,192; a fresh
+TP1 server smoke test also passes with the refined package. These checks preserve
+the scope of the earlier serving and accuracy measurements.
 Qwen TP1 agent throughput is nearly flat against the preceding profile selector.
 One TP2 warmed run regressed substantially; matched follow-ups with the same
 source were nearly flat, so the initial regression remains unresolved.
