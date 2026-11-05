@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
@@ -333,9 +334,19 @@ pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
     read_json_file(path)
 }
 
-/// Load the generation-side EOS metadata if a config file is present.
-pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
+/// Load `generation_config.json` as raw JSON, if present.
+pub(super) fn load_generation_config(path: Option<&Path>) -> Result<Map<String, Value>> {
     read_json_file(path)
+}
+
+/// Parse raw generation-config JSON into the fields the frontend uses.
+pub(super) fn parse_generation_config(config: Map<String, Value>) -> Result<GenerationConfig> {
+    serde_json::from_value(Value::Object(config)).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to parse generation config: {}",
+            error.as_report()
+        ))
+    })
 }
 
 /// Load the model-side config (`config.json`) if present.

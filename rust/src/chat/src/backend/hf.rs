@@ -206,6 +206,7 @@ pub(super) async fn load_model_backends(
         files.clone(),
         model_id.to_string(),
         options.generation_config,
+        &options.override_generation_config,
     )?;
     let tokenizer = text_backend.tokenizer();
     // Rendering and parsing a chat need a tokenizer.
@@ -315,6 +316,7 @@ mod tests {
                 hf_config: None,
                 hf_overrides: Default::default(),
                 generation_config: Default::default(),
+                override_generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),

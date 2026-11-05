@@ -22,7 +22,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
@@ -274,6 +274,20 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub generation_config: GenerationConfigMode,
+
+    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    /// used with `--generation-config auto`, the override parameters will be
+    /// merged with the default config from the model. If used with
+    /// `--generation-config vllm`, only the override parameters are used.
+    /// `max_new_tokens` here also caps every request's `max_tokens`.
+    #[arg(
+        long,
+        value_parser = parse_json::<Map<String, Value>>,
+        default_value = "{}",
+        value_name = "JSON"
+    )]
+    #[serde(default)]
+    pub override_generation_config: Map<String, Value>,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -857,6 +871,7 @@ impl SharedRuntimeArgs {
             skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
+            override_generation_config: self.override_generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
@@ -943,6 +958,7 @@ impl SharedRuntimeArgs {
             skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
+            override_generation_config: self.override_generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             grpc_listener_mode,
@@ -1309,6 +1325,12 @@ impl ServeArgs {
         let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
             serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
         });
+        // The engine reads it too, e.g. Llama 4 attention temperature tuning.
+        let override_generation_config = (!self.runtime.override_generation_config.is_empty())
+            .then(|| {
+                serde_json::to_string(&self.runtime.override_generation_config)
+                    .expect("JSON object serializes")
+            });
 
         let mut managed_engine = self.managed_engine.clone();
         managed_engine.python_args.extend(self.runtime.model.python_args());
@@ -1323,6 +1345,7 @@ impl ServeArgs {
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
+            override_generation_config,
             self.runtime.structured_outputs_config_json(),
             topology,
             client_handshake_address,

@@ -126,6 +126,7 @@ pub fn lower_sampling_params(
         default_presence_penalty,
         default_frequency_penalty,
         default_max_tokens,
+        max_tokens_cap,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
     structured_outputs_backend: StructuredOutputBackend,
@@ -205,6 +206,7 @@ pub fn lower_sampling_params(
     let max_tokens = resolve_max_tokens(
         max_tokens,
         default_max_tokens,
+        max_tokens_cap,
         sampling_limits.max_model_len,
         prompt_len,
     )?;
@@ -387,11 +389,12 @@ fn tokenize_bad_words(
 /// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's
 /// `get_max_tokens()` in `vllm/entrypoints/utils.py`.
 ///
-/// Takes the minimum of all available limits: user-specified, generation-config
-/// default, and `max_model_len - prompt_len`.
+/// Takes the minimum of the requested (or default) value, the server-wide cap,
+/// and `max_model_len - prompt_len`.
 pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
     default_max_tokens: Option<u32>,
+    max_tokens_cap: Option<u32>,
     max_model_len: u32,
     prompt_len: u32,
 ) -> Result<u32> {
@@ -410,7 +413,10 @@ pub fn resolve_max_tokens(
     let model_max_tokens = max_model_len - prompt_len;
 
     let request_max_tokens = user_max_tokens.or(default_max_tokens);
-    Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
+    Ok([request_max_tokens, max_tokens_cap]
+        .into_iter()
+        .flatten()
+        .fold(model_max_tokens, u32::min))
 }
 
 fn merge_unique_token_ids(
@@ -471,6 +477,7 @@ mod tests {
             default_presence_penalty: None,
             default_frequency_penalty: None,
             default_max_tokens: None,
+            max_tokens_cap: None,
         }
     }
 
@@ -500,6 +507,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                max_tokens_cap: None,
             },
             sampling_limits,
             StructuredOutputBackend::Xgrammar,
@@ -1012,6 +1020,7 @@ mod tests {
             files,
             model_id.to_string(),
             GenerationConfigMode::Auto,
+            &Default::default(),
         )
         .expect("load qwen tokenizer and generation config");
         let hints = backend.sampling_hints().expect("collect sampling hints");
@@ -1038,6 +1047,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                max_tokens_cap: None,
             }
         "#]]
         .assert_debug_eq(&hints);
@@ -1121,6 +1131,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                max_tokens_cap: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1202,6 +1213,7 @@ mod tests {
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
                 default_max_tokens: Some(128),
+                max_tokens_cap: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1267,6 +1279,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                max_tokens_cap: None,
             },
             SamplingLimits {
                 max_logprobs: -1,
@@ -1668,6 +1681,7 @@ mod tests {
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
                 default_max_tokens: Some(128),
+                max_tokens_cap: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1713,8 +1727,33 @@ mod tests {
     }
 
     #[test]
+    fn resolve_max_tokens_applies_the_server_cap_to_client_values() {
+        // A client asking for more than the cap is clamped, like Python's
+        // `override_max_tokens`.
+        assert_eq!(
+            resolve_max_tokens(Some(80), None, Some(30), 200, 100).unwrap(),
+            30
+        );
+        // Unset requests fall back to the default, still under the cap.
+        assert_eq!(
+            resolve_max_tokens(None, Some(64), Some(30), 200, 100).unwrap(),
+            30
+        );
+        // The context window still wins when it is tighter than the cap.
+        assert_eq!(
+            resolve_max_tokens(None, None, Some(500), 200, 100).unwrap(),
+            100
+        );
+        // Smaller client values pass through.
+        assert_eq!(
+            resolve_max_tokens(Some(10), None, Some(30), 200, 100).unwrap(),
+            10
+        );
+    }
+
+    #[test]
     fn resolve_max_tokens_caps_by_model_len() {
-        let result = resolve_max_tokens(Some(150), None, 200, 100);
+        let result = resolve_max_tokens(Some(150), None, None, 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
@@ -1723,7 +1762,7 @@ mod tests {
     /// completions reject it in their HTTP handlers.
     #[test]
     fn resolve_max_tokens_caps_budget_above_model_len() {
-        let result = resolve_max_tokens(Some(1000), None, 200, 100);
+        let result = resolve_max_tokens(Some(1000), None, None, 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
@@ -1839,31 +1878,31 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_user_smaller_than_model_limit() {
-        let result = resolve_max_tokens(Some(50), None, 200, 100);
+        let result = resolve_max_tokens(Some(50), None, None, 200, 100);
         assert_eq!(result.unwrap(), 50);
     }
 
     #[test]
     fn resolve_max_tokens_uses_default_when_user_omits() {
-        let result = resolve_max_tokens(None, Some(64), 200, 100);
+        let result = resolve_max_tokens(None, Some(64), None, 200, 100);
         assert_eq!(result.unwrap(), 64);
     }
 
     #[test]
     fn resolve_max_tokens_default_capped_by_model_len() {
-        let result = resolve_max_tokens(None, Some(256), 200, 100);
+        let result = resolve_max_tokens(None, Some(256), None, 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
     #[test]
     fn resolve_max_tokens_uses_model_limit_when_user_omits() {
-        let result = resolve_max_tokens(None, None, 200, 100);
+        let result = resolve_max_tokens(None, None, None, 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
     #[test]
     fn resolve_max_tokens_prompt_too_long() {
-        let result = resolve_max_tokens(Some(10), None, 100, 100);
+        let result = resolve_max_tokens(Some(10), None, None, 100, 100);
         assert!(matches!(
             result,
             Err(Error::PromptFillsContext { max_model_len: 100 })
@@ -1872,7 +1911,7 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_prompt_exceeds_model_len() {
-        let result = resolve_max_tokens(Some(10), None, 100, 200);
+        let result = resolve_max_tokens(Some(10), None, None, 100, 200);
         assert!(matches!(
             result,
             Err(Error::PromptTooLong {
