@@ -909,6 +909,77 @@ class TestNixlPeerFaults:
             transport.poll(peer_id="peer:1")
         assert sum("check_xfer_state failed" in w for w in warnings) == 1
 
+    def test_remove_remote_peer_retires_running_transfer(self):
+        """A WRITE still running at peer removal keeps its handle and the
+        peer's registration until it stops, and leaves every poll() so a
+        reconnected peer under the same id never sees it."""
+        transport = self._make_transport()
+        agent = transport._agent
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        tid = transport.write_blocks("peer:1", [0], [1])
+
+        transport.remove_remote_peer("peer:1")
+        agent.release_dlist_handle.assert_not_called()
+        agent.remove_remote_agent.assert_not_called()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        agent.check_xfer_state.return_value = "DONE"
+        assert not transport.poll(peer_id="peer:1").done
+        assert not transport.poll().done
+        assert tid in transport._inflight
+
+        assert transport.poll_retired() == [tid]
+        assert tid not in transport._inflight
+        agent.release_xfer_handle.assert_called_once()
+        # The old registration only; the new one stays registered.
+        agent.release_dlist_handle.assert_called_once()
+        agent.remove_remote_agent.assert_called_once()
+        assert "peer:1" in transport._remote_dlists
+
+    @pytest.mark.parametrize("state", ["PROC", "PEND"])
+    def test_poll_retired_keeps_running_transfer(self, state):
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport.remove_remote_peer("peer:1")
+        transport._agent.check_xfer_state.return_value = state
+
+        assert transport.poll_retired() == []
+        assert tid in transport._inflight
+        transport._agent.release_xfer_handle.assert_not_called()
+
+    def test_poll_retired_state_check_raise_is_not_terminal(self):
+        """Only a remote disconnect proves a retired WRITE stopped."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport.remove_remote_peer("peer:1")
+        transport._agent.check_xfer_state.side_effect = nixlNotFoundError("gone")
+        assert transport.poll_retired() == []
+        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
+        assert transport.poll_retired() == [tid]
+        assert "peer:1" not in transport._peer_faults
+
+    def test_force_release_retired_releases_registration(self):
+        transport = self._make_transport()
+        agent = transport._agent
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
+        transport.remove_remote_peer("peer:1")
+
+        transport.force_release_retired([tid])
+
+        assert tid not in transport._inflight
+        agent.release_xfer_handle.assert_called_once()
+        agent.remove_remote_agent.assert_called_once()
+
+    def test_remove_remote_peer_without_inflight_releases_at_once(self):
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport.remove_remote_peer("peer:1")
+        transport._agent.release_dlist_handle.assert_called_once()
+        transport._agent.remove_remote_agent.assert_called_once()
+
     def test_remove_remote_peer_clears_the_fault(self):
         transport = self._make_transport()
         for _ in range(3):

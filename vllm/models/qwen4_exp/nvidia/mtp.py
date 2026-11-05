@@ -24,9 +24,6 @@ from vllm import envs
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -42,6 +39,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     get_draft_quant_config,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -62,6 +60,7 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
+    get_qsa_topk_buffer_width,
 )
 
 
@@ -126,6 +125,7 @@ def _remap_mtp_weight_name(name: str) -> str | None:
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int,
 ) -> VllmConfig:
     """Ensure that the draft model config is set in the vLLM config."""
     speculative_config = vllm_config.speculative_config
@@ -157,6 +157,15 @@ def _make_draft_vllm_config(
                 draft_quant_config,
                 "quantized_layers",
                 _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
+            )
+        if draft_quant_config.get_name() == "quark":
+            draft_quant_config.apply_vllm_mapper(
+                WeightsMapper(
+                    orig_to_new_prefix={
+                        f"mtp.layers.{i}.": f"mtp.layers.{mtp_start_layer_idx + i}."
+                        for i in range(num_mtp_layers)
+                    }
+                )
             )
 
     draft_vllm_config = replace(
@@ -196,7 +205,16 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         draft_vllm_config = _make_draft_vllm_config(
             vllm_config,
             self.mtp_start_layer_idx,
+            self.num_mtp_layers,
         )
+        # The proposer replaces this with the target model's buffer.
+        topk_indices_buffer = None
+        if getattr(config, "indexer_n_heads", None) is not None:
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            )
         with set_current_vllm_config(draft_vllm_config, prefix=prefix):
             # residual_linear_shared fusion: fc_embedding projects the token
             # embedding, fc_hidden (shared across HC branches) projects the
@@ -225,13 +243,14 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                     draft_vllm_config,
                     layer_type="qwen_sparse_attention",
                     prefix=f"{prefix}.layers.{self.mtp_start_layer_idx + idx}",
+                    topk_indices_buffer=topk_indices_buffer,
                 )
                 for idx in range(self.num_mtp_layers)
             )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen4ExpSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         self.pre_fc_norm_embedding = GemmaRMSNorm(
@@ -384,7 +403,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",

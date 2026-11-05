@@ -20,11 +20,10 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-
-# Split the shared region into this many shm files so workers pre-fault them
-# in parallel (page-cache inserts are serialized per file).
-_REGION_SEGMENTS = 32
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 
 def _shared_region_barrier() -> None:
@@ -189,7 +188,14 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         from vllm.distributed.parallel_state import get_world_group
 
-        return get_world_group().local_rank % worker_world_size
+        try:
+            local_rank = get_world_group().local_rank
+        except AssertionError:
+            # Config-only construction can happen before distributed state is
+            # initialized; use the configured rank until the process group is
+            # available.
+            local_rank = self.config.parallel.rank
+        return local_rank % worker_world_size
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
@@ -207,8 +213,8 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_shared_region_barrier,
-                num_segments=_REGION_SEGMENTS,
                 unlink_owner=worker_rank == 0,
+                num_segments=REGION_SEGMENTS,
                 populate_shard=(
                     (worker_rank, world_size) if self.replicated_layout else None
                 ),
