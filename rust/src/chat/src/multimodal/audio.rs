@@ -305,11 +305,14 @@ mod tests {
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
         let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
         let fetched = info
-            .fetch_media(vec![MediaContentPart::AudioData {
-                data: wav,
-                mime_type: Some("audio/wav".to_string()),
-                uuid: Some("audio-1".to_string()),
-            }])
+            .fetch_media(
+                vec![MediaContentPart::AudioData {
+                    data: wav,
+                    mime_type: Some("audio/wav".to_string()),
+                    uuid: Some("audio-1".to_string()),
+                }],
+                crate::multimodal::VideoIo::default(),
+            )
             .await
             .unwrap();
 
@@ -348,11 +351,14 @@ mod tests {
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
         let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
         let fetched = info
-            .fetch_media(vec![MediaContentPart::AudioData {
-                data: wav,
-                mime_type: Some("audio/wav".to_string()),
-                uuid: Some("audio-1".to_string()),
-            }])
+            .fetch_media(
+                vec![MediaContentPart::AudioData {
+                    data: wav,
+                    mime_type: Some("audio/wav".to_string()),
+                    uuid: Some("audio-1".to_string()),
+                }],
+                crate::multimodal::VideoIo::default(),
+            )
             .await
             .unwrap();
 
