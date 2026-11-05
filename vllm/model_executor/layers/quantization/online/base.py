@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineLinearMethod,
     LutBOnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
@@ -101,6 +102,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    kLutBStatic: LutBOnlineLinearMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.

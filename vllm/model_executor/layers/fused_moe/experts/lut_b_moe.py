@@ -28,9 +28,10 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
     LUT_B_SM107_TILE_K,
     LUT_B_SM107_TILE_N,
+    lut_b_sm107_supported,
+    mxfp8_qdq,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -44,12 +45,6 @@ logger = init_logger(__name__)
 
 # The SM107 kernel computes 128 x 128 output tiles of one expert.
 LUT_B_SM107_BLOCK_M = 128
-
-
-def mxfp8_qdq(x: torch.Tensor) -> torch.Tensor:
-    """Round activations through MXFP8, as the native kernel consumes them."""
-    x_q, x_scales = mxfp8_e4m3_quantize(x)
-    return dequant_mxfp8_to_bf16(x_q, x_scales.view(*x.shape[:-1], -1)).to(x.dtype)
 
 
 class _LutBExpertsBase(TritonExperts):
@@ -151,11 +146,7 @@ class LutBSm107Experts(_LutBExpertsBase):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability((10, 7))
-            and ops.lut_b_moe_gemm_supported()
-        )
+        return lut_b_sm107_supported()
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
