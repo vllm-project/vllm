@@ -231,7 +231,10 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.draft_watermarker: DraftWatermarker | None = None
         watermark_config = getattr(vllm_config, "watermark_config", None)
-        if watermark_config is not None:
+        if (
+            watermark_config is not None
+            and self.speculative_config.draft_sample_method == "probabilistic"
+        ):
             watermarker = create_watermarker(watermark_config)
             self.draft_watermarker = create_speculative_draft_watermarker(
                 watermarker,

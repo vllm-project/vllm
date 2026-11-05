@@ -1487,11 +1487,9 @@ class VllmConfig:
             return False
         if self.speculative_config is not None:
             speculative_config = self.speculative_config
-            if speculative_config.draft_sample_method != "probabilistic":
-                raise ValueError(
-                    "Speculative decoding with watermarking requires "
-                    "draft_sample_method='probabilistic'."
-                )
+            probabilistic_drafts = (
+                speculative_config.draft_sample_method == "probabilistic"
+            )
             if speculative_config.rejection_sample_method != "standard":
                 raise ValueError(
                     "Speculative decoding with watermarking requires "
@@ -1511,7 +1509,8 @@ class VllmConfig:
                     "candidate-head drafters yet."
                 )
             if (
-                not watermark_config.allow_target_only_watermarking
+                probabilistic_drafts
+                and not watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding
             ):
                 raise ValueError(
@@ -1521,7 +1520,8 @@ class VllmConfig:
                     "unwatermarked."
                 )
             if (
-                watermark_config.allow_target_only_watermarking
+                probabilistic_drafts
+                and watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding
             ):
                 logger.warning_once(
@@ -1535,8 +1535,12 @@ class VllmConfig:
             ):
                 logger.warning_once(
                     "Speculative decoding selects the watermark key by token role: "
-                    "draft tokens use key A, recovery and bonus tokens use key B. "
-                    "The configured alpha=%s is not used.",
+                    "%s. The configured alpha=%s is not used.",
+                    (
+                        "draft tokens use key A, recovery and bonus tokens use key B"
+                        if probabilistic_drafts
+                        else "every output token uses key B"
+                    ),
                     watermark_config.alpha,
                     scope="global",
                 )

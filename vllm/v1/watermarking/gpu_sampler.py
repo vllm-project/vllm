@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Literal
 
 import numpy as np
@@ -116,6 +117,63 @@ class GPUWatermarkSampler(Sampler):
                 sampled,
             )
         return sampled, output_logits
+
+    def pin_to_watermarked_sample(
+        self,
+        processed_logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+        draft_sampled: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, Callable[[], None] | None]:
+        """+inf at the watermarked sample plus temperature 0 makes the greedy
+        rejection path accept only that sample. Call the returned restore after
+        ``rejection_sample``: ``processed_logits`` can be the raw logits, which
+        ``_verify_in_chunks`` reads later.
+        """
+        temperature = self.sampling_states.temperature.gpu
+        enabled = self.watermarking.np[idx_mapping_np] & (
+            self.sampling_states.temperature.np[idx_mapping_np] != 0
+        )
+        if not np.any(enabled):
+            return temperature, None
+
+        contexts = self._get_contexts(
+            expanded_idx_mapping, expanded_local_pos, draft_sampled
+        )
+        watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
+            temperature[expanded_idx_mapping] != 0
+        )
+        skip_mask = ~watermarking | (contexts < 0).any(dim=-1)
+        if self.deduplicate_contexts != "none":
+            skip_mask |= self._get_repeated_contexts(
+                expanded_idx_mapping, contexts, expanded_local_pos
+            )
+        random_sampler = RandomSampler(
+            expanded_idx_mapping=expanded_idx_mapping,
+            temperatures=temperature,
+            seeds=self.sampling_states.seeds.gpu,
+            positions=pos,
+            use_fp64=self.use_fp64_gumbel,
+        )
+        sampled = self.watermarker.sample(
+            processed_logits,
+            contexts,
+            random_sampler,
+            skip_mask=skip_mask,
+        ).token_ids.unsqueeze(-1)
+        original = processed_logits.gather(1, sampled)
+        processed_logits.scatter_(
+            1, sampled, torch.where(watermarking.unsqueeze(-1), float("inf"), original)
+        )
+
+        def restore() -> None:
+            processed_logits.scatter_(1, sampled, original)
+
+        return torch.where(
+            self.watermarking.gpu & (temperature != 0), 0.0, temperature
+        ), restore
 
     def _get_repeated_contexts(
         self,

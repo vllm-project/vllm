@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -275,6 +275,23 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
+        temperature = self.sampler.sampling_states.temperature.gpu
+        restore_logits: Callable[[], None] | None = None
+        watermarking_kwargs: dict[str, Any] = {}
+        if draft_logits is not None:
+            watermarking_kwargs = self._watermarking_kwargs(
+                draft_sampled, expanded_idx_mapping, expanded_local_pos
+            )
+        elif self.watermark_key is not None:
+            assert isinstance(self.sampler, GPUWatermarkSampler)
+            temperature, restore_logits = self.sampler.pin_to_watermarked_sample(
+                processed_logits,
+                expanded_idx_mapping,
+                idx_mapping_np,
+                pos,
+                draft_sampled,
+                expanded_local_pos,
+            )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -284,7 +301,7 @@ class RejectionSampler:
             idx_mapping,
             expanded_idx_mapping,
             expanded_local_pos,
-            self.sampler.sampling_states.temperature.gpu,
+            temperature,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
@@ -296,10 +313,10 @@ class RejectionSampler:
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
-            **self._watermarking_kwargs(
-                draft_sampled, expanded_idx_mapping, expanded_local_pos
-            ),
+            **watermarking_kwargs,
         )
+        if restore_logits is not None:
+            restore_logits()
         if self.sampler.trace_replay_state is not None:
             self.sampler.trace_replay_state.apply_trace_to_verified(
                 sampled, num_sampled, draft_sampled, cu_num_logits, idx_mapping

@@ -10,7 +10,11 @@ import torch
 
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
-from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+from vllm.v1.watermarking.spec_decode import (
+    _resolve_watermark_key,
+    watermarked_rejection_sample,
+)
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
@@ -1231,6 +1235,105 @@ def test_verify_rejects_unproposed_drafts():
     prefill_len.copy_(first_pos)
     _, num_sampled = verify()
     assert (num_sampled == K + 1).all()
+
+
+def test_greedy_drafts_are_verified_against_the_watermarked_sample(monkeypatch):
+    torch.manual_seed(0)
+    device = "cuda"
+    num_reqs, K, vocab_size, context_width = 4, 3, 256, 2
+    temperatures = [1.0, 1.0, 1.0, 0.0]
+    watermarker = GumbelWatermarker(key=42, context_width=context_width)
+
+    inputs = _build_rejection_sample_inputs(
+        torch.randn(vocab_size, device=device),
+        torch.randn(vocab_size, device=device),
+        K,
+        temperature=1.0,
+        num_trials=num_reqs,
+    )
+    num_logits = num_reqs * (K + 1)
+    target_logits = torch.randn(num_logits, vocab_size, device=device)
+    original_logits = target_logits.clone()
+    inputs["temperature"] = torch.tensor(temperatures, device=device)
+    draft_sampled = torch.zeros(num_logits, dtype=torch.int64, device=device)
+
+    all_token_ids = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
+    all_token_ids[:, :4] = torch.tensor([100, 101, 10, 11], dtype=torch.int32)
+    all_token_ids[:, :4] += torch.arange(num_reqs, dtype=torch.int32)[:, None]
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = watermarker
+    sampler.deduplicate_contexts = "none"
+    sampler.use_fp64_gumbel = False
+    sampler.trace_replay_state = None
+    sampler.may_mask_logits = np.zeros(num_reqs, dtype=bool)
+    monkeypatch.setattr(sampler, "apply_sampling_params", lambda logits, *args: logits)
+    sampler.watermarking = SimpleNamespace(
+        np=np.ones(num_reqs, dtype=bool), gpu=torch.ones(num_reqs, dtype=torch.bool)
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(
+            np=np.array(temperatures, dtype=np.float32), gpu=inputs["temperature"]
+        ),
+        seeds=SimpleNamespace(gpu=inputs["seed"]),
+    )
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=all_token_ids),
+        prompt_len=SimpleNamespace(gpu=torch.full((num_reqs,), 2, device=device)),
+        total_len=SimpleNamespace(gpu=torch.full((num_reqs,), 4, device=device)),
+    )
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = sampler
+    rejection_sampler.num_speculative_steps = K
+    rejection_sampler.synthetic_conditional_rates = None
+    rejection_sampler.use_block_verification = False
+    rejection_sampler.fly_window_size = 0
+    rejection_sampler.fly_entropy_threshold = 0.3
+    rejection_sampler.fly_entropy_top_k = 3
+    rejection_sampler.watermark_key = _resolve_watermark_key(watermarker)
+
+    def watermarked_samples() -> torch.Tensor:
+        contexts = sampler._get_contexts(
+            inputs["expanded_idx_mapping"],
+            inputs["expanded_local_pos"],
+            draft_sampled,
+        )
+        return watermarker.sample(target_logits, contexts).token_ids.view(
+            num_reqs, K + 1
+        )
+
+    # Each sample's context includes the drafts before it, so fix the drafts in order.
+    drafts = draft_sampled.view(num_reqs, K + 1)
+    for step in range(K):
+        drafts[:, step + 1] = watermarked_samples()[:, step]
+    expected = watermarked_samples()
+    greedy = target_logits.view(num_reqs, K + 1, vocab_size).argmax(dim=-1)
+    drafts[3, 1:] = greedy[3, :K]
+    # Request 0 accepts every draft, request 1 rejects the second, request 2 the
+    # first and request 3 is an ordinary greedy request that rejects the second.
+    drafts[1, 2] = (expected[1, 1] + 1) % vocab_size
+    drafts[2, 1] = (expected[2, 0] + 1) % vocab_size
+    drafts[3, 2] = (greedy[3, 1] + 1) % vocab_size
+
+    processed_logits, sampled, num_sampled = rejection_sampler._verify(
+        target_logits,
+        None,
+        draft_sampled,
+        inputs["pos"],
+        inputs["cu_num_logits"],
+        inputs["idx_mapping"],
+        np.arange(num_reqs),
+        inputs["expanded_idx_mapping"],
+        inputs["expanded_local_pos"],
+        None,
+    )
+
+    assert num_sampled.tolist() == [K + 1, 2, 1, 2]
+    assert sampled[0].tolist() == expected[0].tolist()
+    assert sampled[1, :2].tolist() == expected[1, :2].tolist()
+    assert sampled[2, :1].tolist() == expected[2, :1].tolist()
+    assert sampled[3, :2].tolist() == greedy[3, :2].tolist()
+    assert processed_logits is target_logits
+    assert torch.equal(processed_logits, original_logits)
 
 
 @pytest.mark.parametrize(
