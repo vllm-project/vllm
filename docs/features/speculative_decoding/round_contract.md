@@ -1,13 +1,9 @@
 # The Speculative Round Contract (Experimental)
 
-This page is for authors of [custom speculators](README.md#custom-speculators-experimental).
-It describes how a speculator controls a whole speculative round with the V2 model
-runner. The round has four parts: the plan of rows the target verifies, the path
-vLLM accepts through them, how many candidates the next round may take, and the kernels that
-verify and commit trees.
-
-Every hook has a default that keeps the standard behaviour. A speculator overrides
-only the hooks it needs.
+This page is for authors of [custom speculators](README.md#custom-speculators-experimental)
+on the V2 model runner. A speculator may choose the rows the target verifies, how
+many candidates the next round takes, and kernels that verify and commit trees.
+Every hook defaults to the standard behaviour; override only the ones you need.
 
 !!! warning
     This is an experimental interface. It may change between releases.
@@ -37,69 +33,41 @@ holds. vLLM sizes memory and CUDA graphs for it once, at startup.
 | `max_branching: int = 1` | 1 for chains. Above 1, plans may branch. |
 
 The scheduler reserves `num_speculative_tokens + 1` KV slots per decoding request.
-The default is a chain of up to K drafts: `capture_rows` is `(K + 1,)`, with one
-recurrent-state row per draft. `SpecResources.plan_kind` follows from the fields:
-`"tree"` when `max_branching > 1`, else `"chain"`.
-
-A plan kind (`PlanKind`) is `"chain"` (each verify row follows the one before
-it) or `"tree"` (each row has a parent and sees its ancestors).
+The default is a chain of up to K drafts: `capture_rows` is `(K + 1,)`.
+`SpecResources.plan_kind` is `"tree"` (each row has a parent and sees its
+ancestors) when `max_branching > 1`, else `"chain"` (each row follows the one
+before it).
 
 ### Startup rule
 
-After the attention backends are built, each worker applies one rule to its target
-layers: the model verifies trees when every layer is full attention on a backend
-that verifies trees or has provider kernels for its kind, and chains otherwise. It reports the result as a
-`SpecCapabilities`: a `plan_kind` and one `SpecLimit(plan_kind, reason)` per layer
-kind or setting that lowers it. The engine core reduces the reports of every rank:
-the model verifies the lowest plan kind of any layer on any rank.
+After the attention backends are built, each worker checks its target
+layers and reports a `SpecCapabilities`: a `plan_kind` and one
+`SpecLimit(plan_kind, reason)` per layer kind or setting that lowers it. The model
+verifies the lowest plan kind of any layer on any rank.
 
-- **Attention layers.** A full attention layer (no sliding window, chunk or R-SWA
-  window) verifies trees when its backend sets
-  `AttentionBackend.serves_trees` and the registry commits its KV layout;
-  the reference `KvCompactor` does. Every other attention kind, and full attention
-  on a backend without the flag, verifies chains. A backend that sets it reads
-  `CommonAttentionMetadata.tree_ancestors` and measures position terms on
-  `CommonAttentionMetadata.positions`, the plan positions. No in-tree backend sets
-  it.
-- **Recurrent layers** (`MambaBase` subclasses). A layer class verifies more than
-  chains only when the class itself sets `spec_layer_variant`, for example
-  `"gdn"`. Subclasses do not inherit it, so a subclass with its own forward
-  falls back to chains. Above chains, a recurrent layer verifies the highest plan
-  kind that its kernels in the registry support (see
-  [Kernel registry](#kernel-registry)).
-- **Runner settings.** These lower trees to chains: pipeline parallelism,
-  prefill and decode context parallelism, batch-sharded sampling and
-  micro-batching.
+- **Attention layers.** Full attention (no sliding window, chunk or R-SWA window)
+  verifies trees when its backend sets `AttentionBackend.serves_trees`; such a
+  backend reads `CommonAttentionMetadata.tree_ancestors` and the plan
+  `positions`. No in-tree backend sets it, so in tree every model verifies chains.
+- **Recurrent layers** (`MambaBase` subclasses) verify chains unless the class
+  itself (not a parent) sets `spec_layer_variant`, for example `"gdn"`, and the
+  registry holds its kernels (see [Kernel registry](#kernel-registry)).
+- **Runner settings** listed under [Limits](#limits) lower trees to chains.
 
 ### Downgrade to chain
 
 The engine core calls `SpeculatorConfig.adapt_resources(declared, caps) ->
-SpecResources` with the reduced capabilities. The result may only take less than
-`declared` (no larger `max_branching`, no undeclared `capture_rows`), and its plan
-kind must be one the model verifies
-(`validate_effective_resources` in `capabilities.py`). By default, a speculator
-that branches runs as a chain of the same length.
+SpecResources`. The result may only shrink `declared` (no larger `max_branching`,
+no undeclared `capture_rows`) and its plan kind must be one the model verifies. By
+default a branching speculator runs as a chain of the same length; a tree
+speculator should pick its own chain, since a 64-row tree is not a 64-token chain.
+Dropping the largest `capture_rows` entry shortens the chain. To refuse a lower
+plan kind, raise in `adapt_resources`. Each lowering is logged, for example
+`spec decode: tree -> chain (<layer kind>, <n> layers: <reason>)`.
 
-A tree speculator should override `adapt_resources` to pick its own chain, because a
-64-row tree is not a 64-token chain. A request verifies at most the largest entry
-of the adapted `capture_rows` (`max_rows`), so dropping the largest entry shortens
-the chain.
-
-The engine logs one line per limit that lowers the declared plan kind, and one when
-`max_rows` drops:
-
-```text
-spec decode: tree -> chain (<layer kind>, <n> layers: <reason>)
-spec decode: max_rows <declared> -> <adapted> (adapt_resources)
-```
-
-The scheduler, the runner, the CUDA graph manager and the speculator then run with
-the adapted resources (see [Limits](#limits)). The speculator receives them in
+Everything then runs with the adapted resources; the speculator receives them in
 `BaseSpeculator.bind_resources(resources)`, once per worker, before capture. With
-`resources.max_branching == 1`, every batch is `PlanInputs.chain_only`.
-
-A speculator that must not run with a lower plan kind raises in its
-`adapt_resources`.
+`max_branching == 1`, every batch is `PlanInputs.chain_only`.
 
 ## Every step, in call order
 
@@ -112,26 +80,24 @@ Steps 2 to 6 run on every worker.
 def candidate_budget(self, view: BudgetView) -> int
 ```
 
-This returns the rows per request, root included, that the drafts proposed after
-this step may take. The value must be in `[1, num_speculative_tokens + 1]`. The scheduler calls
-it once per `schedule()` that schedules requests, after allocation. The drafts
-proposed now are verified next step, so the budget binds one step later. This
-matches the Dynamic SD schedule.
+This returns the rows per request, root included, in `[1, num_speculative_tokens +
+1]`, that the drafts proposed after this step may take. The scheduler calls it once
+per `schedule()` that schedules requests; the budget binds one step later, as the
+Dynamic SD schedule does, and is capped at the effective `max_rows`. The default is
+K + 1, or the Dynamic SD schedule's.
 
-A budget of 1 proposes no drafts. The scheduler sets `skip_drafts`, and the runner
-does not run the drafter after this step. Under data parallelism the drafter is
-skipped only when every rank skips it. The next step is a plain decode. It replays
-the plain-decode graph when 1 is in `capture_rows`. A drafter with its
-own KV leaves the skipped tokens' draft KV unwritten. The target verifies every
-draft, so outputs do not change.
+A budget of 1 proposes no drafts (`skip_drafts`): the runner skips the drafter
+(under data parallelism, only when every rank skips it) and the next step is a
+plain decode. A budget that stops drafting under load:
 
-The default is K + 1, or the Dynamic SD schedule's K + 1 at this batch size. The
-scheduler caps the answer at the effective `max_rows`. `BudgetView` holds
-host integers read after this step's requests are scheduled.
+```python
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 
-On a model with recurrent (Mamba, GDN) layers, a request holds one recurrent-state
-block per draft it verifies, so a budget that drops drafts under load frees blocks
-for more running requests (`view.num_free_blocks` shows the pool).
+
+class MyChainConfig(Eagle3SpeculatorConfig):
+    def candidate_budget(self, view):
+        return 1 if view.num_running > 128 else self.num_speculative_tokens + 1
+```
 
 ### 2. Plan: `BaseSpeculator.plan`
 
@@ -139,10 +105,9 @@ for more running requests (`view.num_free_blocks` shows the pool).
 def plan(self, inputs: PlanInputs) -> VerifyPlan | None
 ```
 
-The runner calls this once per scheduled batch that carries drafts, before it builds
-the batch's inputs (not under adaptive verification, see [Limits](#limits)). Return
-`None`, the default, to verify every scheduled
-draft as a chain.
+The runner calls this once per batch with drafts, before it builds the batch's
+inputs (not under adaptive verification). Return `None`, the default, to verify
+every scheduled draft as a chain.
 
 `PlanInputs` holds `req_ids`, `idx_mapping` (a device tensor), `idx_mapping_np`,
 `scheduled_rows` and `chain_only`. `scheduled_rows[r]` is 1 plus the drafts the
@@ -161,18 +126,10 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | `rows` | Host `[R]` int32, or `None`. `rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`; the drafts past it leave the batch and count as rejected. `None` verifies every scheduled row. Entries past a request's rows are ignored. |
 | `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then skips ancestor sets and KV compaction. It never derives this flag from the tensors. |
 
-Row 0 is the root, the request's last committed token. Each row writes its KV at the
-chain slot of its row index. After acceptance, the commit moves the accepted path
-into place. Plan buffers belong to the speculator. They must stay valid until the
-commit returns, so that CUDA graph replays read stable addresses.
-
-The batch's graph shape follows from the rows; the runner counts each request's
-rows on the device from its query length. A row with no candidate to verify holds
-token -1.
-
-A plan that is not a chain needs `max_branching > 1` in the bound resources, and a
-batch that is not `chain_only`. The runner checks each plan against the effective
-resources and rejects a plan with more than `num_speculative_tokens + 1` rows.
+Row 0 is the root, the request's last committed token. Plan buffers belong to the
+speculator and must stay valid until the commit returns. A plan that is not a chain
+needs `max_branching > 1` and a batch that is not `chain_only`; a plan has at most
+`num_speculative_tokens + 1` rows.
 
 ### 3. Verify
 
@@ -182,22 +139,15 @@ on every section. Attention sees each row's ancestors. The forward replays the c
 
 ### 4. Accept
 
-vLLM checks chains with its rejection sampler. For a plan that is not a chain, it
-gives every row the target's token: the argmax for a greedy request, else a draw
-from the row's logits after the sampling parameters, at the row's plan position.
-It then walks from the root to the child whose token is the current row's target
-token, until no child matches. The committed tokens are the target tokens of the
-accepted rows; the last is the bonus token. Each is the target's draw at its
-prefix, so the walk is lossless when the drafted tokens do not depend on those
-draws, as with a draft model's top-k.
+Chains go through the rejection sampler. For a tree, every row gets the target's
+token (argmax, or a draw from the row's processed logits), and vLLM walks from the
+root to the child whose token matches, until none does. The result, `AcceptResult`:
 
-The result, `AcceptResult`, has these fields:
-
-- `path`: `path[r, :path_len[r]]` lists the accepted rows from the root down. Each
-  row is a child of the previous one, so `path[r, j] >= j`.
+- `path`: `path[r, :path_len[r]]` lists the accepted rows from the root down, so
+  `path[r, j] >= j`.
 - `path_len`: the number of accepted rows per request.
-- `sampled`: `sampled[r, :path_len[r]]` holds the committed tokens.
-The runner takes each committed token's logprobs from its row on the path.
+- `sampled`: `sampled[r, :path_len[r]]` holds the committed tokens; the last is the
+  bonus token.
 
 ### 5. Commit
 
@@ -221,22 +171,18 @@ written as `"<layer kind>/<op>"` in logs:
 
 | Op | Keys | What it does |
 | --- | --- | --- |
-| `verify` | `mamba:gdn@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. There is no reference entry: without a bound provider kernel, the layer runs its own chain kernels. |
-| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: attention KV (the reference entry), or the recurrent state and conv window (a provider's). |
+| `verify` | `mamba:gdn@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. Providers only: without one, the layer runs its own chain kernels. |
+| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: attention KV (in tree), or the recurrent state and conv window (a provider's). |
 
 `@slots` is the recurrent-state mode.
 
-`KernelRegistry` holds the in-tree kernels: the attention KV commit. A speculator
-names provider factories in `SpeculatorConfig.spec_kernel_providers`, a tuple of
-qualified names. Providers overlay the reference kernels in order: a later provider
-wins a key, and each override is logged once. A provider is constructed with
-`vllm_config`, has a `name`, and returns `{key: SpecKernel}` from `kernels()`.
-
-A provider may supply any subset of keys. A layer verifies the highest plan kind
-that every kernel it needs supports for it. `KernelRegistry.required_keys(layer)`
-lists those kernels. For a recurrent layer, they are its `verify` kernel and its
-state's `commit` kernel. If a kernel is missing, or it declines the layer, the layer
-verifies chains. A missing kernel is never called.
+In tree, the registry holds only the attention KV commit. A speculator names
+provider factories in `SpeculatorConfig.spec_kernel_providers` (qualified names);
+each is constructed with `vllm_config`, has a `name`, and returns `{key:
+SpecKernel}` from `kernels()`. Providers overlay the in-tree kernels in order and a
+later one wins a key. A layer verifies the highest plan kind that every kernel in
+`KernelRegistry.required_keys(layer)` supports; a missing or declining kernel
+means chains.
 
 A `SpecKernel` implements these methods:
 
@@ -252,71 +198,25 @@ A `SpecKernel` implements these methods:
 - `commit(step: CommitStep) -> None`, for `layout:*` keys, moves what the rows on
   `step.result.path` wrote to where the next step reads it.
 
-**Capture rules.** `verify` runs inside every forward with verify rows, CUDA graph
-captures included. It must not sync with the host, and it must not allocate memory
-sized by data. When capturing, the runner runs each bound `commit` kernel once per
-capture shape on identity paths, so compilation and launch failures surface at
-startup.
-
-```python
-from vllm.v1.worker.gpu.spec_decode.kernels import SpecKernel
-
-
-class MyGDNVerify(SpecKernel):
-    def supports(self, layer):
-        return frozenset({"chain", "tree"})
-
-    def verify(self, rows) -> None: ...
-
-
-class MyProvider:
-    name = "my_provider"
-
-    def __init__(self, vllm_config): ...
-
-    def kernels(self):
-        return {
-            ("mamba:gdn@slots", "verify"): MyGDNVerify(),
-            ("layout:mamba_state@slots", "commit"): MyConvWindowCommit(),
-        }
-
-
-class MySpeculatorConfig(SpeculatorConfig):
-    spec_kernel_providers = ("my_package.MyProvider",)
-```
-
-## Example: a chain speculator
-
-A chain speculator needs only the config and `propose`. The optional hooks shown
-here is a budget that stops drafting under load.
-
-```python
-# my_package/config.py
-from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
-
-
-class MyChainConfig(Eagle3SpeculatorConfig):
-    def candidate_budget(self, view):
-        # No drafts when many requests are running: K + 1 rows, else 1.
-        k_plus_1 = self.num_speculative_tokens + 1
-        return 1 if view.num_running > 128 else k_plus_1
-```
-
-Register the config with `register_speculative_method` as shown in
-[Custom Speculators](README.md#custom-speculators-experimental).
+**Capture rules.** `verify` runs inside captured graphs: no host syncs and no
+data-sized allocations. The runner runs each bound `commit` kernel once per capture
+shape at startup, so failures surface there.
 
 ## Example: a tree speculator
 
-A tree speculator also declares branching resources, chooses its chain for models
-that cannot verify trees, and returns a plan each step.
+A tree speculator declares branching resources, chooses its chain for models that
+cannot verify trees, and returns a plan each step. Register the config with
+`register_speculative_method` as shown in
+[Custom Speculators](README.md#custom-speculators-experimental).
 
 ```python
 from vllm.v1.spec_decode.resources import SpecResources
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
 
 
-class MyTreeConfig(MyChainConfig):
+class MyTreeConfig(Eagle3SpeculatorConfig):
     speculator_class = "my_package.speculator.MyTreeSpeculator"
 
     def resources(self, max_num_seqs):
@@ -349,34 +249,13 @@ class MyTreeSpeculator(EagleSpeculator):
         return VerifyPlan(parent=self.parent[:n], tokens=self.tokens[:n])
 ```
 
-## Coverage by model family
-
-A model verifies the lowest plan kind of any of its layers. The table shows what each
-family verifies with the in-tree kernels. A kernel provider can raise a row.
-
-| Family | Layers | Plan kind | What decides it |
-| --- | --- | --- | --- |
-| Dense attention (Llama, Qwen3, Mistral) | full attention | chain | The in-tree backends attend causally. A backend with `serves_trees` raises it to tree. |
-| Sliding window, chunked local attention, R-SWA (for example gpt-oss, Gemma 2, Llama 4) | windowed attention | chain | Not full attention. |
-| MLA (DeepSeek V3, Kimi K2) | MLA | chain | Not full attention. |
-| Sparse attention with an indexer (DeepSeek V3.2, GLM-5) | indexer | chain | Not full attention. |
-| GDN hybrids (Qwen3-Next, Qwen3.5) | GDN | chain | No `mamba:gdn@slots/verify` or `layout:mamba_state@slots/commit` kernel in tree. A provider of both, with a tree attention backend, raises it to tree. |
-| Mamba2 hybrids (Nemotron-H, Zamba2, Falcon-H1, Granite hybrids) | Mamba2 | chain | `MambaMixer2` declares no `spec_layer_variant`: its layers take no verify kernel. |
-| KDA and other GDN subclasses (Kimi Linear, OLMo hybrid) | own layer classes | chain | No `spec_layer_variant` on the subclass. |
-| Linear attention (MiniMax-Text-01, Bailing), short conv (LFM2), Mamba1 (Jamba, FalconMamba) | own layer classes | chain | No `spec_layer_variant`. |
-
-The in-tree attention backends attend causally, so on them every family verifies
-chains. A plugin backend that reads `tree_ancestors` sets
-`serves_trees = True` to verify trees.
-
 ## Limits
 
 - A plan has at most 64 rows per request (`MAX_PLAN_ROWS` in `plan_kernels.py`): the
   ancestor set of a row is one int64.
-- With pipeline parallelism, trees run as chains. The tree path is not
-  broadcast between stages.
-- Prefill and decode context parallelism, batch-sharded sampling and micro-batching
-  also run as chains.
+- Pipeline parallelism (the tree path is not broadcast between stages), prefill and
+  decode context parallelism, batch-sharded sampling and micro-batching run trees
+  as chains.
 - `plan` is not called under adaptive verification, which sets its own budget.
 - Overlapping the drafter with the target forward is not part of the contract.
 - The KV and recurrent-state pools are sized for the declared resources, even when
