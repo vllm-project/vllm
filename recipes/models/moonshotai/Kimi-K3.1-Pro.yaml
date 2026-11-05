@@ -9,7 +9,7 @@ meta:
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
+  performance_headline: "TP8 on two GB300 trays, one B300 node, one MI355X node, or one MI325X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -19,6 +19,7 @@ meta:
     810e: verified
     m890: verified
     ironwood: supported
+    mi325x: verified
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
@@ -94,6 +95,8 @@ features:
       ppu: unsupported
       # The fused CuTe DSL decode path is CUDA-only.
       ironwood: unsupported
+      # CuTe DSL latency_specialized decode is a CUDA path.
+      mi325x: unsupported
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
@@ -104,6 +107,7 @@ features:
       ppu: unsupported
       # NVFP4 is a Blackwell format; TPU serves with FP8 KV cache.
       ironwood: unsupported
+      mi325x: unsupported
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
@@ -119,7 +123,7 @@ variants:
     precision: mxfp4
     # 1561 GB of safetensors x 1.2.
     vram_minimum_gb: 1874
-    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890, ironwood]
+    supported_hardware: [b300, gb300, vr200, mi355x, mi325x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
       810e:
@@ -163,6 +167,9 @@ variants:
           - "fp8"
           - "--async-scheduling"
           - "--enable-prefix-caching"
+      # gfx942 image with the Kimi-K3.1 fixes for MI325X.
+      mi325x:
+        docker_image: "amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942"
 
 compatible_strategies:
   - single_node_tp
@@ -182,18 +189,22 @@ strategy_hardware:
   single_node_tep:
     810e: unsupported
     m890: unsupported
+    # Selects deep_gemm_mega_moe and NVLink one-sided all-to-all.
+    mi325x: unsupported
   multi_node_tp:
     810e: unsupported
     m890: unsupported
     # TPU offers only TP+EP (the validated layout); plain multi-node TP is
     # not offered there.
     ironwood: unsupported
+    mi325x: unsupported
   # PD disaggregation has not been validated on TPU, and the default NIXL
   # connector is CUDA-oriented.
   pd_cluster:
     810e: unsupported
     m890: unsupported
     ironwood: unsupported
+    mi325x: unsupported
 
 # One B300 or MI355X node (8 GPUs) or two GB300 / VR200 trays (2 x 4 GPUs) hold the checkpoint.
 strategy_min_gpus:
@@ -401,11 +412,12 @@ presets:
     runbook: |
       The TP32 + DCP8 arm of the vllm-torchtpu#2775 validation on the same slice: complete GSM8K at **97.42%** (1,285/1,319), with prefix-cache and long-context checks matching the TP32 arm. Compile sizes drop the 1-batch capture (DCP decode batches start at 8).
 
-# DCP8 over the TP8 group (one B300 node or two GB300 trays).
+# DCP8 over the TP8 group: one B300 node, two GB300 trays, or one MI325X node.
 decode_context_parallel:
   sizes:
     b300: [8]
     gb300: [8]
+    mi325x: [8]
   match_tp: true
 
 strategy_overrides:
@@ -455,6 +467,36 @@ strategy_overrides:
           VLLM_DEEPEPLL_RECV_HOOK: "0"
           VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: "1"
           DEEPEP_COMBINE_TOKEN_BALANCED: "1"
+  # gfx942 (8x MI325X), single-node TP8 only. Applied only when MI325X is
+  # selected, so the MI355X AgentX preset and hardware_overrides.amd stay as
+  # they are. On MI325X this block stands in for that shared AMD env, which
+  # turns on the MI355X SiTUv2 MoE path.
+  single_node_tp:
+    hardware_overrides:
+      mi325x:
+        extra_args:
+          - "--mm-encoder-tp-mode"
+          - "data"
+          - "--decode-context-parallel-size"
+          - "8"
+          - "--dcp-comm-backend"
+          - "a2a"
+          - "--max-model-len"
+          - "135168"
+          - "--gpu-memory-utilization"
+          - "0.9"
+          - "--no-enable-prefix-caching"
+          - "--kv-cache-dtype"
+          - "fp8_ds_mla"
+          - "--quantization-config"
+          - '{"moe":{"weight":"int4_per_group_32"}}'
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          SAFETENSORS_FAST_GPU: "1"
+          VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
+          VLLM_ENGINE_READY_TIMEOUT_S: "7200"
   # TEP on one B300 node: experts on MegaMoE, which dispatches tokens over
   # NVLink one-sided all-to-all.
   single_node_tep:
@@ -492,6 +534,31 @@ notes:
   - title: "Text-only on TPU"
     when: { hardware: [ironwood] }
     body: "TPU serving runs through vllm-torchtpu, which does not load the vision tower for K3.1 — the command always carries `--language-model-only` and image/video are disabled."
+  - title: "MI325X serves a lossy INT4 requant of the MXFP4 experts"
+    when: { hardware: [mi325x] }
+    body: |
+      `--quantization-config '{"moe":{"weight":"int4_per_group_32"}}'`
+      requantizes the routed experts from MXFP4 to groupwise INT4 at load.
+      Attention, the shared experts and the vision tower stay BF16. The
+      scored run used checkpoint revision
+      `6d0a0202956796543364d666ab19c6ad1a494ee1`.
+
+      Use the image `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. The
+      generic `kimi-k31` ROCm image does not run this configuration on gfx942.
+
+      MI325X is single-node TP8 with DCP8 (`a2a`). Speculative decoding was
+      not part of that run. The tool-call parser is on by default in this
+      recipe and was not in that command either.
+
+troubleshooting:
+  - title: "fp8_ds_mla requires gfx950, or gfx942 with an fnuz aiter"
+    when: { hardware: [mi325x] }
+    body: |
+      Startup raises `NotImplementedError: ROCM_AITER_MLA_SPARSE with
+      kv_cache_dtype=fp8_ds_mla requires gfx950, or gfx942 with an aiter
+      whose sparse_mla_fwd reads the fp8_dsv32_mla layout in fnuz.` This
+      means the server was started from an image other than
+      `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. Use that image.
 
 guide: |
   ## Overview
@@ -511,6 +578,10 @@ guide: |
   day-0 `vllm/vllm-openai-rocm:kimi-k31` image. So far only the
   [AgentX TP8](#preset-mi355x_agentx) configuration has run on MI355X: the tuned single-node AgentX
   configuration for concurrency 48, with DCP8, the K3.1 DSpark draft and host KV offload.
+
+  On MI325X (gfx942), one 8-GPU node runs TP8 with DCP8 from
+  `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`, with the routed experts requantized online
+  to groupwise INT4 and the KV cache in `fp8_ds_mla`. See [MI325X (gfx942)](#mi325x-gfx942).
 
   On Zhenwu PPUs, the default MXFP4 checkpoint runs without speculative decoding on
   two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
@@ -594,6 +665,41 @@ guide: |
   `cpu_bytes_to_use_per_rank` of host memory for every GPU, so size it from the host DRAM that
   is free after the engines are up. The tested GB300 prefill workers used 128 GiB per GPU
   (512 GiB per tray).
+
+  ## MI325X (gfx942)
+
+  Use the image `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`.
+
+  One 8x MI325X node (256 GB per GPU) holds the MXFP4 checkpoint at TP8 after the routed experts
+  are requantized to groupwise INT4 at load. That conversion is lossy. Attention, the shared
+  experts and the vision tower stay BF16. The KV cache is `fp8_ds_mla`.
+
+  The command is single-node TP8 with DCP8 and `--dcp-comm-backend a2a`. Context is capped at
+  135,168 tokens, which covers the 128k RULER prompts. Prefix caching is off. Concurrency and
+  prefill chunk size are left at vLLM's defaults; the accuracy and throughput runs used
+  `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. CUDA graphs are `FULL_AND_PIECEWISE`
+  with `VLLM_USE_BREAKABLE_CUDAGRAPH=1`:
+  K3.1 has no `torch.compile` submodule, so without breakable graphs vLLM captures decode only.
+  `VLLM_ROCM_USE_AITER=1` and `SAFETENSORS_FAST_GPU=1` are set. The accuracy numbers below were
+  measured on checkpoint revision `6d0a0202956796543364d666ab19c6ad1a494ee1`. The following
+  revision, `d9e99b0792a5e93b78ea9bea62a68167e36ddd9e`, only changes `encoding_k3.py` and drops
+  "medium" as a thinking effort.
+
+  **TP8 without DCP (lm-eval 0.4.13).** GSM8K, 20-shot, all 1,319 questions: 0.9735 ± 0.0044.
+  RULER NIAH, all 8 tasks, at 4k, 8k, 16k, 32k, 64k and 128k: 1.0 on every task. A smoke test of
+  chat, thinking, the reasoning parser, images, streaming and mixed load passed 24/24. Long
+  reasoning at max effort ran to about 7k tokens and was correct.
+
+  **DCP8 on the same node.** `--decode-context-parallel-size 8` with `--dcp-comm-backend a2a`
+  started cleanly and served under full CUDA graphs. On a 250-question GSM8K run with thinking
+  off it scored 0.980, against 0.984 with DCP off and 0.984 with DCP8 on the default `ag_rs`
+  backend. Passkey retrieval was 12/12 from 4k through 131k tokens on all three. The KV cache
+  grew from 1.49M tokens to 8.29M. On `vllm bench serve` with 512 output tokens, `a2a` was a
+  little faster than `ag_rs` (241.8 vs 234.0 output tok/s at 2k input, concurrency 8) and both
+  were a few percent below DCP off (263.6 tok/s) at `--max-num-seqs 8`.
+
+  Expert parallelism, speculative decoding, multi-node TP and prefill/decode disaggregation has
+  not been tested yet on MI325X.
 
   ## Client usage
 
