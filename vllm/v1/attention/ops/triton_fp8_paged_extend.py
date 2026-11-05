@@ -111,11 +111,17 @@ def _fp8_paged_extend_kernel(
     P_SHIFT: tl.constexpr,
     L_COLS: tl.constexpr,
     NSPLIT: tl.constexpr,
+    SPLIT_MAJOR: tl.constexpr,
 ):
-    qb = tl.program_id(0)
     seq = tl.program_id(1)
-    kvh = tl.program_id(2) % num_kv
-    sp = tl.program_id(2) // num_kv
+    if SPLIT_MAJOR:
+        qb = tl.program_id(2)
+        z = tl.program_id(0)
+    else:
+        qb = tl.program_id(0)
+        z = tl.program_id(2)
+    kvh = z % num_kv
+    sp = z // num_kv
     q_start = tl.load(CuQ + seq)
     q_len = tl.load(CuQ + seq + 1) - q_start
     t0 = qb * BLOCK_T
@@ -357,6 +363,10 @@ def fp8_paged_extend_attention(
     else:
         part_o = part_l = out
     grid = (q_blocks, seq_lens.numel(), num_kv_heads * nsplit)
+    if decode:
+        # Split axis fastest: workgroups go round-robin over the XCDs, and with the
+        # request axis fastest a batch of 8k requests puts each request on one XCD.
+        grid = grid[::-1]
     _fp8_paged_extend_kernel[grid](
         out,
         q,
@@ -392,6 +402,7 @@ def fp8_paged_extend_attention(
         P_SHIFT=_P_SHIFT,
         L_COLS=_L_COLS,
         NSPLIT=nsplit,
+        SPLIT_MAJOR=decode,
         num_warps=num_warps,
         num_stages=3,
         waves_per_eu=2,
