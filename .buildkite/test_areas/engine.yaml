@@ -213,16 +213,20 @@ steps:
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
     - tests/kernels/mamba/test_ssu_dispatch.py
+    - tests/kernels/mamba/test_replayssm_quantized.py
     - vllm/v1/core/sched/scheduler.py
     - vllm/v1/worker/utils.py
     - vllm/v1/kv_cache_interface.py
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/third_party/replayssm/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
     - vllm/v1/attention/backends/mamba_attn.py
+    - tests/v1/worker/test_gpu_batch_ordering.py
+    - tests/v1/attention/test_batch_reordering.py
     - vllm/v1/worker/mamba_utils.py
     - vllm/v1/worker/replayssm_utils.py
     - vllm/v1/worker/extensible_kv_cache.py
@@ -231,8 +235,20 @@ steps:
     - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
+    - >-
+      pytest -v -s
+      v1/attention/test_batch_reordering.py
+      v1/worker/test_gpu_batch_ordering.py
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
-    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
+    - >-
+      VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
+      kernels/mamba/test_ssu_dispatch.py::test_shared_prefill_selected_slots_and_reuse
+      kernels/mamba/test_ssu_dispatch.py::test_shared_graph_mixed_flush_checkpoint_bytes
+      kernels/mamba/test_ssu_dispatch.py::test_shared_bolt_t8_acceptance_and_ring_wrap
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_copies_payload_and_scale
+      kernels/mamba/test_replayssm_quantized.py
   mirror:
     amd:
       automatic_shard: true

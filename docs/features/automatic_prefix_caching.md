@@ -65,6 +65,33 @@ FlashInfer ReplaySSM has these limits:
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+### Shared 8-bit ReplaySSM checkpoints
+
+`--replayssm-state-dtype fp8` or `int8` stores one shared checkpoint for recurrence and readout.
+The default `auto` preserves floating-point checkpoint storage.
+FlashInfer stores FP8 E4M3FN or INT8 payloads with FP32 scales for each state row.
+The convolution cache and replay inputs remain in BF16.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+    --dtype bfloat16 \
+    --mamba-cache-dtype bfloat16 \
+    --mamba-ssm-cache-dtype auto \
+    --mamba-backend flashinfer \
+    --use-replayssm \
+    --replayssm-state-dtype fp8 \
+    --enable-mamba-cache-stochastic-rounding \
+    --mamba-cache-philox-rounds 5 \
+    --enable-prefix-caching
+```
+
+Replace `fp8` with `int8` for INT8 checkpoints.
+The existing stochastic-rounding options control decode checkpoint writes.
+Prefill conversion uses nearest rounding. Quantization can change model output.
+Both Model Runners support shared quantized checkpoints and aligned prefix caching.
+The path requires Mamba2 head dimension 64, state size 128, BF16 activations, and FlashInfer 0.7.2 or newer.
+Explicit SSU algorithm selection is unsupported for quantized checkpoints.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

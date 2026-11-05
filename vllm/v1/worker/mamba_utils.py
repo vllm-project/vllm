@@ -13,6 +13,8 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncs,
     MambaStateCopyFuncsByType,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
     get_conv_copy_spec,
     get_temporal_copy_spec,
     is_conv_state_dim_first,
@@ -37,6 +39,7 @@ from vllm.v1.worker.replayssm_utils import (
 )
 
 logger = init_logger(__name__)
+
 
 # 16 saturates HBM on H100/GB200 across the reqs=8..128 range in
 # microbenchmarks
@@ -790,6 +793,50 @@ class MambaCopyBuffers:
         )
 
 
+def _validate_replayssm_read_state_spec(spec: MambaSpec) -> None:
+    """Validate each appended cache tensor before preparing copy metadata."""
+    if len(spec.shapes) not in (5, 6, 8, 10) or len(spec.dtypes) != len(spec.shapes):
+        raise ValueError("Invalid quantized ReplaySSM read-state cache specification")
+    if len(spec.shapes) == 5:
+        if spec.dtypes[1] in (torch.float8_e4m3fn, torch.int8):
+            raise ValueError("Quantized ReplaySSM requires an FP32 scale page")
+        return
+    mode = "shared" if len(spec.shapes) == 6 else "separate"
+    pending_state = mode == "separate" and spec.shapes[-1] == (2,)
+    if mode == "separate":
+        ring_len = spec.shapes[2][1]
+        valid_lengths = range(17, 25) if pending_state else (16,)
+        if (
+            ring_len not in valid_lengths
+            or spec.shapes[3][1] != ring_len
+            or spec.shapes[4][1] != ring_len
+        ):
+            raise ValueError("Invalid quantized ReplaySSM history and pending storage")
+    dtype = spec.dtypes[1] if mode == "shared" else spec.dtypes[5]
+    read_dtype = {
+        torch.float8_e4m3fn: "fp8",
+        torch.int8: "int8",
+        torch.uint8: "nvfp4",
+    }.get(dtype)
+    if (
+        read_dtype is None
+        or spec.dtypes[1]
+        != MambaStateDtypeCalculator.replayssm_checkpoint_dtype(read_dtype, mode)
+        or spec.dtypes[2:5] != (torch.bfloat16, torch.float32, torch.bfloat16)
+        or spec.dtypes[5:]
+        != MambaStateDtypeCalculator.replayssm_read_dtypes(read_dtype, mode)
+        or spec.shapes[5:]
+        != MambaStateShapeCalculator.replayssm_read_shapes(
+            spec.shapes[1],
+            read_dtype,
+            mode,
+            n_groups=spec.shapes[4][0],
+            pending_state=pending_state,
+        )
+    ):
+        raise ValueError("Invalid quantized ReplaySSM read-state cache specification")
+
+
 def _get_mamba_gpu_state_copy_funcs(
     spec: MambaSpec,
     layer: Any,
@@ -799,15 +846,16 @@ def _get_mamba_gpu_state_copy_funcs(
     if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) != 5
-            or len(spec.dtypes) != 5
+            or len(spec.shapes) not in (5, 6, 8, 10)
+            or len(spec.dtypes) != len(spec.shapes)
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
                 "FlashInfer ReplaySSM requires two canonical Mamba2 "
                 "states and three ring states"
             )
-        state_copy_funcs += (get_temporal_copy_spec,) * 3
+        _validate_replayssm_read_state_spec(spec)
+        state_copy_funcs += (get_temporal_copy_spec,) * (len(spec.shapes) - 2)
     return state_copy_funcs
 
 
@@ -1064,9 +1112,11 @@ class MambaSpecDecodeGPUContext:
                 if is_flashinfer_replayssm:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                            "ReplaySSM requires five, six, eight, or ten "
+                            "bound Mamba2 states"
                         )
-                    mixers.append(attention)
+                    if attention.replayssm_checkpoint_mode == "shared":
+                        mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
                     raise ValueError(
                         f"Expected at least {len(state_copy_funcs)} Mamba state "

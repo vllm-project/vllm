@@ -17,10 +17,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
+from vllm.config import CacheConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    get_prefill_to_decode_mask,
+    split_decodes_and_prefills,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
@@ -54,6 +59,7 @@ def _make_runner(
     prefill_lens = np.array([s[1] for s in req_states.values()], dtype=np.int32)
     num_computed = np.array([s[0] for s in req_states.values()], dtype=np.int32)
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.cache_config = CacheConfig()
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
     runner.pcp_manager = None
@@ -244,6 +250,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     position would read its row and wrongly reject the two decodes.
     """
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.cache_config = CacheConfig()
     runner.decode_query_len = 8
     runner.adaptive_verification = None
     runner.pcp_manager = None
@@ -309,3 +316,44 @@ def test_no_speculator_dispatches_on_query_length_alone():
         "these speculators classify a decode batch by query length alone; use "
         f"get_uniform_decode_token_count instead: {offenders}"
     )
+
+
+@pytest.mark.parametrize("num_drafts", [None, [-1, -1, -1], [0, 0, 0]])
+def test_separate_prompt_chunks_cannot_replay_decode_graph(num_drafts):
+    # Intermediate, final, and fresh one-token prompt chunks all use prefill.
+    runs_as_decode = get_prefill_to_decode_mask(
+        np.array([1, 1, 1]),
+        np.array([4, 7, 0]),
+        None if num_drafts is None else np.array(num_drafts),
+        allow_unpadded=False,
+    )
+    assert runs_as_decode.tolist() == [False, False, False]
+    assert get_uniform_decode_token_count(3, 3, 1, bool(runs_as_decode.all())) is None
+
+
+def test_separate_padded_tail_needs_prior_state_for_decode_graph():
+    runs_as_decode = get_prefill_to_decode_mask(
+        np.array([8, 8, 8, 8]),
+        np.array([7, 0, 4, 4]),
+        np.array([7, 7, 0, -1]),
+        allow_unpadded=False,
+    )
+    assert runs_as_decode.tolist() == [True, False, False, False]
+    assert get_uniform_decode_token_count(1, 8, 8, bool(runs_as_decode[0])) == 8
+    assert get_uniform_decode_token_count(4, 32, 8, bool(runs_as_decode.all())) is None
+
+
+def test_separate_decodes_and_padded_tails_lead_ordinary_prefills():
+    scheduled = {"mid": 1, "final": 1, "fresh": 8, "decode": 1, "padded": 8}
+    order = sort_batch_req_ids(
+        scheduled,
+        {"padded": [-1] * 7, "fresh": [-1] * 7},
+        8,
+        prefill_req_ids={"mid", "final", "fresh"},
+    )
+    assert order == ["padded", "decode", "fresh", "mid", "final"]
+    common = _make_common_attn_metadata([scheduled[req] for req in order])
+    common.is_prefilling = torch.tensor([False, False, True, True, True])
+    assert split_decodes_and_prefills(
+        common, decode_threshold=8, treat_short_extends_as_decodes=False
+    ) == (2, 3, 9, 10)

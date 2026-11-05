@@ -5,8 +5,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
+import torch
 
+from vllm import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 
 class MockInputBatch:
@@ -194,3 +198,69 @@ def test_reorder_batch_to_split_decodes_and_prefills(test_case: ReorderTestCase)
     assert input_batch.req_ids == expected_req_ids, (
         f"Expected order {expected_req_ids}, got {input_batch.req_ids}"
     )
+
+
+@pytest.mark.parametrize("num_drafts", [3, 7])
+def test_separate_replayssm_orders_prompt_chunks_after_decode(num_drafts: int):
+    batch = InputBatch(
+        max_num_reqs=4,
+        max_model_len=32,
+        max_num_batched_tokens=32,
+        device=torch.device("cpu"),
+        vocab_size=32,
+        block_sizes=[16],
+        max_num_blocks_per_req=[2],
+        num_spec_tokens=num_drafts,
+    )
+    # Each entry gives the prompt length and the computed token count.
+    requests = {
+        "intermediate": (20, 8),
+        "no_state": (1, 0),
+        "decode": (8, 8),
+        "padded_tail": (8, 7),
+    }
+    for req_id, (prompt_len, computed) in requests.items():
+        batch.add_request(
+            CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=[1] * prompt_len,
+                mm_features=[],
+                sampling_params=SamplingParams(temperature=0),
+                generator=None,
+                block_ids=([1, 2],),
+                num_computed_tokens=computed,
+                output_token_ids=[2] if req_id == "decode" else [],
+            )
+        )
+    scheduled = {
+        "intermediate": 1,
+        "no_state": num_drafts + 1,
+        "decode": 1,
+        "padded_tail": num_drafts + 1,
+    }
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens=scheduled,
+        total_num_scheduled_tokens=sum(scheduled.values()),
+        scheduled_spec_decode_tokens={
+            "no_state": [-1] * num_drafts,
+            "padded_tail": [-1] * num_drafts,
+        },
+        scheduled_encoder_inputs={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    assert reorder_batch_to_split_decodes_and_prefills(
+        batch,
+        scheduler_output,
+        decode_threshold=num_drafts + 1,
+        separate_replayssm=True,
+    )
+    assert set(batch.req_ids[:2]) == {"decode", "padded_tail"}
+    assert batch.req_ids[2:] == ["intermediate", "no_state"]
+    for index, req_id in enumerate(batch.req_ids):
+        prompt_len, computed = requests[req_id]
+        assert batch.num_prompt_tokens[index] == prompt_len
+        assert batch.num_computed_tokens_cpu[index] == computed

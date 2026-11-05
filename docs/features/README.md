@@ -3,6 +3,7 @@
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
+See [Quantized ReplaySSM checkpoints](replayssm.md) for Mamba2 shared and separate checkpoint modes.
 
 ## Compatibility Matrix
 

@@ -985,7 +985,7 @@ def _build_staging_metadata(computed, scheduled, prompt_lens, drafts, num_spec=3
         dtypes=(torch.float32,) * 2,
     )
     builder.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode="none")
+        cache_config=CacheConfig(mamba_cache_mode="none")
     )
     builder.num_spec_tokens = num_spec
     builder.use_spec_decode = num_spec > 0
