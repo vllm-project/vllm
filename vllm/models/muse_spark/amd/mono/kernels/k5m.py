@@ -101,13 +101,13 @@ REGION = {"a": 31, "z": 32, "ss": 33, "rs": 34}
 @dataclass(frozen=True, slots=True)
 class BuildM:
     S: int = 32  # rows (32 / 64 / 96 / 128)
-    W: int = 8  # ranks in the TP = EP group (8, or 4 at S = 32)
+    W: int = 8  # ranks in the TP = EP group (8, or 4 at S <= 64)
 
 
 def build_vllm(S, W=8):
     """The HM build vLLM launches for S rows of a TP = EP = W group."""
     assert S in (32, 64, 96, 128) and W in (4, 8), (S, W)
-    assert W == 8 or S == 32, (S, W)
+    assert W == 8 or S <= 64, (S, W)
     return BuildM(S=S, W=W)
 
 

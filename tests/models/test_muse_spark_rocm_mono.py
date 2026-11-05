@@ -270,9 +270,10 @@ def test_buckets_pad_rows_up_to_the_next_build() -> None:
     assert built_buckets(1) == [8]
     assert built_buckets(3) == [8, 16, 32]
     assert built_buckets(16) == built_buckets(128) == [8, 16, 32, 64, 96, 128]
-    # TP 4 has the builds up to 32 rows: larger steps run stock.
+    # TP 4 has the builds up to 64 rows: larger steps run stock.
     assert built_buckets(1, 4) == [8]
-    assert built_buckets(3, 4) == built_buckets(128, 4) == [8, 16, 32]
+    assert built_buckets(3, 4) == [8, 16, 32]
+    assert built_buckets(8, 4) == built_buckets(128, 4) == [8, 16, 32, 64]
 
 
 def test_kv_cache_guard_accepts_only_dense_lbhnc_of_the_configured_dtype() -> None:

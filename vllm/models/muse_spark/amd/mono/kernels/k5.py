@@ -40,10 +40,10 @@ HB  EP all-reduce of HM's partial (reduce-scatter to the column-block owner + al
     next input norm -> xn -> qkv + gate (K eighths) -> head finishers (qk-norm, RoPE,
     q out, bf16 K / V into vLLM's LBHNC KV cache).
 
-The boundaries (Build.bnd). S > 32, token owners: rank r owns tokens t = r (mod 8); the o_proj
+The boundaries (Build.bnd). S > 32, token owners: rank r owns tokens t = r (mod W); the o_proj
 partials and the post_expert_proj outputs go to the owner rank of each token, one CTA a token
 does the whole row (all-reduce sum, both norms, gated residual) and the ffn_in / xn rows are
-all-gathered. The residual stream lives token-sharded (rank r: its S / 8 rows, fp32, all 8192
+all-gathered. The residual stream lives token-sharded (rank r: its S / W rows, fp32, all 8192
 columns); HA reads it as rows so the first layer can read a full replicated stream (s_full);
 HB writes it the same way and (`gather`) all-gathers it. S = 32, column blocks: the o_proj
 partials go to the owner of the column block, which reduces and all-gathers them; both
@@ -187,7 +187,7 @@ REGION_IDS = {
 @dataclass(frozen=True, slots=True)
 class Build:
     S: int = 32  # rows (32 / 64 / 96 / 128)
-    W: int = 8  # ranks in the TP = EP group (8, or 4 at S = 32)
+    W: int = 8  # ranks in the TP = EP group (8, or 4 at S <= 64)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     # this layer's verify attention fused at the HA head ("swa" / "full")
     attn: str = ""
@@ -296,7 +296,7 @@ def build(key: Build):
     NTILES, KSP, HQ, HKV = d.NTILES, d.KSP, d.HQ, d.HKV
     QROWS, QKV_ROWS, QKVG_ROWS = d.QROWS, d.QKV_ROWS, d.QKVG_ROWS
     OK_K, NQTILES, NQT = d.OK_K, d.NQTILES, d.NQT
-    assert W == 8 or S == 32, (S, W)
+    assert W == 8 or S <= 64, (S, W)
     NT = S // 16
     TS = S // W  # tokens a rank owns in the token-owner boundaries
     CO = OK_K // KCH // WAVES  # o_proj chunks a wave
@@ -540,11 +540,12 @@ def build(key: Build):
                 )
             else:
                 e = tid
-                # owner t % 8: wave w pushes owner w's 2 tokens of both tiles of the group
+                # owner t % W: wave w pushes owner (w % W)'s tokens of both tiles of the
+                # group, 2 a wave; at W = 4 the two wave groups split the owner's 4
+                own = uniform(wave % W)
                 rt_ = 2 * gi + (e // 32) % 2
                 pp = e % 16
-                dw = uniform(wave)
-                tt = dw + W * ((e // 16) % 2)
+                tt = own + W * (2 * (wave // W) + (e // 16) % 2)
                 v = []
                 for h2 in range_constexpr(2):
                     rr = 2 * pp + h2
@@ -561,7 +562,7 @@ def build(key: Build):
                 w2 = bf16_pair(v[0], v[1])
                 bo.buffer_store(
                     w2,
-                    rsrc(sel_peer(pl, dw) + fx.Int64(play["op"][0])),
+                    rsrc(sel_peer(pl, own) + fx.Int64(play["op"][0])),
                     idx,
                     cache_modifier=CM_SYS,
                 )
@@ -1500,12 +1501,13 @@ def build(key: Build):
         else:
             for it_ in range_constexpr((NT + 3) // 4):
                 e = tid
-                # 4 tiles a round; wave w: owner w, tiles 4 it + k (k < 4), the owner's 2 tokens of each
-                dw = uniform(wave)
+                # 4 tiles a round; wave w: owner w % W, tiles 4 it + k (k < 4), 2 of the
+                # owner's tokens of each (the two wave groups split the 4 at W = 4)
+                own = uniform(wave % W)
                 k_ = (e // 16) % 4
                 rt_ = 4 * it_ + k_
                 rp = e % 8
-                tt = dw + W * ((e // 8) % 2)
+                tt = own + W * (2 * (wave // W) + (e // 8) % 2)
                 if rt_ < NT:
                     v = []
                     for h2 in range_constexpr(2):
@@ -1554,7 +1556,7 @@ def build(key: Build):
                         w2 = bf16_pair(y0, y1)
                         bo.buffer_store(
                             w2,
-                            rsrc(sel_peer(pl, dw) + fx.Int64(play["yt"][0])),
+                            rsrc(sel_peer(pl, own) + fx.Int64(play["yt"][0])),
                             idx,
                             cache_modifier=CM_SYS,
                         )
@@ -2505,8 +2507,8 @@ def build(key: Build):
 
 def build_vllm(S=32, W=8, next_rope=True, attn="", kv_fp8=False):
     """The HA / HB build vLLM launches for S rows (32 / 64 / 96 / 128) of a TP = EP = W group
-    (W = 4: S = 32 only); next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this
+    (W = 4: S <= 64); next_rope: the next layer has RoPE (HB); attn = "swa" / "full": this
     layer's verify attention fused at the HA head (W = 8 only); kv_fp8: e4m3 KV cache."""
     assert W in (4, 8) and S in (32, 64, 96, 128), (S, W)
-    assert (W == 8 or S == 32) and (not attn or W == 8), (S, W, attn)
+    assert (W == 8 or S <= 64) and (not attn or W == 8), (S, W, attn)
     return Build(S=S, W=W, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))

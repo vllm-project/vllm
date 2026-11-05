@@ -36,10 +36,10 @@ LAST_LAYER = 60
 ROWS_PER_REQUEST = 8
 K3_ROWS = (8, 16)
 K5_ROWS = (32, 64, 96, 128)
-# TP = EP sizes the builds cover: K3 and the 32-row HA + HM + HB at both, the larger
-# HA + HM + HB builds and the fused attention at 8.
+# TP = EP sizes the builds cover: K3 and the 32 / 64-row HA + HM + HB at both,
+# the larger HA + HM + HB builds and the fused attention at 8.
 WORLD_SIZES = (4, 8)
-MAX_ROWS = {4: 32, 8: K5_ROWS[-1]}
+MAX_ROWS = {4: 64, 8: K5_ROWS[-1]}
 NUM_CUS = 256
 KV_BLOCK_SIZE = 16
 HEALTH_POLL_INTERVAL = 64
@@ -845,7 +845,7 @@ class _K5Bucket(_Bucket):
 
 
 def built_buckets(max_num_seqs: int, world_size: int = 8) -> list[int]:
-    """The builds a server with `max_num_seqs` requests can use (TP 4: <= 32 rows)."""
+    """The builds a server with `max_num_seqs` requests can use (TP 4: <= 64 rows)."""
     top = MAX_ROWS[world_size]
     max_rows = min(max_num_seqs, top // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
     return sorted(

@@ -320,7 +320,7 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8 or 4, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
-    requests at TP 8 and 1-4 at TP 4, with bf16 MoE activations instead of the
+    requests at TP 8 and 1-8 at TP 4, with bf16 MoE activations instead of the
     checkpoint's MXFP4). A deployment that cannot run it is refused at startup.
 
     Same switch as `--additional-config '{"decode_backend":

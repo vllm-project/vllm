@@ -21,8 +21,8 @@ cover run vLLM's stock path.
   connector or offloading.
 - Steps (checked every forward; anything else runs stock): uniform decode
   verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager. TP 4
-  has the K3 builds and the 32-row HA + HM + HB build (1-4 requests, no fused
-  attention): stage A and the QKV GEMV split K over KQ = TP CTAs, so each CTA
+  has the K3 builds and the 32 / 64-row HA + HM + HB builds (1-8 requests, no
+  fused attention): stage A and the QKV GEMV split K over KQ = TP CTAs, so each CTA
   reads twice the K of the TP 8 build and owns two row pairs of every QKV
   tile; the post-expert projection splits K in two instead of four.
   8 / 16 rows run K3 (S = 8 / 16); 24-128 rows run HA + HM + HB with the rows
