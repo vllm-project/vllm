@@ -1678,6 +1678,9 @@ class RocmCacheTest(unittest.TestCase):
 
         (build,) = amd.created_builds
         self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
+        # Without it, AMD CI rejects the main build with 422: "Branches have
+        # been disabled for this pipeline".
+        self.assertIs(build["ignore_pipeline_branch_filters"], True)
         self.assertEqual(
             build["env"],
             {

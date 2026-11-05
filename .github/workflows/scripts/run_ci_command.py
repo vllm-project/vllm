@@ -1262,6 +1262,7 @@ def handle_rocm_cache(
             "commit": "HEAD",
             "branch": "main",
             "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
+            "ignore_pipeline_branch_filters": True,
             "env": {
                 "ROCM_PROMOTE_PR": str(pr["number"]),
                 "ROCM_PROMOTE_SHA": sha,
