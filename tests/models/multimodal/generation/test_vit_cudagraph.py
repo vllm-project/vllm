@@ -631,6 +631,8 @@ def test_eonly_vit_cudagraph_outputs(
     from transformers import AutoProcessor
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
     token_budgets = [64, 256, 2048]
@@ -762,6 +764,8 @@ def test_kimi_k3_vit_cudagraph_replay_and_threshold(
 ):
     """Replay matches eager; graphs serve items up to the largest budget (512
     output tokens by default) and larger items run eagerly."""
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS["kimi_k3"]
     compilation_config = get_compilation_config(config)
