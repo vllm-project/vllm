@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
@@ -46,19 +48,6 @@ def _sp_all_gather_fake(x: torch.Tensor) -> torch.Tensor:
     )
 
 
-# The QuickReduce launch is a Python call into AITER, which Dynamo cannot trace.
-direct_register_custom_op(
-    op_name="sp_reduce_scatter_quantized",
-    op_func=common_sp.sp_reduce_scatter_quantized,
-    fake_impl=_sp_local_fake,
-)
-direct_register_custom_op(
-    op_name="sp_all_gather_quantized",
-    op_func=common_sp.sp_all_gather_quantized,
-    fake_impl=_sp_all_gather_fake,
-)
-
-
 def _aiter_comm():
     """The TP group's AITER custom all-reduce, or None when it has none or it is
     disabled. The TP communicator's own reduce-scatter / all-gather stay on RCCL
@@ -71,25 +60,36 @@ def _aiter_comm():
     return None if comm is None or comm.disabled else comm
 
 
-def use_sp_aiter_ipc(vllm_config: VllmConfig) -> bool:
-    """Whether the decoder-layer SP collectives go through AITER's exact IPC
-    reduce-scatter / all-gather: `--enable-hc-sp-aiter-ipc` is set, the GPU is
-    gfx950 and the TP group has the AITER custom all-reduce. Warns once when the
-    flag is set but the group cannot serve it."""
-    if not vllm_config.parallel_config.enable_hc_sp_aiter_ipc:
+def use_sp_aiter_ipc(vllm_config: VllmConfig, below_int4_gate: bool = False) -> bool:
+    """Whether the decoder-layer SP collectives that RCCL would run go through
+    AITER's exact IPC reduce-scatter / all-gather: `--enable-hc-sp-aiter-ipc` or
+    `--enable-hc-sp-quick-reduce` is set (the INT4 flag takes the IPC pair for the
+    steps below its size gate, `below_int4_gate`), the GPU is gfx950 and the TP
+    group has the AITER custom all-reduce. Logs once either way."""
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.enable_hc_sp_aiter_ipc:
+        flag = "--enable-hc-sp-aiter-ipc"
+    elif parallel_config.enable_hc_sp_quick_reduce:
+        flag = "--enable-hc-sp-quick-reduce"
+    else:
         return False
+    where = " below the INT4 size gate" if below_int4_gate else ""
     from vllm.platforms.rocm import get_cdna_version
 
     # gfx950: the only arch run
     if get_cdna_version() == 4 and _aiter_comm() is not None:
         logger.info_once(
             "Using AITER IPC reduce-scatter and all-gather for the Qwen4Exp "
-            "decoder-layer sequence-parallel collectives."
+            "decoder-layer sequence-parallel collectives%s.",
+            where,
         )
         return True
     logger.warning_once(
-        "--enable-hc-sp-aiter-ipc needs gfx950, VLLM_ROCM_USE_AITER=1 and custom "
-        "all-reduce; the sequence-parallel collectives stay on RCCL."
+        "%s needs gfx950 and AITER's custom all-reduce (VLLM_ROCM_USE_AITER=1, "
+        "VLLM_ROCM_USE_AITER_CUSTOM_AR not 0, custom all-reduce not disabled); the "
+        "sequence-parallel collectives%s stay on RCCL.",
+        flag,
+        where,
     )
     return False
 
@@ -130,7 +130,7 @@ def _sp_all_gather_ipc(x: torch.Tensor) -> torch.Tensor:
     return common_sp.sp_all_gather(x)
 
 
-def _sp_reduce_scatter_quantized_ipc(x: torch.Tensor) -> torch.Tensor:
+def _sp_reduce_scatter_quantized(x: torch.Tensor) -> torch.Tensor:
     """INT4 QuickReduce where the shape qualifies, the IPC pair below its size
     gate."""
     assert x.ndim == 2
@@ -139,7 +139,7 @@ def _sp_reduce_scatter_quantized_ipc(x: torch.Tensor) -> torch.Tensor:
     return output if output is not None else _sp_reduce_scatter_ipc(x)
 
 
-def _sp_all_gather_quantized_ipc(x: torch.Tensor) -> torch.Tensor:
+def _sp_all_gather_quantized(x: torch.Tensor) -> torch.Tensor:
     output = _quick_collective("quick_all_gather", x)
     return output if output is not None else _sp_all_gather_ipc(x)
 
@@ -156,13 +156,13 @@ direct_register_custom_op(
     fake_impl=_sp_all_gather_fake,
 )
 direct_register_custom_op(
-    op_name="sp_reduce_scatter_quantized_ipc",
-    op_func=_sp_reduce_scatter_quantized_ipc,
+    op_name="sp_reduce_scatter_quantized",
+    op_func=_sp_reduce_scatter_quantized,
     fake_impl=_sp_local_fake,
 )
 direct_register_custom_op(
-    op_name="sp_all_gather_quantized_ipc",
-    op_func=_sp_all_gather_quantized_ipc,
+    op_name="sp_all_gather_quantized",
+    op_func=_sp_all_gather_quantized,
     fake_impl=_sp_all_gather_fake,
 )
 
@@ -179,16 +179,16 @@ def sp_all_gather_ipc(x: torch.Tensor) -> torch.Tensor:
     return _sp_all_gather_ipc(x)
 
 
-def sp_reduce_scatter_quantized_ipc(x: torch.Tensor) -> torch.Tensor:
+def sp_reduce_scatter_quantized(x: torch.Tensor) -> torch.Tensor:
     if torch.compiler.is_compiling():
-        return torch.ops.vllm.sp_reduce_scatter_quantized_ipc(x)
-    return _sp_reduce_scatter_quantized_ipc(x)
+        return torch.ops.vllm.sp_reduce_scatter_quantized(x)
+    return _sp_reduce_scatter_quantized(x)
 
 
-def sp_all_gather_quantized_ipc(x: torch.Tensor) -> torch.Tensor:
+def sp_all_gather_quantized(x: torch.Tensor) -> torch.Tensor:
     if torch.compiler.is_compiling():
-        return torch.ops.vllm.sp_all_gather_quantized_ipc(x)
-    return _sp_all_gather_quantized_ipc(x)
+        return torch.ops.vllm.sp_all_gather_quantized(x)
+    return _sp_all_gather_quantized(x)
 
 
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
@@ -197,29 +197,27 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     return common_sp.sp_reduce_scatter(x)
 
 
-def sp_reduce_scatter_quantized(x: torch.Tensor) -> torch.Tensor:
-    if torch.compiler.is_compiling():
-        return torch.ops.vllm.sp_reduce_scatter_quantized(x)
-    return common_sp.sp_reduce_scatter_quantized(x)
-
-
-def sp_all_gather_quantized(x: torch.Tensor) -> torch.Tensor:
-    if torch.compiler.is_compiling():
-        return torch.ops.vllm.sp_all_gather_quantized(x)
-    return common_sp.sp_all_gather_quantized(x)
-
-
 def sp_shard(x: torch.Tensor) -> torch.Tensor:
     if torch.compiler.is_compiling():
         return torch.ops.vllm.sp_shard(x)
     return common_sp.sp_shard(x)
 
 
-# The decoder layer's four SP collectives as (all_gather, reduce_scatter), keyed by
-# (INT4 QuickReduce, AITER IPC).
-DECODER_LAYER_SP_COLLECTIVES = {
-    (False, False): (common_sp.sp_all_gather, sp_reduce_scatter),
-    (False, True): (sp_all_gather_ipc, sp_reduce_scatter_ipc),
-    (True, False): (sp_all_gather_quantized, sp_reduce_scatter_quantized),
-    (True, True): (sp_all_gather_quantized_ipc, sp_reduce_scatter_quantized_ipc),
-}
+def decoder_layer_sp_collectives(
+    vllm_config: VllmConfig, hc_sp: bool
+) -> tuple[
+    Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]
+]:
+    """The (all_gather, reduce_scatter) pair of the decoder layer's four SP sites:
+    INT4 QuickReduce above its size gate with AITER's IPC pair below it
+    (`--enable-hc-sp-quick-reduce`), AITER's IPC pair (`--enable-hc-sp-aiter-ipc`),
+    or the common RCCL pair. Where INT4 is not served the quick flag still asks for
+    the IPC pair. Neither opt-in is looked at without HC SP."""
+    if hc_sp:
+        int4 = common_sp.use_quick_sp(vllm_config)
+        ipc = use_sp_aiter_ipc(vllm_config, below_int4_gate=int4)
+        if int4:
+            return sp_all_gather_quantized, sp_reduce_scatter_quantized
+        if ipc:
+            return sp_all_gather_ipc, sp_reduce_scatter_ipc
+    return common_sp.sp_all_gather, sp_reduce_scatter

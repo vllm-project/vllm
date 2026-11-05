@@ -274,13 +274,14 @@ def _check_layer_launches(rank: int, config: VllmConfig) -> None:
     assert launches == ["all_gather", "reduce_scatter", "all_gather", "reduce_scatter"]
 
 
-def _run(rank: int, port: int, check) -> None:
-    """Initialize rank-local runtime state and run one check."""
+def _run(rank: int, port: int, check, flags: dict[str, bool] | None = None) -> None:
+    """Initialize rank-local runtime state and run one check, with the parallel
+    flags `flags` (default: `--enable-hc-sp-quick-reduce`)."""
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
     config = _make_config(rank, hc_sp=True)
     config.parallel_config = replace(
-        config.parallel_config, enable_hc_sp_quick_reduce=True
+        config.parallel_config, **(flags or {"enable_hc_sp_quick_reduce": True})
     )
     init_distributed_environment(
         world_size=2,

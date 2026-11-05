@@ -26,7 +26,7 @@ from vllm.distributed.device_communicators.quick_all_reduce import (
 )
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.envs import disable_envs_cache
-from vllm.logger import _print_info_once, _print_warning_once
+from vllm.logger import _print_warning_once
 from vllm.models.common.ops import sequence_parallel as common_sp
 from vllm.platforms import current_platform
 
@@ -798,34 +798,6 @@ def _patch_tp(monkeypatch, communicator):
     return exact
 
 
-def test_sp_quantized_helpers_use_the_quick_result(monkeypatch):
-    sentinel = torch.zeros(1)
-    communicator = _FakeCommunicator(sentinel)
-    exact = _patch_tp(monkeypatch, communicator)
-
-    assert common_sp.sp_reduce_scatter_quantized(torch.zeros(7, 4)) is sentinel
-    assert common_sp.sp_all_gather_quantized(torch.zeros(3, 4)) is sentinel
-
-    # reduce-scatter pads the rows to a multiple of the world size first
-    assert communicator.seen == [("reduce_scatter", (8, 4)), ("all_gather", (3, 4))]
-    assert not exact.rs and not exact.ag
-
-
-def test_sp_quantized_helpers_fall_back_to_the_exact_collectives(monkeypatch):
-    exact = _patch_tp(monkeypatch, _FakeCommunicator(None))
-
-    assert common_sp.sp_reduce_scatter_quantized(torch.zeros(8, 4)) == "exact_rs"
-    assert common_sp.sp_all_gather_quantized(torch.zeros(3, 4)) == "exact_ag"
-    assert exact.rs == [(8, 4)] and exact.ag == [(3, 4)]
-
-
-def test_sp_quantized_helpers_fall_back_without_a_communicator(monkeypatch):
-    exact = _patch_tp(monkeypatch, None)
-
-    assert common_sp.sp_all_gather_quantized(torch.zeros(3, 4)) == "exact_ag"
-    assert exact.ag == [(3, 4)]
-
-
 @pytest.mark.parametrize(
     "make_communicator, expect_quick",
     [
@@ -865,15 +837,6 @@ def test_use_quick_sp_follows_the_flag_and_the_communicator(
     assert caplog_vllm.text.count("--enable-hc-sp-quick-reduce") == int(
         not expect_quick
     )
-
-
-def test_opaque_op_fakes_match_the_real_shapes(monkeypatch):
-    from vllm.models.qwen4_exp.amd.ops import sequence_parallel as amd_sp
-
-    monkeypatch.setattr(amd_sp, "get_tensor_model_parallel_world_size", lambda: 2)
-
-    assert amd_sp._sp_local_fake(torch.empty(7, 4)).shape == (4, 4)
-    assert amd_sp._sp_all_gather_fake(torch.empty(3, 4)).shape == (6, 4)
 
 
 # Qwen4Exp's AITER IPC sequence-parallel collectives (`--enable-hc-sp-aiter-ipc`).
@@ -957,15 +920,13 @@ def test_sp_ipc_helpers_fall_back_to_the_exact_collectives(
     assert aiter_comm is None or not aiter_comm.calls
 
 
-def test_sp_quantized_ipc_helpers_use_the_quick_result_above_the_gate(
-    monkeypatch, amd_sp
-):
+def test_sp_quantized_helpers_use_the_quick_result_above_the_gate(monkeypatch, amd_sp):
     sentinel = torch.zeros(1)
     quick, aiter_comm = _FakeCommunicator(sentinel), _FakeAiterComm()
     exact = _patch_amd_sp(monkeypatch, amd_sp, quick, aiter_comm)
 
-    assert amd_sp._sp_reduce_scatter_quantized_ipc(torch.zeros(7, 4)) is sentinel
-    assert amd_sp._sp_all_gather_quantized_ipc(torch.zeros(3, 4)) is sentinel
+    assert amd_sp._sp_reduce_scatter_quantized(torch.zeros(7, 4)) is sentinel
+    assert amd_sp._sp_all_gather_quantized(torch.zeros(3, 4)) is sentinel
 
     assert quick.seen == [("reduce_scatter", (8, 4)), ("all_gather", (3, 4))]
     assert not aiter_comm.calls and not exact.rs and not exact.ag
@@ -979,14 +940,14 @@ def test_sp_quantized_ipc_helpers_use_the_quick_result_above_the_gate(
         pytest.param(lambda: None, id="no_communicator"),
     ],
 )
-def test_sp_quantized_ipc_helpers_fall_back_to_the_ipc_pair(
+def test_sp_quantized_helpers_fall_back_to_the_ipc_pair(
     monkeypatch, amd_sp, make_communicator
 ):
     aiter_comm = _FakeAiterComm()
     exact = _patch_amd_sp(monkeypatch, amd_sp, make_communicator(), aiter_comm)
 
-    reduced = amd_sp._sp_reduce_scatter_quantized_ipc(torch.zeros(7, 4))
-    gathered = amd_sp._sp_all_gather_quantized_ipc(torch.zeros(3, 4))
+    reduced = amd_sp._sp_reduce_scatter_quantized(torch.zeros(7, 4))
+    gathered = amd_sp._sp_all_gather_quantized(torch.zeros(3, 4))
 
     assert aiter_comm.calls == [
         ("reduce_scatter", (8, 4), (4, 4)),
@@ -996,72 +957,33 @@ def test_sp_quantized_ipc_helpers_fall_back_to_the_ipc_pair(
     assert not exact.rs and not exact.ag
 
 
-@pytest.mark.parametrize(
-    "cdna, aiter_comm, expect_ipc",
-    [
-        pytest.param(4, _FakeAiterComm(), True, id="serves_sp"),
-        pytest.param(3, _FakeAiterComm(), False, id="gfx942"),
-        pytest.param(4, _FakeAiterComm(disabled=True), False, id="disabled"),
-        pytest.param(4, None, False, id="no_communicator"),
-    ],
-)
-def test_use_sp_aiter_ipc_follows_the_flag_the_arch_and_the_communicator(
-    monkeypatch, caplog_vllm, amd_sp, cdna, aiter_comm, expect_ipc
+def test_sp_quantized_helpers_fall_back_to_rccl_without_an_aiter_communicator(
+    monkeypatch, amd_sp
 ):
-    monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: cdna)
-    monkeypatch.setattr(
-        aiter_ops.rocm_aiter_ops, "get_aiter_allreduce", lambda: aiter_comm
-    )
-    _print_info_once.cache_clear()
-    _print_warning_once.cache_clear()
-    flag_on = SimpleNamespace(
-        parallel_config=ParallelConfig(enable_hc_sp_aiter_ipc=True)
-    )
-    flag_off = SimpleNamespace(
-        parallel_config=ParallelConfig(enable_hc_sp_aiter_ipc=False)
-    )
+    exact = _patch_amd_sp(monkeypatch, amd_sp, _FakeCommunicator(None), None)
 
-    assert amd_sp.use_sp_aiter_ipc(flag_off) is False
-    assert "AITER IPC" not in caplog_vllm.text and "aiter-ipc" not in caplog_vllm.text
-    assert amd_sp.use_sp_aiter_ipc(flag_on) is expect_ipc
-    # A flag that cannot be served warns, once, and says why it stays on RCCL; one
-    # that is served says so, once.
-    assert caplog_vllm.text.count("--enable-hc-sp-aiter-ipc") == int(not expect_ipc)
-    assert caplog_vllm.text.count("Using AITER IPC reduce-scatter") == int(expect_ipc)
-
-
-def test_decoder_layer_sp_collectives_are_selected_by_the_two_flags(amd_sp):
-    table = amd_sp.DECODER_LAYER_SP_COLLECTIVES
-    # neither flag: what the layer used before the flags existed
-    assert table[False, False] == (common_sp.sp_all_gather, amd_sp.sp_reduce_scatter)
-    assert table[True, False] == (
-        amd_sp.sp_all_gather_quantized,
-        amd_sp.sp_reduce_scatter_quantized,
-    )
-    assert table[False, True] == (
-        amd_sp.sp_all_gather_ipc,
-        amd_sp.sp_reduce_scatter_ipc,
-    )
-    assert table[True, True] == (
-        amd_sp.sp_all_gather_quantized_ipc,
-        amd_sp.sp_reduce_scatter_quantized_ipc,
-    )
+    assert amd_sp._sp_reduce_scatter_quantized(torch.zeros(7, 4)) == "exact_rs"
+    assert amd_sp._sp_all_gather_quantized(torch.zeros(3, 4)) == "exact_ag"
+    assert exact.rs == [(8, 4)] and exact.ag == [(3, 4)]
 
 
 @pytest.mark.parametrize(
     "op, rows, expected_rows",
     [
+        ("sp_reduce_scatter", 7, 4),
+        ("sp_shard", 7, 4),
+        ("sp_reduce_scatter_quantized", 7, 4),
         ("sp_reduce_scatter_ipc", 7, 4),
-        ("sp_reduce_scatter_quantized_ipc", 7, 4),
+        ("sp_all_gather_quantized", 3, 6),
         ("sp_all_gather_ipc", 3, 6),
-        ("sp_all_gather_quantized_ipc", 3, 6),
     ],
 )
-def test_ipc_opaque_ops_are_registered_with_the_right_fakes(
+def test_opaque_ops_are_registered_with_the_right_fakes(
     monkeypatch, amd_sp, op, rows, expected_rows
 ):
     """The compiler sees the ops through their fake implementations: a
-    reduce-scatter shrinks the rows to this rank's block, an all-gather grows them."""
+    reduce-scatter or shard shrinks the rows to this rank's block, an all-gather
+    grows them."""
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     monkeypatch.setattr(amd_sp, "get_tensor_model_parallel_world_size", lambda: 2)

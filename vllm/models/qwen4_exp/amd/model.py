@@ -67,7 +67,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
-from vllm.models.common.ops.sequence_parallel import sp_all_gather, use_quick_sp
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -78,11 +78,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
-from .ops.sequence_parallel import (
-    DECODER_LAYER_SP_COLLECTIVES,
-    sp_shard,
-    use_sp_aiter_ipc,
-)
+from .ops.sequence_parallel import decoder_layer_sp_collectives, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
@@ -201,13 +197,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         # The four SP collectives of the decoder layer may use INT4 QuickReduce
-        # (opt-in, lossy) and AITER's exact IPC collectives (opt-in, below the
-        # INT4 size gate with both). The other SP sites (embedding shard,
-        # LM-head gather, PLE) always stay on the common exact path.
-        self.sp_all_gather, self.sp_reduce_scatter = DECODER_LAYER_SP_COLLECTIVES[
-            self.use_hc_sequence_parallel and use_quick_sp(vllm_config),
-            self.use_hc_sequence_parallel and use_sp_aiter_ipc(vllm_config),
-        ]
+        # (opt-in, lossy, with AITER's exact IPC collectives below its size gate)
+        # or AITER's exact IPC collectives alone (opt-in). The other SP sites
+        # (embedding shard, LM-head gather, PLE) always stay on the common exact
+        # path.
+        self.sp_all_gather, self.sp_reduce_scatter = decoder_layer_sp_collectives(
+            vllm_config, self.use_hc_sequence_parallel
+        )
         self.layer_idx = extract_layer_index(prefix)
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe

@@ -198,18 +198,21 @@ class ParallelConfig:
     enable_hc_sp_quick_reduce: bool = False
     """Compress the HC SP reduce-scatter and all-gather of the Qwen4Exp decoder
     layers with AITER's FlyDSL INT4 QuickReduce (ROCm, TP=2, lossy: the codec
-    restores values up to +-480). It needs HC SP (four collectives with
+    restores values up to +-480). Steps below the INT4 size gate (decode and small
+    mixed steps) run AITER's exact IPC reduce-scatter and all-gather instead, as
+    with `--enable-hc-sp-aiter-ipc` (RCCL where AITER's custom all-reduce is not
+    enabled, with a warning). It needs HC SP (four collectives with
     `--enable-hc-sp`, two when only MoE SP enables it, which is untested),
     `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` (which also puts every eligible TP
     all-reduce on INT4) and `VLLM_ROCM_USE_AITER=1`; without gfx950 or an AITER
     with `QuickAllReduceInt4.reduce_scatter`, `all_gather` and `compile_sp` the
-    collectives stay exact and a warning is logged. Validated on gfx950 only.
-    Not supported with DBO. Ignored when TP=1.
+    collectives stay exact (AITER's IPC pair, or RCCL) and a warning is logged.
+    Validated on gfx950 only. Not supported with DBO. Ignored when TP=1.
     """
     enable_hc_sp_aiter_ipc: bool = False
     """Run the HC SP reduce-scatter and all-gather of the Qwen4Exp decoder layers
-    through AITER's exact IPC collectives instead of RCCL (ROCm, TP=2). With
-    `--enable-hc-sp-quick-reduce` they also serve the steps below its size gate.
+    through AITER's exact IPC collectives instead of RCCL (ROCm, TP=2).
+    `--enable-hc-sp-quick-reduce` implies it for the steps below its size gate.
     It needs HC SP (four collectives with `--enable-hc-sp`, two when only MoE SP
     enables it, which is untested) and `VLLM_ROCM_USE_AITER=1`; without gfx950 or
     the AITER custom all-reduce the collectives stay on RCCL and a warning is

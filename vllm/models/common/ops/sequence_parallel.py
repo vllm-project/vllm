@@ -76,24 +76,6 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     return tensor_model_parallel_reduce_scatter(x, 0)
 
 
-def sp_all_gather_quantized(x: torch.Tensor) -> torch.Tensor:
-    """`sp_all_gather` through INT4 QuickReduce when it is enabled and the
-    shape qualifies (lossy); the exact path otherwise."""
-    output = _custom_collective("quick_all_gather", x)
-    return output if output is not None else sp_all_gather(x)
-
-
-def sp_reduce_scatter_quantized(x: torch.Tensor) -> torch.Tensor:
-    """`sp_reduce_scatter` through INT4 QuickReduce, as above."""
-    assert x.ndim == 2
-    tp_size = get_tensor_model_parallel_world_size()
-    sp_pad = (-x.shape[0]) % tp_size
-    if sp_pad > 0:
-        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
-    output = _custom_collective("quick_reduce_scatter", x)
-    return output if output is not None else sp_reduce_scatter(x)
-
-
 def sp_shard(x: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
