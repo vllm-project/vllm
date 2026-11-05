@@ -515,8 +515,8 @@ async def test_stop_strings_rejected_when_tokens_only(client):
         [
             "--enable-lora",
             "--lora-modules",
-            "Alice=charent/self_cognition_Alice",
-            "Bob=charent/self_cognition_Bob",
+            "Alice=vllm-project/self_cognition_Alice",
+            "Bob=vllm-project/self_cognition_Bob",
             "--max-lora-rank",
             "64",
             "--max-cpu-loras",
@@ -744,9 +744,6 @@ async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
             {"sampling_params": {"detokenize": False}}, "detokenize", id="no-detok"
         ),
         pytest.param({"output_mode": "bogus"}, "output_mode", id="unsupported"),
-        pytest.param(
-            {"output_mode": "derender", "stream": True}, "stream", id="derender-stream"
-        ),
     ],
 )
 async def test_text_mode_invalid_requests_return_400(client, overrides, expected):

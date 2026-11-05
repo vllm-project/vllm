@@ -34,7 +34,11 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
-from .rocm_block32_gemm import BLOCK_ROWS, rocm_mxfp8_block32_gemm
+from .rocm_block32_gemm import (
+    BLOCK_ROWS,
+    rocm_mxfp8_block32_gemm,
+    rocm_mxfp8_block32_gemm_quant,
+)
 
 _FP8_MAX = float(torch.finfo(MXFP8_VALUE_DTYPE).max)
 _TINY = float(torch.finfo(torch.float32).tiny)
@@ -253,10 +257,12 @@ def _mxfp8_dot_scaled_gemm(
 # gfx950's async-copy LDS (default in the triton 3.8 this branch pins) leaves no
 # room for num_stages=3 at BLOCK_K=256; use 2 there.
 _BK256_STAGES = 3
+_ON_GFX950 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
 
-    if on_gfx950():
+    _ON_GFX950 = on_gfx950()
+    if _ON_GFX950:
         _BK256_STAGES = 2
 
 
@@ -271,6 +277,11 @@ def _select_cfg(M, N, K):
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
     """
+    if _ON_GFX950 and M <= 16:
+        if K == 6144 and N in (1536, 2560):
+            return 16, 16, 1024, 2, 3
+        if K == 768 and N == 6144:
+            return 16, 16, 256, 2, 3
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
@@ -430,11 +441,22 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         out_shape = (*in_shape[:-1], layer.weight.shape[0])
         if layer.weight_scale.shape[0] != layer.weight.shape[0]:
             # One scale row per 32 weight rows (see process_weights_after_loading).
-            if qa is None:
-                x_q, x_scale = mxfp8_e4m3_quantize(x2d)
-            out = rocm_mxfp8_block32_gemm(
-                x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
-            )
+            if qa is not None:
+                out = rocm_mxfp8_block32_gemm(
+                    x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+                )
+            else:
+                # The op quantizes the activation itself: at tiny M (the
+                # decode / DSpark shapes) the quant is fused into the packed
+                # GEMM kernel -- one launch, bit-exact with
+                # mxfp8_e4m3_quantize, kill switch
+                # VLLM_DISABLE_FUSED_MXFP8_QUANT_GEMM=1 -- while larger M
+                # keeps the separate launches. The branch lives inside the
+                # opaque op so a compiled caller cannot freeze the
+                # token-count decision.
+                out = rocm_mxfp8_block32_gemm_quant(
+                    x2d, layer.weight, layer.weight_scale, out_dtype
+                )
         elif qa is not None:
             out = _mxfp8_dot_scaled_gemm(
                 x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
