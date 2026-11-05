@@ -24,6 +24,7 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -725,10 +726,20 @@ def fp16_partial_sums_row_parallel_test_worker(
     rank: int,
     distributed_init_port: str,
 ):
-    """VLLM_TP_FP16_PARTIAL_SUMS: a TP row-parallel layer with FP16 partial sums
-    keeps the single-GPU error against an exact reference; BF16 partials do not."""
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.linear import RowParallelLinear
+    """VLLM_TP_FP16_PARTIAL_SUMS on a TP row-parallel layer with rank-0 bias:
+    the output is the BF16 rounding of the FP16 sum of the FP16 partial sums,
+    bit for bit; block-FP8 ("kernel" mode) undoes the 2^-k prescale and the
+    bias; a LoRA wrapper falls back to BF16 partial sums."""
+    from types import SimpleNamespace
+
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.lora.layers import RowParallelLinearWithLoRA
+    from vllm.model_executor.layers.linear import (
+        RowParallelLinear,
+        _fp16_partial_linear,
+    )
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
@@ -740,25 +751,74 @@ def fp16_partial_sums_row_parallel_test_worker(
     gen = torch.Generator(device="cuda").manual_seed(0)
     x = torch.randn(m, k, device="cuda", generator=gen).bfloat16()
     w = (torch.randn(n, k, device="cuda", generator=gen) / k**0.5).bfloat16()
-    exact = x.double() @ w.double().T
+    b = torch.randn(n, device="cuda", generator=gen).bfloat16()
+    exact = x.double() @ w.double().T + b.double()
     rms = exact.pow(2).mean(-1, keepdim=True).sqrt()
 
     def error(out: torch.Tensor) -> float:
         return float(((out.double() - exact).abs() / rms).mean())
 
+    # unquantized ("gemm" mode)
     errors = {}
     for flag in ("0", "1"):
         monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS", flag)
         with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
-            layer = RowParallelLinear(k, n, bias=False, params_dtype=torch.bfloat16)
+            layer = RowParallelLinear(k, n, bias=True, params_dtype=torch.bfloat16)
         assert layer._fp16_partials == ("gemm" if flag == "1" else None)
         layer.weight.data.copy_(w[:, shard])
+        layer.bias.data.copy_(b)
         out, _ = layer(x[:, shard])
         assert out.dtype == torch.bfloat16
         errors[flag] = error(out)
-    one_gpu = error(exact.bfloat16())
-    assert errors["1"] < 1.05 * one_gpu, (errors, one_gpu)
-    assert errors["0"] > 1.2 * one_gpu, (errors, one_gpu)
+    part = _fp16_partial_linear(
+        x[:, shard], w[:, shard], b if rank == 0 else None, layer.partial_sum_scale
+    )
+    parts = tensor_model_parallel_all_gather(part.unsqueeze(0), dim=0)
+    expected = (parts[0] + parts[1]).bfloat16() * layer._partial_sum_unscale
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    assert errors["1"] < errors["0"], errors
+
+    # block-FP8 ("kernel" mode): same output as BF16 partial sums up to rounding
+    block = 128
+    w_blocks = w.float().view(n // block, block, k // block, block)
+    w_scale = w_blocks.abs().amax(dim=(1, 3)) / torch.finfo(torch.float8_e4m3fn).max
+    w_fp8 = (w_blocks / w_scale[:, None, :, None]).view(n, k)
+    w_fp8 = w_fp8.to(torch.float8_e4m3fn)
+    k_shard = slice(shard.start // block, shard.stop // block)
+    vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))
+    vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)  # Fp8LinearMethod
+    outs = {}
+    for flag in ("0", "1"):
+        monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS", flag)
+        with (
+            set_current_vllm_config(vllm_config),
+            torch.device("cuda"),
+            set_default_torch_dtype(torch.bfloat16),  # Fp8LinearMethod out dtype
+        ):
+            layer = RowParallelLinear(
+                k,
+                n,
+                bias=True,
+                params_dtype=torch.bfloat16,
+                quant_config=Fp8Config(weight_block_size=[block, block]),
+            )
+            layer.weight.data.copy_(w_fp8[:, shard])
+            layer.weight_scale_inv.data.copy_(w_scale[:, k_shard])
+            layer.bias.data.copy_(b)
+            layer.quant_method.process_weights_after_loading(layer)
+        assert layer._fp16_partials == ("kernel" if flag == "1" else None)
+        outs[flag], _ = layer(x[:, shard])
+        assert outs[flag].dtype == torch.bfloat16
+    diff = float(((outs["1"].double() - outs["0"].double()).abs() / rms).mean())
+    assert diff < 1e-2, diff
+    partial = layer.quant_method.apply(layer, x[:, shard])
+    assert partial.dtype == torch.float16
+
+    # LoRA all-reduces quant_method.apply itself: back to BF16 partial sums
+    with set_current_vllm_config(vllm_config):
+        RowParallelLinearWithLoRA(layer)
+    assert layer._fp16_partials is None and layer.partial_sum_scale == 1.0
+    assert layer.quant_method.apply(layer, x[:, shard]).dtype == torch.bfloat16
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -801,10 +861,10 @@ def test_multi_process_tensor_parallel(
     multi_process_parallel(monkeypatch, tp_size, 1, test_target)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_tp_fp16_partial_sums_scale_is_exact_and_saturates():
-    """The 2^-k prescale of FP16 partial sums only moves the exponent, and
-    partial sums beyond the FP16 range saturate instead of becoming inf."""
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
+def test_tp_fp16_partial_sums_scale_is_exact_and_overflows():
+    """The 2^-k prescale of FP16 partial sums only moves the exponent; partial
+    sums beyond 65504 * 2^k become inf, as in the quantized kernels."""
     from vllm.model_executor.layers.linear import _fp16_partial_linear
 
     torch.manual_seed(0)
@@ -823,8 +883,8 @@ def test_tp_fp16_partial_sums_scale_is_exact_and_saturates():
     xb, wb = (x.float() * c).bfloat16(), (w.float() * c).bfloat16()
     ref = xb.double() @ wb.double().T
     assert ref.abs().max() > fp16_max
-    saturated = _fp16_partial_linear(xb, wb, None, 1.0)
-    assert torch.isfinite(saturated).all()
+    overflow = _fp16_partial_linear(xb, wb, None, 1.0)
+    assert torch.isinf(overflow).any()
     in_range = _fp16_partial_linear(xb, wb, None, 0.25).double() * 4
     torch.testing.assert_close(
         in_range, ref, rtol=2e-3, atol=1e-3 * float(ref.abs().max())
@@ -832,6 +892,7 @@ def test_tp_fp16_partial_sums_scale_is_exact_and_saturates():
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
 def test_tp_fp16_partial_sums_row_parallel(monkeypatch: pytest.MonkeyPatch):
     multi_process_parallel(
         monkeypatch, 2, 1, fp16_partial_sums_row_parallel_test_worker
