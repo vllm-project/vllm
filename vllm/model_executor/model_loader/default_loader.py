@@ -412,17 +412,13 @@ class DefaultModelLoader(BaseModelLoader):
             self._encoder_only_weights_mapper = None
             return
 
-        # Derive from _language_model_names; fail-closed on shared HF roots
-        # (Molmo/Phi-4-MM/Muse). Qwen nested/flat keys classified via mapper.
-        weights_mapper = cast(
-            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
-        )
+        # Derive from _language_model_names. Qwen nested/flat keys are classified
+        # via the mapper when filtering shards.
         self._encoder_only_lm_prefixes = resolve_mm_encoder_only_lm_prefixes(
-            getattr(model, "_language_model_names", None),
-            weights_mapper=weights_mapper,
+            getattr(model, "_language_model_names", None)
         )
-        self._encoder_only_weights_mapper = (
-            weights_mapper if self._encoder_only_lm_prefixes is not None else None
+        self._encoder_only_weights_mapper = cast(
+            "WeightsMapper | None", getattr(model, "hf_to_vllm_mapper", None)
         )
 
     def _init_ep_weight_filter(

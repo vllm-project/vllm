@@ -552,12 +552,7 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
         mappings.update(
             {
                 f"{source_prefix}.input_layernorm.": f"{attention_prefix}.norm.",
-                f"{source_prefix}.self_attn.qkv_proj.": (
-                    f"{attention_prefix}.mixer.qkv_proj."
-                ),
-                f"{source_prefix}.self_attn.o_proj.": (
-                    f"{attention_prefix}.mixer.o_proj."
-                ),
+                f"{source_prefix}.self_attn.": f"{attention_prefix}.mixer.",
                 f"{source_prefix}.post_attention_layernorm.": (f"{mlp_prefix}.norm."),
                 f"{source_prefix}.mlp.": f"{mlp_prefix}.mixer.",
             }
@@ -588,6 +583,9 @@ class Cosmos3EdgeForConditionalGeneration(
             ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
             ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
             ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+            ".mixer.q_proj": (".mixer.qkv_proj", "q"),
+            ".mixer.k_proj": (".mixer.qkv_proj", "k"),
+            ".mixer.v_proj": (".mixer.qkv_proj", "v"),
         },
         orig_to_new_prefix={
             **_cosmos3_edge_diffusers_prefix_map(),

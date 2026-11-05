@@ -207,11 +207,9 @@ def test_get_rename_mapper_keeps_only_renames():
     )
     renames = mapper.get_rename_mapper()
 
-    assert renames.orig_to_new_regex == {}
-    assert renames.orig_to_new_substr == {"keep_substr": "kept"}
     assert renames.orig_to_new_stacked == {}
-    assert renames.orig_to_new_prefix == {"keep_prefix.": "kept."}
-    assert renames.orig_to_new_suffix == {}
+    assert renames.map_name("a.keep_substr") == "a.kept"
+    assert renames.map_name("keep_prefix.w") == "kept.w"
 
     # Names the full mapper drops now survive unchanged.
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
@@ -357,3 +355,19 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
 
     # The halves merge into "e.w", which the suffix mapping then doubles.
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
+
+
+def test_weights_mapper_literal_rules_compile_to_regex():
+    """Literal rules keep their old semantics, including metacharacters in names."""
+    mapper = WeightsMapper(
+        orig_to_new_substr={"a.b": "c", "drop": None},
+        orig_to_new_prefix={"p.": r"new\1.", "": "root."},
+        orig_to_new_suffix={".s": ".t"},
+    )
+
+    assert mapper.map_name("xa.b.a.b") == "root.xc.a.b"
+    assert mapper.map_name("axb") == "root.axb"
+    assert mapper.map_name("p.w") == r"root.new\1.w"
+    assert mapper.map_name("w.s") == "root.w.t"
+    assert mapper.map_name("w.s.s2") == "root.w.s.s2"
+    assert mapper.map_name("a.drop.b") is None

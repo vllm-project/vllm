@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import cast
 
 import torch
@@ -139,8 +140,8 @@ class BeamModel(nn.Module, EagleModelMixin):
         mapper = cls.hf_to_vllm_mapper
         if not use_merged_qkv_gate(config, tp_size):
             return mapper
-        return WeightsMapper(
-            orig_to_new_substr=mapper.orig_to_new_substr,
+        return replace(
+            mapper,
             orig_to_new_stacked={
                 **mapper.orig_to_new_stacked,
                 **{
