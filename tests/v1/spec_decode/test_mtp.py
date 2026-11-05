@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
+from transformers import AutoConfig, PreTrainedConfig
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -21,8 +22,11 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+    set_current_vllm_config,
 )
 from vllm.config.load import LoadConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.platforms import current_platform
@@ -56,6 +60,87 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
 
     parallel_lm_head.assert_not_called()
     assert layer.shared_head.head is None
+
+
+def _tiny_glm_mtp_config(model: str) -> PreTrainedConfig:
+    config = AutoConfig.from_pretrained(model)
+    shrink = dict(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        vocab_size=512,
+    )
+    moe = dict(
+        moe_intermediate_size=128,
+        first_k_dense_replace=0,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        n_group=1,
+        topk_group=1,
+    )
+    if model == "zai-org/GLM-OCR":
+        config.text_config.update({**shrink, "num_key_value_heads": 1})
+    elif model == "zai-org/GLM-4.5-Air":
+        config.update({**shrink, **moe, "num_key_value_heads": 1, "head_dim": 128})
+    else:
+        config.update({**shrink, **moe, "num_key_value_heads": 2})
+    return config
+
+
+@pytest.mark.parametrize(
+    "model", ["zai-org/GLM-4.5-Air", "zai-org/GLM-4.7-Flash", "zai-org/GLM-OCR"]
+)
+def test_glm_mtp_feeds_back_final_normed_hidden(
+    dist_init, workspace_init, tmp_path, model
+):
+    """GLM MTP feeds the final-normed hidden into the next draft step (as
+    DeepSeek and GLM-5 Next do) while keeping the logits input unchanged."""
+    _tiny_glm_mtp_config(model).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path), tokenizer_mode="skip", max_model_len=256, dtype="bfloat16"
+    )
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        speculative_config=speculative_config,
+        load_config=LoadConfig(load_format="dummy"),
+    )
+    with set_current_vllm_config(vllm_config):
+        drafter = get_model(
+            vllm_config=vllm_config, model_config=speculative_config.draft_model_config
+        )
+    (layer,) = drafter.model.layers.values()
+    block_outputs = []
+    layer.mtp_block.register_forward_hook(
+        lambda module, args, out: block_outputs.append(out[0] + out[1])
+    )
+
+    num_tokens = 6
+    positions = torch.arange(1, num_tokens + 1, device=DEVICE_TYPE)
+    if model_config.uses_mrope:
+        positions = positions.expand(3, num_tokens).contiguous()
+    with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
+        out = drafter(
+            input_ids=torch.randint(0, 512, (num_tokens,), device=DEVICE_TYPE),
+            positions=positions,
+            hidden_states=torch.randn(
+                num_tokens, 256, device=DEVICE_TYPE, dtype=torch.bfloat16
+            ),
+        )
+    # Proposers use a single returned tensor for both logits and feedback.
+    logits_hidden, feedback_hidden = out if isinstance(out, tuple) else (out, out)
+
+    (pre_norm,) = block_outputs
+    final_normed = layer.shared_head.norm(pre_norm)
+    torch.testing.assert_close(feedback_hidden, final_normed)
+    # compute_logits used to apply shared_head to the pre-norm sum itself.
+    torch.testing.assert_close(logits_hidden, final_normed)
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:

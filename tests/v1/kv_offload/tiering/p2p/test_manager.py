@@ -1192,6 +1192,7 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
@@ -1249,6 +1250,7 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
