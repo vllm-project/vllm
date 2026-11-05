@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import shutil
 from subprocess import CalledProcessError
 
 import torch
@@ -67,6 +68,32 @@ def _aiter_temp_gumbel_sample(
     return out.to(torch.int64)
 
 
+def _flashinfer_jit_availability_reason() -> str | None:
+    """Return why FlashInfer cannot build its sampling kernels, or None.
+
+    Even when FlashInfer can target this GPU, it may still have to
+    JIT-compile its sampling kernel at first use. If no version-matched
+    flashinfer-cubin is installed and nvcc/ninja are unavailable, that build
+    fails during warmup and takes the whole engine down
+    (https://github.com/vllm-project/vllm/issues/49497). Fall back to the
+    native sampler instead of crashing.
+    """
+    from vllm.utils.flashinfer import (
+        _flashinfer_nvcc_path,
+        has_matching_flashinfer_cubin,
+    )
+
+    if has_matching_flashinfer_cubin():
+        return None
+    if _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None:
+        return None
+    return (
+        "FlashInfer sampling kernels require JIT compilation but no "
+        "version-matched flashinfer-cubin is installed and nvcc or ninja "
+        "is unavailable"
+    )
+
+
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
     """Return why FlashInfer JIT codegen cannot target the current GPU, or
     None if it can.
@@ -83,7 +110,7 @@ def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | No
         return None
     try:
         check_cuda_arch()
-        return None
+        return _flashinfer_jit_availability_reason()
     except RuntimeError as e:
         reason = str(e)
     try:
