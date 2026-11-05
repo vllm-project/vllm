@@ -125,6 +125,7 @@ def _fused_norm_rope_kernel(
     # Q RMS norm
     q_c_ptr,
     q_c_stride,
+    q_num_tokens,
     q_rms_norm_w_ptr,
     q_rms_eps,
     q_c_out_ptr,
@@ -224,6 +225,9 @@ def _fused_norm_rope_kernel(
         return
 
     if pid == 2:
+        # SP keeps Q local while the gathered K rows fill the complete cache.
+        if tok_idx >= q_num_tokens:
+            return
         # Q RMS norm. Runs for every row: under DCP a negative slot only
         # means another rank owns this token's KV slot, but the query is
         # still needed on every rank (queries are not sharded), so the
@@ -670,6 +674,7 @@ def fused_norm_rope(
         # Q RMS norm
         q_c,
         q_c.stride(0),
+        q_c.shape[0],
         q_rms_norm_w,
         q_rms_eps,
         q_c_out,

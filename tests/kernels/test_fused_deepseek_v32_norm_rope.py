@@ -78,6 +78,91 @@ def make_cos_sin(max_pos: int, rot_dim: int, device) -> torch.Tensor:
     return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
 
+@pytest.mark.parametrize("cache_dtype", ["auto", "fp8_ds_mla"])
+@pytest.mark.parametrize("interleave", [False, True])
+def test_local_query_rows_preserve_full_cache_writes(cache_dtype, interleave):
+    """SP's gathered cache inputs must preserve the fused writer's values."""
+    torch.manual_seed(63956)
+    tokens = 129
+    device = "cuda"
+    q = torch.randn(tokens, 256, device=device, dtype=torch.bfloat16)
+    kv = torch.randn(tokens, 512, device=device, dtype=torch.bfloat16)
+    pe = torch.randn(tokens, 64, device=device, dtype=torch.bfloat16)
+    ik = torch.randn(tokens, 128, device=device, dtype=torch.bfloat16)
+    qw = torch.ones(256, device=device, dtype=torch.bfloat16)
+    kvw = torch.ones(512, device=device, dtype=torch.bfloat16)
+    ikw = torch.ones(128, device=device, dtype=torch.float32)
+    ikb = torch.zeros_like(ikw)
+    positions = torch.arange(tokens, device=device)
+    slots = positions.flip(0)
+    cos_sin = make_cos_sin(tokens, 64, device)
+    topk = torch.empty(tokens, 2048, device=device, dtype=torch.int32)
+    storage_dtype = torch.bfloat16 if cache_dtype == "auto" else torch.uint8
+    width = 576 if cache_dtype == "auto" else 656
+    fused_cache = torch.zeros(3, 64, width, device=device, dtype=storage_dtype)
+    fused_index = torch.zeros(3, 64, 132, device=device, dtype=torch.uint8)
+    scale = torch.ones(1, device=device, dtype=torch.float32)
+    reference_q = K.fused_norm_rope(
+        positions,
+        q,
+        qw,
+        EPS,
+        kv,
+        kvw,
+        EPS,
+        pe,
+        cos_sin,
+        ik,
+        ikw,
+        ikb,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=slots,
+        indexer_slot_mapping=slots,
+        mla_kv_cache=fused_cache,
+        mla_kv_cache_dtype=cache_dtype,
+        mla_k_scale=scale,
+        indexer_k_cache=fused_index,
+        index_rope_interleave=interleave,
+    )
+    packed = torch.cat((kv, pe, ik), dim=-1)
+    actual_cache = torch.zeros_like(fused_cache)
+    actual_index = torch.zeros_like(fused_index)
+    # Full backing storage exposes accidental writes beyond local Q rows.
+    query_storage = torch.full_like(q, 123)
+    local_tokens = 65
+    actual_q = K.fused_norm_rope(
+        positions,
+        q[:local_tokens],
+        qw,
+        EPS,
+        packed[:, :512],
+        kvw,
+        EPS,
+        packed[:, 512:576],
+        cos_sin,
+        packed[:, 576:],
+        ikw,
+        ikb,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=slots,
+        indexer_slot_mapping=slots,
+        mla_kv_cache=actual_cache,
+        mla_kv_cache_dtype=cache_dtype,
+        mla_k_scale=scale,
+        indexer_k_cache=actual_index,
+        index_rope_interleave=interleave,
+        q_c_out=query_storage[:local_tokens],
+    )
+    torch.testing.assert_close(actual_q, reference_q[:local_tokens], rtol=0, atol=0)
+    assert torch.all(query_storage[local_tokens:] == 123)
+    torch.testing.assert_close(actual_cache, fused_cache, rtol=0, atol=0)
+    torch.testing.assert_close(actual_index, fused_index, rtol=0, atol=0)
+
+
 def rms_norm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """RMSNorm matching kernels._rms_norm (fp32, eps inside rsqrt). Returns fp32."""
     xf = x.float()

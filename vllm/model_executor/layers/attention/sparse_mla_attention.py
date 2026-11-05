@@ -179,16 +179,18 @@ def build_shardq_metadata(
     vllm_config: "VllmConfig",
     metadata: SparseMLACommonMetadata,
     device: torch.device,
+    sequence_parallel: bool = False,
 ) -> ShardQMetadata | None:
     """This step's ShardQ, with ``metadata`` narrowed to this rank's tokens,
     or None."""
-    split = build_shardq_split(common_attn_metadata, vllm_config)
+    split = build_shardq_split(common_attn_metadata, vllm_config, sequence_parallel)
     if split is None:
         return None
     num_decode_tokens = split.num_decode_tokens
     shardq = ShardQMetadata(
         num_decode_tokens=num_decode_tokens,
         num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+        sequence_parallel=split.sequence_parallel,
         token_ids=async_tensor_h2d(split.token_ids, device=device),
         rank_offsets=async_tensor_h2d(
             np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
@@ -297,6 +299,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         layers = vllm_config.compilation_config.static_forward_context
         self.use_shardq = any(
             getattr(layers[name], "use_shardq", False) for name in layer_names
+        )
+        self.use_sp_shardq = all(
+            getattr(layers[name], "use_sp_shardq", False) for name in layer_names
         )
 
     def _init_reorder_batch_threshold(
@@ -482,7 +487,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         if self.use_shardq:
             metadata.shardq = build_shardq_metadata(
-                common_attn_metadata, self.vllm_config, metadata, self.device
+                common_attn_metadata,
+                self.vllm_config,
+                metadata,
+                self.device,
+                self.use_sp_shardq,
             )
         return metadata
 
