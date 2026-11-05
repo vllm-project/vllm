@@ -11,7 +11,7 @@ from contextlib import suppress
 
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.platforms import current_platform
 
@@ -62,7 +62,7 @@ def layer():
             "ignored_layers": [],
         }
     )
-    hf = PretrainedConfig(
+    hf = PreTrainedConfig(
         hidden_size=HIDDEN,
         num_local_experts=EXPERTS,
         num_experts_per_tok=TOP_K,
@@ -287,13 +287,13 @@ def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
             else:
                 static = torch.zeros_like(x)
                 ffn.run(static)
-                torch.cuda.synchronize()
+                torch.accelerator.synchronize()
                 cuda_graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(cuda_graph):
                     out = ffn.run(static)
                 static.copy_(x)
                 cuda_graph.replay()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             _check(out, moe, x)
     finally:
         moe.e_score_correction_bias.data.copy_(bias)

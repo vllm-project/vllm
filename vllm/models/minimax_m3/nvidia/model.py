@@ -1566,11 +1566,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 )
             for moe in deferring:
                 moe.use_low_batch_ffn = True
-            from vllm.models.minimax_m3.nvidia.specialized_decode.runtime.decode import (  # noqa: E501
-                SpecializedDecode,
-            )
+            from vllm.models.minimax_m3.nvidia.specialized_decode.runtime import decode
 
-            self.specialized_decode = SpecializedDecode(self)
+            self.specialized_decode = decode.SpecializedDecode(self)
 
     def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> list[MiniMaxM3MoE]:
         """Let small batches leave a MoE's top-k finalize to the next layer's

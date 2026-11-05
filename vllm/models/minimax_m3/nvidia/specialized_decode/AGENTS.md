@@ -39,9 +39,9 @@ configuration decides both:
   the last MoE layer finalizes itself and stays stock.
 - Once the weights are processed, each of those layers must be able to take
   the FFN (`moe.unsupported_reason`):
-  - TRT-LLM-gen monolithic NVFP4 experts with per-token activations;
-  - a FlashInfer MXFP8 shared expert;
-  - the SwiGLU-OAI constants the kernels are compiled with.
+    - TRT-LLM-gen monolithic NVFP4 experts with per-token activations;
+    - a FlashInfer MXFP8 shared expert;
+    - the SwiGLU-OAI constants the kernels are compiled with.
 
 ## Structure
 
