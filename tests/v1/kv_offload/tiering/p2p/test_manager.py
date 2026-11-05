@@ -952,6 +952,9 @@ class _FakeSession:
     def finish_request(self, kv_request_id):
         self.finishes.append(kv_request_id)
 
+    def abort_loads(self):
+        pass
+
     def close(self):
         return SessionCloseResult(
             failed_jobs=self._close_jobs,
@@ -2956,6 +2959,84 @@ class TestRetainedTransfers:
         assert polls[0] == 3
         assert mgr._retained == {}
         assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+
+
+def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
+    """A decoder's reset must not wait out the load timeout of a fetch its
+    prefiller never serves: the drain aborts the load, fails it at once, and
+    returns as soon as the AbortAck releases the chunk."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+        AbortAckMsg,
+        AbortFetchMsg,
+    )
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier._control = _DrainCtrl()  # type: ignore[assignment]
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=4, mmap_region=_mock_mmap_region(4)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    key = OffloadKey(b"remote-block")
+    ctx = _req_context(_remote_prefiller_kv_params())
+    prepared = primary.prepare_write([key], ctx)
+    assert prepared is not None
+    assert isinstance(prepared.store_spec, CPULoadStoreSpec)
+    job = TransferJob(
+        job_id=7,
+        keys=[key],
+        chunk_ids=prepared.store_spec.chunk_ids,
+        is_promotion=True,
+        req_context=ctx,
+    )
+    tiering._register_job(job, tier_idx=0)
+    p2p_tier.submit_load(job)
+
+    sleeps = [0]
+
+    def ack_after_abort(_s):
+        # The silent prefiller answers only the drain's AbortFetch; without
+        # one the drain would spin until the load timeout.
+        sleeps[0] += 1
+        assert sleeps[0] < 5, "drain_jobs waited on a load no peer will write"
+        if any(m[TYPE_KEY] == AbortFetchMsg.TYPE for m in conn._sent):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.KV_REQUEST_ID: "req-1",
+                    AbortAckMsg.ROUND_SEQ: 0,
+                }
+            )
+
+    monkeypatch.setattr(manager_module.time, "sleep", ack_after_abort)
+    tiering.reset_cache()
+
+    assert 7 not in tiering._jobs
+    assert session.alive
+    assert primary.num_deferred_release_chunks == 0
 
 
 class TestReconnectBackoff:
