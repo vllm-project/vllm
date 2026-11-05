@@ -28,6 +28,7 @@ from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseHostPool,
+    HiSparseSlotInvalidator,
     drop_hisparse_host_pool,
     release_pinned_state,
     update_hisparse_residency,
@@ -153,12 +154,6 @@ def _select_written_row_mirrors(
     )
 
 
-def _is_hisparse_host_writer(
-    shared_host_region: SharedOffloadRegion | None,
-) -> bool:
-    return shared_host_region is None or get_tensor_model_parallel_rank() == 0
-
-
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
@@ -227,17 +222,15 @@ class HiSparseConnectorWorker:
         host_pool = next(iter(host_pools.values()))
         shared_host_region = host_pool.shared_region
         pinned_host_pools = host_pool.pinned
-        is_host_writer = _is_hisparse_host_writer(shared_host_region)
-
-        resident = cache_handles[0].view
-        assert resident is not None
+        is_host_writer = (
+            shared_host_region is None or get_tensor_model_parallel_rank() == 0
+        )
         host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
         try:
             self.initialize(
                 cache_handles,
                 cache_layer_names,
-                hot_backing,
                 self.vllm_config.scheduler_config.max_num_seqs,
                 host_num_blocks,
                 hot_backing.device,
@@ -247,10 +240,11 @@ class HiSparseConnectorWorker:
             )
         except Exception:
             release_pinned_state(
-                [cache.runtime for cache in cache_handles],
                 pinned_host_pools,
                 shared_host_region,
             )
+            for cache in cache_handles:
+                cache.unbind_cache()
             drop_hisparse_host_pool(self.vllm_config)
             raise
 
@@ -258,7 +252,6 @@ class HiSparseConnectorWorker:
         self,
         cache_handles: list[HiSparseCacheHandle],
         cache_layer_names: list[str],
-        hot_backing: torch.Tensor,
         max_num_reqs: int,
         host_num_blocks: int,
         device: torch.device,
@@ -272,6 +265,9 @@ class HiSparseConnectorWorker:
         resident = cache_handles[0].view
         assert resident is not None
         self.kernel_block_size = resident.block_size
+        self._block_row_offsets = torch.arange(
+            self.kernel_block_size, dtype=torch.int32, device=device
+        )
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
         self.shared_host_region = shared_host_region
@@ -306,7 +302,6 @@ class HiSparseConnectorWorker:
         )
         self._draft_mirror_pending = False
         self._set_row_mirrors(())
-        self.cache_layer_names = cache_layer_names
         self._group_leaders = tuple(
             (layer_name, cache)
             for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
@@ -333,7 +328,9 @@ class HiSparseConnectorWorker:
             raise RuntimeError(
                 "HiSparse request-state mapping does not match max_num_seqs."
             )
-        self.hot_backing = hot_backing
+        self._invalidate_written_slots = HiSparseSlotInvalidator(
+            self.request_state_indices
+        )
         self.residency: torch.Tensor | None = next(
             (cache.residency for cache in cache_handles if cache.residency is not None),
             None,
@@ -431,17 +428,8 @@ class HiSparseConnectorWorker:
         )
         self._restore_pages([transfer for transfer in transfers if transfer.restore])
         self._post_forward_transfers = [
-            transfer
-            for transfer in transfers
-            if not transfer.restore and transfer.after_forward
+            transfer for transfer in transfers if not transfer.restore
         ]
-        self._submit_transfers(
-            [
-                transfer
-                for transfer in transfers
-                if not transfer.restore and not transfer.after_forward
-            ]
-        )
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
@@ -525,9 +513,8 @@ class HiSparseConnectorWorker:
         self._completed_host_copy_dst_ids.extend(
             copy.dst_block_id for copy in host_block_copies
         )
-        if self.shared_host_region is None or get_tensor_model_parallel_rank() == 0:
-            if self.host_caches:
-                previous_host_write_event.synchronize()
+        if self.is_host_writer:
+            previous_host_write_event.synchronize()
             copy_kv_cache_blocks_inplace(
                 self.host_caches,
                 self.host_num_blocks,
@@ -545,8 +532,9 @@ class HiSparseConnectorWorker:
         device = self.cache_handles[0].runtime.device
         staging = torch.tensor(block_ids, dtype=torch.int32, pin_memory=True)
         blocks = staging.to(device, dtype=torch.int32, non_blocking=True)
-        offsets = torch.arange(self.kernel_block_size, dtype=torch.int32, device=device)
-        slots = (blocks[:, None] * self.kernel_block_size + offsets[None, :]).flatten()
+        slots = (
+            blocks[:, None] * self.kernel_block_size + self._block_row_offsets
+        ).flatten()
         sorted_slots = torch.sort(slots).values
         state_indices = request_state_indices.to(device=device, dtype=torch.long)
         for runtime in self.leader_runtimes:
@@ -672,11 +660,6 @@ class HiSparseConnectorWorker:
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
             row_bytes = source.shape[-1] * source.element_size()
-            if (
-                source.stride(1) * source.element_size() != row_bytes
-                or destination.shape[1] * destination.element_size() != row_bytes
-            ):
-                raise RuntimeError("HiSparse row DMA requires contiguous rows.")
             source_blocks, source_row_offsets = np.divmod(
                 source_rows, self.kernel_block_size
             )
@@ -893,12 +876,11 @@ class HiSparseConnectorWorker:
                 self._enqueue_row_dma(pending_layers, ready_event=ready_event)
                 self._submitted_mirror_layers.update(pending_layers)
         assert cache.req_id_per_token is not None
-        for _, handle in active:
-            if handle.runtime.is_group_leader:
-                handle.runtime.invalidate_written_slots(
-                    dst_slots[:num_rows],
-                    cache.req_id_per_token[:num_rows],
-                )
+        self._invalidate_written_slots(
+            [handle.runtime for _, handle in active if handle.runtime.is_group_leader],
+            dst_slots[:num_rows],
+            cache.req_id_per_token[:num_rows],
+        )
 
     def _finish_mirror_phase(self, ready_event: torch.Event | None = None) -> None:
         state = self._slot_mapping_staging
@@ -966,9 +948,10 @@ class HiSparseConnectorWorker:
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
         release_pinned_state(
-            [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,
             self.shared_host_region,
         )
+        for cache in self.cache_handles:
+            cache.unbind_cache()
         drop_hisparse_host_pool(self.vllm_config)
         self._initialized = False
