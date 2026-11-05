@@ -527,6 +527,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 # can recover from an earlier chunk submission failure.
                 with self._chunk_lock:
                     state.failed = False
+                with self._sending_transfers_lock:
                     self._send_failures.discard(job.request_id)
 
             try:
@@ -596,7 +597,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             notif_msg=notif_msg,
             track_request=False,
         )
-        failed = job.request_id in self._send_failures
+        with self._sending_transfers_lock:
+            failed = job.request_id in self._send_failures
         return handles, job.is_final and bool(handles), failed
 
     @staticmethod
@@ -640,7 +642,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _complete_chunk_request(self, req_id: ReqId) -> None:
         self._completed_chunk_requests.add(req_id)
         self._chunk_registrations.pop(req_id, None)
-        self._send_failures.discard(req_id)
+        with self._sending_transfers_lock:
+            self._send_failures.discard(req_id)
 
     def _send_chunk_completion(self, reg_data: dict[str, Any]) -> None:
         engine_id = reg_data["decode_engine_id"]
