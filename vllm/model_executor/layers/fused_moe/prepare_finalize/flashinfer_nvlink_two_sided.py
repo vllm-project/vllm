@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -12,6 +14,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.v1.worker.ubatching import dbo_comm_region, dbo_current_ubatch_id
 
 
 def get_local_sizes():
@@ -35,6 +38,9 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         assert device_communicator is not None
         assert device_communicator.all2all_manager is not None
         self.all2all_manager = device_communicator.all2all_manager
+        # finalize() needs its ubatch's dispatch routing; under DBO the peer
+        # ubatch dispatches in between, so keep one slot per ubatch.
+        self.alltoall_infos: list[Any] = [None, None]
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -50,6 +56,14 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         return self.num_dispatchers_
 
     def output_is_reduced(self) -> bool:
+        return True
+
+    def supports_dbo(self) -> bool:
+        # prepare()/finalize() run the all2all on the DBO comm stream (see
+        # dbo_comm_region). Both ubatches' kernels are ordered on that one
+        # stream and return freshly allocated tensors, so they can share the
+        # manager's workspace. supports_async() stays False: it also selects
+        # MK-internal shared-expert overlap.
         return True
 
     def _apply_router_weight_on_input(
@@ -84,20 +98,22 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         global_num_tokens_cpu = get_local_sizes()
         top_k = topk_ids.size(1)
 
-        (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
-            flashinfer_alltoall_dispatch(
-                self.all2all_manager,
-                global_num_tokens_cpu,
-                a1,
-                quant_config.a1_gscale,
-                topk_ids,
-                topk_weights,
-                top_k,
-                num_experts,
-                quant_config,
-                defer_input_quant=defer_input_quant,
+        with dbo_comm_region():
+            (alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
+                flashinfer_alltoall_dispatch(
+                    self.all2all_manager,
+                    global_num_tokens_cpu,
+                    a1,
+                    quant_config.a1_gscale,
+                    topk_ids,
+                    topk_weights,
+                    top_k,
+                    num_experts,
+                    quant_config,
+                    defer_input_quant=defer_input_quant,
+                )
             )
-        )
+        self.alltoall_infos[dbo_current_ubatch_id()] = alltoall_info
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -112,13 +128,18 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
     ) -> None:
         top_k = topk_ids.size(1)
         token_count = output.shape[0]
-        fused_expert_output = flashinfer_alltoall_combine(
-            self.all2all_manager,
-            fused_expert_output,
-            top_k=top_k,
-            token_count=token_count,
-            alltoall_info=self.alltoall_info,
-        )
+        ubatch_id = dbo_current_ubatch_id()
+        alltoall_info = self.alltoall_infos[ubatch_id]
+        assert alltoall_info is not None, "finalize() called before prepare()"
+        with dbo_comm_region():
+            fused_expert_output = flashinfer_alltoall_combine(
+                self.all2all_manager,
+                fused_expert_output,
+                top_k=top_k,
+                token_count=token_count,
+                alltoall_info=alltoall_info,
+            )
+        self.alltoall_infos[ubatch_id] = None
         output.copy_(fused_expert_output)
 
 

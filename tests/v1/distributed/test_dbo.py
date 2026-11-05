@@ -12,6 +12,7 @@ import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_nvlink_two_sided
 from vllm.utils.import_utils import has_deep_ep
 
 # Detect Blackwell / B200 (compute capability 10.x)
@@ -59,6 +60,19 @@ DEEPEP_BACKENDS = [
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     """Test DBO with DP+EP using GSM8K evaluation."""
     _run_dbo_gsm8k(all2all_backend, num_gpus_available)
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_nvlink_two_sided(),
+    reason="These tests require FlashInfer NVLink two-sided all2all",
+)
+def test_dbo_flashinfer_nvlink_two_sided_gsm8k(num_gpus_available):
+    """Test DBO with the synchronous FlashInfer two-sided all2all."""
+    _run_dbo_gsm8k(
+        "flashinfer_nvlink_two_sided",
+        num_gpus_available,
+        extra_args=["--moe-backend", "flashinfer_cutlass"],
+    )
 
 
 # Combinations the V2 runner supports only (DBO picks V1 unless told otherwise).
