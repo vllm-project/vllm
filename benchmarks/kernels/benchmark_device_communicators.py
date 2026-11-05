@@ -80,25 +80,23 @@ COMM_COLLECTIVE = {
     "flashinfer_mnnvl": "all-reduce",
     "aiter_ag": "all-gather",
     "pynccl_ag": "all-gather",
-    "tp_ag": "tp-all-gather",
-    "rccl_ag": "tp-all-gather",
-    "tp_ag_last": "tp-all-gather-last-dim",
-    "rccl_ag_last": "tp-all-gather-last-dim",
+    "tp_ag": "all-gather",
+    "rccl_ag": "all-gather",
+    "tp_ag_last": "all-gather-last-dim",
+    "rccl_ag_last": "all-gather-last-dim",
     "aiter_rs": "reduce-scatter",
     "pynccl_rs": "reduce-scatter",
 }
 COLLECTIVE_ORDER = [
     "all-reduce",
     "all-gather",
-    "tp-all-gather",
-    "tp-all-gather-last-dim",
+    "all-gather-last-dim",
     "reduce-scatter",
 ]
 COLLECTIVE_BASELINE = {
     "all-reduce": "pynccl",
     "all-gather": "pynccl_ag",
-    "tp-all-gather": "rccl_ag",
-    "tp-all-gather-last-dim": "rccl_ag_last",
+    "all-gather-last-dim": "rccl_ag_last",
     "reduce-scatter": "pynccl_rs",
 }
 
