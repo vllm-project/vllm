@@ -285,10 +285,8 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
       quantized only when a `targets` pattern contains its module name (`"re:.*"`
       does not select it), for example weight-only FP8:
       `"re:.*lm_head$": "fp8_per_channel_weight_only"`, which is the shorthand for
-      `{"weight": "fp8_per_channel_static", "activation": None}`.
-      Only per-channel FP8 weights are supported, since vocab padding rows are
-      never loaded. A tied lm_head, or one the checkpoint already quantizes,
-      raises an error. This quantizes the target model's own head; it is
+      `{"weight": "fp8_per_channel_static", "activation": None}`. A tied lm_head,
+      or one the checkpoint already quantizes, raises an error. This quantizes the target model's own head; it is
       unrelated to `draft_lm_head_quantization`, which gives a speculative-decoding
       drafter a private quantized copy of the head and leaves the target unchanged.
     - fnmatch-style patterns are supported only by online quantization; they are

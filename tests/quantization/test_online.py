@@ -2554,7 +2554,7 @@ def test_online_quantization_targets_ignore_collision() -> None:
             "weight_only",
         ),
         (QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel"}), "w8a8"),
-        (QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"}), "error"),
+        (QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"}), "per_tensor"),
         (quant_config_args(linear="fp8_per_channel"), None),
         (QuantizationConfigArgs(targets={"re:.*": "fp8_per_tensor"}), None),
         (
@@ -2574,21 +2574,20 @@ def test_online_quantization_targets_ignore_collision() -> None:
         "broad_target_ignored_head",
     ],
 )
-def test_online_quantization_lm_head_needs_explicit_per_channel_target(
+def test_online_quantization_lm_head_needs_explicit_target(
     args: QuantizationConfigArgs, expected: str | None
 ) -> None:
-    """The lm_head is quantized online only when a target names it and only
-    with per-channel scales (vocab padding rows are never loaded)."""
+    """The lm_head is quantized online only when a target names it; the
+    scheme is the one the linear layers use for that name."""
     config = OnlineQuantizationConfig(args)
-    if expected == "error":
-        with pytest.raises(NotImplementedError, match="lm_head"):
-            config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
-        return
     resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
     if expected is None:
         assert resolved is None
         return
     assert resolved is not None
+    if expected == "per_tensor":
+        assert resolved[-1] is Fp8PerTensorOnlineLinearMethod
+        return
     assert resolved[-1] is Fp8PtpcOnlineLinearMethod
     expected_activation = None if expected == "weight_only" else kFp8DynamicTokenSym
     assert resolved[3].activation == expected_activation

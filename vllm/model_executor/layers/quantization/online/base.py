@@ -103,12 +103,6 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
 # Online linear methods validated with `QuantSpec.hadamard_size`.
 _ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
 
-# Online linear methods valid for the lm_head. Vocab padding rows are never
-# loaded, so a scale shared across rows (per-tensor, per-block) would absorb
-# their uninitialized values. Per-output-channel scales keep them out of the
-# scales of real rows.
-_ONLINE_LM_HEAD_METHODS: frozenset[type] = frozenset({Fp8PtpcOnlineLinearMethod})
-
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
@@ -305,12 +299,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"online quantization for {layer_cls.__name__} with "
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
-            )
-        if issubclass(layer_cls, ParallelLMHead) and cls not in _ONLINE_LM_HEAD_METHODS:
-            raise NotImplementedError(
-                f"online quantization of the lm_head with weight={spec.weight} "
-                "is not supported: only per-output-channel scales are, because "
-                "vocab padding rows are never loaded"
             )
         # TODO: InputHadamardLinearMethod is format-agnostic; allow the
         # remaining linear methods and MoE once validated.
