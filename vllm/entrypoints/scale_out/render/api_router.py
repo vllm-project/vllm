@@ -8,6 +8,10 @@ from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.pooling.pooling.protocol import (
+    GeneratePoolingRequest,
+    IOProcessorRequest,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     create_json_response,
@@ -108,4 +112,25 @@ async def render_responses(request: ResponsesRequest, raw_request: Request):
         raise NotImplementedError("The model does not support Responses Render API")
 
     result = await handler.render_responses_request(request)
+    return create_json_response(result)
+
+
+@router.post(
+    "/pooling/preprocess",
+    dependencies=[Depends(validate_json_request)],
+    response_model=list[GeneratePoolingRequest],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def preprocess_pooling(request: IOProcessorRequest, raw_request: Request):
+    handler = render(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Pooling Preprocess API")
+
+    result = await handler.preprocess_pooling_request(request, raw_request)
+
     return create_json_response(result)

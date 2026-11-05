@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from concurrent.futures import Executor
+from typing import TYPE_CHECKING, Any, cast
 
+import torch
 from fastapi import Request
 
+from vllm.distributed.io_transfer.io_connector.base import IOConnectorBase
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
     AnthropicMessagesRequest,
@@ -21,6 +25,17 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.pooling.io_processor import PluginWithIOProcessorPlugins
+from vllm.entrypoints.pooling.pooling.protocol import (
+    DataLocation,
+    DataObject,
+    DataRef,
+    GeneratePoolingRequest,
+    IOProcessorRequest,
+    MetadataRef,
+)
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
 )
@@ -35,6 +50,7 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
+from vllm.inputs.engine import MultiModalHashes, MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.parser.utils import count_history_tool_calls
@@ -44,6 +60,8 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
+from vllm.utils import random_uuid
+from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
 
@@ -79,6 +97,9 @@ class ServingRender(BaseServing):
         tool_server: "ToolServer | None" = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
         disabled_thinking_effort_resolver: DisabledThinkingEffortResolver | None = None,
+        io_processor: PoolingIOProcessor | None = None,
+        io_connector: IOConnectorBase | None = None,
+        io_executor: Executor | None = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -113,6 +134,30 @@ class ServingRender(BaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+        self.io_processor = io_processor
+        self.io_connector = io_connector
+
+        # Dedicated executor for blocking connector calls (put_data); owned
+        # and shut down by vllm.distributed.io_transfer.
+        self._io_executor = io_executor
+
+        self._preprocessing_async = make_async(
+            self._preprocessing,
+            executor=self.online_renderer.renderer._executor,
+        )
+
+    @torch.inference_mode()
+    def _preprocessing(self, ctx: PoolingServeContext) -> None:
+        """Run the IO processor plugin's pre_process and render the prompts.
+
+        Runs on the renderer executor since both steps are CPU-bound.
+        """
+        assert isinstance(self.io_processor, PluginWithIOProcessorPlugins)
+        requests = self.io_processor.get_request_factory_online(ctx)
+        if len(requests) == 0:
+            raise ValueError("You must pass at least one prompt")
+        ctx.engine_inputs = [self.io_processor.render(r) for r in requests]
 
     async def render_chat_request(
         self,
@@ -443,3 +488,220 @@ class ServingRender(BaseServing):
             metadata_fields_for=self._placeholder_metadata_fields,
             mm_payload=mm_payload,
         )
+
+    async def preprocess_pooling_request(
+        self,
+        request: IOProcessorRequest,
+        raw_request: Request,
+    ) -> list[GeneratePoolingRequest] | ErrorResponse:
+        """Validate the model and preprocess a pooling request.
+
+        This is the authoritative implementation used directly by the
+        GPU-less render server.
+        """
+        model_name = request.model
+        if not model_name:
+            return self.create_error_response("No model was specified")
+
+        base_request_id = random_uuid()
+        if raw_request is not None and (
+            (req_id := raw_request.headers.get("X-Request-Id")) is not None
+        ):
+            base_request_id = req_id
+
+        request_id = f"pooling-{base_request_id}"
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        if not (
+            self.io_processor
+            and isinstance(self.io_processor, PluginWithIOProcessorPlugins)
+        ):
+            return self.create_error_response(
+                "No IO processor was found "
+                "--io-processor-plugin is not set. "
+                "Refused request without IO processor."
+            )
+
+        pooling_params = self.io_processor.create_pooling_params(request)
+        prompt_extras = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := getattr(request, k, None)) is not None
+        }
+        ctx = PoolingServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            pooling_params=pooling_params,
+            request_id=request_id,
+            lora_request=None,
+            priorities=request.priority,
+            prompt_extras=prompt_extras,
+        )
+
+        await self._preprocessing_async(ctx)
+
+        if ctx.engine_inputs is None:
+            raise ValueError("Engine prompts not available")
+
+        ctx.pooling_params.verify(self.model_config)
+
+        if self.io_connector:
+            io_connector = self.io_connector
+            io_processor = self.io_processor.io_processor
+
+            # Validate all inputs and collect put arguments synchronously
+            # before firing any I/O, so the gather below starts all
+            # puts in a single event-loop tick with no staggering.
+            #
+            # Each entry: (prompt_request_id, metadata, object_id, item)
+            put_entries: list[tuple[str, dict, str, Any]] = []
+            for i, pooling_input in enumerate(ctx.engine_inputs):
+                engine_input = pooling_input["prompts"]
+                prompt_request_id = (
+                    f"{ctx.request_id}-{i}"
+                    if ctx.prompt_request_ids is None
+                    else ctx.prompt_request_ids[i]
+                )
+                if engine_input.get("type") != "multimodal":
+                    return self.online_renderer.create_error_response(
+                        f"Couldn't extract data for {prompt_request_id}."
+                    )
+                mm_engine_input = cast(MultiModalInput, engine_input)
+                raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+                mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+                if not raw_mm_kwargs:
+                    return self.online_renderer.create_error_response(
+                        f"Couldn't extract data for {prompt_request_id}."
+                    )
+
+                if sum(len(items) for items in raw_mm_kwargs.values()) != 1:
+                    return self.online_renderer.create_error_response(
+                        "IO disaggregation supports exactly one multimodal item "
+                        f"per prompt ({prompt_request_id})."
+                    )
+
+                metadata = io_processor.get_request_metadata(prompt_request_id) or {}
+
+                for modality, items in raw_mm_kwargs.items():
+                    for j, item in enumerate(items):
+                        if item is None:
+                            return self.online_renderer.create_error_response(
+                                "Couldn't find data."
+                            )
+                        put_entries.append(
+                            (
+                                prompt_request_id,
+                                metadata,
+                                mm_hashes[modality][j],
+                                item,
+                            )
+                        )
+
+            # Fire all puts in one gather.
+            async def _put_metadata(
+                prompt_request_id: str, metadata: dict
+            ) -> tuple[str, MetadataRef]:
+                ref = await io_connector.put_metadata_async(
+                    prompt_request_id,
+                    metadata,
+                    executor=self._io_executor,
+                )
+                return prompt_request_id, ref
+
+            async def _put_data(
+                prompt_request_id: str, object_id: str, item: Any
+            ) -> tuple[str, DataRef]:
+                ref = await io_connector.put_data_async(
+                    object_id,
+                    item,
+                    executor=self._io_executor,
+                )
+                return prompt_request_id, ref
+
+            # Split put_entries into separate metadata and data coros, keeping
+            # one put_metadata per unique prompt_request_id.
+            seen_metadata: set[str] = set()
+            metadata_coros = []
+            data_coros: list[Any] = []
+            for prompt_request_id, metadata, object_id, item in put_entries:
+                if prompt_request_id not in seen_metadata:
+                    seen_metadata.add(prompt_request_id)
+                    metadata_coros.append(_put_metadata(prompt_request_id, metadata))
+                data_coros.append(_put_data(prompt_request_id, object_id, item))
+            n_metadata = len(metadata_coros)
+            all_results = await asyncio.gather(*metadata_coros, *data_coros)
+
+            # Index metadata_refs by prompt_request_id.
+            metadata_refs: dict[str, MetadataRef] = {}
+            for prompt_request_id, ref in all_results[:n_metadata]:
+                metadata_refs[prompt_request_id] = ref
+
+            # Build generate_pooling_requests in original order.
+            generate_pooling_requests: list[GeneratePoolingRequest] = []
+            for prompt_request_id, data_ref in all_results[n_metadata:]:
+                generate_pooling_requests.append(
+                    GeneratePoolingRequest(
+                        request_id=prompt_request_id,
+                        data_ref=data_ref,
+                        metadata_ref=metadata_refs[prompt_request_id],
+                        model=request.model,
+                        cache_salt=request.cache_salt,
+                        priority=request.priority,
+                    )
+                )
+        else:
+            generate_pooling_requests = []
+            for i, pooling_input in enumerate(ctx.engine_inputs):
+                prompt_request_id = (
+                    f"{ctx.request_id}-{i}"
+                    if ctx.prompt_request_ids is None
+                    else ctx.prompt_request_ids[i]
+                )
+                features = self._extract_mm_features(pooling_input["prompts"])
+
+                if features is None or features.kwargs_data is None:
+                    return self.online_renderer.create_error_response(
+                        f"Couldn't extract data for {prompt_request_id}."
+                    )
+
+                if sum(len(v) for v in features.kwargs_data.values()) != 1:
+                    return self.online_renderer.create_error_response(
+                        "IO disaggregation supports exactly one multimodal item "
+                        f"per prompt ({prompt_request_id})."
+                    )
+
+                metadata = (
+                    self.io_processor.io_processor.get_request_metadata(
+                        prompt_request_id
+                    )
+                    or {}
+                )
+                for modality, encoded_items in features.kwargs_data.items():
+                    for j, data in enumerate(encoded_items):
+                        if data is None:
+                            return self.online_renderer.create_error_response(
+                                "Couldn't find data."
+                            )
+
+                        object_id = features.mm_hashes[modality][j]
+                        data_ref = DataRef(
+                            object_id=object_id, location=DataLocation(locator="")
+                        )
+                        data_obj = DataObject[str](data=data)
+
+                        generate_pooling_requests.append(
+                            GeneratePoolingRequest(
+                                request_id=prompt_request_id,
+                                data_ref=data_ref,
+                                data=data_obj,
+                                metadata=metadata,
+                                model=request.model,
+                                cache_salt=request.cache_salt,
+                                priority=request.priority,
+                            )
+                        )
+
+        return generate_pooling_requests

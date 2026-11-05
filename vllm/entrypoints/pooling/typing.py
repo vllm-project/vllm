@@ -9,6 +9,10 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.entrypoints.pooling.pooling.protocol import (
+    GeneratePoolingRequest,
+    PostProcessPoolingRequest,
+)
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
@@ -63,6 +67,8 @@ AnyPoolingRequest: TypeAlias = (
     | IOProcessorRequest
     | ScoringRequest
     | CohereEmbedRequest
+    | GeneratePoolingRequest
+    | PostProcessPoolingRequest
 )
 
 AnyPoolingResponse: TypeAlias = (

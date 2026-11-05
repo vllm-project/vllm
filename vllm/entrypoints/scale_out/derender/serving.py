@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import time
+from concurrent.futures import Executor
+from typing import Any, cast
+
+import torch
 
 import vllm.envs as envs
+from vllm.distributed.io_transfer.io_connector.base import IOConnectorBase
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
@@ -15,12 +21,22 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.pooling.io_processor import PluginWithIOProcessorPlugins
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorResponse,
+    PostProcessPoolingRequest,
+)
+from vllm.entrypoints.pooling.pooling.tensor_serde import decode_tensor
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.utils.async_utils import make_async
 
 from ..token_in_token_out.mm_features import extract_mm_features
 from ..token_in_token_out.protocol import (
@@ -51,6 +67,9 @@ class ServingDerender(BaseServing):
         online_derenderer: "OnlineDerenderer",
         *,
         request_logger: RequestLogger | None = None,
+        io_processor: PoolingIOProcessor | None = None,
+        io_connector: IOConnectorBase | None = None,
+        io_executor: Executor | None = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -59,6 +78,18 @@ class ServingDerender(BaseServing):
         )
 
         self.online_derenderer = online_derenderer
+
+        self.io_processor = io_processor
+        self.io_connector = io_connector
+
+        # Dedicated executor for blocking connector calls (get_data); owned
+        # and shut down by vllm.distributed.io_transfer.
+        self._io_executor = io_executor
+
+        self._postprocessing_async = make_async(
+            self._postprocessing,
+            executor=self.online_derenderer.renderer._executor,
+        )
 
     def _validate_derender_bounds(
         self,
@@ -138,6 +169,15 @@ class ServingDerender(BaseServing):
                     f"max_model_len ({max_model_len})."
                 )
         return None
+
+    @torch.inference_mode()
+    def _postprocessing(self, ctx: PoolingServeContext) -> None:
+        """Thin wrapper that calls post_process_online under inference_mode.
+        Defined as a method so it can be bound once and reused across requests,
+        matching the pattern in PoolingServingBase._postprocessing.
+        """
+        assert isinstance(self.io_processor, PluginWithIOProcessorPlugins)
+        self.io_processor.post_process_online(ctx)
 
     async def derender_chat_response(
         self,
@@ -455,3 +495,121 @@ class ServingDerender(BaseServing):
         engine_input: EngineInput,
     ) -> MultiModalFeatures | None:
         return extract_mm_features(engine_input)
+
+    async def postprocess_pooling_request(
+        self,
+        request: PostProcessPoolingRequest,
+    ) -> IOProcessorResponse | ErrorResponse:
+        model_name = request.model
+        if not model_name:
+            return self.create_error_response("No model was specified")
+
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        if not (
+            self.io_processor
+            and isinstance(self.io_processor, PluginWithIOProcessorPlugins)
+        ):
+            return self.create_error_response(
+                "No IO processor was found "
+                "--io-processor-plugin is not set. "
+                "Refused request without IO processor."
+            )
+
+        ctx = PoolingServeContext(
+            request=request,
+            model_name=model_name,
+            pooling_params=request.to_pooling_params(),
+            request_id=request.request_id,
+            lora_request=None,
+            priorities=None,
+            prompt_extras=None,
+        )
+
+        # Partition responses: inline (no I/O) vs connector (async fetch).
+        # Inline results are resolved synchronously; connector fetches are
+        # collected into one flat gather — no nested coroutine scheduling.
+        # inline: (idx, data_obj, tensor, metadata); *_coros: (idx, coro)
+        inline: list[tuple[int, Any, Any, Any]] = []
+        data_coros: list[tuple[int, Any]] = []
+        metadata_coros: list[tuple[int, Any]] = []
+
+        for idx, res in enumerate(request.responses):
+            if res.output_data is not None and res.output_metadata is not None:
+                data_obj = res.output_data
+                inline.append(
+                    (idx, data_obj, decode_tensor(data_obj.data), res.output_metadata)
+                )
+            elif (
+                res.output_data_ref is not None
+                and res.output_metadata_ref is not None
+                and self.io_connector
+            ):
+                data_coros.append(
+                    (
+                        idx,
+                        self.io_connector.get_data_async(
+                            res.output_data_ref,
+                            executor=self._io_executor,
+                        ),
+                    )
+                )
+                metadata_coros.append(
+                    (
+                        idx,
+                        self.io_connector.get_metadata_async(
+                            res.output_metadata_ref,
+                            executor=self._io_executor,
+                        ),
+                    )
+                )
+            else:
+                raise KeyError("Couldn't find data.")
+
+        # All data and metadata fetches in one gather — zero nested awaits.
+        all_coros = [c for _, c in data_coros] + [c for _, c in metadata_coros]
+        n_data = len(data_coros)
+        if all_coros:
+            all_results = await asyncio.gather(*all_coros)
+            data_results = all_results[:n_data]
+            metadata_results = all_results[n_data:]
+        else:
+            data_results = metadata_results = []
+
+        # Reconstruct fetched in original response order.
+        fetched: list[Any] = [None] * len(request.responses)
+        for idx, data_obj, tensor, metadata in inline:
+            fetched[idx] = (data_obj, tensor, metadata)
+        for (idx, _), data_obj, metadata in zip(
+            data_coros, data_results, metadata_results
+        ):
+            tensor = cast(torch.Tensor, data_obj.data)
+            fetched[idx] = (data_obj, tensor, metadata)
+
+        ctx.final_res_batch = []
+        for res, (data_obj, tensor, metadata) in zip(request.responses, fetched):
+            self.io_processor.io_processor.update_request_metadata(
+                res.request_id, metadata
+            )
+            ctx.final_res_batch.append(
+                PoolingRequestOutput(
+                    request_id=res.request_id,
+                    outputs=PoolingOutput(data=tensor),
+                    prompt_token_ids=res.prompt_token_ids,
+                    num_cached_tokens=res.num_cached_tokens,
+                    finished=True,
+                )
+            )
+
+        await self._postprocessing_async(ctx)
+
+        if self.io_connector:
+            for res in request.responses:
+                if res.output_metadata_ref is not None:
+                    self.io_connector.cleanup_metadata(res.output_metadata_ref)
+
+        assert ctx.response is not None
+        ctx.response.request_id = ctx.request_id
+        return ctx.response
