@@ -517,7 +517,7 @@ steps:
   dind: false
   device: mi355_4
   num_devices: 4
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   working_dir: /vllm-workspace/
   depends_on:
   - image-build-amd
@@ -562,6 +562,8 @@ steps:
     "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_dsa_layer_matches_vllm_ops[8-mixed-False]"
     "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_dsa_layer_matches_vllm_ops[8-mixed-True]"
     "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_ffn_matches_glm5next_moe[8]"
+    "tests/kernels/models/amd/glm5next_mono/test_model.py::test_model_matches_native[8-eager]"
+    "tests/kernels/models/amd/glm5next_mono/test_model.py::test_model_matches_native[8-full_graphs]"
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
