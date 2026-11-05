@@ -188,6 +188,27 @@ def test_tree_speculator_runs_chains(model, backend, tp, capfd):
     _check(model, got, "tree_runs_chains", **kwargs)
 
 
+# --- E5: a tree speculator on a backend that verifies trees -----------------
+
+
+def test_tree_speculator_verifies_trees(capfd):
+    """On the plugin's tree attention backend (TRITON_ATTN with the plan rows
+    recomputed under their ancestor masks) a dense model verifies the 2-way
+    trees: nothing lowers them, a step accepts a path that skips a sibling, and
+    greedy tokens and logprobs match decoding without speculation."""
+    from vllm_add_test_speculators import OFF_CHAIN
+
+    # The test backend reads the batch layout on the host: no CUDA graphs.
+    kwargs = {"attention_config": {"backend": "CUSTOM"}, "enforce_eager": True}
+    config = {"method": "test_ngram_tree", **NGRAM}
+    got, drafted, acceptance = _run(DENSE, config, **kwargs)
+    out, err = capfd.readouterr()
+    assert LOWERED not in out + err
+    assert OFF_CHAIN in out + err
+    assert drafted > 0 and acceptance > 1
+    _check(DENSE, got, "tree_verifies_trees", **kwargs)
+
+
 # --- E7: data parallel ranks at different budgets -----------------------------
 
 

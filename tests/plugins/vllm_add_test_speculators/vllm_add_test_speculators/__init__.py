@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test-only speculative methods, registered as a vLLM general plugin so that
-every process (engine core and workers, forked or spawned) has them."""
+"""Test-only speculative methods and the tree attention backend (as the CUSTOM
+backend), registered as a vLLM general plugin so that every process (engine core
+and workers, forked or spawned) has them."""
 
 # Method name -> config class in `configs`, imported lazily by qualified name.
 TEST_SPECULATORS = {
@@ -11,12 +12,22 @@ TEST_SPECULATORS = {
     "test_ngram_budget_one_on_rank_zero": "NgramBudgetOneOnRankZeroConfig",
     "test_ngram_tree": "NgramTreeConfig",
 }
+# Printed once per worker when the tree speculator accepts a path that leaves
+# the chain (skips a sibling).
+OFF_CHAIN = "test_ngram_tree: accepted a path off the chain"
 
 
 def register():
+    from vllm.v1.attention.backends.registry import (
+        AttentionBackendEnum,
+        register_backend,
+    )
     from vllm.v1.worker.gpu.spec_decode.speculator_config import (
         register_speculative_method,
     )
 
     for name, config_cls in TEST_SPECULATORS.items():
         register_speculative_method(name, f"{__name__}.configs.{config_cls}")
+    register_backend(
+        AttentionBackendEnum.CUSTOM, f"{__name__}.tree_attn.TreeAttentionBackend"
+    )

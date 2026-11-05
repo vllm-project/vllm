@@ -6,12 +6,23 @@ import numpy as np
 import torch
 
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
-from vllm.v1.worker.gpu.spec_decode.round import PlanInputs, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    PlanInputs,
+    VerifyOutput,
+    VerifyPlan,
+)
+from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree
+
+from . import OFF_CHAIN
 
 
 class NgramTreeSpeculator(NgramGPUSpeculator):
     """Verifies the n-gram drafts as a tree: the first draft gets a sibling
-    holding another token, and the chain continues from the first draft."""
+    holding another token, and the chain continues from the first draft. Accepts
+    greedily, and prints ``OFF_CHAIN`` the first time a path skips a row."""
+
+    _printed = False
 
     def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
         if inputs.chain_only:
@@ -47,3 +58,15 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
         return VerifyPlan(
             parent=self._parent[:num_reqs], tokens=self._tokens[:num_reqs]
         )
+
+    def accept(self, plan: VerifyPlan, output: VerifyOutput) -> AcceptResult | None:
+        result = accept_greedy_tree(plan, output, plan.parent.shape[1])
+        if not self._printed:
+            num_reqs = len(output.is_greedy)
+            path = result.path[:num_reqs].cpu()
+            rows = torch.arange(path.shape[1])
+            in_path = rows < result.path_len[:num_reqs].cpu()[:, None]
+            if bool(((path != rows) & in_path).any()):
+                print(OFF_CHAIN, flush=True)
+                self._printed = True
+        return result
