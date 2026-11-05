@@ -736,6 +736,45 @@ class TestClientFlows:
         assert session.close().failed_jobs == []
         assert _released(failure)
 
+    def test_abort_loads_fails_each_load_once(self):
+        """abort_loads aborts every load not already aborting and fails it
+        at once; the AbortAck only releases it."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"a")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=2, kv_request_id="req-2", keys=[OffloadKey(b"b")], block_ids=[1]
+        )
+        session.finish_request("req-1")
+
+        session.abort_loads()
+        session.abort_loads()
+
+        aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+        assert sorted(m[AbortFetchMsg.KV_REQUEST_ID] for m in aborts) == [
+            "req-1",
+            "req-2",
+        ]
+        failures = session.poll().loads
+        assert sorted((f.job_id, f.success) for f in failures) == [
+            (1, False),
+            (2, False),
+        ]
+        assert not any(_released(f) for f in failures)
+        for req_id in ("req-1", "req-2"):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.ROUND_SEQ: 0,
+                    AbortAckMsg.KV_REQUEST_ID: req_id,
+                }
+            )
+        assert session.poll().loads == []
+        assert all(_released(f) for f in failures)
+        assert session._client.has_active_loads is False
+
     def test_late_transfer_done_after_abort_ack_is_ignored(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
