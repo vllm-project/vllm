@@ -600,7 +600,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         data = hf_inputs[key]
         # Un-padded fields are already one entry per item, so index rather than slice
         if modality == "audio" or isinstance(data, list):
-            return MultiModalFieldConfig.batched(modality)
+            # Only read to drop padding, which would sync if this was on the GPU
+            keep_on_cpu = key == "padding_mask"
+            return MultiModalFieldConfig.batched(modality, keep_on_cpu=keep_on_cpu)
 
         total = int(sizes.sum())
         dim = self._get_slice_dim(data, total)
@@ -1106,12 +1108,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padded to match another.
         embeddings: list[torch.Tensor] = []
         for index, features in enumerate(input_features):
-            with gpu_sync_allowed():
-                audio_output = self.model.get_audio_features(
-                    features.unsqueeze(0),
-                    return_dict=True,
-                    **self._select_item_kwargs(kwargs, index, len(input_features)),
-                )
+            audio_output = self.model.get_audio_features(
+                features.unsqueeze(0),
+                return_dict=True,
+                **self._select_item_kwargs(kwargs, index, len(input_features)),
+            )
             embeddings.extend(
                 self._split_embeddings(audio_output.pooler_output, [split_sizes[index]])
             )
