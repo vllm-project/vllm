@@ -128,6 +128,9 @@ def _builder(
         # preferred still keeps this True so qlen < _MIN_CPRR_QLEN can fall back.
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
         _use_triton_dcp_verify=False,
+        _use_triton_verify=False,
+        _triton_verify_qlens=(),
+        _fp8_v_scale_fix_qlens=frozenset(),
         # Derived once in the real constructor, so derive it once here too.
         _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
             kernel_block_size
@@ -511,6 +514,8 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
         paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        triton_verify_num_kv_splits=0,
+        fp8_v_scale_fix=False,
         dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         g_kv_indptr=None,
@@ -575,6 +580,8 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        triton_verify_num_kv_splits=0,
+        fp8_v_scale_fix=False,
         dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         has_persistent_metadata=False,
@@ -802,6 +809,8 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             ),
             use_gluon_decode=False,
             use_gluon_verify=False,
+            triton_verify_num_kv_splits=0,
+            fp8_v_scale_fix=False,
             dcp_route=rocm_aiter_mla._DCPDecodeRoute.SEGMENTED,
             dcp_verify=view,
             attn_out_dtype=torch.bfloat16,
@@ -935,6 +944,11 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
+    # The probe is cached per process; running it against the stub aiter
+    # would leave a wrong answer for later tests.
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_fp8_mla_decode_drops_v_scale", lambda *args: False
+    )
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
@@ -1572,6 +1586,34 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
+
+
+@pytest.mark.parametrize(
+    "num_heads, mtp_qlen, kv_cache_dtype, dcp, cdna, expected",
+    [
+        pytest.param(128, 8, "auto", 1, 3, True, id="bf16"),
+        pytest.param(16, 8, "fp8", 1, 3, True, id="fp8-16-heads"),
+        # FP8 at 128 heads has a persistent kernel past qlen 4.
+        pytest.param(128, 8, "fp8", 1, 3, False, id="fp8-128-heads"),
+        pytest.param(128, 4, "auto", 1, 3, False, id="qlen-4"),
+        pytest.param(128, 8, "auto", 2, 3, False, id="dcp"),
+        pytest.param(128, 8, "auto", 1, 4, False, id="cdna4"),
+    ],
+)
+def test_asm_causal_verify_unsupported(
+    monkeypatch, num_heads, mtp_qlen, kv_cache_dtype, dcp, cdna, expected
+):
+    """Only CDNA3 causal verify past qlen 4 without DCP leaves the asm decode,
+    and FP8 keeps it at 128 heads."""
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    assert (
+        rocm_aiter_mla._asm_causal_verify_unsupported(
+            num_heads, mtp_qlen, kv_cache_dtype, dcp
+        )
+        is expected
+    )
 
 
 def _adaptive_config(
