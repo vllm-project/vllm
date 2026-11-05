@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -139,14 +139,29 @@ pub(crate) struct RenderState {
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
     pub(crate) lora_modules: Vec<LoraModulePath>,
+    /// Served model names followed by LoRA adapter names.
+    pub(crate) model_names: ServedModelNames,
 }
 
-impl RenderState {
-    /// Served model names followed by LoRA adapter names.
-    pub(crate) fn model_names(&self) -> ServedModelNames {
-        (self.served_model_names.clone())
-            .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
+/// Check `--lora-modules` the way `vllm-rs serve` does when it loads them.
+fn validate_lora_modules(
+    served_model_names: &ServedModelNames,
+    lora_modules: &[LoraModulePath],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for module in lora_modules {
+        let name = &module.name;
+        if name.trim().is_empty() || module.path.trim().is_empty() {
+            bail!("--lora-modules entries need a non-empty name and path");
+        }
+        if served_model_names.names().contains(name) {
+            bail!("LoRA adapter name `{name}` is also a served model name");
+        }
+        if !seen.insert(name) {
+            bail!("LoRA adapter `{name}` is given more than once");
+        }
     }
+    Ok(())
 }
 
 async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
@@ -175,6 +190,10 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         &config.served_model_name,
     ))
     .with_accept_any(config.skip_model_name_validation);
+    validate_lora_modules(&served_model_names, &config.lora_modules)?;
+    let model_names = served_model_names
+        .clone()
+        .with_names(config.lora_modules.iter().map(|module| module.name.clone()));
     // Only multimodal preprocessing reads the dtype, so text-only models never
     // fail on an unusual config dtype.
     let model_dtype = loaded
@@ -216,6 +235,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         text,
         chat,
         lora_modules: config.lora_modules.clone(),
+        model_names,
     }))
 }
 
@@ -265,6 +285,17 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lora_modules_are_checked_like_serve() {
+        let served = ServedModelNames::new(vec!["qwen".to_string()]);
+        let modules = |specs: &[&str]| -> Vec<LoraModulePath> {
+            specs.iter().map(|spec| spec.parse().unwrap()).collect()
+        };
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "b=org/b"])).is_ok());
+        assert!(validate_lora_modules(&served, &modules(&["qwen=org/a"])).is_err());
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "a=org/b"])).is_err());
+    }
 
     #[test]
     fn render_dtype_auto_follows_config_like_vllm() {

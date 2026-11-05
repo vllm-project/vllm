@@ -192,6 +192,8 @@ pub struct RenderArgs {
     chat_template_content_format: ChatTemplateContentFormatOption,
     /// Maximum model context length used for request validation. When not set,
     /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
+    /// Set it to the engine's for multimodal models: some image processors size
+    /// images to fit it.
     #[arg(long)]
     max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
@@ -206,8 +208,10 @@ pub struct RenderArgs {
     #[arg(long)]
     language_model_only: bool,
     /// Dtype that multimodal inputs are preprocessed in; set it to the
-    /// engine's `--dtype`. `auto` follows the model config, running float32
-    /// checkpoints in bfloat16 like vLLM.
+    /// engine's `--dtype`. `auto` follows the model config's dtype (or its
+    /// `text_config`'s), running float32 checkpoints in bfloat16 like vLLM; it
+    /// does not inspect weights or the GPU, so pass the engine's dtype when it
+    /// differs.
     #[arg(long, default_value = "auto")]
     dtype: RenderDtype,
     /// The maximum number of input items allowed per prompt for each
