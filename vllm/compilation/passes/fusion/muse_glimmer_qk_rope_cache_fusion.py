@@ -3,6 +3,7 @@
 
 import inspect
 from functools import cache
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -29,6 +30,9 @@ from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_i64
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionImpl
 
 logger = init_logger(__name__)
 
@@ -60,7 +64,8 @@ def _fused_muse_qk_rope_cache_impl(
         k = qkv.new_zeros((qkv.shape[0], num_kv_heads, head_dim))
         v = qkv.new_zeros((qkv.shape[0], num_kv_heads, head_dim))
     else:
-        key_cache, value_cache = attn_layer.impl._split_kv_cache(kv_cache)
+        impl = cast("AiterFlashAttentionImpl", attn_layer.impl)
+        key_cache, value_cache = impl._split_kv_cache(kv_cache)
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
         weight = _zero_weight(qkv.device)
         q, k, v = fused_qkv_split_qk_norm_rope_cache(
@@ -176,6 +181,24 @@ class MuseGlimmerQkRopeCachePattern:
         )
         return dummy, q, k, v
 
+    def _mk_pattern_with_layer_name_input(self):
+        def pattern(qkv, positions, cos_sin_cache, layer_name):
+            return self.pattern(qkv, positions, cos_sin_cache, layer_name)
+
+        def replacement(qkv, positions, cos_sin_cache, layer_name):
+            return self.replacement(qkv, positions, cos_sin_cache, layer_name)
+
+        return pattern, replacement
+
+    def _mk_pattern_with_layer_name_closure(self):
+        def pattern(qkv, positions, cos_sin_cache):
+            return self.pattern(qkv, positions, cos_sin_cache)
+
+        def replacement(qkv, positions, cos_sin_cache):
+            return self.replacement(qkv, positions, cos_sin_cache)
+
+        return pattern, replacement
+
     def register(self, patterns: PatternMatcherPass) -> None:
         inputs = [
             empty_bf16(5, self.q_size + 2 * self.kv_size),
@@ -184,20 +207,9 @@ class MuseGlimmerQkRopeCachePattern:
         ]
         if _USE_LAYERNAME:
             inputs.append(_encode_layer_name(self.layer_name))
-
-            def pattern(qkv, positions, cos_sin_cache, layer_name):
-                return self.pattern(qkv, positions, cos_sin_cache, layer_name)
-
-            def replacement(qkv, positions, cos_sin_cache, layer_name):
-                return self.replacement(qkv, positions, cos_sin_cache, layer_name)
-
+            pattern, replacement = self._mk_pattern_with_layer_name_input()
         else:
-
-            def pattern(qkv, positions, cos_sin_cache):
-                return self.pattern(qkv, positions, cos_sin_cache)
-
-            def replacement(qkv, positions, cos_sin_cache):
-                return self.replacement(qkv, positions, cos_sin_cache)
+            pattern, replacement = self._mk_pattern_with_layer_name_closure()
 
         def trace_fn(fn, args, **kwargs):
             graph = pm.fwd_only(fn, args, **kwargs)
