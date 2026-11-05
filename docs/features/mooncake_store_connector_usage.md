@@ -56,6 +56,10 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
   Store provider owns the memory pool and (optionally) the SSD tier.
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback.
   `"nvlink"` is used by the opt-in [EGM deployment](#standalone-egm-over-nvlink).
+- `device_name_per_gpu`: Optional list of RDMA device names indexed by
+  physical GPU ID, such as `["rdma0", "rdma1", ...]`. Each rank's store client
+  uses only its own GPU's entry, which may list several devices separated by
+  commas. Set it instead of `device_name` to give each GPU its local NIC.
 - `global_segment_size`: CPU memory contributed to the distributed pool (per
   GPU). Must be `> 0` in `embedded` mode and `0` in `standalone-store` mode.
 - `local_buffer_size`: Private buffer for this node's own operations (per GPU).
