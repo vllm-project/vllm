@@ -36,6 +36,10 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.triton_fp8_paged_extend import (
+    fp8_paged_extend_attention,
+    fp8_paged_extend_supported,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -49,6 +53,9 @@ _PARTITION_SIZE_ROCM = 256
 # max_logits / tmp_out regions without the mtp factor the kernels index with,
 # so mtp > 1 overlaps them (wrong outputs, NaN in serving).
 _PAGED_MTP_MODE = os.environ.get("VLLM_ROCM_AITER_FA_PAGED_MTP", "0").strip().lower()
+# Full-attention extends with an fp8 cache: one fp8 paged kernel over context + new
+# tokens instead of the 32K-slice gather/dequant + varlen + merge loop.
+_FP8_CTX_ATTN = os.environ.get("VLLM_ROCM_MUSE_FP8_CTX_ATTN", "0") == "1"
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
@@ -1019,6 +1026,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.use_fp8_paged_extend = (
+            _FP8_CTX_ATTN
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and self.sliding_window[0] == -1
+            and alibi_slopes is None
+            and sinks is None
+            and self.logits_soft_cap == 0.0
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            and fp8_paged_extend_supported(num_heads, num_kv_heads, head_size)
+        )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1134,6 +1151,28 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 block_table,
                 k_scale,
                 v_scale,
+            )
+            return
+        if self.use_fp8_paged_extend and attn_metadata.causal:
+            start = attn_metadata.num_decodes
+            seq_lens = attn_metadata.seq_lens[start : start + attn_metadata.num_extends]
+            q_fp8, q_descale = rocm_aiter_ops.per_tensor_quant(
+                query.contiguous(), current_platform.fp8_dtype()
+            )
+            fp8_paged_extend_attention(
+                q_fp8,
+                key_cache,
+                value_cache,
+                output,
+                cu_seqlens_q,
+                seq_lens,
+                block_table,
+                max_seqlen_q,
+                max_seqlen_k,
+                q_descale,
+                k_scale,
+                v_scale,
+                self.scale,
             )
             return
         out, lse = rocm_aiter_ops.flash_attn_varlen_func(
