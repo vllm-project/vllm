@@ -116,7 +116,7 @@ class TraceTensor(torch.Tensor):
             if func is torch.Tensor.to and self_._is_noop_to(args[1:], kwargs):
                 return self_
             if func in _VALUE_READS:
-                return self_._sink.value_read(func, self_)
+                return self_._sink.value_read(self_)
         # Metadata reads are answered by the wrapper subclass and stop here; ops
         # that need data fall through to __torch_dispatch__.
         with torch._C.DisableTorchFunctionSubclass():

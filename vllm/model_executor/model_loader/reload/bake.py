@@ -11,11 +11,10 @@ checkpoint tensor a fallback, and constant writes into one (``fill_``,
 ``zero_``) happen, mid-update, and stay out of the plan (post-load processing
 owns padding)."""
 
-import itertools
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
 from torch.utils import _pytree as pytree
@@ -72,8 +71,16 @@ def _storage_key(t: torch.Tensor) -> int | None:
 
 
 class _BakeStopped(Exception):
-    """A loader needs a traced tensor's values, or an op on it fails on meta;
-    the bake cannot continue."""
+    """A loader needs a traced tensor's values, or an op on it fails on meta:
+    the loader cannot continue. ``name`` is the trace's name."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
+
+
+class _SinkClosed(RuntimeError):
+    """A trace was used after its bake ended."""
 
 
 _VALUE_READ = "its loader reads tensor values (.item(), bool(), ...)"
@@ -101,28 +108,37 @@ class _PlanSink:
     targets: Targets
     copies: dict[str, list[Copy]] = field(default_factory=lambda: defaultdict(list))
     fallback: dict[str, str] = field(default_factory=dict)
-    # Names that stopped the bake, and why. Kept even though these also raise:
-    # a loader may catch the exception and carry on, and the name must still
-    # be rerun without.
+    # Names that stopped their loader, and why. Kept even though these also
+    # raise: a loader may catch the exception and carry on, and the name must
+    # still fall back.
     stops: dict[str, str] = field(default_factory=dict)
     wrote: set[str] = field(default_factory=set)  # copied anywhere
     last_writer: dict[int, str] = field(default_factory=dict)  # per storage
-    # The name last handed to load_weights. A loader that reads ahead (as
-    # AutoWeightsLoader's groupby does) makes this the next name; it is used
-    # only to blame a destination read that no copy_ preceded.
+    # The name last handed to load_weights, or last copied from. A loader that
+    # reads ahead (as AutoWeightsLoader's groupby does) makes this the next
+    # name; it is used only to blame a destination read that no copy_ preceded.
     current: str | None = None
+    # Set when the bake ends: a trace a loader kept on the module must not be
+    # used again (by a later load_weights), or its writes would go nowhere.
+    closed: bool = False
 
     def mark(self, name: str, reason: str) -> None:
         self.fallback.setdefault(name, reason)
 
+    def _check_open(self, trace: TraceTensor) -> None:
+        if self.closed:
+            raise _SinkClosed(
+                f"load plan: a planning trace of {trace._name!r} was used after "
+                "planning; a loader keeps an incoming tensor across load_weights "
+                "calls, which the load plan does not support"
+            )
+
     def accept_copy(self, dest: torch.Tensor, src: TraceTensor) -> torch.Tensor:
+        self._check_open(src)
         name = src._name
         self.current = name
         self.wrote.add(name)
-        key = _storage_key(dest)
-        if key is None:
-            self.mark(name, "copies into another checkpoint tensor")
-            return dest
+        key = dest.untyped_storage()._cdata  # dest is never a trace
         self.last_writer[key] = name
         self.copies[name].append(
             Copy(
@@ -136,9 +152,10 @@ class _PlanSink:
         )
         return dest
 
-    def value_read(self, func: Callable, trace: TraceTensor) -> Any:
+    def value_read(self, trace: TraceTensor) -> NoReturn:
+        self._check_open(trace)
         self.stops.setdefault(trace._name, _VALUE_READ)
-        raise _BakeStopped
+        raise _BakeStopped(trace._name)
 
     def unsupported(
         self, func: Callable, args: tuple, kwargs: dict, traces: list[TraceTensor]
@@ -146,6 +163,7 @@ class _PlanSink:
         """Mark the names fallbacks and run ``func`` on meta copies of its
         arguments, so it writes no real tensor; tensor results become traces
         of the first name, with no geometry."""
+        self._check_open(traces[0])
         if _writes_a_real_tensor(func, args, kwargs):  # in place, or out=
             reason = f"writes it without Tensor.copy_ ({func.__name__})"
             self.wrote.update(t._name for t in traces)
@@ -171,7 +189,7 @@ class _PlanSink:
             # the error stays out of the reason, which groups the report
             logger.debug("load plan: %s on %s fails on meta: %r", func, first._name, e)
             self.stops.setdefault(first._name, f"{func.__name__} fails on meta")
-            raise _BakeStopped from e
+            raise _BakeStopped(first._name) from e
         originals = {id(m): a for m, a in zip(meta_flat, flat)}
 
         def wrap(o: Any) -> Any:
@@ -267,58 +285,67 @@ class _TargetGuard(TorchDispatchMode):
 
 
 def _bake(
-    model: torch.nn.Module,
-    metas: dict[str, "ParamMeta"],
-    names: list[str],
-    targets: Targets,
+    model: torch.nn.Module, metas: dict[str, "ParamMeta"], targets: Targets
 ) -> _PlanSink:
-    """One traced ``load_weights`` over ``names``. Module state a loader sets
-    stays: it is what that loader would leave on the ``load_weights`` path."""
+    """Trace ``load_weights`` over every name, in one pass. A name that stops
+    the loader (a value read, an op that fails on meta) unwinds the model's
+    ``load_weights``; it falls back, and ``load_weights`` is called again
+    with the names after it, on the same sink, so nothing is replayed.
+    Module state a loader sets stays: it is what that loader would leave on
+    the ``load_weights`` path."""
     sink = _PlanSink(targets)
+    names = list(metas)
 
-    def weights() -> Iterator[tuple[str, torch.Tensor]]:
-        for name in names:
+    def weights(rest: list[str]) -> Iterator[tuple[str, torch.Tensor]]:
+        for name in rest:
             meta = metas[name]
             sink.current = name
             shape = torch.Size(meta.shape)
             yield name, TraceTensor.checkpoint(name, shape, meta.dtype, sink)
 
+    start = 0
     try:
         with torch.no_grad(), _TargetGuard(sink):
-            model.load_weights(weights())
-    except _BakeStopped:
-        pass  # in sink.stops; the caller reruns without the name
+            while start < len(names):
+                try:
+                    model.load_weights(weights(names[start:]))
+                    break
+                except _BakeStopped as stop:
+                    # Resume after the name that stopped (not after the last
+                    # name yielded: a loader may have read ahead).
+                    at = names.index(stop.name)
+                    if at < start:
+                        raise RuntimeError(
+                            f"load plan: a loader reads the values of "
+                            f"{stop.name!r} after later names arrived (it keeps "
+                            "an incoming tensor across names)"
+                        ) from stop
+                    start = at + 1
+    finally:
+        sink.closed = True
     return sink
 
 
 @dataclass
 class Traced:
-    copies: dict[str, list[Copy]]  # per name, from the full bake
+    copies: dict[str, list[Copy]]  # per name
     reasons: dict[str, str]  # fallback names and why
-    lonely: list[str]  # fallbacks that wrote nothing in the bake
-    rebakes: int  # full bakes rerun after a name stopped one
+    lonely: list[str]  # fallbacks that wrote nothing
 
 
 def trace_loads(
     model: torch.nn.Module, metas: dict[str, "ParamMeta"], targets: Targets
 ) -> Traced:
-    """Bake all names. Each name whose loader reads tensor values (or runs an
-    op that fails on meta) reruns the whole bake without it (at most one full
-    bake per such name)."""
-    reasons: dict[str, str] = {}
-    names = list(metas)
-    for rebakes in itertools.count():
-        try:
-            sink = _bake(model, metas, names, targets)
-        except Exception as e:
-            raise RuntimeError(f"load plan: tracing load_weights failed: {e!r}") from e
-        if not sink.stops:
-            break
-        for name, reason in sink.stops.items():
-            reasons.setdefault(name, reason)
-        names = [n for n in names if n not in reasons]
-
-    lonely = [n for n in sink.fallback if n not in sink.wrote]
+    """Bake all names (see ``_bake``). A name that stopped the loader falls
+    back; what it recorded before stopping is dropped."""
+    try:
+        sink = _bake(model, metas, targets)
+    except Exception as e:
+        raise RuntimeError(f"load plan: tracing load_weights failed: {e!r}") from e
+    reasons = dict(sink.stops)
+    for name in reasons:
+        sink.copies.pop(name, None)
+    lonely = [n for n in sink.fallback if n not in sink.wrote and n not in reasons]
     for name, reason in sink.fallback.items():
         reasons.setdefault(name, reason)
-    return Traced(sink.copies, reasons, lonely, rebakes)
+    return Traced(sink.copies, reasons, lonely)

@@ -127,9 +127,9 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
     targets = Targets(model)
     traced = trace_loads(model, metas, targets)
     if traced.lonely:
-        lonely = list(dict.fromkeys(traced.lonely))
+        lonely = traced.lonely
         raise RuntimeError(
-            f"load plan: {len(lonely)} names write nothing when loaded alone "
+            f"load plan: {len(lonely)} fallback names write nothing themselves "
             f"(e.g. {lonely[:3]}); their loaders combine several checkpoint "
             "tensors. Move the combine into process_weights_after_loading."
         )
@@ -142,7 +142,7 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
         if e.writes is not None
     }
     plan = LoadPlan(entries=entries, dests=dests)
-    _report(plan, time.perf_counter() - t0, traced.rebakes)
+    _report(plan, time.perf_counter() - t0)
     return plan
 
 
@@ -285,7 +285,7 @@ def _nbytes(entry: Entry) -> int:
     return sum(prod(b - a for a, b in box) for box in boxes) * entry.dtype.itemsize
 
 
-def _report(plan: LoadPlan, seconds: float, rebakes: int) -> None:
+def _report(plan: LoadPlan, seconds: float) -> None:
     """Every name at debug; fallbacks grouped by reason and a summary at info."""
     counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # kind: [n, bytes]
     fallbacks: dict[str, list[str]] = defaultdict(list)
@@ -304,8 +304,7 @@ def _report(plan: LoadPlan, seconds: float, rebakes: int) -> None:
         )
     logger.info(
         "load plan: %d names: %d direct (%.1f MiB), %d fallback (%.1f MiB), "
-        "%d not needed on this rank; traced in %.2f s (%d re-bakes after names "
-        "that stopped the bake)",
+        "%d not needed on this rank; traced in %.2f s",
         len(plan.entries),
         counts["direct"][0],
         counts["direct"][1] / (1 << 20),
@@ -313,5 +312,4 @@ def _report(plan: LoadPlan, seconds: float, rebakes: int) -> None:
         counts["fallback"][1] / (1 << 20),
         counts["unneeded"][0],
         seconds,
-        rebakes,
     )

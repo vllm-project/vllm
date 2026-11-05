@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Load plan on tiny CPU models.
 
-Invariant: planning (after ``start_reload``, as the NCCL engine does at the
-first update) changes no registration, attribute, address or layout, and no
+Invariant, for these models (whose loaders set no module state): planning
+(after ``start_reload``, as the NCCL engine does at the first update) changes
+no registration, attribute, address or layout, and no
 bytes outside checkpoint tensors, and a direct reload that copies each
 name's boxes into its ``get_dest`` tensors (and sends fallbacks in full through
 ``load_weights``) leaves every tensor byte for byte as a cold start on the same
@@ -576,7 +577,7 @@ def _two_names(loader_a):
     return make, {"a.weight": ((4,), BF16), "b.weight": ((4,), BF16)}
 
 
-def test_value_read_reruns_without_the_name():
+def test_value_read_falls_back_and_the_bake_continues():
     def loader(model, param, loaded):
         param.copy_(loaded if bool(loaded.sum() > 0) else -loaded)
 
@@ -593,8 +594,8 @@ def test_meta_failure_is_not_called_a_value_read():
 
     def loader(model, param, loaded):
         # A shape error. On the real path the loader swallows it; under the
-        # trace the op stops the bake, and the loader swallows that too: the
-        # stop is still recorded and the bake reruns without the name.
+        # trace the op stops the loader, and the loader swallows that too: the
+        # stop is still recorded and the name falls back.
         with contextlib.suppress(Exception):
             loaded + torch.ones(3)
         param.copy_(loaded)
@@ -632,16 +633,71 @@ class _Paired(_Toy):
 
 @pytest.mark.parametrize("keep_stash", [False, True])
 def test_paired_loader_is_refused(monkeypatch, keep_stash):
-    """Whether the loader keeps its stash or not, ``weight_a`` writes
-    nothing, so the plan is refused."""
+    """Whether the loader keeps its stash or not, the combined write is
+    labelled ``weight_a``, so ``weight_b`` writes nothing itself and the plan
+    is refused."""
     monkeypatch.setattr(_Paired, "keep_stash", keep_stash)
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
     model = _cold_start(_Paired, _checkpoint(shapes, 0))
     model.__dict__.pop("stash", None)
     start_reload(model)
-    with pytest.raises(RuntimeError, match="write nothing when loaded alone"):
+    with pytest.raises(RuntimeError, match=r"write nothing themselves.*weight_b"):
         plan_loads(model, _metadata(shapes))
     assert model.pending == []
+
+
+class _PairedWithValueRead(_Toy):
+    """``weight_a`` is stashed until ``weight_b`` arrives, and ``x``, which
+    arrives between them, reads its values."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer = _Layer()
+        self.layer.weight = _param(4)
+        self.x = _Layer()
+        self.x.weight = _param(4)
+        self.pending = []
+
+    def load_weights(self, weights):
+        for name, w in weights:
+            if name == "layer.weight_a":
+                self.pending.append(w)
+            elif name == "x.weight":
+                self.x.weight.copy_(w if bool(w.sum() > 0) else -w)
+            else:
+                self.layer.weight.copy_(self.pending.pop(0) + w)
+
+
+def test_a_stop_resumes_without_replaying_names():
+    """A stop resumes ``load_weights`` after the stopped name instead of
+    replaying the names before it, so the stash holds only this bake's
+    ``weight_a``: the pair is refused, not silently "not needed"."""
+    shapes = {
+        "layer.weight_a": ((4,), BF16),
+        "x.weight": ((4,), BF16),
+        "layer.weight_b": ((4,), BF16),
+    }
+    model = _cold_start(_PairedWithValueRead, _checkpoint(shapes, 0))
+    start_reload(model)
+    with pytest.raises(RuntimeError, match=r"write nothing themselves.*weight_b"):
+        plan_loads(model, _metadata(shapes))
+    assert model.pending == []
+
+
+def test_a_trace_kept_past_planning_fails_loudly(monkeypatch):
+    """A loader that keeps an incoming tensor on the module keeps a planning
+    trace; using it in a later ``load_weights`` raises instead of writing
+    nowhere."""
+    monkeypatch.setattr(_Paired, "keep_stash", True)
+    shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
+    model = _cold_start(_Paired, _checkpoint(shapes, 0))
+    model.__dict__.pop("stash", None)
+    start_reload(model)
+    with pytest.raises(RuntimeError):
+        plan_loads(model, _metadata(shapes))
+    weight_b = torch.ones(4, dtype=BF16)
+    with pytest.raises(RuntimeError, match="used after planning"):
+        model.load_weights([("layer.weight_b", weight_b)])
 
 
 def test_overlapping_writes_fall_back():
