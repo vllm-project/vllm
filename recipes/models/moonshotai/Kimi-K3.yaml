@@ -2126,13 +2126,7 @@ guide: |
   ### Prerequisites
 
   - Model paths, container devices, host networking and locked memory as in the [MoRIIO example](#amd-mi355x-disaggregated-prefill-and-decode) above.
-  - A worker image built from vLLM source with these open pull requests applied, and AITER v0.1.27 or newer:
-    - vllm-project/vllm#63730: online quantization of `routed_expert_down_proj`, prefill GEMMs on AITER tuned kernels, and `enable_rocm_aiter_gemm_warmup`.
-    - vllm-project/vllm#59124: the `ROCM_AITER_FLYDSL_FP8` MLA prefill backend.
-    - vllm-project/vllm#64969: DCP verify at 96 native heads.
-    - vllm-project/vllm#64994: up-project the MLA decode output before the DCP all-to-all merge (on by default with `--dcp-comm-backend a2a`).
-    - vllm-project/vllm#64975: `--evict-superseded-mamba-states` (prefill, concurrency 72 and 88).
-  - `mooncake-transfer-engine-rocm` 0.3.14 or newer (check with `pip show`). Older wheels can run out of HSA memory or crash after registering HIP memory on amdgpu-dkms older than 6.19.14 (kvcache-ai/Mooncake#4657).
+  - `WORKER_IMAGE` and `ROUTER_IMAGE` as in the MoRIIO example, with a worker nightly from 2026-11-05 or later; no source patches are needed. Its `mooncake-transfer-engine-rocm` must be 0.3.14 or newer (check with `pip show`): older wheels can run out of HSA memory or crash after registering HIP memory on amdgpu-dkms older than 6.19.14 (kvcache-ai/Mooncake#4657).
   - Store configurations (concurrency 16 and up) register about 1.8 TB of host memory per prefill node, which must be backed by transparent huge pages when the Store mounts: on the tested ionic NICs, registration fails with `EINVAL` once a memory region contains a 4 KiB page. The Store mounts after the weights load, and fastsafetensors reads the checkpoint through the page cache, so preparing memory before `vllm serve` is not enough; the load refills the cache and the end of the segment falls back to 4 KiB pages. vLLM has no step between the load and the mount for this. The tested runs used a worker hook right before the mount that drops the page cache of the model files and then compacts each NUMA node's free memory into huge pages, as [compact_huge_pages.py](https://github.com/ROCm/ATOM/blob/d27ac0b9a8a7b131774380444057c780f968bc85/.github/scripts/atomesh/compact_huge_pages.py) does.
   - `MC_GID_INDEX` and `MC_IB_TC` below are site values for RoCE; set yours. Allow router port 8000, worker port 6100, the Mooncake bootstrap port 8998 on the prefill node, and RDMA traffic.
 
@@ -2216,22 +2210,16 @@ guide: |
   case "$ROLE" in
     prefill)
       KV_ROLE=kv_producer GMU=$P_GMU BATCHED=8192 KV_B="kv_b_proj|"
-      if [ "$CONC" -ge 72 ]; then
-        BATCHED=12288 KV_B=
-        ARGS+=(--evict-superseded-mamba-states)
-      fi
+      [ "$CONC" -lt 72 ] || BATCHED=12288 KV_B=
       export HSA_NO_SCRATCH_RECLAIM=0
       COMPILATION="{\"mode\":3,\"cudagraph_mode\":\"NONE\",\"max_cudagraph_capture_size\":0,\"custom_ops\":$CUSTOM_OPS}"
-      QUANT="{\"targets\":{\"re:.*\\\\.self_attn\\\\.(in_proj_qkvgfab|f_b_proj|o_proj|fused_qkv_a_proj|q_b_proj|${KV_B}g_proj)\$\":\"fp8_per_channel\",\"re:.*\\\\.shared_experts\\\\.(gate_up_proj|down_proj)\$\":\"fp8_per_channel\",\"re:.*\\\\.mlp\\\\.(gate_up_proj|down_proj)\$\":\"fp8_per_channel\",\"re:.*\\\\.routed_expert_down_proj\$\":\"mxfp4\"}}"
-      ATTENTION='{"mla_prefill_backend":"ROCM_AITER_FLYDSL_FP8","use_prefill_query_quantization":true}'
-      ARGS+=(--kernel-config '{"enable_rocm_aiter_gemm_warmup":true}')
+      QUANT="{\"targets\":{\"re:.*\\\\.self_attn\\\\.(in_proj_qkvgfab|f_b_proj|o_proj|fused_qkv_a_proj|q_b_proj|${KV_B}g_proj)\$\":\"fp8_per_channel\",\"re:.*\\\\.shared_experts\\\\.(gate_up_proj|down_proj)\$\":\"fp8_per_channel\",\"re:.*\\\\.mlp\\\\.(gate_up_proj|down_proj)\$\":\"fp8_per_channel\"}}"
       ;;
     decode)
       KV_ROLE=kv_consumer GMU=0.90 BATCHED=512
       [ "$CONC" -lt 16 ] || export AITER_MLA_USE_OPUS=1
       COMPILATION="{\"mode\":3,\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"max_cudagraph_capture_size\":${CAPTURES##*,},\"cudagraph_capture_sizes\":[$CAPTURES],\"custom_ops\":$CUSTOM_OPS}"
       QUANT='{"linear":"fp8_per_channel","ignore":["lm_head","model.embed_tokens","*self_attn.[qkv]_conv1d*","*block_sparse_moe.experts*","*block_sparse_moe.routed_expert_*","*vision_tower*","*mm_projector*"]}'
-      ATTENTION='{"mla_prefill_backend":"ROCM_AITER_FA","use_prefill_query_quantization":true}'
       ;;
     *) echo "Role must be prefill or decode" >&2; exit 1 ;;
   esac
@@ -2258,7 +2246,7 @@ guide: |
     --kv-cache-dtype fp8 --mamba-ssm-cache-dtype "$SSM" \
     --block-size 128 \
     --attention-backend ROCM_AITER_MLA \
-    --attention-config "$ATTENTION" \
+    --attention-config '{"mla_prefill_backend":"ROCM_AITER_FA","use_prefill_query_quantization":true}' \
     --speculative-config "$SPEC" \
     --max-num-seqs "$SEQS" \
     --max-num-batched-tokens "$BATCHED" \
@@ -2293,8 +2281,8 @@ guide: |
   | 32, 48, 56 | 2 x C | 8,192 | 8 | 4 | BF16 | 209 GiB per rank | FP8 | 1-128, then every 5 to 510 |
   | 72, 88 | 2 x C | 12,288 | 8 | 4 | BF16 | 209 GiB per rank | BF16 | 1-128, then every 5 to 510 |
 
-  - Both roles quantize online. Prefill puts the attention projections, shared experts and dense MLPs in FP8 per channel and `routed_expert_down_proj` in MXFP4; decode puts all linear layers but the experts in FP8 per channel.
+  - Both roles quantize online. Prefill puts the attention projections, shared experts and dense MLPs in FP8 per channel; decode puts all linear layers but the experts in FP8 per channel.
   - From concurrency 16 the decode worker sets `AITER_MLA_USE_OPUS=1`, AITER's opt-in FP8 MLA decode kernel on gfx950.
   - Keep the SSM state dtype matched on both roles, since the state is transferred.
-  - Prefill uses 12,288 batched tokens at 72 and 88 because at 8,192 a step fits only one append of about 5,000 tokens. 16,384 failed AITER GEMM warmup on the tested build.
+  - Prefill uses 12,288 batched tokens at 72 and 88 because at 8,192 a step fits only one append of about 5,000 tokens.
   - Throughput runs replace block verification with synthetic acceptance (`"rejection_sample_method":"synthetic"`) at the [golden acceptance lengths](https://github.com/SemiAnalysisAI/InferenceX/blob/8737db4e8a1fae1f2e9cd03d04f2e03d6bf90145/inferencex-e2e/infx/golden_al_distribution/kimik3_dspark_probabilistic_sample_method_block_rejection_sample_method.yaml): 3.84 at K7 and 3.36 at K4.
