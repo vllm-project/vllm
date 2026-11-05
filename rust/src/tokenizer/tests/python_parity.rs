@@ -9,12 +9,13 @@
 //! them, in corpus order on one thread, so state carried from one prompt to the next (such as a
 //! cache keyed on a shared prefix) is exercised the way a server thread exercises it. Every
 //! `tokenizer.json` is also loaded with the corpus' truncation and padding blocks added, which
-//! the Python frontend ignores.
+//! the Python frontend ignores. The file is also loaded through the constructor `vllm-text`
+//! calls, whose outcome on every case must equal that of the backend it is expected to pick.
 //!
 //! A divergence present on main is listed in [`EXPECTED_DIVERGENCES`] with its cause and the
 //! exact Rust outcome. The test fails on any other difference from the Python ids, on a listed
-//! case whose outcome changes or matches Python again, and on an entry that names a tokenizer,
-//! backend or case the test doesn't check.
+//! case whose outcome changes or matches Python again, on an entry that names a tokenizer,
+//! backend or case the test doesn't check, and on a case listed twice for one backend.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -152,6 +153,11 @@ enum Variant {
 
 type LoadedBackend = (Backend, Variant, Box<dyn Tokenizer>);
 
+/// The backend `HuggingFaceTokenizer::new` is expected to pick for every `tokenizer.json` here.
+const DEFAULT_HF_BACKEND: Backend = Backend::Fastokens;
+/// The backend `TiktokenTokenizer::new` is expected to pick for `tiktoken.model`.
+const DEFAULT_TIKTOKEN_BACKEND: Backend = Backend::Riptoken;
+
 /// The result of one Rust encode, with the error rendered as its report.
 type Outcome = Result<Vec<u32>, String>;
 
@@ -275,9 +281,29 @@ const EXPECTED_DIVERGENCES: &[ExpectedDivergence] = &[
     },
 ];
 
+fn is_tokenizer_json(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "tokenizer.json")
+}
+
+/// Load `path` through the constructor `vllm-text` calls for its format, with the backend that
+/// constructor is expected to pick.
+fn load_production(path: &Path) -> (Backend, Box<dyn Tokenizer>) {
+    if is_tokenizer_json(path) {
+        (
+            DEFAULT_HF_BACKEND,
+            Box::new(HuggingFaceTokenizer::new(path).unwrap()),
+        )
+    } else {
+        (
+            DEFAULT_TIKTOKEN_BACKEND,
+            Box::new(TiktokenTokenizer::new(path).unwrap()),
+        )
+    }
+}
+
 /// Load every backend that can serve `path`, in each variant that applies to its format.
 fn load_backends(path: &Path, corpus: &Corpus, dir: &Path) -> Vec<LoadedBackend> {
-    if path.file_name().is_some_and(|name| name != "tokenizer.json") {
+    if !is_tokenizer_json(path) {
         return vec![
             (
                 Backend::Riptoken,
@@ -406,6 +432,45 @@ fn stale_entries(
     stale
 }
 
+/// Encode every case of the corpus in order.
+fn encode_corpus(tokenizer: &dyn Tokenizer, corpus: &Corpus, special_token: &str) -> Vec<Outcome> {
+    corpus
+        .cases
+        .iter()
+        .map(|case| {
+            tokenizer
+                .encode(&corpus.text(case, special_token), case.add_special_tokens)
+                .map_err(|error| error.to_report_string())
+        })
+        .collect()
+}
+
+/// Describe each case where the production tokenizer's outcome differs from that of the backend
+/// it is expected to pick, naming the backends it matches instead.
+fn check_production(
+    default: Backend,
+    production: &[Outcome],
+    published: &BTreeMap<Backend, Vec<Outcome>>,
+    corpus: &Corpus,
+) -> Vec<String> {
+    let expected = &published[&default];
+    let mut failures = Vec::new();
+    for (index, case) in corpus.cases.iter().enumerate() {
+        if production[index] != expected[index] {
+            let matching: Vec<_> = published
+                .iter()
+                .filter(|(_, outcomes)| outcomes[index] == production[index])
+                .map(|(backend, _)| *backend)
+                .collect();
+            failures.push(format!(
+                "production {}: differs from {default:?}, the expected default; matches {matching:?}",
+                case.name
+            ));
+        }
+    }
+    failures
+}
+
 async fn check(key: &str) {
     let corpus = Corpus::load();
     let snapshot = Snapshot::load(key, &corpus);
@@ -416,22 +481,26 @@ async fn check(key: &str) {
         EXPECTED_DIVERGENCES.iter().filter(|entry| entry.tokenizer == key).collect();
 
     let mut failures = stale_entries(&entries, &backends, &corpus);
+    let mut published = BTreeMap::new();
     for (backend, variant, tokenizer) in &backends {
-        for case in &corpus.cases {
-            let text = corpus.text(case, &snapshot.special_token);
-            let rust = tokenizer
-                .encode(&text, case.add_special_tokens)
-                .map_err(|error| error.to_report_string());
+        let outcomes = encode_corpus(tokenizer.as_ref(), &corpus, &snapshot.special_token);
+        for (case, rust) in corpus.cases.iter().zip(&outcomes) {
             let listed = entries
                 .iter()
                 .filter(|entry| entry.backend == *backend)
                 .find_map(|entry| entry.observed(&case.name).map(|observed| (*entry, observed)));
             let python = snapshot.python_ids(key, &case.name);
-            if let Some(failure) = check_outcome(listed, &rust, python) {
+            if let Some(failure) = check_outcome(listed, rust, python) {
                 failures.push(format!("{backend:?} {variant:?} {}: {failure}", case.name));
             }
         }
+        if *variant == Variant::AsPublished {
+            published.insert(*backend, outcomes);
+        }
     }
+    let (default, production) = load_production(&path);
+    let production = encode_corpus(production.as_ref(), &corpus, &snapshot.special_token);
+    failures.extend(check_production(default, &production, &published, &corpus));
     assert!(
         failures.is_empty(),
         "{key} ({}@{}) breaks its contract with the Python frontend:\n{}",
@@ -470,7 +539,9 @@ python_parity_tests! {
 }
 
 #[test]
-fn expected_divergences_name_tested_tokenizers() {
+fn expected_divergences_name_tested_tokenizers_once() {
+    let mut listed = BTreeMap::new();
+    let mut duplicates = Vec::new();
     for entry in EXPECTED_DIVERGENCES {
         assert!(
             TOKENIZER_KEYS.contains(&entry.tokenizer),
@@ -478,5 +549,16 @@ fn expected_divergences_name_tested_tokenizers() {
             entry.name,
             entry.tokenizer
         );
+        for (case, _) in entry.cases {
+            let key = (entry.tokenizer, entry.backend, *case);
+            if let Some(first) = listed.insert(key, entry.name) {
+                duplicates.push(format!(
+                    "{} {:?} {case} is listed in {first} and again in {}",
+                    entry.tokenizer, entry.backend, entry.name
+                ));
+            }
+        }
     }
+    // `check` uses the first entry and case that match, so a duplicate would never be checked.
+    assert!(duplicates.is_empty(), "{}", duplicates.join("\n"));
 }

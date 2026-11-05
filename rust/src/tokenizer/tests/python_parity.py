@@ -28,6 +28,7 @@ import tokenizers
 import transformers
 import yaml
 
+from vllm import envs
 from vllm.renderers.params import TokenizeParams
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils.repo_utils import get_non_weight_snapshot_path
@@ -155,9 +156,16 @@ def check_overrides_ignored(
     padding, which the Rust test relies on to reuse the same ids."""
     if case.files[0] != "tokenizer.json":
         return
+    source = Path(get_non_weight_snapshot_path(case.model, case.revision))
+    # The helper returns the repo id unchanged when the download fails.
+    if not source.is_dir():
+        raise RuntimeError(
+            f"{case.key}: could not download the non-weight files of "
+            f"{case.model}@{case.revision}"
+        )
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp) / "model"
-        shutil.copytree(get_non_weight_snapshot_path(case.model, case.revision), copy)
+        shutil.copytree(source, copy)
         target = copy / "tokenizer.json"
         tokenizer_json = json.loads(target.read_text())
         tokenizer_json.update(corpus["tokenizer_json_overrides"])
@@ -209,6 +217,11 @@ def generate(case: TokenizerCase, corpus: dict, corpus_sha256: str) -> None:
 
 
 def main(keys: list[str]) -> int:
+    if envs.VLLM_USE_FASTOKENS:
+        # `get_tokenizer` would then patch transformers with fastokens, so the
+        # snapshots would hold fastokens' ids instead of the default frontend's.
+        print("unset VLLM_USE_FASTOKENS to generate the snapshots", file=sys.stderr)
+        return 2
     corpus_bytes = (SNAPSHOT_DIR / "corpus.json").read_bytes()
     corpus = json.loads(corpus_bytes)
     corpus_sha256 = hashlib.sha256(corpus_bytes).hexdigest()
