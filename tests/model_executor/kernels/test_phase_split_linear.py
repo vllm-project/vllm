@@ -370,6 +370,8 @@ def test_phase_split_without_phase_returns_kernel() -> None:
         ("data_parallel", "does not support data parallelism"),
         ("elastic_ep", "does not support data parallelism"),
         ("encoder_cudagraphs", "encoder CUDA graphs"),
+        ("prompt_embeds", "client-supplied prompt or multimodal embeddings"),
+        ("mm_embeds", "client-supplied prompt or multimodal embeddings"),
     ],
 )
 def test_phase_split_rejects_unsafe_configs(
@@ -384,8 +386,16 @@ def test_phase_split_rejects_unsafe_configs(
         vllm_config.parallel_config.data_parallel_size = 2
     elif setting == "elastic_ep":
         vllm_config.parallel_config.enable_elastic_ep = True
-    else:
+    elif setting == "encoder_cudagraphs":
         vllm_config.compilation_config.cudagraph_mm_encoder = True
+    else:
+        # One request's embeddings would set the scale of every request.
+        vllm_config.model_config = types.SimpleNamespace(
+            enable_prompt_embeds=setting == "prompt_embeds",
+            multimodal_config=types.SimpleNamespace(
+                enable_mm_embeds=setting == "mm_embeds"
+            ),
+        )
     with pytest.raises(ValueError, match=match) as error:
         maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
     assert "quantization_config.linear.phase" in str(error.value)

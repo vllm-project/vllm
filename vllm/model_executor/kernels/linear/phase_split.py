@@ -152,6 +152,17 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
         raise ValueError(
             f"{name} does not support data parallelism or encoder CUDA graphs"
         )
+    # One request's activations set the scale for every request in the step,
+    # so clients must not supply them directly.
+    model_config = config.model_config
+    mm_config = getattr(model_config, "multimodal_config", None)
+    if getattr(model_config, "enable_prompt_embeds", False) or getattr(
+        mm_config, "enable_mm_embeds", False
+    ):
+        raise ValueError(
+            f"{name} with NVFP4 does not support client-supplied prompt or "
+            "multimodal embeddings"
+        )
 
 
 def padding_rows(num_rows: int) -> torch.Tensor | None:
