@@ -161,6 +161,9 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("media_io_kwargs", json!({"image": {}})),
         ("mm_processor_kwargs", json!({})),
         ("enable_response_messages", json!(true)),
+        ("prompt_cache_retention", json!("1w")),
+        ("prompt_cache_options", json!({"ttl": "1h"})),
+        ("prompt_cache_options", json!({"mode": "bogus"})),
     ] {
         let response = responses_call(&app, json!({"input": "hello", field: value})).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
@@ -187,6 +190,93 @@ async fn responses_accepts_codex_controls_and_metadata_boundaries() {
     engine_task.await.expect("mock engine task");
     assert_eq!(response["metadata"], json!(metadata));
     assert_eq!(response["service_tier"], "default");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_echoes_prompt_cache_and_safety_fields() {
+    /// Collect the four echoed keys, failing if any is missing.
+    fn echoed(response: &serde_json::Value) -> serde_json::Value {
+        let keys = [
+            "prompt_cache_key",
+            "prompt_cache_options",
+            "prompt_cache_retention",
+            "safety_identifier",
+        ];
+        keys.into_iter()
+            .map(|key| {
+                let value = response.get(key).unwrap_or_else(|| panic!("missing `{key}`"));
+                (key.to_string(), value.clone())
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
+
+    // Absent fields are echoed as `null`.
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(&app, json!({"input": "hello"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        echoed(&response),
+        json!({
+            "prompt_cache_key": null,
+            "prompt_cache_options": null,
+            "prompt_cache_retention": null,
+            "safety_identifier": null,
+        })
+    );
+
+    // Defaults are applied to the echoed options, the request-only
+    // `prewarm` is dropped, and the legacy `in-memory` spelling is echoed in
+    // its current form, on every lifecycle event of the stream.
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = responses_call(
+        &app,
+        json!({
+            "input": "hello",
+            "stream": true,
+            "prompt_cache_key": "tenant-a",
+            "prompt_cache_options": {"mode": "explicit", "prewarm": true},
+            "prompt_cache_retention": "in-memory",
+            "safety_identifier": "user-1234",
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let events = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+        .into_iter()
+        .filter(|event| event.get("response").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.iter().map(|event| event["type"].as_str().unwrap()).collect::<Vec<_>>(),
+        [
+            "response.created",
+            "response.in_progress",
+            "response.completed"
+        ]
+    );
+    for event in &events {
+        assert_eq!(
+            echoed(&event["response"]),
+            json!({
+                "prompt_cache_key": "tenant-a",
+                "prompt_cache_options": {
+                    "mode": "explicit",
+                    "ttl": "30m",
+                    "comparison_response_id": null,
+                },
+                "prompt_cache_retention": "in_memory",
+                "safety_identifier": "user-1234",
+            }),
+            "{}",
+            event["type"]
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
