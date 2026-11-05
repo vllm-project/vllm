@@ -113,7 +113,7 @@ class VmmPeerMappings:
         # Owner zeroing must complete before any producer can write through peers.
         torch.accelerator.synchronize(self.device)
         local_fds = []
-        error = None
+        error: Exception | None = None
         try:
             for handle, _, _ in new_chunks:
                 local_fds.append(self.driver.export_fd(handle))

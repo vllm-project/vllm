@@ -12,7 +12,8 @@ import torch.multiprocessing as mp
 
 def _worker(rank, port, world_size):
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
+    torch.manual_seed(1234 + rank)
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
     from vllm.utils.extensible_tensor import (
         ExtensibleTensor,
@@ -42,7 +43,7 @@ def _worker(rank, port, world_size):
                 alias[offset + rank * 16 : offset + (rank + 1) * 16].fill_(rank + 1)
 
     write()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     dist.barrier()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -54,7 +55,7 @@ def _worker(rank, port, world_size):
             owner.release_physical()
             owner.resize_segments_([granule + 128, 2 * granule + 128], zero_new=True)
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         dist.barrier()
         expected = torch.arange(1, world_size + 1, device="cuda", dtype=torch.uint8)
         expected = expected.repeat_interleave(16)
@@ -70,7 +71,9 @@ def _worker(rank, port, world_size):
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-@pytest.mark.skipif(torch.cuda.device_count() < 4, reason="requires four CUDA GPUs")
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="requires four CUDA GPUs"
+)
 def test_padded_unequal_peer_segments(world_size):
     from vllm.utils.network_utils import get_open_port
 
