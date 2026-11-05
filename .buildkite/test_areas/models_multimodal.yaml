@@ -2,6 +2,22 @@ group: Models - Multimodal
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (4xH200) Ling VL YaRN and image DP"
+  key: bailing-vl-yarn-image-dp
+  timeout_in_minutes: 60
+  device: h200
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/model_executor/models/bailing_moe_v3.py
+  - vllm/model_executor/models/bailing_moe_v3_vl.py
+  - vllm/model_executor/models/qwen3_vl.py
+  - vllm/model_executor/models/vision.py
+  - vllm/model_executor/layers/rotary_embedding/
+  - vllm/transformers_utils/configs/bailing_moe_v3_vl.py
+  - tests/models/multimodal/generation/test_bailing_moe_v3_vl.py
+  commands:
+  - pytest -v -s models/multimodal/generation/test_bailing_moe_v3_vl.py
+
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 1: qwen2"
   key: multi-modal-models-standard-1-qwen2
   automatic_shard: true

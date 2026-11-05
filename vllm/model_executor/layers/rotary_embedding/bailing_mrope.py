@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -121,7 +123,8 @@ def _triton_bailing_mrope_forward(
         temporal_position,
     )
     cache_offsets = (
-        selected_position * cache_stride_position + frequency_offsets * cache_stride_dim
+        tl.abs(selected_position) * cache_stride_position
+        + frequency_offsets * cache_stride_dim
     )
     cos_row = tl.load(
         cos_sin_cache_ptr + cache_offsets,
@@ -133,6 +136,7 @@ def _triton_bailing_mrope_forward(
         mask=frequency_mask,
         other=0.0,
     ).to(tl.float32)
+    sin_row = tl.where(selected_position < 0, -sin_row, sin_row)
 
     q_head_offsets = tl.arange(0, pad_n_qh)[:, None]
     k_head_offsets = tl.arange(0, pad_n_kh)[:, None]
@@ -226,6 +230,9 @@ def triton_bailing_mrope(
         pad_half_rotary_dim,
         spatial_size,
         num_warps=4,
+        # FMA can bypass the product casts above and skip the native path's
+        # intermediate FP16/BF16 rounding.
+        enable_fp_fusion=False,
     )
     return query, key
 
@@ -242,10 +249,13 @@ class BailingMRotaryEmbedding(MRotaryEmbedding):
         is_neox_style: bool,
         dtype: torch.dtype,
         mrope_section: list[int],
+        **yarn_kwargs: Any,
     ) -> None:
         self.spatial_size = _validate_bailing_mrope_config(
             head_size, rotary_dim, mrope_section
         )
+        # Image-only Bailing positions are bounded by the token count, including
+        # abs(centered H/W). Keep the original length for the shared YaRN math.
         super().__init__(
             head_size,
             rotary_dim,
@@ -254,6 +264,8 @@ class BailingMRotaryEmbedding(MRotaryEmbedding):
             is_neox_style,
             dtype,
             mrope_section=mrope_section,
+            positions_factor=1,
+            **yarn_kwargs,
         )
 
     def select_cos_sin(
@@ -264,8 +276,10 @@ class BailingMRotaryEmbedding(MRotaryEmbedding):
         _validate_bailing_positions(positions)
         if cos_sin_cache is None:
             cos_sin_cache = self.cos_sin_cache
-        cos_sin = cos_sin_cache[positions.to(torch.long)]
+        # Centered spatial coordinates can be negative: cos is even, sin is odd.
+        cos_sin = cos_sin_cache[positions.to(torch.long).abs()]
         cos, sin = cos_sin.chunk(2, dim=-1)
+        sin = torch.where((positions < 0).unsqueeze(-1), -sin, sin)
         if positions.ndim == 1:
             return cos, sin
 
