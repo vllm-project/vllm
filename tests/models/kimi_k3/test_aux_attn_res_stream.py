@@ -157,25 +157,23 @@ def test_last_layer_on_the_final_rank_uses_the_output_aggregation(
     assert recorder[0].kwargs["num_blocks"] == 99
 
 
-def test_last_layer_of_a_non_final_stage_falls_back(recorder, monkeypatch):
-    """The consumer lives on the next rank and the output aggregation only
-    exists on the last one, so there is nothing here to mix against.
-
-    This is the case that would otherwise reach for weights this rank never
-    constructs. The forward guard is `layer_idx + 1 < end_layer`, where
-    `end_layer` is the rank's own exclusive bound from `get_pp_indices`, so a
-    `PPMissingLayer` is unreachable by construction -- the fallback below is
-    what makes that true rather than merely likely.
-    """
+def test_aux_layer_at_non_final_pp_boundary_is_rejected(monkeypatch):
+    model = k3_model.KimiLinearModel.__new__(k3_model.KimiLinearModel)
+    torch.nn.Module.__init__(model)
+    model.use_attn_res = True
+    model.end_layer = 72
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.model_parallel_is_initialized", lambda: False
+    )
     _set_last_rank(monkeypatch, False)
-    prefix_sum = torch.tensor([3.0, 4.0])
-
-    got = _call(
-        _stub_model(enabled=True), END_LAYER - 1, prefix_sum, None, torch.zeros(2)
+    monkeypatch.setattr(
+        k3_model.KimiLinearModel,
+        "_aux_attn_res_stream",
+        property(lambda self: True),
     )
 
-    torch.testing.assert_close(got, prefix_sum)
-    assert not recorder, "no weights exist on this rank to mix against"
+    with pytest.raises(ValueError, match="Auxiliary layer 72"):
+        model._set_aux_hidden_state_layers((3, 24, 48, 72, 90))
 
 
 def test_pending_mlp_output_is_folded_in_rather_than_passed_as_delta(

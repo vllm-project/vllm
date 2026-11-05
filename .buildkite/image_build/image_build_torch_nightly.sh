@@ -49,9 +49,20 @@ echo "Image not found, proceeding with build..."
 # Nightly CI uses CUDA 13.0 while regular CI stays on CUDA 12.9
 NIGHTLY_CUDA_VERSION="13.0.2"
 NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
-NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu22.04"
+# Must track ARG UBUNTU_VERSION in docker/Dockerfile. The nightly lane exists to
+# run the normal pipeline against nightly torch, so it has to differ from the
+# regular image in torch only -- not in the OS underneath it. This was pinned to
+# 22.04 while everything else moved to 24.04, and the runtime dependency list in
+# tools/install_snapshot_runtime.sh is 24.04-only (libgnutls30t64 is the 64-bit
+# time_t rename and does not exist on jammy), so the nightly build failed with
+# "E: Unable to locate package libgnutls30t64" while regular CI stayed green on
+# a cached layer.
+NIGHTLY_UBUNTU_VERSION="24.04"
+NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu${NIGHTLY_UBUNTU_VERSION}"
 
 echo "--- :docker: Building torch nightly image (CUDA ${NIGHTLY_CUDA_VERSION})"
+# Provenance labels match the bake `_labels` target in docker/docker-bake.hcl;
+# the initialized-snapshot E2E refuses images whose commit labels differ.
 docker buildx build --file docker/Dockerfile \
   --build-arg max_jobs=16 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
@@ -61,6 +72,10 @@ docker buildx build --file docker/Dockerfile \
   --build-arg BUILD_BASE_IMAGE="${NIGHTLY_BUILD_BASE_IMAGE}" \
   --build-arg FINAL_BASE_IMAGE="${NIGHTLY_FINAL_BASE_IMAGE}" \
   --build-arg torch_cuda_arch_list="8.0 8.9 9.0 10.0 12.0" \
+  --label "org.opencontainers.image.revision=${BUILDKITE_COMMIT}" \
+  --label "ai.vllm.build.commit=${BUILDKITE_COMMIT}" \
+  --label "ai.vllm.build.pipeline=${BUILDKITE_PIPELINE_SLUG:-local}" \
+  --label "ai.vllm.build.url=${BUILDKITE_BUILD_URL:-}" \
   --tag "$IMAGE_TAG" \
   --push \
   --target test \

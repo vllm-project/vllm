@@ -70,12 +70,14 @@ def main(
 
     packed_w13 = cpu_prepack_moe_weight(w13, isa)
     packed_w2 = cpu_prepack_moe_weight(w2, isa)
+    output = torch.empty_like(input_tensor)
 
     def run_benchmark(iters: int) -> list[float]:
         times = []
         for _ in range(iters):
             start_time = time.perf_counter_ns()
-            _ = cpu_fused_moe(
+            cpu_fused_moe(
+                output,
                 input_tensor,
                 packed_w13,
                 packed_w2,

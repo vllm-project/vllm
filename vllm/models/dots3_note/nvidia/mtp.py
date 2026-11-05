@@ -9,9 +9,12 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+)
+from vllm.model_executor.layers.fused_embed_norm import (
+    fused_embed_eh_norm,
+    has_full_vocab_on_rank,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -25,7 +28,7 @@ from vllm.models.deepseek_v32.nvidia.mtp import (
     DeepseekV32MultiTokenPredictor,
 )
 
-from .model import Dots3NoteDecoderLayer
+from .model import Dots3NoteDecoderLayer, _pad_dense_mlp_weight
 
 
 class Dots3NoteMultiTokenPredictorLayer(nn.Module):
@@ -59,18 +62,30 @@ class Dots3NoteMultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        embed_table: torch.Tensor | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        del input_ids, spec_step_index
-        assert inputs_embeds is not None
-        eh_input = fused_eh_norm(
-            positions,
-            inputs_embeds,
-            previous_hidden_states,
-            self.enorm.weight,
-            self.hnorm.weight,
-            self.enorm.variance_epsilon,
-        )
+        del spec_step_index
+        if embed_table is not None:
+            eh_input = fused_embed_eh_norm(
+                positions,
+                input_ids,
+                embed_table,
+                previous_hidden_states,
+                self.enorm.weight,
+                self.hnorm.weight,
+                self.enorm.variance_epsilon,
+            )
+        else:
+            assert inputs_embeds is not None
+            eh_input = fused_eh_norm(
+                positions,
+                inputs_embeds,
+                previous_hidden_states,
+                self.enorm.weight,
+                self.hnorm.weight,
+                self.enorm.variance_epsilon,
+            )
         hidden_states = self.eh_proj(eh_input)[0]
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
@@ -108,6 +123,7 @@ class Dots3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
             config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
+        self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
         self.register_buffer(
             "max_token_id",
             torch.tensor(config.vocab_size - 1, dtype=torch.int64),
@@ -128,7 +144,7 @@ class Dots3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
-            inputs_embeds = self.embed_input_ids(input_ids)
+            input_ids = torch.minimum(input_ids, self.max_token_id)
         return super().forward(
             input_ids,
             positions,
@@ -151,27 +167,6 @@ class Dots3NoteMTP(DeepseekV32MTP):
         )
         self.set_moe_parameters()
 
-    def _pad_dense_mlp_weight(
-        self, name: str, loaded_weight: torch.Tensor
-    ) -> torch.Tensor:
-        block_size = getattr(self.quant_config, "weight_block_size", None)
-        if block_size is None or ".mlp.experts." in name:
-            return loaded_weight
-        if not any(
-            proj_name in name
-            for proj_name in (".gate_proj.", ".up_proj.", ".down_proj.")
-        ):
-            return loaded_weight
-        dim = 1 if ".down_proj." in name else 0
-        block_step = 1 if name.endswith("weight_scale_inv") else block_size[0]
-        multiple = get_tensor_model_parallel_world_size() * block_step
-        pad = (-loaded_weight.shape[dim]) % multiple
-        if pad == 0:
-            return loaded_weight
-        pad_shape = list(loaded_weight.shape)
-        pad_shape[dim] = pad
-        return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
-
     def _adapt_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -183,7 +178,14 @@ class Dots3NoteMTP(DeepseekV32MTP):
                     f"model.layers.{mtp_layer}.embed_tokens.",
                     1,
                 )
-            yield name, self._pad_dense_mlp_weight(name, weight)
+            yield (
+                name,
+                _pad_dense_mlp_weight(
+                    name,
+                    weight,
+                    getattr(self.quant_config, "weight_block_size", None),
+                ),
+            )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         return super().load_weights(self._adapt_weights(weights))

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference
+"""This example shows how to use vLLM for running offline inference
 with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
@@ -252,6 +251,26 @@ def run_midashenglm(question: str, audio_count: int):
     )
 
 
+# Ming3-ASR
+def run_ming_v3_asr(question: str, audio_count: int) -> ModelRequestData:
+    from vllm.model_executor.models.ming_v3_asr import ASR_INSTRUCTION
+
+    assert audio_count == 1, "Ming3-ASR only supports single audio input per prompt"
+    engine_args = EngineArgs(
+        model="inclusionAI/Ming-3.0-asr-tiny",
+        trust_remote_code=True,
+        dtype="bfloat16",
+        max_model_len=8192,
+        max_num_seqs=4,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=ASR_INSTRUCTION + "<audio><audioPatch></audio>",
+    )
+
+
 # MiniCPM-O
 def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "openbmb/MiniCPM-o-2_6"
@@ -286,8 +305,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
 
 # Phi-4-multimodal-instruct
 def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process audio inputs.
     """
     model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
@@ -505,6 +523,7 @@ model_example_map = {
     "granite_speech": run_granite_speech,
     "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
+    "ming_v3_asr": run_ming_v3_asr,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,

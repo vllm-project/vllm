@@ -27,6 +27,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.kv_cache_interface import (
@@ -36,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.metadata import (
@@ -74,7 +78,9 @@ class FakeNixlWrapper:
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in blocks_data]
 
-    def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
+    def prep_xfer_dlist(
+        self, agent_name: str, descs, mem_type: str | None = None
+    ) -> int:
         return uuid.uuid4().int
 
     def get_agent_metadata(self) -> bytes:
@@ -213,7 +219,7 @@ def _multi_connector_config(swa_enabled: bool = False):
 def test_nixl_wins_load_over_cpu_offload():
     """When NixlConnector (index 0) has matched tokens from a remote prefill, it should
     win the load: Nixl metadata tracks the recv while CPU offload metadata has no load
-     scheduled."""
+    scheduled."""
     vllm_config, kv_cache_config = _multi_connector_config()
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
     mc = scheduler.connector
@@ -227,8 +233,14 @@ def test_nixl_wins_load_over_cpu_offload():
     )
     scheduler.add_request(request)
     sched_out = scheduler.schedule()
+    # The remote-prefill load is async, so the step has no sync KV loads
+    # and the worker will start the load after the forward.
+    assert not sched_out.has_sync_kv_loads
 
     assert mc._requests_to_connector[request.request_id] == 0
+    assert mc.get_external_cache_hit_sources(request, 2 * BLOCK_SIZE) == {
+        CacheHitSource.P2P: 2 * BLOCK_SIZE
+    }
 
     meta = sched_out.kv_connector_metadata
     assert isinstance(meta, MultiKVConnectorMetadata)
@@ -275,6 +287,8 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     assert cpu_meta.store_event >= 0, "Expected a store event on the second schedule"
 
     cpu_connector = mc._connectors[1]
+    assert isinstance(cpu_connector, SimpleCPUOffloadConnector)
+    assert cpu_connector.scheduler_manager is not None
     worker_meta = SimpleCPUOffloadWorkerMetadata(
         completed_store_events={
             cpu_meta.store_event: cpu_connector.scheduler_manager._expected_worker_count
@@ -299,6 +313,9 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     assert hit_tokens is not None and hit_tokens > 0
     assert mc._requests_to_connector[req2.request_id] == 1
     assert is_async is True
+    assert mc.get_external_cache_hit_sources(req2, hit_tokens) == {
+        CacheHitSource.HOST: hit_tokens
+    }
 
 
 @pytest.mark.parametrize("swa_enabled", [False, True], ids=["fa_only", "fa_sw"])

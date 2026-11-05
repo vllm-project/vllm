@@ -259,10 +259,7 @@ class MMEncoderAttention(CustomOp):
         sequence_lengths = add_padding_to_seqlens(
             sequence_lengths, len(sequence_lengths), 0
         )
-        sequence_lengths = torch.from_numpy(sequence_lengths).to(
-            device, non_blocking=True
-        )
-        return sequence_lengths
+        return async_tensor_h2d(sequence_lengths, device=device)
 
     @classmethod
     def maybe_recompute_cu_seqlens(
@@ -325,14 +322,14 @@ class MMEncoderAttention(CustomOp):
         num_kv_heads: int | None = None,
         prefix: str = "",
     ) -> None:
-        """
-        Args:
-            num_heads: number of attention heads per partition.
-            head_size: hidden_size per attention head.
-            scale: scale factor.
-            num_kv_heads: number of kv heads.
-            prefix: This has no effect, it is only here to make it easier to
-                    swap between Attention and MultiHeadAttention
+        """Args:
+        num_heads: number of attention heads per partition.
+        head_size: hidden_size per attention head.
+        scale: scale factor.
+        num_kv_heads: number of kv heads.
+        prefix: This has no effect, it is only here to make it easier to
+                swap between Attention and MultiHeadAttention
+
         """
         super().__init__()
 
@@ -459,13 +456,8 @@ class MMEncoderAttention(CustomOp):
             _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
             _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        """Populate FP8 scale buffers after weights are loaded.
-
-        ``act_dtype`` matches the signature used by :class:`Attention` and
-        :class:`MLAAttention` for the loader auto-scan but is unused:
-        FP8 scales are always float32.
-        """
+    def process_weights_after_loading(self) -> None:
+        """Populate FP8 scale buffers (always float32) after weights are loaded."""
         if not self.fp8_enabled:
             return
 
@@ -520,8 +512,7 @@ class MMEncoderAttention(CustomOp):
         q_len: int,
         kv_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Reshape query, key, value to 4D tensors:
+        """Reshape query, key, value to 4D tensors:
         (batch_size, seq_len, num_heads, head_size)
         """
         query = query.view(bsz, q_len, self.num_heads, self.head_size)

@@ -6,7 +6,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -303,7 +303,11 @@ def flash_attn_supports_kv_cache_dtype(
         kv_cache_block_size=kv_cache_block_size,
         supports_fa4_hd256=supports_fa4_hd256,
     )
-    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+    is_sm90 = current_platform.is_device_capability_family(90)
+    sm90_fp8_kv_supported = fa_version == 3 or (
+        fa_version == 4 and head_size in (None, 512)
+    )
+    return (sm90_fp8_kv_supported and is_sm90) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
     )
 
@@ -336,6 +340,8 @@ def flash_attn_supports_mla():
 
         except (ImportError, AssertionError):
             pass
+    elif current_platform.is_xpu():
+        return True
     return False
 
 
@@ -357,6 +363,7 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     Returns:
         bool: True if a working flash_attn_varlen_func implementation is available.
+
     """
     if current_platform.is_cuda() or current_platform.is_xpu():
         # CUDA and XPU always have flash_attn_varlen_func available

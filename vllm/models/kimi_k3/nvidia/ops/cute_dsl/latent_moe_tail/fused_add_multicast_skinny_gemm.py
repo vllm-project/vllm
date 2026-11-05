@@ -14,14 +14,15 @@ import torch
 from cutlass import BFloat16, Float32, Int64, const_expr
 from cutlass.cute.runtime import from_dlpack
 
-from .primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     CUDAGraphCompatibleWrapper,
     bf16x2_to_u32,
     bf16x4_to_packed_u32x2,
     bf16x8_to_packed_u32x4,
-    sanitize_negative_zero,
+    fma_f32_bf16,
     sanitize_negative_zero_u32,
     sanitize_negative_zero_u32x2,
+    sanitize_negative_zero_u32x4,
     store_global_u32,
     store_global_u32x2,
     store_global_u32x4,
@@ -38,6 +39,13 @@ class SkinnyConfig:
 
 
 def config_for_m(num_rows: int, shard_dim: int = 896) -> SkinnyConfig:
+    if num_rows <= 5 and shard_dim in (448, 896):
+        return SkinnyConfig(
+            block_size=224,
+            outputs_per_block=2,
+            k_unroll=1,
+            vector_width=16,
+        )
     if shard_dim == 448:
         if num_rows >= 6:
             return SkinnyConfig(
@@ -59,7 +67,7 @@ def config_for_m(num_rows: int, shard_dim: int = 896) -> SkinnyConfig:
 def _as_cute(tensor: torch.Tensor):
     return from_dlpack(
         CUDAGraphCompatibleWrapper(tensor.detach()),
-        assumed_align=16,
+        assumed_align=32,
     )
 
 
@@ -194,9 +202,11 @@ class FusedAddMulticastSkinnyGemm:
         for vi in cutlass.range_constexpr(vector_width):
             for mi in cutlass.range_constexpr(num_rows):
                 for ni in cutlass.range_constexpr(outputs_per_block):
-                    acc[mi, ni] = acc[mi, ni] + a_regs[mi, vi].to(Float32) * b_regs[
-                        ni, vi
-                    ].to(Float32)
+                    acc[mi, ni] = fma_f32_bf16(
+                        a_regs[mi, vi],
+                        b_regs[ni, vi],
+                        acc[mi, ni],
+                    )
 
         for k_tile in cutlass.range(1, num_k_tiles, unroll=self.k_unroll):
             for mi in cutlass.range_constexpr(num_rows):
@@ -211,9 +221,11 @@ class FusedAddMulticastSkinnyGemm:
             for vi in cutlass.range_constexpr(vector_width):
                 for mi in cutlass.range_constexpr(num_rows):
                     for ni in cutlass.range_constexpr(outputs_per_block):
-                        acc[mi, ni] = acc[mi, ni] + a_regs[mi, vi].to(Float32) * b_regs[
-                            ni, vi
-                        ].to(Float32)
+                        acc[mi, ni] = fma_f32_bf16(
+                            a_regs[mi, vi],
+                            b_regs[ni, vi],
+                            acc[mi, ni],
+                        )
 
         for mi in cutlass.range_constexpr(num_rows):
             for ni in cutlass.range_constexpr(outputs_per_block):
@@ -271,7 +283,7 @@ class FusedAddMulticastSkinnyGemm:
                         packed,
                     )
                 else:
-                    packed = sanitize_negative_zero(
+                    packed = sanitize_negative_zero_u32x4(
                         bf16x8_to_packed_u32x4(fused.load())
                     )
                     store_global_u32x4(
@@ -315,19 +327,19 @@ def compile_kernel(
         BFloat16,
         (num_rows, latent_dim),
         stride=(latent_dim, 1),
-        assumed_align=16,
+        assumed_align=32,
     )
     b = make_fake_tensor(
         BFloat16,
         (shard_dim, latent_dim),
         stride=(latent_dim, 1),
-        assumed_align=16,
+        assumed_align=32,
     )
     shared = make_fake_tensor(
         BFloat16,
         (num_rows, shard_dim),
         stride=(hidden_dim, 1),
-        assumed_align=16,
+        assumed_align=32,
     )
     compiled = cute.compile(
         FusedAddMulticastSkinnyGemm(
@@ -424,6 +436,8 @@ class FusedAddMulticastSkinnyGemmKernel:
             or not mailbox.is_contiguous()
         ):
             raise ValueError("skinny up-projection inputs have unsupported strides")
+        if any(tensor.data_ptr() % 32 for tensor in (latent, weight, shared_shard)):
+            raise ValueError("skinny up-projection inputs must be 32-byte aligned")
         if mailbox.shape[1] < self.num_rows:
             raise ValueError("mailbox capacity is smaller than runtime M")
 

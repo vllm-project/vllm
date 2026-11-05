@@ -8,12 +8,12 @@ from collections.abc import Sequence
 import regex as re
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -42,8 +42,7 @@ TOOL_CALL_END = "<|tool_call_end|>"
 
 
 class Lfm2ToolParser(ToolParser):
-    """
-    Tool call parser for LiquidAI LFM2/LFM2.5 models that produce pythonic
+    """Tool call parser for LiquidAI LFM2/LFM2.5 models that produce pythonic
     tool calls wrapped in <|tool_call_start|> and <|tool_call_end|> tokens.
 
     Example model output:

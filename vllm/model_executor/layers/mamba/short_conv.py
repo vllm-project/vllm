@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -360,6 +361,7 @@ class ShortConv(MambaBase, PluggableLayer):
         return MambaAttentionBackendEnum.SHORT_CONV
 
 
+@eager_break_during_capture
 def short_conv(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -373,17 +375,8 @@ def short_conv(
         self.forward_native(hidden_states=hidden_states, output=output)
 
 
-def short_conv_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="short_conv",
     op_func=short_conv,
     mutates_args=["output"],
-    fake_impl=short_conv_fake,
 )

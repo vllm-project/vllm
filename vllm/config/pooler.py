@@ -63,6 +63,14 @@ class PoolerConfig:
     `None` uses the pooler's default, which is `True` in most cases.
     """
 
+    enable_flash_late_interaction: bool = True
+    """
+    Whether the engine-side late-interaction scorer may use the fused
+    flash-maxsim Triton kernel. Disabled automatically when the API server
+    is started with `--disable-flash-late-interaction`; the reference
+    scorer is used instead.
+    """
+
     ## for embedding models
     dimensions: int | None = None
     """
@@ -75,7 +83,7 @@ class PoolerConfig:
     maximum position embeddings. When enabled, long inputs will be split into
     chunks, processed separately, and then aggregated using weighted averaging.
     This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
+    errors. Multimodal inputs are not supported. Defaults to False.
     """
     max_embed_len: int | None = None
     """
@@ -176,8 +184,7 @@ class PoolerConfig:
         return self.tok_pooling_type
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

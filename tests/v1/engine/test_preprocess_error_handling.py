@@ -9,12 +9,11 @@ from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
-
     if current_platform.is_rocm() or current_platform.is_xpu():
         pytest.skip(
             "Skipped on ROCm/XPU: this test only works with 'fork', "
@@ -33,7 +32,7 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     # only for requests with "FAIL" in the first token
     def conditional_failing_preprocess(self, request: EngineCoreRequest):
         # Fail if the first token id is 333
-        if request.prompt_token_ids and request.prompt_token_ids[0] == 333:
+        if request.prompt_token_ids is not None and request.prompt_token_ids[0] == 333:
             raise ValueError("Simulated preprocessing error!")
         return original_preprocess(self, request)
 

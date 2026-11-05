@@ -16,7 +16,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 def with_triton_mode(fn):
-    """Temporarily force the Triton fallback path"""
+    """Temporarily force the Triton fallback path."""
 
     def wrapped(*args, **kwargs):
         with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
@@ -124,8 +124,7 @@ def compute_geomean_speedups(
     speedup_cols: list[str],
     groupby_cols: list[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    Compute geometric mean speedups over a baseline column.
+    """Compute geometric mean speedups over a baseline column.
 
     Args:
         df: Input dataframe
@@ -135,6 +134,7 @@ def compute_geomean_speedups(
 
     Returns:
         pd.DataFrame with geometric mean speedups
+
     """
     from scipy.stats import gmean
 

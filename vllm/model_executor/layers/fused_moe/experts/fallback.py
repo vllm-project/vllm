@@ -25,13 +25,16 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         self.fallback_experts = fallback_experts
         self.experts = experts
 
+    def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
+        self.experts.keep_constants(layer, prefix + "experts_")
+        self.fallback_experts.keep_constants(layer, prefix + "fallback_")
+
     @staticmethod
     def get_clses() -> tuple[
         type[mk.FusedMoEExpertsModular],
         type[mk.FusedMoEExpertsModular],
     ]:
-        """
-        Get the cls for the experts and fallback experts.
+        """Get the cls for the experts and fallback experts.
 
         Subclasses should implement this method, so that
         we have a consistent way to call the _supports_*

@@ -430,7 +430,7 @@ class ChatGLMBaseModel(nn.Module):
 
 
 class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP, SupportsQuant):
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
     }

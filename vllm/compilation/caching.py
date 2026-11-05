@@ -172,8 +172,7 @@ def patch_pytree_map_over_slice():
 
 
 class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
-    """
-    A wrapper around a compiled function by vllm. It will forward the tensor
+    """A wrapper around a compiled function by vllm. It will forward the tensor
     inputs to the compiled function and return the result.
     It also implements a serialization interface to support PyTorch's precompile
     with custom backend, so that we can save and load the compiled function on
@@ -410,9 +409,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
     @property
     def co_name(self) -> Literal["VllmSerializableFunction"]:
-        """
-        Used for depyf debugging.
-        """
+        """Used for depyf debugging."""
         return "VllmSerializableFunction"
 
 
@@ -445,6 +442,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     If modifying the backend creation/wrapping logic, consider updating both.
 
     Args:
+        fake_mode: FakeTensorMode used to unpickle the cached graph.
         state: Deserialized state dict containing graph_module, example_inputs,
             prefix, sym_tensor_indices, is_encoder, etc.
         standalone_compile_artifacts: The StandaloneCompiledArtifacts containing
@@ -455,6 +453,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
     Returns:
         A VllmSerializableFunction that can be called directly.
+
     """
     from vllm.compilation.backends import (
         VllmBackend,

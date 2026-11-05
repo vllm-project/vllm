@@ -288,7 +288,7 @@ impl TiktokenTokenizer {
             config.pattern,
         )
         .map_err(|error| {
-            tokenizer_error!(
+            backend!(
                 "failed to create riptoken tokenizer from {}: {error}",
                 path.display()
             )
@@ -315,7 +315,7 @@ impl TiktokenTokenizer {
             config.pattern,
         )
         .map_err(|error| {
-            tokenizer_error!(
+            backend!(
                 "failed to create tiktoken-rs tokenizer from {}: {error}",
                 path.display()
             )
@@ -342,7 +342,7 @@ struct LoadedTiktokenConfig {
 impl LoadedTiktokenConfig {
     fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|error| {
-            tokenizer_error!(
+            backend!(
                 "failed to read tiktoken file {}: {}",
                 path.display(),
                 error.as_report()
@@ -356,15 +356,14 @@ impl LoadedTiktokenConfig {
             }
             let mut parts = line.split_whitespace();
             let token_b64 =
-                parts.next().ok_or_else(|| tokenizer_error!("missing token in tiktoken file"))?;
-            let rank_str =
-                parts.next().ok_or_else(|| tokenizer_error!("missing rank in tiktoken file"))?;
+                parts.next().ok_or_else(|| backend!("missing token in tiktoken file"))?;
+            let rank_str = parts.next().ok_or_else(|| backend!("missing rank in tiktoken file"))?;
             let token_bytes = base64::engine::general_purpose::STANDARD
                 .decode(token_b64)
-                .map_err(|error| tokenizer_error!("invalid base64 in tiktoken file: {error}"))?;
+                .map_err(|error| backend!("invalid base64 in tiktoken file: {error}"))?;
             let rank: u32 = rank_str
                 .parse()
-                .map_err(|error| tokenizer_error!("invalid rank in tiktoken file: {error}"))?;
+                .map_err(|error| backend!("invalid rank in tiktoken file: {error}"))?;
             encoder.insert(token_bytes, rank);
         }
 
@@ -964,16 +963,16 @@ mod tests {
             for &id in &ids {
                 decoder.push_token(id).unwrap();
                 if let Some(chunk) = decoder.next_chunk() {
-                    output.push_str(&chunk);
+                    output.push_str(&chunk.text);
                 }
             }
-            let (last_chunk, full_text) = decoder.flush(None).unwrap();
+            let (last_chunk, full) = decoder.flush(None).unwrap();
             if let Some(chunk) = last_chunk {
-                output.push_str(&chunk);
+                output.push_str(&chunk.text);
             }
 
             assert_eq!(output, text);
-            assert_eq!(full_text, text);
+            assert_eq!(full.text, text);
         }
     }
 
@@ -991,16 +990,16 @@ mod tests {
             for &id in &ids {
                 decoder.push_token(id).unwrap();
                 if let Some(chunk) = decoder.next_chunk() {
-                    output.push_str(&chunk);
+                    output.push_str(&chunk.text);
                 }
             }
-            let (last_chunk, full_text) = decoder.flush(None).unwrap();
+            let (last_chunk, full) = decoder.flush(None).unwrap();
             if let Some(chunk) = last_chunk {
-                output.push_str(&chunk);
+                output.push_str(&chunk.text);
             }
 
             assert_eq!(output, text);
-            assert_eq!(full_text, text);
+            assert_eq!(full.text, text);
         }
     }
 

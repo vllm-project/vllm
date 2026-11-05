@@ -75,6 +75,7 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
 )
 
 
+@create_new_process_for_each_test()
 def test_extract_hidden_states_with_predictable_dummy_model(
     predictable_llama_config_path, tmp_path, monkeypatch
 ):
@@ -82,7 +83,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     Tests 3 scenarios:
 
-    1. **Basic extraction**: non-sequential layer ordering, multiple prompts
+    1. **Basic extraction**: unsorted layer selection, multiple prompts
        of varying length — verifies correct layer association and
        deterministic values.
     2. **Chunked prefill**: max_num_batched_tokens=128 with ~500-token
@@ -95,6 +96,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     layer_ids = [5, 2, 10]
+    expected_layer_ids = sorted(layer_ids)
     num_layers = len(layer_ids)
     max_num_batched_tokens = 128
 
@@ -139,6 +141,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     assert len(outputs) == len(prompts)
     for output in outputs:
+        assert output.prompt_token_ids is not None
         expected_shape = (
             len(output.prompt_token_ids),
             num_layers,
@@ -146,7 +149,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
         )
         _token_ids, hidden_states = get_and_check_output(output, expected_shape)
 
-        for idx, layer_id in enumerate(layer_ids):
+        for idx, layer_id in enumerate(expected_layer_ids):
             layer_hidden = hidden_states[:, idx, :]
             assert torch.allclose(
                 layer_hidden,
@@ -170,11 +173,12 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     assert len(outputs) == len(chunked_prompts)
     for output in outputs:
+        assert output.prompt_token_ids is not None
         prompt_len = len(output.prompt_token_ids)
         expected_shape = (prompt_len, num_layers, hidden_size)
         _token_ids, hidden_states = get_and_check_output(output, expected_shape)
 
-        for idx, layer_id in enumerate(layer_ids):
+        for idx, layer_id in enumerate(expected_layer_ids):
             layer_hidden = hidden_states[:, idx, :]
             assert torch.allclose(
                 layer_hidden,
@@ -212,6 +216,8 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     # First output: prompt-only hidden states, default path
     out0 = outputs[0]
+    assert out0.kv_transfer_params is not None
+    assert out0.prompt_token_ids is not None
     path0 = out0.kv_transfer_params["hidden_states_path"]
     assert path0 != custom_path
     obj0 = example_hidden_states_connector.load_hidden_states(path0)
@@ -225,6 +231,8 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     # Second output: prompt + output tokens, custom path
     out1 = outputs[1]
+    assert out1.kv_transfer_params is not None
+    assert out1.prompt_token_ids is not None
     assert out1.kv_transfer_params["hidden_states_path"] == custom_path
     obj1 = example_hidden_states_connector.load_hidden_states(custom_path)
     token_ids = obj1["token_ids"]
@@ -236,7 +244,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     assert hidden_states.shape == (total_tokens, num_layers, hidden_size)
 
     # Verify predictable layer values hold for all tokens (prompt + output)
-    for idx, layer_id in enumerate(layer_ids):
+    for idx, layer_id in enumerate(expected_layer_ids):
         layer_hidden = hidden_states[:, idx, :]
         assert torch.allclose(
             layer_hidden,
@@ -288,6 +296,7 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         token_ids = obj["token_ids"]
         hidden_states = obj["hidden_states"]
 
+        assert output.prompt_token_ids is not None
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
         assert hidden_states.shape == (
             len(output.prompt_token_ids),
@@ -342,6 +351,7 @@ def test_extract_hidden_states_tp2():
         token_ids = obj["token_ids"]
         hidden_states = obj["hidden_states"]
 
+        assert output.prompt_token_ids is not None
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
         assert hidden_states.shape == (
             len(output.prompt_token_ids),

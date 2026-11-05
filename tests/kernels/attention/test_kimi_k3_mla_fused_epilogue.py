@@ -11,9 +11,11 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_key_concat_kv_cache_insert,
     fused_mla_kv_concat,
     fused_mla_kv_concat_quant_fp8,
+    fused_mla_kv_pack_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_concat_mla_kv_quant_fp8
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Kimi-K3 fused MLA requires CUDA"
@@ -285,3 +287,48 @@ def test_decode_epilogue_preserves_nope_path() -> None:
     torch.testing.assert_close(
         _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
     )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("num_tokens", [64, 65])
+def test_decode_epilogue_row_split_boundary(num_tokens: int) -> None:
+    """Both sides of the M-based warps-per-row dispatch produce the same rows."""
+    torch.manual_seed(3)
+    num_blocks = (num_tokens + _BLOCK_SIZE - 1) // _BLOCK_SIZE
+    slots = torch.randperm(num_blocks * _BLOCK_SIZE, device="cuda")[:num_tokens].long()
+    ql_nope = _randn(num_tokens, _NUM_HEADS, 512)
+    q_pe = _randn(num_tokens, _NUM_HEADS, 64)
+    kv_c = _randn(num_tokens, 512)
+    k_pe = _randn(num_tokens, 64)
+    cache = torch.zeros(num_blocks, _BLOCK_SIZE, 576, device="cuda", dtype=_DTYPE)
+
+    q_actual = fused_mla_decode_q_concat_kv_cache_insert(
+        ql_nope, q_pe, kv_c, k_pe, cache, slots
+    )
+
+    torch.testing.assert_close(q_actual, torch.cat((ql_nope, q_pe), dim=-1))
+    torch.testing.assert_close(
+        _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
+    )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability_family(100)
+        and has_flashinfer_concat_mla_kv_quant_fp8()
+    ),
+    reason="needs FlashInfer's concat_mla_kv_quant_fp8 on SM10x",
+)
+@pytest.mark.parametrize("num_tokens", [1, 257, 2048])
+@pytest.mark.parametrize("num_heads", [3, 12, 24])
+@torch.inference_mode()
+def test_context_kv_pack_flashinfer_route_is_byte_exact(
+    num_tokens: int, num_heads: int
+) -> None:
+    kv_nope = _randn(num_tokens, num_heads, 256)
+    _, k_pe, _ = _strided_context_inputs(num_tokens, num_heads, torch.bfloat16, False)
+    k_nope, v = kv_nope.split((128, 128), dim=-1)
+    k_expected, v_expected = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+    k, v_out = fused_mla_kv_pack_quant_fp8(kv_nope, k_pe, nope_dim=128)
+    assert torch.equal(k.view(torch.uint8), k_expected.view(torch.uint8))
+    assert torch.equal(v_out.view(torch.uint8), v_expected.view(torch.uint8))

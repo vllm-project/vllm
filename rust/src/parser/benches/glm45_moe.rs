@@ -9,7 +9,7 @@ use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
 use vllm_parser::tool::{Glm45MoeToolParser, Glm47MoeToolParser, Tool, ToolParser};
 
 mod utils;
-use utils::{feed_external_parser, feed_parser, openai_tools};
+use utils::{feed_external_parser, feed_parser, openai_tools, test_tokenizer};
 
 const GLM45_PARSER_NAME: &str = "glm45";
 const GLM47_PARSER_NAME: &str = "glm47";
@@ -77,8 +77,8 @@ fn long_normal_text_fixture() -> String {
 
 fn native_parser(name: &str, tools: &[Tool]) -> Box<dyn ToolParser> {
     match name {
-        GLM45_PARSER_NAME => Glm45MoeToolParser::create(tools),
-        GLM47_PARSER_NAME => Glm47MoeToolParser::create(tools),
+        GLM45_PARSER_NAME => Glm45MoeToolParser::create(tools, test_tokenizer()),
+        GLM47_PARSER_NAME => Glm47MoeToolParser::create(tools, test_tokenizer()),
         _ => unreachable!("unexpected GLM parser name"),
     }
     .expect("GLM MoE parser should initialize")

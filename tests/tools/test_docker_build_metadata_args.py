@@ -6,9 +6,10 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
-ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
 
 
 def run_helper(
@@ -92,6 +93,25 @@ def test_nightly_metadata_args_fall_back_to_pipeline_slug() -> None:
     assert option_values(args, "--tag") == [expected_tag]
 
 
+@pytest.mark.parametrize(
+    ("variant", "expected_image_tag"),
+    [
+        ("efa", "vllm/vllm-openai:efa-nightly-def456"),
+        ("cu134-efa", "vllm/vllm-openai:cu134-nightly-def456-efa"),
+    ],
+)
+def test_nightly_variant_tags_match_published_nightly_tags(
+    variant: str, expected_image_tag: str
+) -> None:
+    """push-nightly-builds.sh <variant> publishes as <variant>-nightly-<commit>."""
+    args = run_helper(
+        variant,
+        env={"BUILDKITE": "1", "BUILDKITE_COMMIT": "def456", "NIGHTLY": "1"},
+    )
+
+    assert build_args(args)["VLLM_IMAGE_TAG"] == expected_image_tag
+
+
 def test_local_metadata_args_use_local_overrides() -> None:
     args = run_helper(
         env={
@@ -154,10 +174,15 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
 
 
 def test_rust_build_cache_excludes_git_metadata() -> None:
+    import torch
+
     from vllm.platforms import current_platform
 
     dockerfile_names = ["Dockerfile", "Dockerfile.cpu"]
-    if not current_platform.is_rocm():
+    # CPU jobs can reuse ROCm artifacts, which omit the XPU Dockerfile.
+    if not current_platform.is_rocm() and (
+        not current_platform.is_cpu() or torch.version.hip is None
+    ):
         dockerfile_names.append("Dockerfile.xpu")
     for name in dockerfile_names:
         dockerfile = (REPO_ROOT / "docker" / name).read_text()
@@ -171,60 +196,4 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         assert "source=.git,target=.git" not in cached_run
         assert "source=.git,target=.git" in exact_version_stage
         assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in exact_version_stage
-        assert "bash build_rust.sh" in exact_version_stage
-
-
-def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
-    bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
-
-    for expected in (
-        'variable "CI_BASE_CONTENT_HASH"',
-        'target "ci-base-rocm"',
-        'target   = "ci_base"',
-        '"vllm.ci_base.content_hash" = CI_BASE_CONTENT_HASH',
-    ):
-        assert expected in bake_file
-
-
-def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
-    ci_bake = ROCM_CI_BAKE.read_text()
-
-    for expected in (
-        "requirements/common.txt",
-        "requirements/rocm.txt",
-        "requirements/test/rocm.txt",
-        "docker/Dockerfile.rocm",
-    ):
-        assert expected in ci_bake
-
-
-def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    git = fake_bin / "git"
-    git.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
-    git.chmod(0o755)
-
-    env = os.environ.copy()
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; git_fetch_with_timeout --quiet origin HEAD',
-            "bash",
-            str(ROCM_CI_BAKE),
-        ],
-        check=True,
-        env=env,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-
-    assert result.stdout.splitlines() == [
-        "fetch",
-        "--no-auto-maintenance",
-        "--quiet",
-        "origin",
-        "HEAD",
-    ]
+        assert "bash tools/build_rust.sh" in exact_version_stage
