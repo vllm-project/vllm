@@ -613,10 +613,7 @@ class RadioWithNeck(nn.Module):
             else:
                 param = adaptor_dict[name]
                 with torch.no_grad():
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, w)
+                    default_weight_loader(param, w)
 
         self.model_encoder.load_weights(model_encoder_weights)
 
@@ -776,10 +773,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
                 trimmed_name = ".".join(name.split(".")[1:])
                 param = lm_head_dict[trimmed_name]
                 with torch.no_grad():
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, w)
+                    default_weight_loader(param, w)
             else:
                 logger.info("Found unexpected weight: %s", name)
 

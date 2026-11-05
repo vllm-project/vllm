@@ -544,10 +544,7 @@ class VoxtralForConditionalGeneration(
                 if name in audio_params:
                     param = audio_params[name]
                     with torch.no_grad():
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, w)
+                        default_weight_loader(param, w)
                     loaded_weights.add(name)
                 else:
                     yield (name, w)

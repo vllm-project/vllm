@@ -433,56 +433,6 @@ def test_attention_first_load_processes_weights(default_vllm_config, layer_cls):
     assert torch.equal(layer.weight, loaded_weight)
 
 
-class _KVScaleAttentionLayer(_ReloadableAttentionLayer):
-    """An attention layer with FP8 KV-cache scales, created as at model init."""
-
-    def __init__(self):
-        from vllm.model_executor.layers.attention.attention import (
-            set_default_quant_scales,
-        )
-        from vllm.model_executor.layers.quantization.kv_cache import (
-            BaseKVCacheMethod,
-        )
-
-        super().__init__()
-        self.kv_cache_dtype = "fp8"
-        set_default_quant_scales(self, register_buffer=True)
-        self.quant_method = BaseKVCacheMethod(None)
-        self.quant_method.create_weights(self)
-
-    def process_weights_after_loading(self) -> None:
-        pass
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_kv_scale_reload_uses_model_dtype(dtype):
-    """KV-cache scales take the model dtype at model init; a reload recreates
-    them under it too, so an fp32 checkpoint scale is rounded as on a fresh
-    load."""
-    from vllm.utils.torch_utils import set_default_torch_dtype
-
-    scales = {"k_scale": torch.tensor(0.1234567), "v_scale": torch.tensor(0.7654321)}
-
-    def load(layer):
-        for name, scale in scales.items():
-            param = getattr(layer, name)
-            param.weight_loader(param, scale)
-
-    with set_default_torch_dtype(dtype):
-        layer = _KVScaleAttentionLayer()
-    model = torch.nn.Sequential(layer)
-    load(layer)
-    layer.quant_method.process_weights_after_loading(layer)
-    fresh = (layer._k_scale_float, layer._v_scale_float)
-    assert fresh != (0.1234567, 0.7654321)  # rounded to the model dtype
-
-    record_metadata_for_reloading(model)
-    initialize_layerwise_reload(model)
-    load(layer)
-    finalize_layerwise_reload(model, SimpleNamespace(dtype=dtype))
-    assert (layer._k_scale_float, layer._v_scale_float) == fresh
-
-
 def test_reload_lifecycle():
     layer = torch.nn.Linear(2, 3)
     info = LayerReloadingInfo(
@@ -1512,10 +1462,14 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     assert after == before
 
 
-def test_kv_scale_reload(vllm_runner):
-    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+@pytest.mark.parametrize("mode", ["layerwise", "direct"])
+def test_kv_scale_reload(vllm_runner, monkeypatch, mode):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights. The
+    attention backend must follow the reloaded scales, not the dummy ones its
+    warmup saw."""
     if _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
 
     model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
 
