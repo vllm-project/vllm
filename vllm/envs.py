@@ -272,10 +272,10 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
-    VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM: int = 16
     VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP: bool = False
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
+    VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM: int = 16
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1486,11 +1486,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
     ),
-    # Multiple the FP8 ViT attention Q/K/V head_dim is zero-padded to on ROCm
-    # with the AITER backend (--mm-encoder-attn-dtype fp8). 128 runs AITER's
-    # FP8 varlen flash attention kernel for head_dims below 128 (e.g. 80).
-    "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM": lambda: int(
-        os.getenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "16")
+    # FP8 ViT attention on ROCm with the AITER backend
+    # (--mm-encoder-attn-dtype fp8). 128 zero-pads Q/K/V head_dims below 128
+    # to 128 and runs AITER's asm FP8 head_dim-128 kernel instead of its CK-tile
+    # kernel (validated on MI355X with head_dim 80). 16 (default; 0 also means
+    # 16) pads only to a multiple of 16. Any other value is rejected.
+    "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM": lambda: (
+        int(
+            env_with_choices(
+                "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "16", ["0", "16", "128"]
+            )()
+            or "16"
+        )
+        or 16
     ),
     # With mm_encoder_fp8_scale_save_path set, rewrite the FP8 ViT attention
     # scale file at every amax-history wrap instead of only the first one.
