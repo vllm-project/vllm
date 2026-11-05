@@ -255,6 +255,8 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # Request-level failures cannot identify a safe external source to retry.
+        self.requests_with_failed_kv_loads: set[str] = set()
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -1135,11 +1137,15 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
+                        ext_tokens: int | None
+                        if request_id in self.requests_with_failed_kv_loads:
+                            ext_tokens, load_kv_async = 0, False
+                        else:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, block_aligned_local
+                                )
                             )
-                        )
                         if request.skip_reading_external_kv:
                             ext_tokens, load_kv_async = 0, False
 
@@ -3057,6 +3063,7 @@ class Scheduler(SchedulerInterface):
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
+        self.requests_with_failed_kv_loads.discard(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
@@ -3706,6 +3713,7 @@ class Scheduler(SchedulerInterface):
                 if self.recompute_kv_load_failures:
                     request.num_computed_tokens = 0
                     self.failed_recving_kv_req_ids.add(req_id)
+                    self.requests_with_failed_kv_loads.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(

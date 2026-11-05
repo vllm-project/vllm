@@ -3,6 +3,7 @@
 import filecmp
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -352,6 +353,55 @@ class RangeTransport(KVConnectorBase_V1, SupportsHMA):
 
 
 KVConnectorFactory.register_connector("RangeTransport", __name__, "RangeTransport")
+
+
+@dataclass
+class FailedLoadMetadata(KVConnectorMetadata):
+    request_ids: set[str]
+
+
+class FailingLoadTransport(RangeTransport):
+    """External-service fault: lookup hits forever, while every GET fails."""
+
+    def __init__(self, config, role, kv_cache_config):
+        super().__init__(config, role, kv_cache_config)
+        self.pending_loads = set()
+        self.failed_loads = set()
+        self.completed_loads = set()
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        with Path(self.options["lookup_log"]).open("a") as log:
+            log.write(request.request_id + "\n")
+        return super().get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def update_state_after_alloc(self, request, blocks, num_external_tokens):
+        if num_external_tokens:
+            self.pending_loads.add(request.request_id)
+
+    def update_state_after_alloc_for_range(self, request, blocks, load_range):
+        self.update_state_after_alloc(request, blocks, load_range.num_tokens)
+
+    def build_connector_meta(self, scheduler_output):
+        metadata = FailedLoadMetadata(self.pending_loads)
+        self.pending_loads = set()
+        return metadata
+
+    def start_load_kv(self, forward_context, **kwargs):
+        self.failed_loads.update(self._get_connector_metadata().request_ids)
+
+    def get_transfer_results(self, finished_req_ids):
+        result = KVConnectorTransferResults(
+            finished_recving=self.completed_loads,
+            failed_recving=self.failed_loads,
+        )
+        self.completed_loads = self.failed_loads
+        self.failed_loads = set()
+        return result
+
+
+KVConnectorFactory.register_connector(
+    "FailingLoadTransport", __name__, "FailingLoadTransport"
+)
 
 
 def _range_config(options, policy="range_aware"):
@@ -764,6 +814,169 @@ def test_window_missing_at_shortened_endpoint_falls_back_before_allocation():
     assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, 80) == (0,)
     connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 80)
     assert [c.loads for c in connector.sub_connectors] == [[0], [80]]
+
+
+@pytest.mark.parametrize("adopted", [32, 64, 80])
+@pytest.mark.cpu_test
+def test_shortened_fallback_validates_mooncake_window(adopted):
+    """Original-endpoint P/D capabilities cannot prove an earlier SWA window."""
+    config = _range_config([{"endpoint": 64}])
+    config.kv_transfer_config.kv_connector_extra_config["connectors"].append(
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
+    )
+    connector = MultiConnector(
+        config, KVConnectorRole.SCHEDULER, _range_cache("bounded")
+    )
+    request = create_request(num_tokens=97, do_remote_prefill=True)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, 96) == (0, 1)
+    pd = connector.sub_connectors[1]
+    assert pd.get_loaded_kv_cache_group_ids(request) == (0, 1)
+    assert pd.get_loadable_window_group_ids(request, adopted) == ()
+    assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, adopted) == (0,)
+
+
+@pytest.mark.parametrize("token_budget", [16, 64, 256])
+@pytest.mark.cpu_test
+def test_mooncake_window_hit_is_not_shortened_by_compute_budget(token_budget):
+    """A 96-token P/D window hit stays at 96 even with a smaller compute budget."""
+    config = _range_config([{"endpoint": 64}])
+    config.scheduler_config.max_num_batched_tokens = token_budget
+    config.kv_transfer_config.kv_connector_extra_config["connectors"].append(
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
+    )
+    register_all_kvcache_specs(config)
+    scheduler = create_scheduler(config, kv_cache_config=_range_cache("bounded"))
+    request = create_request(num_tokens=97, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        remote_bootstrap_addr="localhost:12345", transfer_id="transfer"
+    )
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == 96
+    assert request.request_id not in output.num_scheduled_tokens
+    assert scheduler.connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+
+
+@pytest.mark.parametrize("abort", [False, True])
+@pytest.mark.parametrize("failed_source", [0, 1])
+@pytest.mark.cpu_test
+def test_range_failure_before_completion_is_sticky(abort, failed_source):
+    """Failure-only polls must survive until all destination writers settle."""
+    worker = _range_connector([{}, {}, {}], role=KVConnectorRole.WORKER)
+    worker.bind_connector_metadata(
+        MultiKVConnectorMetadata(
+            metadata=tuple(KVConnectorMetadata() for _ in range(3)),
+            pending_async_loads={"req": (0, 1)},
+        )
+    )
+    children = worker.sub_connectors
+    children[failed_source].completions = KVConnectorTransferResults(
+        failed_recving={"req"}
+    )
+    children[2].completions = KVConnectorTransferResults(failed_recving={"req"})
+    assert worker.get_transfer_results({"req"} if abort else set()) == (
+        KVConnectorTransferResults()
+    )
+    children[failed_source].completions = KVConnectorTransferResults(
+        finished_recving={"req"}
+    )
+    assert worker.get_transfer_results(set()) == KVConnectorTransferResults()
+    children[failed_source].completions = KVConnectorTransferResults()
+    children[1 - failed_source].completions = KVConnectorTransferResults(
+        finished_recving={"req"}
+    )
+    assert worker.get_transfer_results(set()) == KVConnectorTransferResults(
+        finished_recving={"req"}, failed_recving={"req"}
+    )
+    for child in children:
+        child.completions = KVConnectorTransferResults()
+    assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
+
+
+@pytest.mark.parametrize("load_policy", [None, "range_aware"])
+@pytest.mark.parametrize("failure_policy", ["fail", "recompute"])
+@pytest.mark.parametrize("kind", ["full", "bounded"])
+@pytest.mark.cpu_test
+def test_failed_load_with_persistent_hit_makes_progress(
+    load_policy, failure_policy, kind
+):
+    """Lookup stays a hit after GET failure; recompute must not load it again."""
+    config = _range_config([{"endpoint": 64}, {"endpoint": 96}], load_policy)
+    config.kv_transfer_config.kv_load_failure_policy = failure_policy
+    register_all_kvcache_specs(config)
+    scheduler = create_scheduler(config, kv_cache_config=_range_cache(kind))
+    request = create_request(request_id=99123, num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            [],
+            finished_recving={request.request_id},
+            failed_recving={request.request_id},
+        ),
+    )
+    if failure_policy == "fail":
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert request.request_id not in scheduler.requests
+        return
+    output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert output.num_scheduled_tokens[request.request_id] == 160
+    assert [c.lookups for c in scheduler.connector.sub_connectors] == [[0], [0]]
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    # Reuse the ID but not the prompt: local APC must not hide a stale failure flag.
+    next_request = create_request(request_id=99123, num_tokens=160, common_prefix_len=1)
+    scheduler.add_request(next_request)
+    scheduler.schedule()
+    assert next_request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+@pytest.mark.parametrize("load_policy", ["first_hit", "range_aware"])
+@pytest.mark.timeout(240)
+def test_failed_load_model_recomputes(vllm_runner, tmp_path, monkeypatch, load_policy):
+    """Actual model outputs survive a persistent hit and split failure/completion."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    kwargs = dict(
+        enforce_eager=True,
+        max_model_len=512,
+        max_num_seqs=1,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+    )
+    with vllm_runner(MODEL_NAME, **kwargs) as reference:
+        expected = reference.generate_greedy(PROMPTS[:1], max_tokens=8)
+    logs = [tmp_path / f"lookup-{i}.log" for i in range(2)]
+    extra = {
+        "connectors": [
+            {
+                "kv_connector": "FailingLoadTransport",
+                "kv_connector_module_path": __name__,
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {
+                    "endpoint": endpoint,
+                    "lookup_log": str(log),
+                },
+            }
+            for endpoint, log in zip((64, 96), logs)
+        ]
+    }
+    if load_policy == "range_aware":
+        extra["load_policy"] = load_policy
+    transfer = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_consumer",
+        kv_load_failure_policy="recompute",
+        kv_connector_extra_config=extra,
+    )
+    with vllm_runner(MODEL_NAME, kv_transfer_config=transfer, **kwargs) as recovering:
+        actual = recovering.generate_greedy(PROMPTS[:1], max_tokens=8)
+    assert actual == expected
+    for log in logs:
+        assert len(log.read_text().splitlines()) == 1
 
 
 @pytest.mark.parametrize("first_source", [0, 1])
