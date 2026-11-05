@@ -27,8 +27,11 @@ _SINGLE_STAGE_PP_GROUP = SimpleNamespace(
 
 @contextmanager
 def single_stage_pp_group() -> Iterator[None]:
-    """Hide pipeline stages from a standalone draft model's code, so it builds
-    all of its layers and takes no intermediate tensors."""
+    """Hide pipeline stages from a standalone draft model's code.
+
+    The draft model then builds all of its layers and takes no intermediate
+    tensors.
+    """
     if get_pp_group().world_size == 1:
         yield
         return

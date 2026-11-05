@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
+import vllm.distributed.parallel_state as parallel_state
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -579,6 +580,7 @@ def test_standalone_draft_kv_dtype_override(
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
+    monkeypatch.setattr(ar_module, "single_stage_pp_group", contextlib.nullcontext)
     monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
     monkeypatch.setattr(
         ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
@@ -598,3 +600,34 @@ def test_standalone_draft_kv_dtype_override(
     )
     assert target.kernel_config.moe_backend == "flashinfer_cutlass"
     assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+
+def test_standalone_draft_pp_falls_back_from_fastsafetensors(monkeypatch):
+    """Only the last PP stage loads the draft, so it must avoid fastsafetensors."""
+
+    @dataclass
+    class Config:
+        parallel_config: ParallelConfig
+        model_config: object
+        quant_config: object | None = None
+
+    speculator = object.__new__(ar_module.StandaloneARSpeculator)
+    speculator.vllm_config = Config(ParallelConfig(), object())
+    speculator.draft_model_config = object()
+    speculator.speculative_config = SimpleNamespace(
+        apply_draft_overrides=lambda config: config,
+        draft_parallel_config=ParallelConfig(),
+    )
+    monkeypatch.setattr(parallel_state, "_PP", SimpleNamespace(world_size=2))
+    get_model = Mock(side_effect=lambda **_: parallel_state.get_pp_group().world_size)
+    monkeypatch.setattr(ar_module, "get_model", get_model)
+    monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
+    monkeypatch.setattr(
+        ar_module,
+        "get_draft_load_config",
+        lambda _: LoadConfig(load_format="fastsafetensors"),
+    )
+
+    # get_model returns the PP size it saw: the draft is built as one stage.
+    assert speculator.load_draft_model(object(), set()) == 1
+    assert get_model.call_args.kwargs["load_config"].load_format == "auto"
