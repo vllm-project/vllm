@@ -567,7 +567,6 @@ class AiterFlashAttentionMetadataBuilder(
         window = self.aot_sliding_window[0] + 1
         lens = seq_lens[:num_decodes]
         first_block = (lens - window).clamp_(min=0) // self.block_size
-        # int64 offsets promote the sum, so the gather index needs no cast copy
         index = (self._swa_block_offsets + first_block[:, None]).clamp_(
             max=block_table.shape[1] - 1
         )
