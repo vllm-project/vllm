@@ -741,6 +741,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             req.reasoning_effort = disabled_thinking_effort
         elif thinking.type == "enabled":
             req.thinking_token_budget = thinking.budget_tokens
+        # "adaptive" pins nothing: the model chooses depth beneath the ceiling
+        # already set from output_config.effort.
 
     @classmethod
     def _handle_output_config(
