@@ -136,6 +136,8 @@ class GumbelWatermarker(Watermarker):
             deduplicate=state.deduplicate_contexts != "none",
             max_history=state.deduplicate_contexts_max_history,
             include_prompt=state.deduplicate_contexts == "all",
+            uncommitted_ring=state.uncommitted_ring,
+            uncommitted_state=state.uncommitted_state,
         )
 
 

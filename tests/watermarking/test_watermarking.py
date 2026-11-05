@@ -21,6 +21,7 @@ from vllm.v1.watermarking import (
 )
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
+from vllm.v1.watermarking.prfs.philox import _philox_context_state
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     _resolve_watermark_key,
@@ -30,8 +31,9 @@ from vllm.v1.watermarking.spec_decode import (
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu import buffer_utils
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.sample.watermark import (
+    append_uncommitted_contexts,
     draft_watermarking_mask,
     philox_gumbel_sample,
     repeated_context_mask,
@@ -67,6 +69,7 @@ def make_gpu_watermark_sampler(monkeypatch):
     monkeypatch.setattr(buffer_utils, "UvaBuffer", CPUUvaBuffer)
 
     def make(watermarker, *, max_num_reqs=2, vocab_size=8, **kwargs):
+        vllm_config = kwargs.pop("vllm_config", VllmConfig())
         req_states = SimpleNamespace(
             max_num_reqs=max_num_reqs,
             vocab_size=vocab_size,
@@ -81,7 +84,7 @@ def make_gpu_watermark_sampler(monkeypatch):
         )
         return GPUWatermarkSampler(
             watermarker,
-            vllm_config=VllmConfig(),
+            vllm_config=vllm_config,
             max_num_reqs=max_num_reqs,
             vocab_size=vocab_size,
             device=torch.device("cpu"),
@@ -1811,12 +1814,16 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch, parti
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("with_uncommitted", [False, True])
 @pytest.mark.parametrize("deduplicate_contexts", ["none", "single_turn", "all"])
-def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dtype):
+def test_dflash_draft_sampler_matches_step_loop_on_cuda(
+    deduplicate_contexts, with_uncommitted, dtype
+):
     """The fused CUDA `sample_block` is bit-exact with sampling step by step.
 
-    Covers repeated contexts, a NaN logit, and greedy, opted-out and padding
-    rows; padding rows are discarded, so only valid rows are compared.
+    Covers repeated contexts, contexts recorded as uncommitted, a NaN logit, and
+    greedy, opted-out and padding rows; padding rows are discarded, so only valid
+    rows are compared.
     """
     num_reqs, num_steps, vocab_size, max_num_reqs = 4, 5, 1500, 6
     generator = torch.Generator().manual_seed(0)
@@ -1834,6 +1841,24 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
     contexts = torch.randint(0, 3, (num_reqs, 2), generator=generator)
     contexts[0, 0] = -1
     all_token_ids = torch.randint(0, 3, (max_num_reqs, 32), generator=generator)
+    uncommitted_ring = uncommitted_state = None
+    if with_uncommitted:
+        uncommitted_ring, uncommitted_state = _uncommitted_buffers(
+            max_num_reqs, capacity=16
+        )
+        uncommitted_ring, uncommitted_state = (
+            uncommitted_ring.cuda(),
+            uncommitted_state.cuda(),
+        )
+        append_uncommitted_contexts(
+            uncommitted_ring,
+            uncommitted_state,
+            torch.randint(0, 3, (8, 2), generator=generator).cuda(),
+            torch.tensor([4, 2]).cuda(),
+            torch.tensor([0, 4, 8], dtype=torch.int32).cuda(),
+            torch.tensor([1, 1], dtype=torch.int32).cuda(),
+            draft_key=42,
+        )
 
     def run(fused: bool):
         draft_watermarker = DraftWatermarker(
@@ -1850,6 +1875,8 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
             all_token_ids=all_token_ids.cuda(),
             prompt_lens=torch.full((max_num_reqs,), 4).cuda(),
             total_lens=torch.full((max_num_reqs,), 24).cuda(),
+            uncommitted_ring=uncommitted_ring,
+            uncommitted_state=uncommitted_state,
         )
         draft_logits = torch.zeros(max_num_reqs, num_steps, vocab_size, dtype=dtype)
         draft_logits = draft_logits.cuda()
@@ -1964,3 +1991,270 @@ def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch
     )
 
     assert torch.equal(sampled, torch.tensor([3, 4]))
+
+
+def _uncommitted_buffers(
+    max_num_reqs: int, capacity: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.zeros(max_num_reqs, capacity, dtype=torch.int32),
+        torch.zeros(max_num_reqs, 2, dtype=torch.int32),
+    )
+
+
+def _draft_context_words(contexts: torch.Tensor, key: int = 42) -> torch.Tensor:
+    state_0 = _philox_context_state(key & 0xFFFFFFFF, key >> 32, contexts)[0]
+    return ((state_0 + 2**31) % 2**32 - 2**31).to(torch.int32)
+
+
+def _block_draft_mask(
+    contexts: torch.Tensor,
+    req_indices: torch.Tensor,
+    ring: torch.Tensor | None,
+    state: torch.Tensor | None,
+) -> torch.Tensor:
+    num_rows = len(contexts)
+    return draft_watermarking_mask(
+        torch.zeros(2, 4, dtype=torch.int32),
+        req_indices,
+        torch.zeros(2, dtype=torch.int32),
+        torch.zeros(2, dtype=torch.int32),
+        torch.zeros(num_rows, 3, contexts.shape[-1], dtype=torch.int64),
+        contexts,
+        torch.zeros(num_rows, dtype=torch.int64),
+        torch.ones(num_rows, dtype=torch.bool),
+        max_history=None,
+        include_prompt=False,
+        draft_key=42,
+        uncommitted_ring=ring,
+        uncommitted_state=state,
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_sampled", "recorded_rows"),
+    [(1, [1, 2]), (2, [2]), (3, []), (4, [])],
+)
+def test_append_uncommitted_contexts_skips_the_first_rejected_draft(
+    num_sampled, recorded_rows
+):
+    # Three drafts give four verification rows. After t = num_sampled - 1
+    # accepted drafts, rows t + 1 .. 2 hold the contexts of the rejected drafts
+    # after the first one.
+    contexts = torch.arange(8).view(4, 2) + 10
+    ring, state = _uncommitted_buffers(max_num_reqs=2, capacity=8)
+
+    append_uncommitted_contexts(
+        ring,
+        state,
+        contexts,
+        torch.tensor([1]),
+        torch.tensor([0, 4]),
+        torch.tensor([num_sampled]),
+        draft_key=42,
+    )
+
+    num_recorded = len(recorded_rows)
+    assert state[1].tolist() == [num_recorded, num_recorded]
+    assert ring[1, :num_recorded].tolist() == (
+        _draft_context_words(contexts)[recorded_rows].tolist()
+    )
+    assert not state[0].any()
+
+
+def test_rejected_draft_contexts_are_skipped_by_the_next_block_draft():
+    # Block 1 accepts no draft. Rows 1 and 2 hold the contexts of the drafts after
+    # the first rejected one, so block 2 draws ordinarily there, except at the
+    # start padded context, which is never recorded.
+    verify_contexts = torch.tensor([[10, 11], [11, 20], [-1, 21], [21, 22]])
+    ring, state = _uncommitted_buffers(max_num_reqs=2, capacity=8)
+    append_uncommitted_contexts(
+        ring,
+        state,
+        verify_contexts,
+        torch.tensor([1]),
+        torch.tensor([0, 4]),
+        torch.tensor([1]),
+        draft_key=42,
+    )
+    next_contexts = torch.tensor([[11, 20], [-1, 21], [21, 22], [22, 23]])
+
+    on_slot_1 = _block_draft_mask(
+        next_contexts, torch.ones(4, dtype=torch.int64), ring, state
+    )
+    on_slot_0 = _block_draft_mask(
+        next_contexts, torch.zeros(4, dtype=torch.int64), ring, state
+    )
+
+    assert state[1].tolist() == [1, 1]
+    assert on_slot_1.tolist() == [False, True, True, True]
+    assert on_slot_0.all()
+
+
+def test_draft_watermarker_skips_contexts_recorded_for_the_request():
+    draft_watermarker = DraftWatermarker(
+        GumbelWatermarker(key=42, context_width=1),
+        max_num_reqs=1,
+        device=torch.device("cpu"),
+        num_speculative_steps=3,
+        deduplicate_contexts="single_turn",
+        deduplicate_contexts_max_history=None,
+    )
+    ring, state = _uncommitted_buffers(max_num_reqs=1, capacity=4)
+    ring[0, 0] = _draft_context_words(torch.tensor([[1]]))[0]
+    state[0] = torch.tensor([1, 1])
+
+    def watermarked(context: int, with_ring: bool) -> bool:
+        draft_watermarker.prepare(
+            contexts=torch.tensor([[context]]),
+            enabled=torch.tensor([True]),
+            all_token_ids=torch.tensor([[100, 0, 0, 0]]),
+            prompt_lens=torch.tensor([1]),
+            total_lens=torch.tensor([1]),
+            uncommitted_ring=ring if with_ring else None,
+            uncommitted_state=state if with_ring else None,
+        )
+        _, enabled = draft_watermarker._sampling_state(
+            torch.zeros(1, 8),
+            torch.tensor([0]),
+            torch.tensor([1.0]),
+            0,
+            draft_watermarker.state.contexts[:1],
+        )
+        return bool(enabled[0])
+
+    assert not watermarked(1, with_ring=True)
+    assert watermarked(2, with_ring=True)
+    assert watermarked(1, with_ring=False)
+
+
+@pytest.mark.parametrize(
+    ("method", "dedup", "num_speculative_tokens", "allocated"),
+    [
+        ("block", "single_turn", 3, True),
+        ("block", "all", 3, True),
+        ("standard", "single_turn", 3, False),
+        ("block", "none", 3, False),
+        ("block", "single_turn", 1, False),
+    ],
+)
+def test_gpu_sampler_allocates_uncommitted_ring_only_for_block_verification(
+    make_gpu_watermark_sampler, method, dedup, num_speculative_tokens, allocated
+):
+    config = VllmConfig()
+    config.speculative_config = SimpleNamespace(
+        rejection_sample_method=method, num_speculative_tokens=num_speculative_tokens
+    )
+
+    sampler = make_gpu_watermark_sampler(
+        StubWatermarker(),
+        max_num_reqs=2,
+        vllm_config=config,
+        num_speculative_tokens=num_speculative_tokens + 1,
+        deduplicate_contexts=dedup,
+        deduplicate_block_contexts_max_history=16,
+        draft_key=42,
+    )
+
+    if not allocated:
+        assert sampler.uncommitted_ring is None
+        assert sampler.uncommitted_state is None
+        return
+    assert sampler.uncommitted_ring.shape == (2, 16 * (num_speculative_tokens - 1))
+    assert sampler.uncommitted_ring.dtype == torch.int32
+    assert sampler.uncommitted_state.gpu.shape == (2, 2)
+
+
+def test_gpu_sampler_forgets_uncommitted_contexts_of_a_new_request(
+    make_gpu_watermark_sampler, monkeypatch
+):
+    config = VllmConfig()
+    config.speculative_config = SimpleNamespace(
+        rejection_sample_method="block", num_speculative_tokens=3
+    )
+    sampler = make_gpu_watermark_sampler(
+        StubWatermarker(), vllm_config=config, draft_key=42
+    )
+    staged_writes = []
+    applied = []
+    monkeypatch.setattr(
+        StagedWriteTensor,
+        "stage_write",
+        lambda self, index, start, x: staged_writes.append((index, start, list(x))),
+    )
+    monkeypatch.setattr(
+        StagedWriteTensor, "apply_write", lambda self: applied.append(self)
+    )
+
+    sampler.add_request(1, SamplingParams(watermarking=True))
+    sampler.apply_staged_writes()
+
+    assert (1, 0, [0, 0]) in staged_writes
+    assert sampler.uncommitted_state in applied
+
+
+def test_block_context_history_must_be_positive():
+    with pytest.raises(ValueError):
+        WatermarkConfig(key=42, deduplicate_block_contexts_max_history=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("context_width", [2, 4, 5])
+def test_uncommitted_contexts_accelerator_parity(context_width):
+    """The Triton append and scan kernels match the CPU reference.
+
+    The Philox context word is computed in-kernel on the accelerator and by the
+    torch helper on the CPU. The ring holds 600 of 700 entries, so the scan
+    crosses a block boundary and a recorded context sits beyond the first block.
+    """
+    capacity, num_blocks = 700, 150
+    generator = torch.Generator().manual_seed(0)
+    block_contexts = [
+        torch.randint(0, 50_000, (6, context_width), generator=generator)
+        for _ in range(num_blocks)
+    ]
+    recorded = block_contexts[-1][3]
+    queries = torch.stack([recorded, torch.full((context_width,), 60_000), recorded])
+    req_indices = torch.tensor([0, 0, 1])
+
+    def run(device):
+        ring, state = _uncommitted_buffers(max_num_reqs=2, capacity=capacity)
+        ring, state = ring.to(device), state.to(device)
+        for contexts in block_contexts:
+            append_uncommitted_contexts(
+                ring,
+                state,
+                contexts.to(device),
+                torch.tensor([0], device=device),
+                torch.tensor([0, 6], dtype=torch.int32, device=device),
+                torch.tensor([1], dtype=torch.int32, device=device),
+                draft_key=42,
+            )
+        mask = draft_watermarking_mask(
+            torch.zeros(2, 4, dtype=torch.int32, device=device),
+            req_indices.to(device),
+            torch.zeros(2, dtype=torch.int32, device=device),
+            torch.zeros(2, dtype=torch.int32, device=device),
+            torch.zeros(3, 3, context_width, dtype=torch.int64, device=device),
+            queries.to(device),
+            torch.zeros(3, dtype=torch.int64, device=device),
+            torch.ones(3, dtype=torch.bool, device=device),
+            max_history=None,
+            include_prompt=False,
+            draft_key=42,
+            uncommitted_ring=ring,
+            uncommitted_state=state,
+        )
+        return ring.cpu(), state.cpu(), mask.cpu()
+
+    cpu_ring, cpu_state, cpu_mask = run(torch.device("cpu"))
+    cuda_ring, cuda_state, cuda_mask = run(torch.device("cuda"))
+
+    assert cpu_state.tolist() == [[(num_blocks * 4) % capacity, 600], [0, 0]]
+    assert torch.equal(cuda_ring, cpu_ring)
+    assert torch.equal(cuda_state, cpu_state)
+    assert cpu_mask.tolist() == [False, True, True]
+    assert torch.equal(cuda_mask, cpu_mask)
+    assert (cpu_ring[0] == _draft_context_words(recorded.unsqueeze(0))[0]).any()

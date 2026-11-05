@@ -644,6 +644,10 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler.req_states.all_token_ids.gpu,
             sampler.req_states.prompt_len.gpu,
             sampler.req_states.total_len.gpu,
+            sampler.uncommitted_ring,
+            None
+            if sampler.uncommitted_state is None
+            else sampler.uncommitted_state.gpu,
         )
 
     def prepare_propose(

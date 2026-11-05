@@ -225,7 +225,12 @@ implementing [SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
 With `"rejection_sample_method": "block"`, block verification replaces the
 per-token test and recovery samples the block residual. The key roles are the
-same.
+same. Block verification observes key A noise at the contexts of rejected drafts
+without committing it, so the drafter skips those contexts and a few positions
+are not watermarked. In our evaluation, detection with block verification was
+within -1 to +3 percentage points of standard verification.
+`deduplicate_block_contexts_max_history` sets how many verification steps per
+request are remembered (default 8,192, using 4 bytes per remembered context).
 
 Select `dual_key_gumbel` together with probabilistic drafting:
 

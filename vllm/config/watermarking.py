@@ -55,6 +55,12 @@ class WatermarkConfig:
     `None` for the whole scope. Each position is compared over the
     `context_width` tokens before it. Ignored when `deduplicate_contexts` is
     `none`."""
+    deduplicate_block_contexts_max_history: int = Field(default=8192, ge=1)
+    """With block verification, the number of most recent verification steps per
+    request whose rejected-draft contexts are remembered and sampled without the
+    draft watermark (default 8192). Each step remembers up to
+    `num_speculative_tokens - 1` contexts in a 4-byte ring entry per context.
+    Ignored when `deduplicate_contexts` is `none`."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
     allow_target_only_watermarking: bool = False
