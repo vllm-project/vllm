@@ -1466,15 +1466,14 @@ def _auto_fit_max_model_len(
         else f"{kv_cache_memory} available for the KV cache"
     )
     if auto_fit_max >= AUTO_FIT_SHORT_MAX_MODEL_LEN:
-        (logger.info if after_warmup else logger.info_once)(
+        logger.info(
             "--max-model-len auto reduced max_model_len from %d to %d (%s).",
             original_max,
             auto_fit_max,
             left,
         )
         return
-    # Before warmup this runs once per engine config; log the result once.
-    (logger.warning if after_warmup else logger.warning_once)(
+    logger.warning(
         "--max-model-len auto reduced max_model_len from %d to %d (%s). "
         "Requests longer than %d tokens will be rejected. Increase "
         "`gpu_memory_utilization` or set --max-model-len explicitly.",
