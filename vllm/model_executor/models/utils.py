@@ -5,15 +5,7 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import InitVar, dataclass, field, replace
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Literal,
-    Protocol,
-    TypeAlias,
-    cast,
-    overload,
-)
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
 
 import regex as re
 import torch
@@ -72,25 +64,24 @@ class WeightsMapper:
 
     If a key maps to a value of `None`, the corresponding weight is ignored.
 
-    `orig_to_new_transform` runs first, in list order. Each entry is one of:
+    ``weights_transforms`` rewrite the raw weight stream in list order before
+    any name mapping.
 
-    - A Transformers `WeightRenaming`, which renames a weight.
-    - A one-to-one Transformers `WeightConverter`, which also runs its operations.
-    - A `WeightsTransformFn`, which rewrites the raw weight stream. Name-only consumers
-      such as `map_name` skip these.
+    `orig_to_new_transform` then takes Transformers `WeightTransform`s, in list order:
+    a `WeightRenaming` renames a weight and a one-to-one `WeightConverter` also runs
+    its operations on the tensor.
 
     `orig_to_new_substr`, `orig_to_new_prefix` and `orig_to_new_suffix` are shorthand
     for literal rules that are compiled into `orig_to_new_regex`, in that order. A
     substring only replaces its first occurrence. `orig_to_new_stacked` runs last.
     """
 
-    orig_to_new_transform: list["WeightTransform | WeightsTransformFn"] = field(
-        default_factory=list
-    )
+    orig_to_new_transform: list["WeightTransform"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
         default_factory=dict
     )
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
     orig_to_new_substr: InitVar[Mapping[str, str | None] | None] = None
     orig_to_new_prefix: InitVar[Mapping[str, str | None] | None] = None
     orig_to_new_suffix: InitVar[Mapping[str, str | None] | None] = None
@@ -127,6 +118,7 @@ class WeightsMapper:
                 **self.orig_to_new_stacked,
                 **other.orig_to_new_stacked,
             },
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
         )
 
     def map_name(self, key: str) -> str | None:
@@ -138,14 +130,8 @@ class WeightsMapper:
         """Backward-compatible alias for :meth:`map_name`."""
         return self.map_name(key)
 
-    def _map_name_with_shard(
-        self, key: str, start: int = 0
-    ) -> tuple[str, ShardIds | None] | None:
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
         """Map a weight name and extract any shard_id metadata.
-
-        Args:
-            key: The weight name.
-            start: The index of the first `orig_to_new_transform` entry to run.
 
         Returns:
             (mapped_name, shard_id) if the name should be kept. A list of shard
@@ -163,9 +149,8 @@ class WeightsMapper:
                 "k_scale to v_scale"
             )
 
-        for transform in self.orig_to_new_transform[start:]:
-            if not callable(transform):
-                key, _ = transform.rename_source_key(key)
+        for transform in self.orig_to_new_transform:
+            key, _ = transform.rename_source_key(key)
 
         for pattern, new_key in self.orig_to_new_regex.items():
             if pattern.search(key):
@@ -182,39 +167,31 @@ class WeightsMapper:
 
         return key, shard_id
 
-    def _apply_weight_transform(
-        self,
-        index: int,
-        weights: Iterable[tuple[str, torch.Tensor]],
-        model: nn.Module | None,
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        """Rename `weights` using the entry at `index`, running its operations."""
-        transform = cast("WeightTransform", self.orig_to_new_transform[index])
-        operations = getattr(transform, "operations", ())
-        for name, data in weights:
-            name, matched = transform.rename_source_key(name)
-            if (
-                matched is not None
-                and operations
-                and (result := self._map_name_with_shard(name, index + 1)) is not None
-            ):
-                for op in operations:
-                    converted = op.convert(
-                        {matched: [data]},
-                        source_patterns=transform.source_patterns,
-                        target_patterns=transform.target_patterns,
-                        full_layer_name=result[0],
-                        model=model,
-                        config=getattr(model, "config", None),
+    def _convert(
+        self, key: str, data: torch.Tensor, out_name: str, model: nn.Module | None
+    ) -> torch.Tensor:
+        """Run the operations of each `WeightConverter` matching `key`."""
+        for transform in self.orig_to_new_transform:
+            key, matched = transform.rename_source_key(key)
+            if matched is None:
+                continue
+            for op in getattr(transform, "operations", ()):
+                converted = op.convert(
+                    {matched: [data]},
+                    source_patterns=transform.source_patterns,
+                    target_patterns=transform.target_patterns,
+                    full_layer_name=out_name,
+                    model=model,
+                    config=getattr(model, "config", None),
+                )
+                if len(converted) != 1:
+                    raise ValueError(
+                        f"{op!r} produced {len(converted)} tensors from {key!r}, "
+                        "but only one-to-one conversions are supported"
                     )
-                    if len(converted) != 1:
-                        raise ValueError(
-                            f"{op!r} produced {len(converted)} tensors from {name!r}, "
-                            "but only one-to-one conversions are supported"
-                        )
-                    data = next(iter(converted.values()))
-                    data = data[0] if isinstance(data, list) else data
-            yield name, data
+                data = next(iter(converted.values()))
+                data = data[0] if isinstance(data, list) else data
+        return data
 
     def apply(
         self,
@@ -222,16 +199,14 @@ class WeightsMapper:
         *,
         model: nn.Module | None = None,
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        for index, transform in enumerate(self.orig_to_new_transform):
-            if callable(transform):
-                weights = transform(weights)
-            else:
-                weights = self._apply_weight_transform(index, weights, model)
+        for transform in self.weights_transforms:
+            weights = transform(weights)
         for name, data in weights:
-            result = self._map_name_with_shard(name, len(self.orig_to_new_transform))
+            result = self._map_name_with_shard(name)
             if result is None:
                 continue
             out_name, shard_id = result
+            data = self._convert(name, data, out_name, model)
             if shard_id is None:
                 yield out_name, data
                 continue
@@ -271,14 +246,13 @@ class WeightsMapper:
         return replace(
             self,
             orig_to_new_transform=[
-                t
-                for t in self.orig_to_new_transform
-                if not callable(t) and not hasattr(t, "operations")
+                t for t in self.orig_to_new_transform if not hasattr(t, "operations")
             ],
             orig_to_new_regex={
                 k: v for k, v in self.orig_to_new_regex.items() if v is not None
             },
             orig_to_new_stacked={},
+            weights_transforms=[],
         )
 
 

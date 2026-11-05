@@ -272,7 +272,7 @@ def test_weights_mapper_transform_runs_before_name_mapping():
     merge completes however its inputs are ordered."""
     mapper = WeightsMapper(
         orig_to_new_suffix={".w": ".w_renamed"},
-        orig_to_new_transform=[_pair_halves],
+        weights_transforms=[_pair_halves],
     )
     first, second = torch.ones(2), torch.zeros(2)
     keep = torch.ones(1)
@@ -286,7 +286,7 @@ def test_weights_mapper_transform_runs_before_name_mapping():
 
 
 def test_weights_mapper_transform_can_recode_values():
-    mapper = WeightsMapper(orig_to_new_transform=[_double])
+    mapper = WeightsMapper(weights_transforms=[_double])
 
     mapped = list(mapper.apply([("w", torch.ones(2))]))
 
@@ -296,7 +296,7 @@ def test_weights_mapper_transform_can_recode_values():
 def test_weights_mapper_transform_raises_at_iteration_not_at_apply():
     """Incomplete input raises when the stream is exhausted; merely calling
     apply() (or the transform) does nothing yet."""
-    mapper = WeightsMapper(orig_to_new_transform=[_pair_halves])
+    mapper = WeightsMapper(weights_transforms=[_pair_halves])
     stream = mapper.apply([("e.w.first", torch.ones(2))])
 
     with pytest.raises(ValueError, match="unpaired"):
@@ -305,7 +305,7 @@ def test_weights_mapper_transform_raises_at_iteration_not_at_apply():
 
 def test_weights_mapper_transform_state_is_fresh_per_apply():
     """The mapper is shared and long-lived; each apply() must start clean."""
-    mapper = WeightsMapper(orig_to_new_transform=[_pair_halves])
+    mapper = WeightsMapper(weights_transforms=[_pair_halves])
     with pytest.raises(ValueError, match="unpaired"):
         list(mapper.apply([("e.w.first", torch.ones(2))]))
     # A leaked pending entry would pair with this stream instead of raising.
@@ -329,16 +329,16 @@ def test_weights_mapper_or_concatenates_transforms_in_order():
 
         return rename
 
-    mapper = WeightsMapper(orig_to_new_transform=[tag("x"), tag("y")]) | WeightsMapper(
-        orig_to_new_transform=[tag("z")]
+    mapper = WeightsMapper(weights_transforms=[tag("x"), tag("y")]) | WeightsMapper(
+        weights_transforms=[tag("z")]
     )
     (mapped,) = list(mapper.apply([("w", torch.ones(1))]))
 
     assert mapped[0] == "w.x.y.z"
     assert seen == [("x", "w"), ("y", "w.x"), ("z", "w.x.y")]
-    assert (WeightsMapper() | WeightsMapper()).orig_to_new_transform == []
-    one_side = WeightsMapper() | WeightsMapper(orig_to_new_transform=[_pair_halves])
-    assert one_side.orig_to_new_transform == [_pair_halves]
+    assert (WeightsMapper() | WeightsMapper()).weights_transforms == []
+    one_side = WeightsMapper() | WeightsMapper(weights_transforms=[_pair_halves])
+    assert one_side.weights_transforms == [_pair_halves]
 
 
 def _double_w(weights):
@@ -350,7 +350,7 @@ def _double_w(weights):
 
 
 def test_weights_mapper_transforms_see_earlier_emitted_names():
-    mapper = WeightsMapper(orig_to_new_transform=[_pair_halves, _double_w])
+    mapper = WeightsMapper(weights_transforms=[_pair_halves, _double_w])
 
     (mapped,) = list(
         mapper.apply([("e.w.second", torch.zeros(1)), ("e.w.first", torch.ones(1))])
@@ -468,28 +468,3 @@ def test_weights_mapper_literal_rules_compile_to_regex():
     assert mapper.map_name("w.s") == "root.w.t"
     assert mapper.map_name("w.s.s2") == "root.w.s.s2"
     assert mapper.map_name("a.drop.b") is None
-
-
-def test_weights_mapper_stream_transforms_run_in_list_order_with_renames():
-    """A stream transform sees the renames listed before it, and not those after."""
-    seen = []
-
-    def record(weights):
-        for name, tensor in weights:
-            seen.append(name)
-            yield name, tensor
-
-    mapper = WeightsMapper(
-        orig_to_new_transform=[
-            WeightRenaming("a", "b"),
-            record,
-            WeightRenaming("b", "c"),
-        ]
-    )
-
-    assert [name for name, _ in mapper.apply([("a", torch.ones(1))])] == ["c"]
-    assert seen == ["b"]
-    assert mapper.map_name("a") == "c"
-    assert mapper.get_rename_mapper().orig_to_new_transform == [
-        t for t in mapper.orig_to_new_transform if t is not record
-    ]

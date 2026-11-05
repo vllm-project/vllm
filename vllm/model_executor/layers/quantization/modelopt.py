@@ -786,7 +786,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         if encoding is None:
             return mapper
         transform = csf_weights_transform((encoding,))
-        return mapper | WeightsMapper(orig_to_new_transform=[transform])
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
@@ -1752,7 +1752,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if not encodings:
             return mapper
         transform = csf_weights_transform(encodings)
-        return mapper | WeightsMapper(orig_to_new_transform=[transform])
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]

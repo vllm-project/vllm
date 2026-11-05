@@ -433,7 +433,7 @@ def _unsqueeze_gguf_shared_expert_gate(
 class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     fall_back_to_pt_during_load = False
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_transform=[_unsqueeze_gguf_shared_expert_gate],
+        weights_transforms=[_unsqueeze_gguf_shared_expert_gate],
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),
