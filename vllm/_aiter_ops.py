@@ -3568,10 +3568,11 @@ class rocm_aiter_ops:
     @staticmethod
     @functools.cache
     def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        # AITER #5141 keys this CSV by (gfx, cu_num, M, N, K). get_CKGEMM_config
-        # fills gfx and cu_num from the current device. One shuffled weight is
-        # used for every M, so any tuned row for this (N, K) selects the path.
-        # Split-K is part of the kernel name inside AITER, not a vLLM argument.
+        # AITER #5141 (c03cf003) keys this CSV by (gfx, cu_num, M, N, K).
+        # get_CKGEMM_config fills gfx and cu_num from the current device. One
+        # shuffled weight is used for every M, so any tuned row for this (N, K)
+        # selects the path. Split-K lives in the FlyDSL kernel name; the CSV
+        # splitK column stays 0 and vLLM does not pass a split factor.
         try:
             from aiter.jit.core import AITER_CONFIGS
             from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config

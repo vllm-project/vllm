@@ -509,20 +509,21 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 class AiterPreshuffledBlockScaleFp8ScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     """Block-scaled FP8 GEMM through AITER ``gemm_a8w8_blockscale_bpreshuffle``.
 
-    AITER #5141 dispatches ck, cktile, asm, opus, or FlyDSL from the tuned
-    row, including split-K when the kernel name carries it. This class only
-    prepares the shared contract: weights shuffled with ``layout=(16, 16)``
-    and K-major fp32 activation scales. It is selected when any probed M for
-    this ``(N, K)`` has a row, because one shuffled weight serves prefill and
-    decode.
+    AITER #5141 (head ``c03cf003``) dispatches ck, cktile, asm, opus, or FlyDSL
+    from the tuned row. A gfx942 FlyDSL row is selected by a kernel name starting
+    with ``flydsl_blockscale_bpreshuffle_``. Split-K is encoded in that name;
+    the CSV ``splitK`` column stays 0. This class prepares the shared contract:
+    weights shuffled with ``layout=(16, 16)`` and fp32 activation scales in the
+    layout that head accepts. It is selected when any probed M for this ``(N, K)``
+    has a row, because one shuffled weight serves prefill and decode.
     """
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
-        # AITER indexes x_scale as kb * M + row (K-major). ROCm
+        # The FlyDSL kernel indexes x_scale as kb * M + row. ROCm
         # group_fp8_quant does not read column_major_scales, so
-        # apply_block_scaled_mm converts when the scale is still row-major.
+        # apply_block_scaled_mm builds the stride the kernel accepts.
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
@@ -616,7 +617,15 @@ class AiterPreshuffledBlockScaleFp8ScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 As = As.to(torch.float32)
             Bs = Bs.to(torch.float32)
 
-        if As.dim() == 2 and As.size(-1) > 1 and As.stride(0) != 1:
+        # c03cf003 raises unless x_scale is contiguous K-major or an
+        # (M, K/128) view with stride (1, M). group_fp8_quant emits row-major
+        # (M, K/128); this view is the one the kernel transposes without a copy.
+        if (
+            As.dim() == 2
+            and As.size(0) > 0
+            and As.size(1) > 1
+            and As.stride() != (1, As.size(0))
+        ):
             As = As.t().contiguous().t()
 
         return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
