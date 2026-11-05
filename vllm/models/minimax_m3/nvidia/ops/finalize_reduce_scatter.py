@@ -23,6 +23,9 @@ routed sum, the shared add and the reduction. Consecutive layers alternate
 between two mailbox generations, so a rank may write layer L+1's rows while a
 peer still reads layer L's; every layer in between has a TP collective, which
 orders L+2's writes after L's reads.
+
+The mailbox holds 2 x max_num_batched_tokens BF16 rows of symmetric memory per
+GPU whatever the TP size: 201 MB for hidden 6144 and 8192 tokens.
 """
 
 import torch

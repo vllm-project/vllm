@@ -303,6 +303,18 @@ steps:
   commands:
     - pytest -v -s models/minimax_m3 --ignore=models/minimax_m3/amd_specialized_decode
 
+- label: ":nvidia: (2xB200) MiniMax-M3 Large-Batch Sequence Parallel"
+  key: minimax-m3-large-batch-sp-2xb200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/minimax_m3/nvidia/
+  - tests/models/minimax_m3/test_sequence_parallel_gather.py
+  - tests/models/minimax_m3/test_finalize_reduce_scatter.py
+  commands:
+    - pytest -v -s models/minimax_m3/test_sequence_parallel_gather.py models/minimax_m3/test_finalize_reduce_scatter.py
+
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore

@@ -219,6 +219,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
+    VLLM_MINIMAX_M3_LARGE_BATCH_SP: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
@@ -1722,6 +1723,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
     # ranks must belong to one NVLink domain.
     "VLLM_ENABLE_GEMM_RS": lambda: bool(int(os.getenv("VLLM_ENABLE_GEMM_RS", "0"))),
+    # MiniMax-M3 on SM100 with tensor parallelism: shard the residual stream by
+    # token for batches of 4096+ tokens and fuse the MoE finalize into the
+    # reduce-scatter. Set to 0 to keep the all-reduce layout for every batch.
+    "VLLM_MINIMAX_M3_LARGE_BATCH_SP": lambda: bool(
+        int(os.getenv("VLLM_MINIMAX_M3_LARGE_BATCH_SP", "1"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(

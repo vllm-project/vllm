@@ -157,12 +157,12 @@ _QKV_FUSED_EPILOGUE_MIN_TOKENS = 512
 
 # Batches of at least this many tokens keep the residual stream sharded by token
 # across TP ranks (sequence parallelism) even without MegaMoE. Each all-reduce
-# becomes a reduce-scatter (fused into o_proj by GEMM-RS where it can bind), the
-# residual add + RMSNorm runs on 1/TP of the rows, and the attention input is
-# all-gathered as MXFP8 (6336 instead of 12288 bytes per token); the FFN input
-# is all-gathered in BF16. On GB300 at TP4 this took 6.2 ms off a 118.6 ms
-# 8192-token mixed prefill + decode step. At 4096 tokens collective benchmarks
-# put both layouts within a few percent; below that the all-reduce is faster.
+# becomes a reduce-scatter (fused into o_proj by GEMM-RS, and into the MoE
+# finalize by finalize_reduce_scatter), the residual add + RMSNorm runs on 1/TP
+# of the rows, and the attention input is all-gathered as MXFP8 (6336 instead
+# of 12288 bytes per token); the FFN input is all-gathered in BF16. At 4096
+# tokens, TP4 collective benchmarks put both layouts within a few percent;
+# below that the all-reduce is faster.
 _SEQUENCE_PARALLEL_MIN_TOKENS = 4096
 
 # Smallest batch whose o_proj/down_proj runs the fused GEMM-RS kernel. Below
@@ -268,7 +268,8 @@ def _use_large_batch_sequence_parallel(vllm_config: VllmConfig) -> bool:
     """
     parallel_config = vllm_config.parallel_config
     return (
-        current_platform.is_cuda()
+        envs.VLLM_MINIMAX_M3_LARGE_BATCH_SP
+        and current_platform.is_cuda()
         and parallel_config.tensor_parallel_size > 1
         and parallel_config.pipeline_parallel_size == 1
         and not parallel_config.enable_expert_parallel
@@ -308,7 +309,8 @@ def _maybe_init_gemm_rs(
     hidden_size = vllm_config.model_config.hf_text_config.hidden_size
     if not maybe_init_gemm_rs_ar(vllm_config, N=hidden_size, all_reduce=False):
         return False
-    logger.info_once("To disable MiniMax-M3 GEMM-RS, set VLLM_ENABLE_GEMM_RS=0.")
+    if use_sequence_parallel:
+        logger.info_once("To disable MiniMax-M3 GEMM-RS, set VLLM_ENABLE_GEMM_RS=0.")
     return True
 
 
@@ -1630,6 +1632,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.large_batch_sequence_parallel = _use_large_batch_sequence_parallel(
             vllm_config
         )
+        if self.large_batch_sequence_parallel:
+            from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+                supports_fused_moe_finalize,
+            )
+
+            # It pays off only with the MoE tail fused (finalize_reduce_scatter).
+            self.large_batch_sequence_parallel = supports_fused_moe_finalize(
+                vllm_config
+            )
         run_gemm_rs = _maybe_init_gemm_rs(
             vllm_config,
             self.use_sequence_parallel,
@@ -1701,7 +1712,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # Sharded first: it reads the experts' own deferral limit, which the
             # replicated deferral then lowers.
             if self.large_batch_sequence_parallel:
-                self._init_sharded_moe_finalize(vllm_config)
+                self.large_batch_sequence_parallel = self._init_sharded_moe_finalize(
+                    vllm_config
+                )
             self._init_fused_moe_finalize(vllm_config)
 
     def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> None:
@@ -1750,21 +1763,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             len(deferring),
         )
 
-    def _init_sharded_moe_finalize(self, vllm_config: VllmConfig) -> None:
+    def _init_sharded_moe_finalize(self, vllm_config: VllmConfig) -> bool:
         """Let token-sharded batches leave every MoE's top-k finalize, shared
-        add and reduce-scatter to the next norm (or the final norm), fused.
-        Builds a collective kernel: every TP rank decides alike."""
-        from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
-            supports_fused_moe_finalize,
-        )
+        add and reduce-scatter to the next norm (or the final norm), fused;
+        return whether every MoE layer accepted. Builds a collective kernel:
+        every TP rank decides alike."""
         from vllm.models.minimax_m3.nvidia.ops.finalize_reduce_scatter import (
             init_sharded_moe_finalize,
         )
 
-        if not supports_fused_moe_finalize(vllm_config):
-            return
         layers = self.layers[self.start_layer : self.end_layer]
-
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         deferring = [
             layer
@@ -1772,8 +1780,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if layer.is_moe_layer
             and layer.block_sparse_moe.defer_finalize(max_num_tokens, sharded=True)
         ]
-        if not deferring:
-            return
+        if len(deferring) != sum(layer.is_moe_layer for layer in layers):
+            logger.info_once(
+                "MiniMax M3: large-batch sequence parallelism is off: not every "
+                "MoE layer can defer its finalize."
+            )
+            return False
         init_sharded_moe_finalize(
             hidden_size=self.config.hidden_size,
             max_num_tokens=max_num_tokens,
@@ -1786,6 +1798,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             "norm for token-sharded batches (%d layers).",
             len(deferring),
         )
+        return True
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
