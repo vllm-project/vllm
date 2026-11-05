@@ -2170,6 +2170,27 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific test")
+@pytest.mark.skipif(not ROCM_TRITON_KERNELS_AVAILABLE, reason="triton_kernels required")
+def test_rocm_mxfp4_moe_selects_triton_unfused_without_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Without AITER (e.g. CDNA2/gfx90a), MXFP4 MoE must pick the native
+    Triton backend instead of falling through to emulation."""
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
+    moe_config = make_dummy_moe_config(
+        num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=256
+    )
+
+    with set_current_vllm_config(VllmConfig()):
+        backend, _ = mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(moe_config)
+
+    assert backend == mxfp4_oracle.Mxfp4MoeBackend.TRITON_UNFUSED
+
+
 @pytest.mark.parametrize(
     "moe_backend,w4a4,supported,expected",
     [
