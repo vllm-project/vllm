@@ -7225,7 +7225,7 @@ async fn non_stream_completions_echo_reports_the_truncated_prompt() {
         Arc::new(FakeChatBackend::new()),
         |request| {
             assert_eq!(
-                request.prompt_token_ids.as_deref(),
+                decode_prompt_token_ids(request).as_deref(),
                 Some(bytes_to_token_ids(b"world").as_slice())
             );
         },
@@ -7316,7 +7316,10 @@ async fn chat_completions_echo_stream_with_prompt_truncation() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::new()),
         |request| {
-            assert_eq!(request.prompt_token_ids.as_ref().map(Vec::len), Some(4));
+            assert_eq!(
+                decode_prompt_token_ids(request).as_ref().map(Vec::len),
+                Some(4)
+            );
         },
     )
     .await;
