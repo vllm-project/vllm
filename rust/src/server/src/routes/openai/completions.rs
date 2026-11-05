@@ -15,17 +15,16 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, future, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
-use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest,
+    TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
@@ -43,10 +42,11 @@ use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
 };
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
@@ -55,9 +55,9 @@ pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    tokenizer: &dyn Tokenizer,
+    processor: &TextRequestProcessor,
 ) -> Result<TextRequest, ApiError> {
-    prepare_completion_request(request, lora_resolution, ctx, tokenizer)
+    prepare_completion_request(request, lora_resolution, ctx, processor)
         .map(|prepared| prepared.text_request)
 }
 
@@ -73,20 +73,23 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
         body,
         &lora_resolution,
         request_context,
-        tokenizer.as_ref(),
+        state.chat.text().request_processor(),
     ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         prepared.text_request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
+        state.llm().info().max_model_len,
     ) {
         return error.into_response();
     }
@@ -113,48 +116,95 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_stream = match state
+    let text_streams = match state
         .chat
         .text()
-        .generate(prepared.text_request)
+        .generate_n(prepared.text_request, prepared.n)
         .instrument(request_span.clone())
         .await
     {
-        Ok(stream) => stream,
+        Ok(streams) => streams,
         Err(error) => {
             return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        );
-        let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
+        let chunk_streams = text_streams
+            .into_iter()
+            .map(|text_stream| {
+                completion_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    api_server_options,
+                    prepared.options.clone(),
+                )
+            })
+            .collect();
+        let sse_stream = completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
+            .instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_completion(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = future::try_join_all(text_streams.into_iter().map(|text_stream| {
+            collect_completion(
+                text_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                api_server_options,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+        .await;
+        match responses {
+            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
 
-        Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<CompletionResponse>) -> CompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
+            usage.add_choice(other);
+        }
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for CompletionSseChunk {
+    fn set_choice_index(&mut self, index: u32) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        for choice in &mut chunk.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        match self {
+            Self::Chunk(_) => None,
+            Self::Usage(chunk) => chunk.usage.as_mut(),
+        }
+    }
+
+    fn clear_metrics(&mut self) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        chunk.metrics = None;
     }
 }
 
