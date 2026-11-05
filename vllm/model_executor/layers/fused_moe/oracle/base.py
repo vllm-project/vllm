@@ -22,7 +22,7 @@ pre-class code.
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import torch
 
@@ -37,6 +37,37 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 BackendT = TypeVar("BackendT", bound=Enum)
+
+
+def make_fused_moe_experts(
+    prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+    experts_cls: type[mk.FusedMoEExperts],
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    **kwargs: Any,
+) -> mk.FusedMoEExperts:
+    """Validate the activation contract before constructing the experts."""
+    experts_activation_format = experts_cls.activation_format()
+    prepare_finalize_activation_format = prepare_finalize.activation_format
+    if experts_activation_format != prepare_finalize_activation_format:
+        raise ValueError(
+            f"{experts_cls.__name__} expects {experts_activation_format.name} "
+            "activations, but "
+            f"{prepare_finalize.__class__.__name__} produces "
+            f"{prepare_finalize_activation_format.name} activations."
+        )
+
+    if experts_activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
+        kwargs["max_num_tokens"] = max_num_tokens
+        kwargs["num_dispatchers"] = prepare_finalize.num_dispatchers()
+
+    return experts_cls(
+        moe_config=moe_config,
+        quant_config=quant_config,
+        **kwargs,
+    )
 
 
 class MoEKernelOracle(ABC, Generic[BackendT]):

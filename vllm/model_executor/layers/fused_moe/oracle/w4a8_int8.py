@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import make_fused_moe_experts
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -345,9 +346,11 @@ def make_w4a8_int8_moe_kernel(
             f"but got {experts_cls.__name__}"
         )
 
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
+    experts = make_fused_moe_experts(
+        prepare_finalize,
+        experts_cls,
+        moe_config,
+        moe_quant_config,
     )
 
     kernel = mk.FusedMoEKernel(
