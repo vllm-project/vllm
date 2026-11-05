@@ -62,7 +62,7 @@ if not current_platform.is_fp8_fnuz():
 vllm_config = VllmConfig()
 
 
-@dataclass
+@dataclass(slots=True)
 class BatchedMMConfig:
     in_dtype: torch.dtype
     quant_dtype: torch.dtype | None
@@ -73,7 +73,7 @@ class BatchedMMConfig:
     N: int
 
 
-@dataclass
+@dataclass(slots=True)
 class BatchedMMTensors:
     A: torch.Tensor  # [E, max_tokens, K]
     B: torch.Tensor  # [E, K, N] - column major
