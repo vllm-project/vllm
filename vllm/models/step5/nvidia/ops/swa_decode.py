@@ -12,7 +12,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .sparse_decode_attention import _PDL, _gate
+from ...common.ops.sparse_decode_attention import _PDL, _gate
 
 
 @triton.jit(do_not_specialize=["SCALE"])

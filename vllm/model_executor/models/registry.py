@@ -187,7 +187,6 @@ _TEXT_GENERATION_MODELS = {
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
-    "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
@@ -214,7 +213,9 @@ _TEXT_GENERATION_MODELS = {
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
+    "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
+    "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
@@ -284,6 +285,8 @@ _LATE_INTERACTION_MODELS = {
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     # Inferred by Transformers for ModernVBERT checkpoints without `architectures`
     "ModernVBertModel": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    # Declared by ColUltraVBERT checkpoints since native Transformers support
+    "UltraVBertModel": ("colultravbert", "ColUltraVBertForRetrieval"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
@@ -515,6 +518,10 @@ _MULTIMODAL_MODELS = {
     ),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
+    "MingV3ASRForConditionalGeneration": (
+        "ming_v3_asr",
+        "MingV3ASRForConditionalGeneration",
+    ),
     "MiniMaxM3SparseForConditionalGeneration": (
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForConditionalGeneration",
@@ -639,6 +646,7 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
+    "CanaryForConditionalGeneration": ("canary", "CanaryForConditionalGeneration"),
     "CohereAsrForConditionalGeneration": (
         "cohere_asr",
         "CohereAsrForConditionalGeneration",
@@ -771,6 +779,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "OlmoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "PhiForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -941,6 +950,10 @@ class _ModelInfo:
     supports_kv_cache_grouping: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    # Fully-qualified name of `SpeculativeDraftModel.speculator_config_class`.
+    speculator_config_class: str | None
+    # Whether a draft model may reuse the target's input embedding under PP.
+    may_use_target_embed: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -979,6 +992,12 @@ class _ModelInfo:
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
             ),
+            speculator_config_class=(
+                f"{config_cls.__module__}.{config_cls.__qualname__}"
+                if (config_cls := getattr(model, "speculator_config_class", None))
+                else None
+            ),
+            may_use_target_embed=hasattr(model, "has_own_embed_tokens"),
         )
 
 
@@ -1096,8 +1115,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         except Exception:
             logger.exception("Error saving model info cache.")
 
-    @logtime(logger=logger, msg="Registry inspect model class")
-    def inspect_model_cls(self) -> _ModelInfo:
+    def _get_module_hash(self) -> str | None:
         # Modules registered with a non-default location (e.g. the
         # hardware-isolated ``vllm.models.<name>`` layout) live outside
         # ``vllm/model_executor/models``. Resolve the module spec directly
@@ -1111,11 +1129,15 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             except (ImportError, ValueError):
                 spec = None
             model_path = Path(spec.origin) if spec is not None and spec.origin else None
-        module_hash = None
+        if model_path is None or not model_path.exists():
+            return None
+        return self._get_modelinfo_module_hash(model_path)
 
-        if model_path is not None and model_path.exists():
-            module_hash = self._get_modelinfo_module_hash(model_path)
+    @logtime(logger=logger, msg="Registry inspect model class")
+    def inspect_model_cls(self) -> _ModelInfo:
+        module_hash = self._get_module_hash()
 
+        if module_hash is not None:
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
                 logger.debug(
@@ -1184,6 +1206,28 @@ class _ModelRegistry:
 
     def get_supported_archs(self) -> Set[str]:
         return self.models.keys()
+
+    def fill_model_info_cache(self) -> None:
+        """Inspect every lazily registered model that is missing from the model
+        info cache, in one subprocess, and cache the results.
+
+        A cache miss in `inspect_model_cls` starts a subprocess for that model
+        alone, which takes about as long as inspecting all of them at once. Best
+        effort: a model that fails to inspect here is left to `inspect_model_cls`.
+        """
+        models = list(
+            dict.fromkeys(
+                model
+                for model in self.models.values()
+                if isinstance(model, _LazyRegisteredModel)
+            )
+        )
+        try:
+            # Resolving a module outside vllm/model_executor/models imports its
+            # package, so even the cache lookup runs in the subprocess.
+            _run_in_subprocess(lambda: _fill_model_info_cache(models))
+        except Exception:
+            logger.warning("Could not fill the model info cache.", exc_info=True)
 
     def register_model(
         self,
@@ -1601,6 +1645,27 @@ ModelRegistry = _ModelRegistry(
 )
 
 _T = TypeVar("_T")
+
+
+def _fill_model_info_cache(models: list[_LazyRegisteredModel]) -> None:
+    for model in models:
+        module_hash = model._get_module_hash()
+        if (
+            module_hash is None
+            or model._load_modelinfo_from_cache(module_hash) is not None
+        ):
+            continue
+        try:
+            mi = _ModelInfo.from_model_cls(model.load_model_cls())
+        except Exception:
+            logger.debug(
+                "Could not inspect %s.%s",
+                model.module_name,
+                model.class_name,
+                exc_info=True,
+            )
+            continue
+        model._save_modelinfo_to_cache(mi, module_hash)
 
 
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:

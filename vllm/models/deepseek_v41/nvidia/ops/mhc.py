@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 from .mega_mhc import (
@@ -320,3 +321,35 @@ def mhc_shifted_post_pre(
         norm_eps=norm_eps,
         capture_aux=capture_aux,
     )
+
+
+@triton.jit
+def _hc_expand_kernel(
+    x,
+    out,
+    numel,
+    H: tl.constexpr,
+    N: tl.constexpr,
+    STRIDE_M: tl.constexpr,
+    STRIDE_H: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = index < numel
+    row = index // H
+    col = index % H
+    value = tl.load(x + row * STRIDE_M + col * STRIDE_H, mask=mask, other=0)
+    for stream in tl.static_range(N):
+        tl.store(out + (row * N + stream) * H + col, value, mask=mask)
+
+
+def hc_expand(x: torch.Tensor, hc_mult: int) -> torch.Tensor:
+    """``x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()``, reading
+    ``x`` once instead of once per copy."""
+    m, h = x.shape
+    out = x.new_empty(m, hc_mult, h)
+    if out.numel():
+        _hc_expand_kernel[(triton.cdiv(m * h, 1024),)](
+            x, out, m * h, h, hc_mult, *x.stride(), BLOCK=1024, num_warps=4
+        )
+    return out

@@ -935,7 +935,7 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
 )
 def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_init):
     """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
-    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
+    model_id = "vllm-project/qwen2.5-0.5b-modelopt-fp8-pc-pt"
     model_path = _snapshot_download_or_skip(model_id)
 
     model, vllm_config = load_model_without_vllm_runner(
@@ -985,7 +985,7 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_i
 )
 def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_init):
     """Test ModelOpt FP8_PB_WO checkpoint setup."""
-    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
+    model_id = "vllm-project/qwen2.5-0.5b-modelopt-fp8-pb-wo"
     model_path = _snapshot_download_or_skip(model_id)
 
     model, vllm_config = load_model_without_vllm_runner(
@@ -1375,7 +1375,6 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     method.wkey = mo.SCHEME_FOR[kFp8Static128BlockSym]
     method.akey = mo.SCHEME_FOR[kFp8Dynamic128Sym]
     method.input_dtype = method.out_dtype = torch.bfloat16
-    method.marlin_input_dtype = None
 
     layer = torch.nn.Module()
     with (
@@ -1620,6 +1619,7 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
     layer = torch.nn.Module()
     layer.layer_name = "model.layers.0.mlp.experts"
     layer.is_fused_checkpoint_transposed = False
+    layer.shared_expert_online_loader = None
     layer._orient_fused_weight = RoutedExperts._orient_fused_weight
     layer.get_expert_mapping = lambda **kwargs: (
         RoutedExperts.build_expert_params_mapping(
