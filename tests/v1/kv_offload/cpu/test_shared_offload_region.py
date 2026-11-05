@@ -859,8 +859,8 @@ def test_cleanup_creator_all_effects(iid):
 
 def test_cleanup_non_creator_all_effects(iid):
     """cleanup() on a non-creator closes mmap and fd, but leaves the file on disk."""
-    r0 = _make_region(iid)  # creator
-    r1 = _make_region(iid)  # joiner
+    r0 = _make_region(iid, unlink_owner=False)  # initializer
+    r1 = _make_region(iid, unlink_owner=False)  # joiner
     path = r0.mmap_path
     # captured before cleanup(), which clears both attributes on the region
     fd1 = r1.fd
