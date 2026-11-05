@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.quantization.mxfp4 import (
+    GptOssMxfp4MoEMethod,
+    Mxfp4MoEMethod,
+)
 from vllm.model_executor.models.gpt_oss import (
     GptOssForCausalLM,
     GptOssModel,
@@ -150,3 +156,17 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
+
+
+@pytest.mark.parametrize(
+    "method_cls", [GptOssMxfp4MoEMethod, Mxfp4MoEMethod], ids=["gpt_oss", "mxfp4"]
+)
+def test_post_load_processing_rebuilds_permute_cache(method_cls):
+    """Level-2 sleep discards the storage behind cached permute indices."""
+    method = object.__new__(method_cls)
+    method.mxfp4_backend = Mxfp4MoeBackend.NONE
+    method._cache_permute_indices = {torch.Size([2]): torch.zeros(2)}
+    # No layer: processing stops right after the clear this test is about.
+    with contextlib.suppress(AttributeError):
+        method.process_weights_after_loading(None)
+    assert method._cache_permute_indices == {}
