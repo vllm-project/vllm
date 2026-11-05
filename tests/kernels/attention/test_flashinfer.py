@@ -735,3 +735,51 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
     )
     assert ((deq[:, 0] - kv).norm() / kv.norm()) < 0.2
     assert not layers[0].any()
+
+
+def test_flashinfer_nvfp4_receive_reblocking(default_vllm_config):
+    """Reblocked bytes must match the native writer, including V-scale tiles."""
+    from vllm.config import CacheConfig
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        kv_postprocess_nvfp4_on_receive,
+    )
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    set_random_seed(0)
+    with torch.device("cuda"):
+        remote_size, block_size, received_blocks = 16, 64, 7
+        num_heads, head_size = 2, 128
+        source = torch.zeros(
+            received_blocks, 2 * num_heads, remote_size, 72, dtype=torch.uint8
+        )
+        received = torch.full(
+            (6, 2 * num_heads, block_size, 72), 231, dtype=torch.uint8
+        )
+        expected = received.clone()
+        indices = torch.tensor([3, 1, 4])
+        expected[indices] = 0
+        tokens = torch.arange(received_blocks * remote_size)
+        slots = indices[tokens // block_size] * block_size + tokens % block_size
+        kv = torch.randn(2, tokens.numel(), num_heads, head_size, dtype=torch.bfloat16)
+        layer = Attention(
+            4,
+            head_size,
+            1.0,
+            num_kv_heads=num_heads,
+            cache_config=CacheConfig(cache_dtype="nvfp4"),
+            attn_backend=fi.FlashInferBackend,
+        )
+        impl = layer.impl
+        assert isinstance(impl, fi.FlashInferImpl)
+        impl.do_kv_cache_update(layer, kv[0], kv[1], source, tokens)
+        impl.do_kv_cache_update(layer, kv[0], kv[1], expected, slots)
+
+        ratio = block_size // remote_size
+        for i in range(received_blocks):
+            page, sub_block = divmod(i, ratio)
+            received[indices[page]].view(ratio, -1)[sub_block].copy_(
+                source[i].flatten()
+            )
+        kv_postprocess_nvfp4_on_receive(received, indices, ratio, received_blocks)
+        torch.testing.assert_close(received, expected, rtol=0, atol=0)

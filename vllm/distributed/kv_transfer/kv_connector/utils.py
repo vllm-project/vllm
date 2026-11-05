@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, nvfp4_split_data_scale
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, iter_layer_specs
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -292,6 +292,46 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
         .flatten(2, 3)
     )
     cache.index_copy_(0, indices, permuted_blocks)
+
+
+def kv_postprocess_nvfp4_on_receive(
+    cache: torch.Tensor,
+    indices: torch.Tensor,
+    block_size_ratio: int,
+    covered_sub_blocks: int,
+) -> None:
+    """Assemble head-major NVFP4 pages, clearing untransferred data and scales."""
+    received = cache.index_select(0, indices)
+    num_blocks, num_slots, block_size, full_dim = received.shape
+    num_heads = num_slots // 2
+    remote_block_size = block_size // block_size_ratio
+    remote_pages = received.view(-1, num_slots, remote_block_size, full_dim)
+    result = torch.empty_like(received)
+    covered_blocks, sub_blocks_in_last = divmod(covered_sub_blocks, block_size_ratio)
+    first_stale = covered_blocks + bool(sub_blocks_in_last)
+
+    for source_side, target_side in zip(
+        remote_pages.split(num_heads, dim=1), result.split(num_heads, dim=1)
+    ):
+        for source, target in zip(
+            nvfp4_split_data_scale(source_side), nvfp4_split_data_scale(target_side)
+        ):
+            source, target = source.view(torch.uint8), target.view(torch.uint8)
+            target.copy_(
+                source.reshape(
+                    num_blocks, block_size_ratio, num_heads, remote_block_size, -1
+                )
+                .transpose(1, 2)
+                .flatten(2, 3)
+            )
+            # NVFP4 V-scale swizzles stay within four-token tiles; remote
+            # pages and the untransferred tail are aligned to those tiles.
+            if sub_blocks_in_last:
+                target[
+                    covered_blocks, :, sub_blocks_in_last * remote_block_size :
+                ].zero_()
+            target[first_stale:].zero_()
+    cache.index_copy_(0, indices, result)
 
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):

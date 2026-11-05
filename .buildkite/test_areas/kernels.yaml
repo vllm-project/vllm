@@ -762,6 +762,9 @@ steps:
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/attention/test_cache.py
   - tests/kernels/quantization/nvfp4_utils.py
+  - tests/kernels/attention/test_flashinfer.py
+  - vllm/distributed/kv_transfer/kv_connector/utils.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py

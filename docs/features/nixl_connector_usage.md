@@ -415,6 +415,20 @@ GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVC
 
 ## Experimental Feature
 
+### NVFP4 KV cache with different block sizes
+
+NVFP4 KV pages pack K data, K scales, V data, and V scales separately.
+When prefill uses smaller blocks than decode (for example, 16 and 64 tokens),
+NIXL regroups these sections on receive and clears untransferred data and
+scales in the last decode block and any remaining allocated blocks.
+
+For this conversion, use the same tensor-parallel size and the `LBHNC`
+KV layout on both instances (`VLLM_KV_CACHE_LAYOUT=LBHNC`). Decode's block
+size must be an integer multiple of prefill's block size. Other layouts and
+the experimental layout permutation below are rejected for this packed
+NVFP4 format when receive conversion is required. NVFP4 KV-head re-sharding
+remains unsupported for this format.
+
 ### Heterogeneous KV Layout support
 
 Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental configuration
