@@ -526,6 +526,7 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     worker = SimpleNamespace(
         cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
@@ -590,8 +591,8 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
         log.append("get_mem_pool_context")
         return connector_pool
 
-    def commit(num_blocks, **kwargs):
-        log.append(f"commit:{num_blocks}")
+    def commit(num_blocks, defragment, **kwargs):
+        log.append(f"commit:{num_blocks}:defragment={defragment}")
         raise Committed
 
     monkeypatch.setattr(
@@ -614,14 +615,21 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
             commit=commit,
         ),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
-        vllm_config=SimpleNamespace(kv_transfer_config=object()),
+        # A connector that registers the KV cache needs one chunk per segment.
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(registers_kv_cache_memory=lambda: True)
+        ),
     )
     kv_cache_config = SimpleNamespace(num_blocks=16, kv_cache_tensors=[])
 
     if connector_pool is None:
         with pytest.raises(Committed):
             extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
-        assert log == ["ensure_kv_transfer:8", "get_mem_pool_context", "commit:8"]
+        assert log == [
+            "ensure_kv_transfer:8",
+            "get_mem_pool_context",
+            "commit:8:defragment=True",
+        ]
     else:
         with pytest.raises(ValueError, match="own memory pool"):
             extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)

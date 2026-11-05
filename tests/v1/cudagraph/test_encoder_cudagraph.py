@@ -255,6 +255,15 @@ class TestFindBudgetGraph:
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
 
+    def test_capture_skipped_without_supported_modalities(self):
+        mgr = _make_manager_with_budgets([2048, 4096])
+        mgr.config.modalities = []
+        mgr.model = None  # capture must not touch the model
+
+        assert mgr.get_num_graphs_to_capture() == 0
+        mgr.capture(graph_pool=object())
+        assert not mgr.is_captured()
+
 
 # ---------------------------------------------------------------------------
 # _execute_local greedy packing with budget-cliff deferral (no GPU required)
