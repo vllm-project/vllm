@@ -684,11 +684,11 @@ def _shared_hf_root_module_prefixes(
 
     E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
     under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
-    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
+    ``WeightsMapper.prefix_rules`` (no hard-coded name list).
     """
     if weights_mapper is None:
         return ()
-    mapping = weights_mapper.orig_to_new_prefix
+    mapping = weights_mapper.prefix_rules()
     if not mapping:
         return ()
 

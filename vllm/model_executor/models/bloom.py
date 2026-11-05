@@ -23,9 +23,11 @@ import math
 from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BloomConfig
+from transformers.conversion_mapping import WeightConverter
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -49,9 +51,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
+from .falcon import DeinterleaveQKV
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -242,6 +246,16 @@ class BloomModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        num_heads = config.num_attention_heads
+        self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_transform=[
+                WeightConverter(
+                    "query_key_value",
+                    "query_key_value",
+                    [DeinterleaveQKV(num_heads, num_heads)],
+                )
+            ]
+        )
 
         self.embed_dim = config.hidden_size
 
@@ -295,26 +309,16 @@ class BloomModel(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
-    def _repack_qkv(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        # BLOOM's fused QKV is laid out as (num_heads * 3 * head_size) on its
-        # output dim (0), while vLLM expects (3 * num_heads * head_size).
-        num_heads = self.config.num_attention_heads
-        for name, loaded_weight in weights:
-            if "query_key_value" in name:
-                shape = loaded_weight.shape
-                loaded_weight = loaded_weight.view((num_heads, 3, -1) + shape[1:])
-                loaded_weight = loaded_weight.transpose(0, 1)
-                loaded_weight = loaded_weight.reshape(shape)
-            yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(self._repack_qkv(weights))
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^(?!transformer\.)"): "transformer."}
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -361,14 +365,4 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        weights = _add_transformer_prefix(weights)
-        return loader.load_weights(weights)
-
-
-def _add_transformer_prefix(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    for name, tensor in weights:
-        if not name.startswith("transformer."):
-            name = "transformer." + name
-        yield name, tensor
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

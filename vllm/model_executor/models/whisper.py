@@ -824,7 +824,7 @@ class WhisperForConditionalGeneration(
         },
         orig_to_new_prefix={"proj_out.": None},
         # Add fake zeros bias to k_proj for qkv packed
-        weights_transforms=[
+        orig_to_new_transform=[
             lambda weights: _create_fake_bias_for_k_proj(weights, ".k_proj.weight"),
             lambda weights: _create_fake_bias_for_k_proj(
                 weights, ".k_proj.weight_packed"

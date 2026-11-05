@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import pytest
 import regex as re
 import torch
+from transformers.conversion_mapping import WeightConverter, WeightRenaming
+from transformers.core_model_loading import Chunk, Transpose
 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.falcon import DeinterleaveQKV
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -207,11 +212,9 @@ def test_get_rename_mapper_keeps_only_renames():
     )
     renames = mapper.get_rename_mapper()
 
-    assert renames.orig_to_new_regex == {}
-    assert renames.orig_to_new_substr == {"keep_substr": "kept"}
     assert renames.orig_to_new_stacked == {}
-    assert renames.orig_to_new_prefix == {"keep_prefix.": "kept."}
-    assert renames.orig_to_new_suffix == {}
+    assert renames.map_name("a.keep_substr") == "a.kept"
+    assert renames.map_name("keep_prefix.w") == "kept.w"
 
     # Names the full mapper drops now survive unchanged.
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
@@ -271,7 +274,7 @@ def test_weights_mapper_transform_runs_before_name_mapping():
     merge completes however its inputs are ordered."""
     mapper = WeightsMapper(
         orig_to_new_suffix={".w": ".w_renamed"},
-        weights_transforms=[_pair_halves],
+        orig_to_new_transform=[_pair_halves],
     )
     first, second = torch.ones(2), torch.zeros(2)
     keep = torch.ones(1)
@@ -285,7 +288,7 @@ def test_weights_mapper_transform_runs_before_name_mapping():
 
 
 def test_weights_mapper_transform_can_recode_values():
-    mapper = WeightsMapper(weights_transforms=[_double])
+    mapper = WeightsMapper(orig_to_new_transform=[_double])
 
     mapped = list(mapper.apply([("w", torch.ones(2))]))
 
@@ -295,7 +298,7 @@ def test_weights_mapper_transform_can_recode_values():
 def test_weights_mapper_transform_raises_at_iteration_not_at_apply():
     """Incomplete input raises when the stream is exhausted; merely calling
     apply() (or the transform) does nothing yet."""
-    mapper = WeightsMapper(weights_transforms=[_pair_halves])
+    mapper = WeightsMapper(orig_to_new_transform=[_pair_halves])
     stream = mapper.apply([("e.w.first", torch.ones(2))])
 
     with pytest.raises(ValueError, match="unpaired"):
@@ -304,7 +307,7 @@ def test_weights_mapper_transform_raises_at_iteration_not_at_apply():
 
 def test_weights_mapper_transform_state_is_fresh_per_apply():
     """The mapper is shared and long-lived; each apply() must start clean."""
-    mapper = WeightsMapper(weights_transforms=[_pair_halves])
+    mapper = WeightsMapper(orig_to_new_transform=[_pair_halves])
     with pytest.raises(ValueError, match="unpaired"):
         list(mapper.apply([("e.w.first", torch.ones(2))]))
     # A leaked pending entry would pair with this stream instead of raising.
@@ -328,16 +331,16 @@ def test_weights_mapper_or_concatenates_transforms_in_order():
 
         return rename
 
-    mapper = WeightsMapper(weights_transforms=[tag("x"), tag("y")]) | WeightsMapper(
-        weights_transforms=[tag("z")]
+    mapper = WeightsMapper(orig_to_new_transform=[tag("x"), tag("y")]) | WeightsMapper(
+        orig_to_new_transform=[tag("z")]
     )
     (mapped,) = list(mapper.apply([("w", torch.ones(1))]))
 
     assert mapped[0] == "w.x.y.z"
     assert seen == [("x", "w"), ("y", "w.x"), ("z", "w.x.y")]
-    assert (WeightsMapper() | WeightsMapper()).weights_transforms == []
-    one_side = WeightsMapper() | WeightsMapper(weights_transforms=[_pair_halves])
-    assert one_side.weights_transforms == [_pair_halves]
+    assert (WeightsMapper() | WeightsMapper()).orig_to_new_transform == []
+    one_side = WeightsMapper() | WeightsMapper(orig_to_new_transform=[_pair_halves])
+    assert one_side.orig_to_new_transform == [_pair_halves]
 
 
 def _double_w(weights):
@@ -349,7 +352,7 @@ def _double_w(weights):
 
 
 def test_weights_mapper_transforms_see_earlier_emitted_names():
-    mapper = WeightsMapper(weights_transforms=[_pair_halves, _double_w])
+    mapper = WeightsMapper(orig_to_new_transform=[_pair_halves, _double_w])
 
     (mapped,) = list(
         mapper.apply([("e.w.second", torch.zeros(1)), ("e.w.first", torch.ones(1))])
@@ -357,3 +360,151 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
 
     # The halves merge into "e.w", which the suffix mapping then doubles.
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
+
+
+def test_weights_mapper_transform_applies_renames_and_converters_in_order():
+    """Renames and converters share a list; the converter matches the renamed key
+    and only its weight is changed."""
+    mapper = WeightsMapper(
+        orig_to_new_transform=[
+            WeightRenaming("old", "new"),
+            WeightConverter("new.gate", "new.gate", [Transpose()]),
+        ],
+    )
+    gate, other = torch.arange(6.0).reshape(2, 3), torch.ones(2, 3)
+
+    mapped = dict(mapper.apply([("old.gate", gate), ("old.other", other)]))
+
+    assert torch.equal(mapped["new.gate"], gate.T)
+    assert mapped["new.other"] is other
+
+
+def test_weights_mapper_transform_rejects_one_to_many_converters():
+    mapper = WeightsMapper(
+        orig_to_new_transform=[WeightConverter("w", ["w.a", "w.b"], [Chunk()])],
+    )
+
+    with pytest.raises(ValueError, match="one-to-one"):
+        list(mapper.apply([("w", torch.ones(2))]))
+
+
+def test_rename_mapper_keeps_renames_but_not_converters():
+    """Consumers that name modules must keep the rename but never run a converter."""
+    renaming = WeightRenaming("old", "new")
+    converter = WeightConverter("w", "w", [Transpose()])
+    mapper = WeightsMapper(orig_to_new_transform=[renaming, converter])
+
+    assert mapper.get_rename_mapper().orig_to_new_transform == [renaming]
+
+
+def _falcon_qkv_module(output_dim: int | None, shape: tuple[int, ...]):
+    """A module with a `qkv.weight` parameter tagged with `output_dim`."""
+    module = torch.nn.Module()
+    module.qkv = torch.nn.Module()
+    module.qkv.weight = torch.nn.Parameter(torch.zeros(shape))
+    if output_dim is not None:
+        module.qkv.weight.output_dim = output_dim
+    return module
+
+
+def _deinterleave_mapper(num_heads: int, num_kv_heads: int) -> WeightsMapper:
+    op = DeinterleaveQKV(num_heads, num_kv_heads)
+    return WeightsMapper(orig_to_new_transform=[WeightConverter("qkv", "qkv", [op])])
+
+
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads"),
+    [(2, 2), (4, 2), (4, 1)],
+    ids=["bloom", "new_decoder", "multi_query"],
+)
+@pytest.mark.parametrize("output_dim", [0, 1], ids=["dense", "gptq"])
+def test_deinterleave_qkv_restores_block_layout(num_heads, num_kv_heads, output_dim):
+    q_per_kv = num_heads // num_kv_heads
+    q = torch.arange(num_heads * 3.0).reshape(num_heads, 3)
+    k = 100 + torch.arange(num_kv_heads * 3.0).reshape(num_kv_heads, 3)
+    v = 200 + torch.arange(num_kv_heads * 3.0).reshape(num_kv_heads, 3)
+    expected = torch.cat([q, k, v])
+    interleaved = torch.cat(
+        [
+            torch.cat(
+                [q[g * q_per_kv : (g + 1) * q_per_kv], k[g : g + 1], v[g : g + 1]]
+            )
+            for g in range(num_kv_heads)
+        ]
+    )
+    if output_dim == 1:
+        interleaved, expected = interleaved.unsqueeze(0), expected.unsqueeze(0)
+    module = _falcon_qkv_module(output_dim, interleaved.shape)
+
+    mapper = _deinterleave_mapper(num_heads, num_kv_heads)
+    ((_, loaded),) = mapper.apply([("qkv.weight", interleaved)], model=module)
+
+    assert torch.equal(loaded, expected)
+
+
+def test_deinterleave_qkv_skips_weights_without_a_local_output_dim():
+    """PP-missing layers and unpartitioned parameters must pass through as is."""
+    weight = torch.arange(12.0).reshape(6, 2)
+    mapper = _deinterleave_mapper(2, 2)
+
+    no_param = torch.nn.Module()
+    ((_, missing),) = mapper.apply([("qkv.weight", weight)], model=no_param)
+    no_dim = _falcon_qkv_module(None, weight.shape)
+    ((_, untagged),) = mapper.apply([("qkv.weight", weight)], model=no_dim)
+
+    assert missing is weight
+    assert untagged is weight
+
+
+def test_weights_mapper_literal_rules_compile_to_regex():
+    """Literal rules keep their old semantics, including metacharacters in names."""
+    mapper = WeightsMapper(
+        orig_to_new_substr={"a.b": "c", "drop": None},
+        orig_to_new_prefix={"p.": r"new\1.", "": "root."},
+        orig_to_new_suffix={".s": ".t"},
+    )
+
+    assert mapper.map_name("xa.b.a.b") == "root.xc.a.b"
+    assert mapper.map_name("axb") == "root.axb"
+    assert mapper.map_name("p.w") == r"root.new\1.w"
+    assert mapper.map_name("w.s") == "root.w.t"
+    assert mapper.map_name("w.s.s2") == "root.w.s.s2"
+    assert mapper.map_name("a.drop.b") is None
+
+
+def test_weights_mapper_prefix_rules_survive_or_and_replace():
+    mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^x"): "y"},
+        orig_to_new_prefix={"model.vision_": r"v\1", "drop.": None},
+    ) | WeightsMapper(orig_to_new_prefix={"lm_head.": "llm.lm_head."})
+
+    assert replace(mapper, orig_to_new_stacked={}).prefix_rules() == {
+        "model.vision_": r"v\1",
+        "drop.": None,
+        "lm_head.": "llm.lm_head.",
+    }
+
+
+def test_weights_mapper_stream_transforms_run_in_list_order_with_renames():
+    """A stream transform sees the renames listed before it, and not those after."""
+    seen = []
+
+    def record(weights):
+        for name, tensor in weights:
+            seen.append(name)
+            yield name, tensor
+
+    mapper = WeightsMapper(
+        orig_to_new_transform=[
+            WeightRenaming("a", "b"),
+            record,
+            WeightRenaming("b", "c"),
+        ]
+    )
+
+    assert [name for name, _ in mapper.apply([("a", torch.ones(1))])] == ["c"]
+    assert seen == ["b"]
+    assert mapper.map_name("a") == "c"
+    assert mapper.get_rename_mapper().orig_to_new_transform == [
+        t for t in mapper.orig_to_new_transform if t is not record
+    ]

@@ -317,13 +317,13 @@ class Base(
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
-        orig_to_new_renaming: list[WeightRenaming] = []
+        orig_to_new_transform: list[WeightTransform] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
         for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
-                orig_to_new_renaming.append(mapping)
+                orig_to_new_transform.append(mapping)
             # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
@@ -355,7 +355,7 @@ class Base(
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
         self.hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_renaming=orig_to_new_renaming,
+            orig_to_new_transform=orig_to_new_transform,
             orig_to_new_regex=orig_to_new_regex,
         )
 

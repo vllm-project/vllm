@@ -55,27 +55,18 @@ def _make_deepseek_v4_vl_weights_mapper(
     text_mapper: WeightsMapper, image_enabled: bool
 ) -> WeightsMapper:
     """Text-checkpoint mapping rules re-rooted under ``language_model.``."""
-    orig_to_new_prefix = {
-        src: None if dst is None else f"language_model.{dst}"
-        for src, dst in text_mapper.orig_to_new_prefix.items()
+    # Draft models load the checkpoint's MTP weights separately from the target
+    # model.
+    orig_to_new_prefix: dict[str, str | None] = {
+        "model.": "language_model.model.",
+        "lm_head.": "language_model.lm_head.",
     }
     if not image_enabled:
         orig_to_new_prefix.update({"vision.": None, "aligner.": None, "image_": None})
-    return WeightsMapper(
-        orig_to_new_renaming=text_mapper.orig_to_new_renaming,
-        orig_to_new_prefix=orig_to_new_prefix,
-        orig_to_new_regex=text_mapper.orig_to_new_regex,
-        orig_to_new_stacked=text_mapper.orig_to_new_stacked,
-        orig_to_new_suffix={
-            **text_mapper.orig_to_new_suffix,
-            "head.weight": "language_model.lm_head.weight",
-        },
-        orig_to_new_substr={
-            **text_mapper.orig_to_new_substr,
-            # Draft models load the checkpoint's MTP weights separately from
-            # the target model.
-            "mtp.": None,
-        },
+    return (
+        WeightsMapper(orig_to_new_substr={"mtp.": None})
+        | text_mapper
+        | (WeightsMapper(orig_to_new_prefix=orig_to_new_prefix))
     )
 
 
