@@ -395,7 +395,6 @@ def test_engine_pads_segments_without_a_connector(
         "Qwen/Qwen3-0.6B",
         enforce_eager=True,
         max_model_len=256,
-        gpu_memory_utilization=0.05,
     ) as runner:
         ((offsets, granule),) = runner.llm.collective_rpc(_layout_of_segments)
     assert len(offsets) > 1
