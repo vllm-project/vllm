@@ -251,9 +251,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
-        # The profile run's outputs (non-last PP ranks): the largest PP send,
-        # which sizes the PP transport's buffers.
-        self.profile_pp_send: IntermediateTensors | None = None
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -964,7 +961,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras=max_loras,
         ):
             # Execute the model.
-            output = self.execute_model(
+            self.execute_model(
                 dummy_scheduler_output,
                 intermediate_tensors=intermediate_tensors,
                 dummy_run=True,
@@ -978,9 +975,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Non-last PP ranks don't produce output for sampling.
         if not self.is_last_pp_rank:
-            if is_profile:
-                assert isinstance(output, IntermediateTensors)
-                self.profile_pp_send = output
             return None, None
 
         assert self.execute_model_state is not None
@@ -2096,7 +2090,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             received = intermediate_tensors.tensors
             new_tensors = {
                 k: v[:n]
-                # Some PP transports receive into the persistent buffer.
+                # Some PP transports receive into the persistent tensors.
                 if dummy_run or received[k].data_ptr() == v.data_ptr()
                 else v[:n].copy_(received[k][:n])
                 for k, v in self.intermediate_tensors.tensors.items()
