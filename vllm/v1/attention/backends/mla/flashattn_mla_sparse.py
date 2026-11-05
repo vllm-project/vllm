@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
+    FlashInferMLASparseMetadata,
     FlashInferMLASparseTRTLLMBackend,
     FlashInferMLASparseTRTLLMMetadataBuilder,
 )
@@ -37,6 +38,10 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
@@ -356,6 +361,19 @@ class FlashAttnMLASparseFA4MetadataBuilder(FlashInferMLASparseTRTLLMMetadataBuil
 _QUERY_GROUP_SIZES = {16: 8, 32: 4, 64: 2}
 # Packed gather entries keep the KV row in 24 bits; -1 is padding.
 _MAX_GROUPED_KV_ROWS = (1 << 24) - 1
+# Packed rows per grouped prefill call. Each call's scratch (packed query, unions
+# and the union builder's bitmap) is sized by this, not by the prefill length.
+_GROUPED_PREFILL_ROWS = 1024
+_UNION_BITMAP_BYTES = 64 << 20
+
+
+def _pack_rows(x: torch.Tensor, buf: torch.Tensor) -> torch.Tensor:
+    """`x` [tokens, heads, d] as `buf`'s [rows, 128, d] packing: a view when the
+    token stride allows it, else a copy into `buf`."""
+    if x.stride(0) == x.shape[1] * x.stride(1):
+        return x.view(buf.shape)
+    buf.view(x.shape).copy_(x)
+    return buf
 
 
 @cache
@@ -372,15 +390,40 @@ def _fa4_varlen_scalars(
 class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
     # FA4 emits a natural-log LSE; prefill converts trtllm-gen's log2 LSE.
     lse_base_on_e: bool = True
-    # (index group id, per-request query-group unions) built by the group's first
-    # layer and reused by its other layers; one slot, as layers run in order.
-    _query_group_unions: ClassVar[tuple[int, list] | None] = None
+    _attn_metadata: FlashInferMLASparseMetadata | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        group_size = _QUERY_GROUP_SIZES.get(self.num_heads)
+        if (
+            group_size is not None
+            and self.topk_indices_buffer is not None
+            and is_workspace_manager_initialized()
+        ):
+            # Reserved before the workspace manager locks, so memory profiling
+            # counts grouped prefill's scratch.
+            self._grouped_prefill_scratch(group_size, torch.bfloat16)
+
+    def _grouped_prefill_scratch(
+        self, group_size: int, dtype: torch.dtype
+    ) -> list[torch.Tensor]:
+        """Packed ql_nope and q_pe, unions, union lengths and union bitmap for one
+        grouped prefill call."""
+        assert self.topk_indices_buffer is not None
+        rows = _GROUPED_PREFILL_ROWS
+        return current_workspace_manager().get_simultaneous(
+            ((rows, 128, self.kv_lora_rank), dtype),
+            ((rows, 128, self.qk_rope_head_dim), dtype),
+            ((rows, group_size * self.topk_indices_buffer.shape[1]), torch.int32),
+            ((rows,), torch.int32),
+            ((_UNION_BITMAP_BYTES // 4,), torch.int32),
+        )
 
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: SparseMLACommonMetadata,
+        attn_metadata: FlashInferMLASparseMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         self._attn_metadata = attn_metadata
@@ -511,12 +554,21 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
     ) -> tuple[torch.Tensor, None]:
         """Prefill with `group_size` consecutive queries of a request per kernel row.
 
-        Decode rows, each request's last `num_tokens % group_size` rows and padding
-        rows keep one query per kernel row.
+        Grouped rows go in calls of at most `_GROUPED_PREFILL_ROWS` rows, each with
+        its own unions, so the scratch does not grow with the prefill. Decode rows,
+        each request's last `num_tokens % group_size` rows and padding rows keep
+        one query per kernel row.
         """
         group_size = _QUERY_GROUP_SIZES[q_pe.shape[1]]
         kv_rows, block_stride_rows = flat_kv_row_view(kv_cache, block_size)
         out = q_pe.new_empty((q_pe.shape[0], q_pe.shape[1], self.kv_lora_rank))
+        md = self._attn_metadata
+        logical_topk = self.topk_indices_buffer
+        assert md is not None and logical_topk is not None
+        ql_buf, pe_buf, enc_buf, lens_buf, bits = self._grouped_prefill_scratch(
+            group_size, q_pe.dtype
+        )
+        tokens_per_call = _GROUPED_PREFILL_ROWS * group_size
 
         def one_query_per_row(lo: int, hi: int) -> None:
             if hi > lo:
@@ -530,68 +582,36 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
                     out=out[lo:hi],
                 )
 
-        unions = self._query_group_union(
-            spans, group_size, block_size, block_stride_rows
-        )
         one_query_per_row(0, spans[0][0])
-        for (first, grouped, num_tokens), union in zip(spans, unions):
-            if union is not None:
-                enc, lens = union
-                rows = slice(first, first + grouped)
-                num_groups = grouped // group_size
+        for request, (first, grouped, num_tokens) in enumerate(spans):
+            for lo in range(first, first + grouped, tokens_per_call):
+                hi = min(lo + tokens_per_call, first + grouped)
+                num_groups = (hi - lo) // group_size
+                enc, lens = enc_buf[:num_groups], lens_buf[:num_groups]
+                build_query_group_union(
+                    logical_topk[lo:hi],
+                    md.block_table[md.num_decodes + request],
+                    group_size=group_size,
+                    max_seq_len=md.prefill_max_seq_len,
+                    block_size=block_size,
+                    block_stride_rows=block_stride_rows,
+                    enc=enc,
+                    lens=lens,
+                    bits=bits,
+                )
                 # A head-major query (the DSA model's absorbed q_nope) is copied
                 # into the token-major rows the kernel packs.
                 self._fa4_sparse_attention(
-                    ql_nope[rows].reshape(num_groups, -1, ql_nope.shape[-1]),
-                    q_pe[rows].reshape(num_groups, -1, q_pe.shape[-1]),
+                    _pack_rows(ql_nope[lo:hi], ql_buf[:num_groups]),
+                    _pack_rows(q_pe[lo:hi], pe_buf[:num_groups]),
                     kv_rows,
                     enc,
                     lens,
                     return_lse=False,
-                    out=out[rows].view(num_groups, -1, self.kv_lora_rank),
+                    out=out[lo:hi].view(num_groups, -1, self.kv_lora_rank),
                     query_group_size=group_size,
                 )
             one_query_per_row(first + grouped, first + num_tokens)
         last_first, _, last_tokens = spans[-1]
         one_query_per_row(last_first + last_tokens, q_pe.shape[0])
         return out, None
-
-    def _query_group_union(
-        self,
-        spans: list[tuple[int, int, int]],
-        group_size: int,
-        block_size: int,
-        block_stride_rows: int,
-    ) -> list[tuple[torch.Tensor, torch.Tensor] | None]:
-        group = self.index_group
-        shared = group is not None and group.num_layers > 1
-        cached = FlashAttnMLASparseFA4Impl._query_group_unions
-        if (
-            shared
-            and self.index_group_index > 0
-            and cached is not None
-            and cached[0] == id(group)
-        ):
-            return cached[1]
-        md = self._attn_metadata
-        logical_topk = self.topk_indices_buffer
-        assert md is not None and logical_topk is not None
-        unions: list[tuple[torch.Tensor, torch.Tensor] | None] = []
-        for request, (first, grouped, _) in enumerate(spans):
-            unions.append(
-                build_query_group_union(
-                    logical_topk[first : first + grouped],
-                    md.block_table[md.num_decodes + request],
-                    group_size=group_size,
-                    max_seq_len=md.prefill_max_seq_len,
-                    block_size=block_size,
-                    block_stride_rows=block_stride_rows,
-                    width=group_size * logical_topk.shape[1],
-                )
-                if grouped
-                else None
-            )
-        FlashAttnMLASparseFA4Impl._query_group_unions = (
-            (id(group), unions) if shared else None
-        )
-        return unions

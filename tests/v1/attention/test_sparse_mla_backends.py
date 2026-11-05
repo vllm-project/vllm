@@ -4284,15 +4284,19 @@ def test_build_query_group_union_matches_reference():
     block_table = torch.randperm(64, generator=gen)[: cdiv(seq_len, block_size)]
     block_table = block_table.to(torch.int32)
 
-    enc, lens = build_query_group_union(
+    enc = torch.empty(num_groups, group * topk, dtype=torch.int32, device="cuda")
+    lens = torch.empty(num_groups, dtype=torch.int32, device="cuda")
+    build_query_group_union(
         logical.cuda(),
         block_table.cuda(),
         group_size=group,
         max_seq_len=seq_len,
         block_size=block_size,
         block_stride_rows=stride_rows,
-        width=group * topk,
-        scratch_bytes=5 * 4 * cdiv(seq_len, 4),  # 5 groups per chunk
+        enc=enc,
+        lens=lens,
+        # 5 groups per chunk
+        bits=torch.empty(5 * cdiv(seq_len, 4), dtype=torch.int32, device="cuda"),
     )
 
     enc = enc.cpu().to(torch.int64) & 0xFFFFFFFF
@@ -4369,7 +4373,7 @@ def _fa4_prefill_inputs(num_heads, query_lens, seq_lens, *, topk=256, device):
 
 
 @pytest.mark.parametrize("num_heads", [16, 32, 64])
-def test_fa4_sparse_grouped_prefill_correctness(monkeypatch, num_heads):
+def test_fa4_sparse_grouped_prefill_correctness(workspace_init, monkeypatch, num_heads):
     if not current_platform.is_device_capability_family(100):
         pytest.skip("FA4 sparse MLA requires SM 10.x")
     if (reason := _fa4_cute_mla_available()) is not None:
@@ -4416,8 +4420,8 @@ def test_fa4_sparse_grouped_prefill_correctness(monkeypatch, num_heads):
 
     assert all(lse is None for _, lse in outs)
     assert torch.equal(outs[0][0], outs[1][0])
-    # Both prefills are grouped on the first layer; the second reuses the unions.
-    assert group_sizes.count(group) == 4 and len(builds) == 2
+    # Each layer groups both prefills, one call per request at these lengths.
+    assert group_sizes.count(group) == 4 and len(builds) == 4
 
     md = inputs.metadata
     logical = inputs.logical.long()
@@ -4433,6 +4437,41 @@ def test_fa4_sparse_grouped_prefill_correctness(monkeypatch, num_heads):
     scores = (scores * inputs.scale).masked_fill((logical < 0)[:, None, :], -math.inf)
     reference = torch.einsum("thk,tkd->thd", torch.softmax(scores, -1), keys[..., :512])
     torch.testing.assert_close(outs[0][0].float(), reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.parametrize("num_heads", [16, 64])
+def test_fa4_sparse_grouped_prefill_sub_chunks(workspace_init, monkeypatch, num_heads):
+    """Splitting a request's grouped rows over several calls leaves every union,
+    and so the output, unchanged."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    group = 128 // num_heads
+    inputs = _fa4_prefill_inputs(
+        num_heads, [1, 7 * group + 5, 2 * group + 1], [300, 700, 650], device="cuda"
+    )
+    impl = _fa4_impl(inputs.logical, scale=inputs.scale)
+    group_sizes = []
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+
+    def fa4(**kwargs):
+        group_sizes.append(kwargs["gather_kv_query_group_size"])
+        return real_fa4(**kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+    outs, grouped_calls = [], []
+    for rows in (1024, 3):
+        monkeypatch.setattr(flashattn_sparse_module, "_GROUPED_PREFILL_ROWS", rows)
+        group_sizes.clear()
+        with torch.inference_mode():
+            out, _ = impl.forward_mqa(inputs.q, inputs.kv_cache, inputs.metadata, None)
+        outs.append(out)
+        grouped_calls.append(group_sizes.count(group))
+
+    # 7 and 2 grouped rows: one call per request, then calls of 3, 3, 1 and 2 rows.
+    assert grouped_calls == [2, 4]
+    assert torch.equal(outs[0], outs[1])
 
 
 @pytest.mark.parametrize(

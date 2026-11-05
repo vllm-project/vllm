@@ -815,27 +815,28 @@ def build_query_group_union(
     max_seq_len: int,
     block_size: int,
     block_stride_rows: int,
-    width: int,
-    scratch_bytes: int = 64 << 20,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    enc: torch.Tensor,
+    lens: torch.Tensor,
+    bits: torch.Tensor,
+) -> None:
     """Union of the top-k of every `group_size` consecutive queries of ONE request.
 
     `logical_topk` holds request-local positions (-1 padded) for a multiple of
-    `group_size` queries. Returns `enc` [num_groups, width] int32, the position-
+    `group_size` queries. Writes `enc` [num_groups, width] int32, the position-
     sorted union mapped to KV rows through `block_table_row` and encoded as
     `row | (membership << 24)` (bit t = query t selected the row), -1 padded to a
-    whole 128-entry tile, and `lens` [num_groups], the union sizes. Groups are
-    processed in chunks so the per-group position bitmap stays in `scratch_bytes`.
+    whole 128-entry tile, and `lens` [num_groups], the union sizes. `bits` is
+    int32 scratch for the per-group position bitmap; groups are processed in
+    chunks that fit in it.
     """
     num_tokens, topk = logical_topk.shape
     assert num_tokens % group_size == 0 and logical_topk.stride(1) == 1
     num_groups = num_tokens // group_size
-    device = logical_topk.device
-    enc = torch.empty((num_groups, width), dtype=torch.int32, device=device)
-    lens = torch.empty((num_groups,), dtype=torch.int32, device=device)
+    assert enc.shape[0] == lens.shape[0] == num_groups and enc.is_contiguous()
+    width = enc.shape[1]
     words_per_group = cdiv(max_seq_len, 4)
-    chunk = max(1, min(num_groups, scratch_bytes // (4 * words_per_group)))
-    bits = torch.empty((chunk * words_per_group,), dtype=torch.int32, device=device)
+    chunk = min(num_groups, bits.numel() // words_per_group)
+    assert chunk > 0, "bits must hold one group's position bitmap"
     for g0 in range(0, num_groups, chunk):
         n = min(chunk, num_groups - g0)
         bits[: n * words_per_group].zero_()
@@ -859,4 +860,3 @@ def build_query_group_union(
             BLOCK_STRIDE_ROWS=block_stride_rows,
             BLOCK=1024,
         )
-    return enc, lens
