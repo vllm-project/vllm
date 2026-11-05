@@ -44,12 +44,13 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
-    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
+    IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task,
+    spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -282,8 +283,8 @@ fn engine_outputs_for_request(
     .into()
 }
 
-fn test_llm(client: EngineCoreClient) -> Llm {
-    Llm::new(client).with_request_id_randomization(false)
+fn test_llm(client: EngineCoreClient) -> EngineCoreLlm {
+    EngineCoreLlm::new(client).with_request_id_randomization(false)
 }
 
 fn sample_logprobs_for_token(token_id: u32, alternate_token_id: u32) -> Logprobs {
@@ -729,8 +730,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 check_request(&request);
                 send_outputs(push, outputs(&request.request_id)).await;
             })
@@ -1576,7 +1576,7 @@ where
 }
 
 async fn test_app_with_chat_and_engine_request_check<F>(
-    build_chat: impl FnOnce(Llm) -> ChatLlm,
+    build_chat: impl FnOnce(EngineCoreLlm) -> ChatLlm,
     check_request: F,
 ) -> (axum::Router, MockEngineTask)
 where
@@ -1592,8 +1592,7 @@ where
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 check_request(&request);
                 send_outputs(
                     push,
@@ -1920,6 +1919,28 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Python renders an empty user turn, so the render route must accept empty
+/// message content instead of rejecting it.
+#[tokio::test]
+async fn render_chat_accepts_empty_message_content() {
+    let mut app = test_render_app();
+
+    for content in [json!(""), json!([])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json["token_ids"].as_array().expect("token_ids").is_empty());
+    }
+}
+
 /// Python renders an assistant turn with null, missing, or `[]` content and no
 /// tool calls as an empty turn, the same as `content: ""`.
 #[tokio::test]
@@ -2095,7 +2116,7 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
         move |request| {
             assert_eq!(
-                request.prompt_token_ids.as_deref(),
+                decode_prompt_token_ids(request).as_deref(),
                 Some(token_ids.as_slice())
             );
             assert_eq!(
@@ -2851,8 +2872,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
 
             let add = recv_engine_message(dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
-            let request: EngineCoreRequest =
-                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            let request = decode_add_request(&add);
             assert_adapter_a_lora_request(&request);
 
             send_outputs(
@@ -2863,8 +2883,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
 
             let add = recv_engine_message(dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
-            let request: EngineCoreRequest =
-                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            let request = decode_add_request(&add);
             assert_adapter_a_lora_request(&request);
 
             send_outputs(
@@ -2875,9 +2894,11 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
 
             let add = recv_engine_message(dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
-            let request: EngineCoreRequest =
-                rmp_serde::from_slice(&add[1]).expect("decode engine request");
-            assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
+            let request = decode_add_request(&add);
+            assert_eq!(
+                decode_prompt_token_ids(&request).as_deref(),
+                Some(&[11, 22][..])
+            );
             assert_adapter_a_lora_request(&request);
 
             send_outputs(
@@ -3191,8 +3212,7 @@ async fn load_lora_adapter_inplace_does_not_reach_generate_requests() {
 
             let add = recv_engine_message(dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
-            let request: EngineCoreRequest =
-                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            let request = decode_add_request(&add);
             // Reply before asserting, so a failure surfaces without waiting
             // for the HTTP call to time out.
             send_outputs(
@@ -3345,8 +3365,7 @@ async fn request_metrics_use_served_model_name_label() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
@@ -4005,7 +4024,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
             qwen_multimodal_model_info(),
         )),
         |request| {
-            let prompt_token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+            let prompt_token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
             assert!(prompt_token_ids.contains(&151655));
 
             let features = request.mm_features.as_ref().expect("multimodal features");
@@ -4187,7 +4206,7 @@ async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
             step5_vl_multimodal_model_info(),
         )),
         |request| {
-            let prompt_token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+            let prompt_token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
             // The 1x1 input image yields no sliding-window patches, so the
             // `<im_patch>` marker expands to the global-view span only:
             // `<im_start>` + 169 `<im_patch>` embed tokens + `<im_end>`.
@@ -4311,7 +4330,7 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                 |dealer, push| {
                     boxed_test_future(async move {
                         let add = recv_engine_message(dealer).await;
-                        let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                        let request = decode_add_request(&add);
                         let params = request.sampling_params.as_ref().unwrap();
                         assert_eq!(params.logprob_token_ids, Some(vec![65, 104, 66]));
                         assert_eq!(params.logprobs, None);
@@ -4502,9 +4521,8 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
-                let prompt_token_ids = request.prompt_token_ids.clone().expect("prompt token ids");
+                let request = decode_add_request(&add);
+                let prompt_token_ids = decode_prompt_token_ids(&request).expect("prompt token ids");
 
                 send_outputs(
                     push,
@@ -4882,7 +4900,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     .await;
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while state.chat.engine_core_client().is_healthy() {
+        while state.engine_core_client().is_healthy() {
             tokio::task::yield_now().await;
         }
     })
@@ -4893,7 +4911,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.is_empty(), "expected empty body, got {:?}", body);
     assert!(matches!(
-        state.chat.engine_core_client().health_error().as_deref(),
+        state.engine_core_client().health_error().as_deref(),
         Some(vllm_engine_core_client::Error::EngineCoreDead)
     ));
 
@@ -5527,7 +5545,7 @@ async fn non_stream_completions_echo_decodes_token_id_prompt_text() {
         Arc::new(FakeChatBackend::new()),
         move |request| {
             assert_eq!(
-                request.prompt_token_ids.as_deref(),
+                decode_prompt_token_ids(request).as_deref(),
                 Some(expected_prompt_token_ids.as_slice())
             );
         },
@@ -5574,7 +5592,7 @@ async fn non_stream_completions_token_id_echo_return_token_ids_keeps_prompt_ids_
         Arc::new(FakeChatBackend::new()),
         move |request| {
             assert_eq!(
-                request.prompt_token_ids.as_deref(),
+                decode_prompt_token_ids(request).as_deref(),
                 Some(expected_prompt_token_ids.as_slice())
             );
         },
@@ -5632,8 +5650,7 @@ async fn non_stream_completions_include_logprobs() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 send_outputs(
                     push,
                     RequestBatchOutputs {
@@ -5737,8 +5754,7 @@ async fn logprob_tokens_with_server_flag(
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 send_outputs(
                     push,
                     RequestBatchOutputs {
@@ -5901,8 +5917,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 send_outputs(
                     push,
                     RequestBatchOutputs {
@@ -6017,8 +6032,7 @@ async fn non_stream_chat_completions_still_succeed() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
@@ -6208,8 +6222,7 @@ async fn non_stream_completions_still_succeed() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
@@ -6271,8 +6284,7 @@ async fn chat_completions_header_request_id_takes_precedence() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 assert_eq!(
                     request.external_req_id.as_deref(),
                     Some("chatcmpl-header-req")
@@ -6299,7 +6311,8 @@ async fn chat_completions_header_request_id_takes_precedence() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router(Arc::new(AppState::new(
         vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
         chat,
@@ -6346,9 +6359,11 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
-                assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
+                let request = decode_add_request(&add);
+                assert_eq!(
+                    decode_prompt_token_ids(&request).as_deref(),
+                    Some(&[11, 22][..])
+                );
                 assert_eq!(request.external_req_id.as_deref(), Some("raw-req"));
                 assert!(request.request_id.starts_with("raw-req-"));
                 assert_ne!(request.request_id, "raw-req");
@@ -6395,7 +6410,8 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -6480,9 +6496,11 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
-                assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
+                let request = decode_add_request(&add);
+                assert_eq!(
+                    decode_prompt_token_ids(&request).as_deref(),
+                    Some(&[11, 22][..])
+                );
                 assert_eq!(request.external_req_id.as_deref(), Some("raw-stream"));
 
                 send_outputs(
@@ -6525,7 +6543,8 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     )
     .await
     .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let chat =
+        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
     let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -7139,7 +7158,7 @@ async fn completions_echo_stream_decodes_token_id_prompt_chunk() {
         Arc::new(FakeChatBackend::new()),
         move |request| {
             assert_eq!(
-                request.prompt_token_ids.as_deref(),
+                decode_prompt_token_ids(request).as_deref(),
                 Some(expected_prompt_token_ids.as_slice())
             );
         },
@@ -7452,8 +7471,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
         |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 let reasoning_token_ids = token_ids("<think>think</think>");
                 let answer_token_ids = bytes_to_token_ids(b"answer");
 
@@ -7671,8 +7689,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
 
                 send_outputs(
                     push,
@@ -9953,23 +9970,26 @@ async fn tokenize_chat_empty_messages_returns_400() {
     assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
+/// Python renders an empty user turn, so empty content is accepted here too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn tokenize_chat_empty_message_content_returns_400() {
+async fn tokenize_chat_accepts_empty_message_content() {
     let mut app = test_app().await;
 
-    let (status, json) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": ""}],
-        }),
-    )
-    .await;
+    for content in [json!(""), json!([])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/tokenize",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json["tokens"].as_array().expect("tokens").is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

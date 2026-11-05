@@ -43,7 +43,7 @@ def test_grouped_conv_matches_reference(block_size: int):
     torch.testing.assert_close(actual, expected.flatten(0, 1).flatten(-2))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize(
     "rows,width,query,group,taps",
     [
@@ -58,7 +58,7 @@ def test_grouped_conv_matches_reference(block_size: int):
 def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     """Dtype rounding and request boundaries survive residual/norm fusion."""
     from vllm import _custom_ops as ops
-    from vllm.models.beam.nvidia.dflash2_conv_ops import conv_residual_norm
+    from vllm.models.beam import conv_residual_norm
 
     torch.manual_seed(42)
     hidden = torch.randn(rows, width, device="cuda", dtype=dtype)
@@ -87,7 +87,7 @@ def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
     "batch,num_groups,group_size,block_size,taps",
@@ -287,7 +287,7 @@ def test_selector_edges_match_sequential_reference():
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize(
     "batch,steps,top_k,rank",
     [(1, 1, 3, 5), (1, 15, 8, 128), (32, 15, 16, 256), (3, 5, 17, 65)],
@@ -297,7 +297,7 @@ def test_selector_edges_match_sequential_reference():
 def test_fused_score_edges_match_reference(
     batch, steps, top_k, rank, unary_dtype, anchor_dtype
 ):
-    """The CUDA edge kernel keeps the reference's anchors and predecessor
+    """The GPU edge kernel keeps the reference's anchors and predecessor
     mapping, and returns FP32 scores whatever the unary dtype."""
     torch.manual_seed(1)
     vocab = 257
@@ -318,12 +318,12 @@ def test_fused_score_edges_match_reference(
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("rows", [8, 64, 256])
 def test_beam_draft_qk_norm_rope_cache(rows):
     """Fused query preparation preserves BF16 rounding and ignores padded slots."""
     from vllm import _custom_ops as ops
-    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+    from vllm.models.beam import beam_qk_norm_rope
 
     torch.manual_seed(42)
     qkv = torch.randn(rows, 896, device="cuda", dtype=torch.bfloat16)
