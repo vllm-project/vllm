@@ -261,6 +261,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        divide_shared_output_in_fp16: bool = False,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -268,6 +269,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
+        self.divide_shared_output_in_fp16 = divide_shared_output_in_fp16
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
@@ -409,18 +411,22 @@ class MoERunner(MoERunnerInterface):
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Apply routed_scaling_factor to the output with FP16 overflow
-        protection.
+        """Apply routed_scaling_factor to the output.
 
-        Scale the fused expert output by routed_scaling_factor. For FP16,
-        avoid overflow by dividing shared_output by the scale instead
-        (the decoder layer compensates with matching divisions).
+        Scale the fused expert output by routed_scaling_factor. If
+        divide_shared_output_in_fp16 is set, FP16 outputs with shared experts
+        avoid overflow by dividing shared_output by the scale instead; the
+        model's decoder layer must compensate with matching divisions.
         """
         if self.routed_scaling_factor != 1.0:
-            if fused_output.dtype != torch.float16 or shared_output is None:
-                fused_output *= self.routed_scaling_factor
-            elif shared_output is not None:
+            if (
+                self.divide_shared_output_in_fp16
+                and shared_output is not None
+                and fused_output.dtype == torch.float16
+            ):
                 shared_output *= 1.0 / self.routed_scaling_factor
+            else:
+                fused_output *= self.routed_scaling_factor
         return shared_output, fused_output
 
     @property
