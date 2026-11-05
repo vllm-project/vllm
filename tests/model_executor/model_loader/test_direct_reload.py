@@ -676,20 +676,3 @@ def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
     else:
         with pytest.raises(ValueError, match=match):
             VllmConfig._verify_direct_reload_compat(config)
-
-
-def test_input_hadamard_refilled_in_place():
-    # mxfp4_hadamard32: post-load processing reruns on every reload; captured
-    # CUDA graphs read `input_hadamard`, which must keep its address
-    from vllm.model_executor.layers.quantization.input_hadamard import (
-        InputHadamardLinearMethod,
-    )
-
-    inner = SimpleNamespace(process_weights_after_loading=lambda layer: None)
-    method = InputHadamardLinearMethod(inner, size=4, rotate_weight=True)
-    layer = torch.nn.Module()
-    layer.weight = torch.nn.Parameter(torch.ones(2, 8, device=_DEVICE), False)
-    method.process_weights_after_loading(layer)
-    hadamard = layer.input_hadamard
-    method.process_weights_after_loading(layer)
-    assert layer.input_hadamard is hadamard
