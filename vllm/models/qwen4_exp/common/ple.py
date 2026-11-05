@@ -9,6 +9,7 @@ import torch
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import copy_weight_
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ class PLEVocabParallelEmbedding(VocabParallelEmbedding):
         source = loaded_weight.narrow(0, overlap.source_start, overlap.row_count)
         target = destination.narrow(0, overlap.destination_start, overlap.row_count)
         with torch.no_grad():
-            target.copy_(source.to(device=target.device, dtype=target.dtype))
+            copy_weight_(target, source)
         return overlap.row_count
 
     def weight_loader(
