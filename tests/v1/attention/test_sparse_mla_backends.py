@@ -2040,6 +2040,9 @@ def test_sparse_backend_prefill_correctness(
     assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
     if kv_cache_dtype.startswith("fp8"):
         torch.testing.assert_close(out_buffer, ref_output, rtol=0.065, atol=0.05)
+    elif batch_name == "masked_mha_chunked_context":
+        # Each context-chunk merge rounds the running partial to bf16.
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.02, atol=0.01)
     else:
         torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
 

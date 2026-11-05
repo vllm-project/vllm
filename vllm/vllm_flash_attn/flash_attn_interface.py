@@ -461,7 +461,7 @@ def flash_attn_varlen_func(
             and torch.cuda.get_device_capability()[0] == 9
         )
 
-        out, softmax_lse, _, _ = _flash_attn_fwd(
+        out, softmax_lse, _, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
@@ -550,9 +550,12 @@ def compile_flash_attn_varlen_func_from_specs(
     k = _make_compile_only_tensor_spec(k_shape, q_dtype, stride=k_stride)
     v = _make_compile_only_tensor_spec(v_shape, q_dtype, stride=v_stride)
     cu_seqlens_q = _make_compile_only_tensor_spec(cu_seqlens_q_shape, torch.int32, 4)
+    # FA4's _flash_attn_fwd requires a 32-byte aligned `out` for
+    # head_dim_v == 512 (SM90 hd512 warmup, e.g. Gemma 4 on Hopper).
     out = _make_compile_only_tensor_spec(
         (*q_shape[:-1], v_shape[-1]),
         q_dtype,
+        assumed_align=32 if v_shape[-1] == 512 else 16,
     )
     lse = None
     if return_softmax_lse:

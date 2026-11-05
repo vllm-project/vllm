@@ -24,13 +24,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
-    FA4_HD256_PAGE_SIZE,
     flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
-    uses_fa4_hd256_kernel,
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
@@ -65,7 +63,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -102,6 +100,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         q_stage: int
         dtype: torch.dtype
         qhead_per_kvhead: int
+        num_kv_heads: int
         head_dim: int
         page_size: int
         has_window_left: bool
@@ -133,6 +132,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             q_stage=q_stage,
             dtype=dtype,
             qhead_per_kvhead=num_qo_heads // num_kv_heads,
+            # FA4's scheduler-metadata kernel specializes on the head counts.
+            num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             page_size=page_size,
             has_window_left=window_size[0] >= 0,
@@ -171,14 +172,13 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             )
             or 0
         )
-        if (
-            major in (10, 11)
-            and uses_fa4_hd256_kernel(head_dim)
-            and page_size == FA4_HD256_PAGE_SIZE
-        ):
+        if major in (10, 11) and head_dim == 256:
             q_stages = WarmupChoices(1, 2)
             single_batches = WarmupChoices(True, False)
-            split_counts = WarmupChoices(1)
+            # 0 = FA4's own split heuristic (num_splits=0), which the builder
+            # passes outside full CUDA graphs. It selects dynamic-split variants
+            # (and their scheduler) that fixed split counts do not compile.
+            split_counts = WarmupChoices(1, 2, 0)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
@@ -207,22 +207,32 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         assert compile_flash_attn_varlen_func_from_specs is not None
         max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
         batch_size = 1 if compile_key.is_single_batch else 2
+        max_seqlen_k = FA4_DENSE_MAX_SEQLEN_K
+        if (
+            compile_key.num_splits == 0
+            and compile_key.q_stage == 1
+            and not compile_key.is_single_batch
+        ):
+            # Auto split on a mixed batch of short queries (chunked prefill
+            # next to decodes) picks a non-split variant without a tile cumsum.
+            batch_size, max_seqlen_q, max_seqlen_k = 64, 16, 1024
+        num_kv_heads = compile_key.num_kv_heads
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
             compile_key.page_size,
-            1,
+            num_kv_heads,
             compile_key.head_dim,
         )
         kv_stride = (
-            2 * compile_key.page_size * compile_key.head_dim,
-            2 * compile_key.head_dim,
-            2 * compile_key.head_dim,
+            2 * compile_key.page_size * num_kv_heads * compile_key.head_dim,
+            2 * num_kv_heads * compile_key.head_dim,
+            compile_key.head_dim,
             1,
         )
         compile_flash_attn_varlen_func_from_specs(
             q_shape=(
                 batch_size * max_seqlen_q,
-                compile_key.qhead_per_kvhead,
+                compile_key.qhead_per_kvhead * num_kv_heads,
                 compile_key.head_dim,
             ),
             k_shape=kv_shape,
@@ -234,17 +244,29 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             seqused_k_shape=(batch_size,),
             page_table_shape=(
                 batch_size,
-                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+                -(-max_seqlen_k // compile_key.page_size),
             ),
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
+            max_seqlen_k=max_seqlen_k,
             causal=True,
             window_size=[
-                1 if compile_key.has_window_left else -1,
-                1 if compile_key.has_window_right else -1,
+                # The split heuristic looks at the window span: give auto-split
+                # keys a window as long as the warmup sequence.
+                (max_seqlen_k - 1 if compile_key.num_splits == 0 else 1)
+                if compile_key.has_window_left
+                else -1,
+                (0 if compile_key.num_splits == 0 else 1)
+                if compile_key.has_window_right
+                else -1,
             ],
             softcap=compile_key.softcap,
-            num_splits=2 if compile_key.num_splits > 1 else 1,
+            num_splits=(
+                0
+                if compile_key.num_splits == 0
+                else 2
+                if compile_key.num_splits > 1
+                else 1
+            ),
             fa_version=4,
             return_softmax_lse=False,
         )
@@ -294,7 +316,6 @@ class FlashAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
     ]
-    head_size_v: int | None = None
 
     @staticmethod
     def _get_sm90_fa4_fp8_kv_block_size(
@@ -326,43 +347,12 @@ class FlashAttentionBackend(AttentionBackend):
         return None
 
     @classmethod
-    def _get_fa4_hd256_block_size(
-        cls, kv_cache_spec: KVCacheSpec | None = None
-    ) -> int | None:
-        if kv_cache_spec is None:
-            vllm_config = get_current_vllm_config_or_none()
-            if vllm_config is None or vllm_config.model_config is None:
-                return None
-            head_size = vllm_config.model_config.get_head_size()
-            head_size_v = cls.head_size_v
-        else:
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                return None
-            head_size = kv_cache_spec.head_size
-            head_size_v = kv_cache_spec.head_size_v
-
-        if (
-            uses_fa4_hd256_kernel(head_size, head_size_v)
-            and get_flash_attn_version(
-                head_size=head_size,
-                head_size_v=head_size_v,
-                supports_fa4_hd256=True,
-            )
-            == 4
-        ):
-            return FA4_HD256_PAGE_SIZE
-        return None
-
-    @classmethod
     def get_supported_kernel_block_sizes(
         cls, kv_cache_spec: KVCacheSpec | None = None
     ) -> list[int | MultipleOf]:
         if current_platform.is_xpu():
             return [MultipleOf(64)]
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size(kv_cache_spec):
-            return [block_size]
-        if block_size := cls._get_fa4_hd256_block_size(kv_cache_spec):
-            # Sliding-window specs select the smallest advertised size.
             return [block_size]
         return [MultipleOf(16)]
 
@@ -372,10 +362,23 @@ class FlashAttentionBackend(AttentionBackend):
     def get_preferred_block_size(cls, default_block_size: int) -> int:
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
             return max(default_block_size, block_size)
-        if block_size := cls._get_fa4_hd256_block_size():
-            return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
+        if (
+            current_platform.is_device_capability_family(100)
+            and (vllm_config := get_current_vllm_config_or_none()) is not None
+            and vllm_config.model_config is not None
+            and (head_size := vllm_config.model_config.get_head_size()) >= 128
+            and get_flash_attn_version(
+                head_size=head_size,
+                head_size_v=getattr(cls, "head_size_v", None),
+            )
+            == 4
+        ):
+            # FA4's SM100 kernels load paged KV via TMA only when the page size
+            # equals the 128-token KV tile. Below head_size 128, prefill is
+            # faster on the non-TMA path, so keep the default there.
+            return max(default_block_size, 128)
         return super().get_preferred_block_size(default_block_size)
 
     @staticmethod
@@ -488,8 +491,6 @@ class FlashAttentionBackend(AttentionBackend):
                 head_size=head_size,
                 head_size_v=head_size,
                 has_sinks=has_sink,
-                kv_cache_block_size=block_size,
-                supports_fa4_hd256=True,
             )
         ):
             return (
@@ -501,8 +502,6 @@ class FlashAttentionBackend(AttentionBackend):
             and get_flash_attn_version(
                 head_size=head_size,
                 has_sinks=has_sink,
-                kv_cache_block_size=block_size,
-                supports_fa4_hd256=True,
             )
             != 4
         ):
@@ -706,20 +705,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
-        head_size_v = getattr(kv_cache_spec, "head_size_v", None)
         fa_version = get_flash_attn_version(
             head_size=self.headdim,
-            head_size_v=head_size_v,
-            kv_cache_block_size=self.block_size,
-            supports_fa4_hd256=True,
-        )
-        self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
-            self.headdim, head_size_v
+            head_size_v=getattr(kv_cache_spec, "head_size_v", None),
         )
 
         if (
             vllm_config.kernel_config.enable_jit_warmup
-            and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
             and fa_version == 4
         ):
             _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
@@ -1096,29 +1088,11 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.attn_type = attn_type
         vllm_config = get_current_vllm_config_or_none()
-        uses_kv_cache = attn_type not in (
-            AttentionType.ENCODER,
-            AttentionType.ENCODER_ONLY,
-        )
-        # The final KV cache block size is unavailable during construction.
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
             has_sinks=sinks is not None,
-            requires_softcap=bool(self.logits_soft_cap),
-            supports_fa4_hd256=True,
         )
-        self.fa4_hd256 = self.vllm_flash_attn_version == 4 and uses_fa4_hd256_kernel(
-            head_size
-        )
-        if self.fa4_hd256 and not uses_kv_cache and sliding_window is not None:
-            # The hd256 kernel requires seqused_k for local attention.
-            logger.warning_once(
-                "FA4's Blackwell head_size=256 kernel does not support local "
-                "attention on encoder inputs, defaulting to FA version 2."
-            )
-            self.vllm_flash_attn_version = 2
-            self.fa4_hd256 = False
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
@@ -1134,8 +1108,6 @@ class FlashAttentionImpl(AttentionImpl):
             head_size=head_size,
             head_size_v=head_size,
             has_sinks=sinks is not None,
-            requires_softcap=bool(self.logits_soft_cap),
-            supports_fa4_hd256=True,
         ):
             raise NotImplementedError(
                 f"FlashAttention does not support {self.kv_cache_dtype}"
@@ -1410,15 +1382,6 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 causal = not has_window
 
-            num_splits = attn_metadata.max_num_splits
-            if self.fa4_hd256:
-                # hd256 requires page-aligned lengths, exact-width block
-                # tables, and no SplitKV.
-                num_pages = cdiv(max_seqlen_k, FA4_HD256_PAGE_SIZE)
-                max_seqlen_k = num_pages * FA4_HD256_PAGE_SIZE
-                block_table = block_table[:, :num_pages]
-                num_splits = 1
-
             _FA4_DENSE_ATTENTION_KERNEL(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -1440,7 +1403,7 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=k_descale,
                 v_descale=v_descale,
                 dynamic_causal=dynamic_causal,
-                num_splits=num_splits,
+                num_splits=attn_metadata.max_num_splits,
                 s_aux=self.sinks,
                 mask_mod=rswa_mask_mod_fn or mm_mask_mod,
                 aux_tensors=rswa_aux or mm_aux,
@@ -1724,8 +1687,7 @@ class FlashAttentionImpl(AttentionImpl):
             else None,
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
-            # The hd256 kernel does not support SplitKV.
-            num_splits=1 if self.batch_invariant_enabled or self.fa4_hd256 else 0,
+            num_splits=1 if self.batch_invariant_enabled else 0,
             s_aux=self.sinks,
         )
 
