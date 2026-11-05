@@ -131,7 +131,7 @@ def test_manager_checks_target_varlen_cudagraph_bound(
         return SimpleNamespace(
             layer_names=[layer_name],
             backend=backend,
-            kv_cache_spec=SimpleNamespace(is_draft=False),
+            kv_cache_spec=None,
             get_metadata_builder=lambda _index: builder,
         )
 
