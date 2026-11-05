@@ -67,9 +67,9 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.model_loader.reload.layerwise import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
+from vllm.model_executor.model_loader.reload.lifecycle import (
+    finish_reload,
+    start_reload,
 )
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
@@ -5460,26 +5460,14 @@ class GPUModelRunner(
 
         target_model = self.get_model()
         with _temporarily_detach_target_owned_draft_modules(draft_model, target_model):
-            initialize_layerwise_reload(draft_model)
+            start_reload(draft_model)
             draft_model.load_weights(
                 model_loader.get_all_weights(draft_model_config, draft_model)
             )
-            finalize_layerwise_reload(draft_model, draft_model_config)
-
-        # The dflash/dspark drafters rebuild fused buffers (a stacked copy of
-        # layer weights plus a cached rotary embedding reference) at the end of
-        # load_weights. Inside the layerwise lifecycle that rebuild captures
-        # the temporarily meta-derived rotary buffer; finalization then
-        # restores the real buffer on the module tree, leaving the cached
-        # reference on meta. Re-running the drafter's own rebuild after
-        # finalization re-captures the restored objects. No-op elsewhere.
-        rebuild_fused_state = getattr(
-            getattr(draft_model, "model", None) or draft_model,
-            "_build_fused_kv_buffers",
-            None,
-        )
-        if callable(rebuild_fused_state):
-            rebuild_fused_state()
+            device = torch.device(
+                load_config.device or self.vllm_config.device_config.device
+            )
+            finish_reload(draft_model, draft_model_config, device)
 
     def reload_weights(
         self,
@@ -5489,7 +5477,7 @@ class GPUModelRunner(
     ) -> None:
         """Reload weights in place; see `reload_weights` in
         `vllm.model_executor.model_loader.reload.inplace` for details."""
-        if weights_iterator is None:
+        if weights_iterator is None and weights_path is None:
             # Draft first (L2 dropped its params). Target-owned aliases are
             # detached during that load. Unbound: MRV2 passes a V2 self.
             GPUModelRunner._reload_draft_weights_from_disk(self)

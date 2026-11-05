@@ -611,11 +611,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_checkpoint_format: bool = True,
     ) -> None:
         """Reload weights in place."""
-        if weights_iterator is None:
-            # Reload draft weights (dropped by L2 sleep) before the target so it
-            # stays authoritative for shared storage. V2 has its own reload path,
-            # so call the V1 helper unbound with this V2 self (lazy import to
-            # avoid a V1<->V2 module cycle).
+        if weights_iterator is None and weights_path is None:
+            # Draft first so the target owns shared storage. Import lazily to
+            # avoid a V1<->V2 module cycle.
             from vllm.v1.worker.gpu_model_runner import (
                 GPUModelRunner as _V1GPUModelRunner,
             )

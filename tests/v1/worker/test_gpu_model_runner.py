@@ -2038,6 +2038,7 @@ class TestReloadDraftWeights:
         runner = object.__new__(cls)
         runner.load_config = Mock()
         runner.load_config.load_format = "safetensors"
+        runner.load_config.device = "cpu"
         runner.lora_config = None
         runner.vllm_config = Mock()
         runner.model_config = Mock()
@@ -2086,12 +2087,8 @@ class TestReloadDraftWeights:
             patch.object(
                 gpu_model_runner_module, "get_model_loader", side_effect=get_loader
             ) as get_loader_mock,
-            patch.object(
-                gpu_model_runner_module, "initialize_layerwise_reload"
-            ) as initialize_reload,
-            patch.object(
-                gpu_model_runner_module, "finalize_layerwise_reload"
-            ) as finalize_reload,
+            patch.object(gpu_model_runner_module, "start_reload") as initialize_reload,
+            patch.object(gpu_model_runner_module, "finish_reload") as finalize_reload,
         ):
             # Both the V1 and V2 runners delegate the target to a shared
             # in-place reload; mock whichever one the runner under test uses.
@@ -2106,7 +2103,11 @@ class TestReloadDraftWeights:
         draft_model.load_weights.assert_called_once_with(draft_weights)
         assert initialize_reload.call_args_list == [call(draft_model)]
         assert finalize_reload.call_args_list == [
-            call(draft_model, runner.speculative_config.draft_model_config)
+            call(
+                draft_model,
+                runner.speculative_config.draft_model_config,
+                torch.device("cpu"),
+            )
         ]
         # Exactly one of the V1/V2 shared reloads is used, per the runner type.
         assert shared_reload.call_count + shared_reload_v2.call_count == 1
@@ -2135,8 +2136,8 @@ class TestReloadDraftWeights:
                 "get_model_loader",
                 return_value=model_loader,
             ) as get_loader,
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "start_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
         ):
             runner.reload_weights()
 
@@ -2146,8 +2147,12 @@ class TestReloadDraftWeights:
         shared_reload.assert_called_once()
         runner.get_draft_model.assert_called_once_with()
 
-    def test_iterator_reload_does_not_reload_draft_model(self):
-        runner = self._make_runner()
+    @pytest.mark.parametrize("runner_cls", [GPUModelRunner, GPUModelRunnerV2])
+    @pytest.mark.parametrize("use_iterator", [False, True])
+    def test_explicit_target_reload_does_not_reload_draft_model(
+        self, runner_cls, use_iterator
+    ):
+        runner = self._make_runner(runner_cls)
         target_model = Mock()
         target_model.named_parameters.return_value = []
         target_model.load_weights.return_value = set()
@@ -2157,17 +2162,20 @@ class TestReloadDraftWeights:
 
         with (
             patch.object(gpu_model_runner_module, "reload_weights") as shared_reload,
+            patch.object(model_runner_module, "reload_weights") as shared_reload_v2,
             patch.object(gpu_model_runner_module, "get_model_loader") as get_loader,
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "start_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
         ):
-            runner.reload_weights(weights_iterator=weights)
+            if use_iterator:
+                runner.reload_weights(weights_iterator=weights)
+            else:
+                runner.reload_weights(weights_path="new-target-checkpoint")
 
         get_loader.assert_not_called()
         runner.get_draft_model.assert_not_called()
-        # Iterator path skips the draft and delegates the target to the
-        # shared in-place reload (mocked).
-        shared_reload.assert_called_once()
+        # Explicit target updates must not reload the configured draft.
+        assert shared_reload.call_count + shared_reload_v2.call_count == 1
 
     def test_disk_reload_skips_dim_mismatched_aliased_embeddings(self):
         """Skip shared embed load; still fill the tied draft-dim lm_head."""
@@ -2234,10 +2242,10 @@ class TestReloadDraftWeights:
             ),
             patch.object(
                 gpu_model_runner_module,
-                "initialize_layerwise_reload",
+                "start_reload",
                 side_effect=capture_init,
             ),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
             patch.object(gpu_model_runner_module, "reload_weights"),
         ):
             runner.reload_weights()
@@ -2306,8 +2314,8 @@ class TestReloadDraftWeights:
             patch.object(
                 gpu_model_runner_module, "get_model_loader", side_effect=get_loader
             ),
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "start_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
             patch.object(gpu_model_runner_module, "reload_weights"),
         ):
             runner.reload_weights()
@@ -2375,8 +2383,8 @@ class TestReloadDraftWeights:
             patch.object(
                 gpu_model_runner_module, "get_model_loader", side_effect=get_loader
             ),
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "start_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
             patch.object(gpu_model_runner_module, "reload_weights"),
         ):
             runner.reload_weights()
@@ -2386,77 +2394,74 @@ class TestReloadDraftWeights:
         assert torch.equal(draft_model.lm_head.weight, head_from_ckpt)
         assert torch.equal(draft_model.proj.weight, draft_proj)
 
-    def test_disk_reload_rebuilds_fused_state_after_finalization(self):
-        """Drafters whose load_weights rebuilds fused buffers mid-lifecycle
-        (dflash/dspark) capture the temporarily meta-derived rotary buffer;
-        the runner must re-run that rebuild after finalize restores the tree.
-        """
-
-        class _Rotary(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.cache = torch.zeros(4)
-
-        class _Inner(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.rotary_emb = _Rotary()
-                self.captured = None
-                self.rebuild_calls = 0
-
-            def _build_fused_kv_buffers(self) -> None:
-                self.rebuild_calls += 1
-                self.captured = self.rotary_emb.cache
-
-            def load_weights(self, weights):
-                self._build_fused_kv_buffers()
-                return set()
+    @pytest.mark.parametrize("runner_cls", [GPUModelRunner, GPUModelRunnerV2])
+    @pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
+    @torch.inference_mode()
+    def test_disk_reload_refreshes_fused_state_in_place(
+        self, monkeypatch, runner_cls, reload_mode
+    ):
+        """Reloaded source weights must refill the storage held by CUDA graphs."""
+        from vllm.model_executor.model_loader.reload.direct import (
+            record_checkpoint_layout,
+        )
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            record_metadata_for_reloading,
+        )
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+        from vllm.model_executor.utils import refill_derived
 
         class _Draft(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.model = _Inner()
+                self.proj = nn.Linear(2, 2, bias=False)
 
             def load_weights(self, weights):
-                return self.model.load_weights(weights)
+                for name, weight in weights:
+                    param = self.get_parameter(name)
+                    getattr(param, "weight_loader", default_weight_loader)(
+                        param, weight
+                    )
+                return {"proj.weight"}
 
-        draft_model = _Draft()
-        target_model = Mock()
-        target_model.named_parameters.return_value = []
-        target_model.load_weights.return_value = set()
-        runner = self._make_runner()
-        runner.get_draft_model = Mock(return_value=draft_model)
-        runner.get_model = Mock(return_value=target_model)
-        model_loader = Mock()
-        model_loader.get_all_weights.return_value = iter([])
-        restored = _Rotary()
+            def process_weights_after_loading(self):
+                refill_derived(self, "fused", torch.cat([self.proj.weight] * 2))
 
-        def finalize(model, _config):
-            # Emulate the real finalize: the module tree ends up holding a
-            # different, healthy buffer object than the meta one load_weights
-            # saw mid-lifecycle.
-            model.model.rotary_emb = restored
+        monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
+        draft = _Draft()
+        # Real initialization records metadata before post-load derived tensors exist.
+        record_metadata_for_reloading(draft)
+        if reload_mode == "direct":
+            record_checkpoint_layout(draft)
+        draft.process_weights_after_loading()
+        original_fused = draft.fused
+        original_address = original_fused.data_ptr()
+        runner = self._make_runner(runner_cls)
+        runner.speculative_config.draft_model_config = SimpleNamespace(
+            word_embeddings_untied_by_checkpoint=False,
+            quantization=None,
+            dtype=torch.float32,
+        )
+        runner.get_draft_model = Mock(return_value=draft)
+        runner.get_model = Mock(return_value=nn.Module())
+        loader = Mock()
 
         with (
             patch.object(
-                gpu_model_runner_module,
-                "get_model_loader",
-                return_value=model_loader,
+                gpu_model_runner_module, "get_model_loader", return_value=loader
             ),
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(
-                gpu_model_runner_module,
-                "finalize_layerwise_reload",
-                side_effect=finalize,
-            ),
-            patch.object(gpu_model_runner_module, "reload_weights"),
+            patch.object(gpu_model_runner_module, "reload_weights") as target_v1,
+            patch.object(model_runner_module, "reload_weights") as target_v2,
         ):
-            runner.reload_weights()
-
-        # Mid-lifecycle rebuild from load_weights, then the post-finalize
-        # re-run: the cached reference must be the restored tree object.
-        assert draft_model.model.rebuild_calls == 2
-        assert draft_model.model.captured is restored.cache
+            for value in (3.0, 7.0, -2.0):
+                loader.get_all_weights.return_value = iter(
+                    [("proj.weight", torch.full((2, 2), value))]
+                )
+                runner.reload_weights()
+                assert draft.fused is original_fused
+                assert draft.fused.data_ptr() == original_address
+                assert torch.equal(draft.fused, torch.full((4, 2), value))
+                assert "fused" not in draft.state_dict()
+            assert target_v1.call_count + target_v2.call_count == 3
 
     def test_disk_reload_keeps_parameterless_shared_modules_attached(self):
         """A rotary embedding shared through get_rope's instance cache has no
@@ -2528,8 +2533,8 @@ class TestReloadDraftWeights:
                 "get_model_loader",
                 return_value=model_loader,
             ),
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "start_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
             patch.object(gpu_model_runner_module, "reload_weights"),
         ):
             runner.reload_weights()
@@ -2617,8 +2622,8 @@ class TestReloadDraftWeights:
                 "get_model_loader",
                 return_value=model_loader,
             ),
-            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "start_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
             patch.object(gpu_model_runner_module, "reload_weights"),
         ):
             runner.reload_weights()
@@ -2724,10 +2729,10 @@ class TestReloadDraftWeights:
             ),
             patch.object(
                 gpu_model_runner_module,
-                "initialize_layerwise_reload",
+                "start_reload",
                 side_effect=capture_init,
             ),
-            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finish_reload"),
             patch.object(gpu_model_runner_module, "reload_weights"),
         ):
             runner.reload_weights()
