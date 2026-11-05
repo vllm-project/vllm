@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm import LLM
+from vllm import LLM, ModelRegistry
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -64,6 +64,12 @@ MINIMAL_MODEL_ARCH_LIST = [
 OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
     MINIMAL_MODEL_ARCH_LIST
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def fill_model_info_cache() -> None:
+    # Every case builds a different model: inspect them all once, not per case.
+    ModelRegistry.fill_model_info_cache()
 
 
 @pytest.fixture(autouse=True)

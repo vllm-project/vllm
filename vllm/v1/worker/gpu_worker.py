@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+import copy
 import gc
 import os
 import time
@@ -71,6 +72,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -113,6 +115,8 @@ from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
     measure_kv_cache_blocks,
+    pad_kv_cache_segments,
+    registers_kv_cache_memory,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -237,6 +241,7 @@ class Worker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self._external_weight_charges = ExternalWeightCharges()
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -583,14 +588,15 @@ class Worker(WorkerBase):
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
-            self.external_weight_memory = get_model_loader(
-                self.load_config
-            ).get_external_weight_memory(self.vllm_config)
+            with self._external_weight_charges.track():
+                external_weight_memory = get_model_loader(
+                    self.load_config
+                ).get_external_weight_memory(self.vllm_config)
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, self.external_weight_memory
+                init_snapshot, self.cache_config, external_weight_memory
             )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -647,8 +653,16 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        if self._external_weight_charges.fallback_bytes:
+            self.requested_memory = self._resolve_requested_memory()
+            logger.info(
+                "Updated engine memory budget after disk fallback: %s GiB",
+                format_gib(self.requested_memory),
+            )
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -955,6 +969,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
+            if registers_kv_cache_memory(self.vllm_config):
+                kv_cache_config = pad_kv_cache_segments(
+                    kv_cache_config,
+                    self.cache_config.get_resolved_kv_cache_layout(),
+                    granule_size(torch.accelerator.current_device_index()),
+                )
             # The connector is created in `extend_kv_cache`, once the
             # memory it registers is final.
             self._kv_cache_config = kv_cache_config
@@ -1027,14 +1047,23 @@ class Worker(WorkerBase):
             return reason or "another rank cannot use it"
         return None
 
-    def kv_cache_commit_granule(self) -> int:
-        """Bytes one physical KV cache commit is rounded to on this device."""
-        return granule_size(torch.accelerator.current_device_index())
-
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
-        self.requested_memory = request_memory(
-            self.init_snapshot, self.cache_config, self.external_weight_memory
+        self.requested_memory = self._resolve_requested_memory()
+
+    def _resolve_requested_memory(self) -> int:
+        fallback_bytes = self._external_weight_charges.fallback_bytes
+        snapshot = self.init_snapshot
+        if fallback_bytes:
+            # init_snapshot was taken while the daemon still held the
+            # fallen-back weights; a removed charge means that memory is
+            # free again, so count it as available for the validation.
+            snapshot = copy.copy(snapshot)
+            snapshot.free_memory += fallback_bytes
+        return request_memory(
+            snapshot,
+            self.cache_config,
+            self._external_weight_charges.current_bytes,
         )
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":
@@ -1229,6 +1258,27 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+
+        if (
+            self.use_v2_model_runner
+            and get_pp_group().is_last_rank
+            and not self.model_runner.is_pooling_model
+        ):
+            # MRV2 counterpart of the V1 warm-up above: keep the sampler's
+            # max-batch buffers (e.g. the fp32 logits copy) cached after the
+            # empty_cache() in capture_model(), so later steps reuse them
+            # instead of reserving a new, larger block at each new batch size.
+            max_num_reqs = min(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            # Take the hidden states from a dummy forward pass, as V1 does, so they
+            # have the LM head's input size (e.g. OPT projects to a smaller size).
+            _, sample_hidden_states = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs, skip_eplb=True
+            )
+            self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            del sample_hidden_states
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

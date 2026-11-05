@@ -515,8 +515,8 @@ async def test_stop_strings_rejected_when_tokens_only(client):
         [
             "--enable-lora",
             "--lora-modules",
-            "Alice=charent/self_cognition_Alice",
-            "Bob=charent/self_cognition_Bob",
+            "Alice=vllm-project/self_cognition_Alice",
+            "Bob=vllm-project/self_cognition_Bob",
             "--max-lora-rank",
             "64",
             "--max-cpu-loras",
