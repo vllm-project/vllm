@@ -767,15 +767,13 @@ def test_logprob_publication_normalizes_per_request_width(sampler_widths):
 )
 def test_logprob_rows_follow_absolute_sample_positions(
     tmp_path,
-    monkeypatch,
+    dist_init,
     first_prompt_len,
     first_token_start,
     first_count,
     next_prompt_len,
     next_token_start,
 ):
-    import vllm.distributed.aux_output_connector.worker as aux_worker
-
     LlamaConfig(
         architectures=["LlamaForCausalLM"],
         num_hidden_layers=1,
@@ -804,11 +802,6 @@ def test_logprob_rows_follow_absolute_sample_positions(
         ),
     )
     config.aux_output_config.enable_return_logprobs = True
-    monkeypatch.setattr(
-        aux_worker,
-        "get_tp_group",
-        lambda: SimpleNamespace(is_first_rank=True),
-    )
     worker = AuxOutputWorkerConnector(vllm_config=config, model=torch.nn.Identity())
     worker.initialize_output_storage(
         KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
