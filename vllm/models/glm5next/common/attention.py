@@ -407,6 +407,7 @@ class Glm5NextMLAAttention(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         skip_rope: bool | None = False,
+        shardq_eligible: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -572,6 +573,7 @@ class Glm5NextMLAAttention(nn.Module):
             prefix,
             skip_topk=False,
             fuse_qkv_rmsnorm=True,
+            shardq_eligible=shardq_eligible,
         )
 
     def forward(
