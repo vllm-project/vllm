@@ -159,7 +159,14 @@ class BaseRenderer(ABC, Generic[_T]):
         # Separate executor so tokenization never queues behind MM
         # preprocessing. Single-worker while the multimodal processor cache is
         # on (#38418: P0/P1 order); see _mm_executor_workers.
-        self._mm_executor = ThreadPoolExecutor(max_workers=_mm_executor_workers(config))
+        mm_workers = _mm_executor_workers(config)
+        if mm_workers > 1:
+            logger.info_once(
+                "Multimodal processor cache is disabled: multimodal "
+                "preprocessing runs on %d threads (renderer_num_workers).",
+                mm_workers,
+            )
+        self._mm_executor = ThreadPoolExecutor(max_workers=mm_workers)
         self._resources.callback(self._mm_executor.shutdown, wait=False)
 
         # Offload tokenization to the thread pool. The sync
