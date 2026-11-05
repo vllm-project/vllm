@@ -998,21 +998,30 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
 
 @pytest.mark.parametrize(
-    "speculative, hybrid, aiter_found, expected_backend",
+    "speculative, hybrid, kv_connector, aiter_found, expected_backend",
     [
-        (False, False, True, AttentionBackendEnum.ROCM_ATTN),
-        (True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (True, False, False, AttentionBackendEnum.TRITON_ATTN),
-        (False, True, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (False, True, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, False, False, True, AttentionBackendEnum.ROCM_ATTN),
+        (True, False, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, True, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (True, True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, True, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
     ],
 )
 def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
-    speculative, hybrid, aiter_found, expected_backend, mock_get_cdna_version
+    speculative,
+    hybrid,
+    kv_connector,
+    aiter_found,
+    expected_backend,
+    mock_get_cdna_version,
 ):
     """Speculative decoding and hybrid models would run ROCM_ATTN's Triton
-    fallbacks, so the unified backends rank above it."""
-    from vllm.platforms.rocm import RocmPlatform
+    fallbacks, so the unified backends rank above it. ROCM_ATTN stays in the
+    list as the last fallback, except with a KV connector."""
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms.rocm import RocmPlatform, _get_backend_priorities
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace() if speculative else None,
@@ -1027,50 +1036,27 @@ def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
         use_mla=False,
         has_sink=False,
         use_sparse=False,
+        use_kv_connector=kv_connector,
     )
     with (
-        patch("vllm.config.get_current_vllm_config_or_none", return_value=config),
+        set_current_vllm_config(config),
         patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found),
     ):
         backend_path = RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
-
-    assert backend_path == expected_backend.get_path()
-
-
-@pytest.mark.parametrize(
-    "use_spec_decode, is_hybrid, use_kv_connector",
-    [
-        (False, False, False),
-        (True, False, False),
-        (False, True, False),
-        (True, True, False),
-        (True, False, True),
-    ],
-)
-def test_backend_priorities_rank_rocm_attn_below_unified(
-    use_spec_decode, is_hybrid, use_kv_connector
-):
-    from vllm.platforms.rocm import _get_backend_priorities
-
-    with patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=True):
         priorities = _get_backend_priorities(
             use_mla=False,
             use_sparse=False,
-            use_kv_connector=use_kv_connector,
-            use_spec_decode=use_spec_decode,
-            is_hybrid=is_hybrid,
+            use_kv_connector=kv_connector,
+            use_spec_decode=speculative,
+            is_hybrid=hybrid,
         )
 
+    assert backend_path == expected_backend.get_path()
     rocm_attn = AttentionBackendEnum.ROCM_ATTN
-    if use_kv_connector:
+    triton_attn = AttentionBackendEnum.TRITON_ATTN
+    if kv_connector:
         assert rocm_attn not in priorities
-    elif use_spec_decode or is_hybrid:
-        triton_attn = AttentionBackendEnum.TRITON_ATTN
+    elif speculative or hybrid:
         assert priorities.index(rocm_attn) == priorities.index(triton_attn) + 1
-    else:
-        assert priorities[0] == rocm_attn
-    assert priorities.index(
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-    ) < priorities.index(AttentionBackendEnum.TRITON_ATTN)
