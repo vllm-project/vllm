@@ -4,7 +4,7 @@ meta:
   provider: "PaddlePaddle"
   description: "PaddleOCR-VL (0.9B) — compact vision-language model for document parsing, OCR, tables, formulas, charts"
   date_added: 2025-11-04
-  date_updated: 2026-04-17
+  date_updated: 2026-11-05
   tasks:
     - multimodal
   related_recipes: []
@@ -28,10 +28,14 @@ model:
 dependencies:
   - note: "PaddlePaddle runtime (install in a separate venv from vllm to avoid conflicts)"
     command: "uv pip install paddlepaddle-gpu==3.2.1 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+    optional: true
+    brand: NVIDIA
   - note: "PaddleOCR document-parsing helpers"
-    command: 'uv pip install -U "paddleocr[doc-parser]"'
+    command: 'uv pip install "paddleocr[doc-parser]==3.3.2"'
+    optional: true
   - note: "Safetensors loader used by the doc-parser path"
     command: "uv pip install safetensors"
+    optional: true
 
 features:
   text_only:
@@ -53,6 +57,21 @@ variants:
     precision: bf16
     vram_minimum_gb: 2
     description: "BF16 weights — small footprint, runs on most GPUs"
+    supported_hardware:
+      - arch:gfx942
+      - arch:gfx950
+      - arch:sm100
+      - arch:sm103
+      - arch:sm120
+      - arch:sm121
+      - arch:sm89
+      - arch:sm90
+      - arc_pro_b60
+      - arc_pro_b70
+      - ironwood
+      - trillium
+      - xeon5
+      - xeon6
 
 compatible_strategies:
   - single_node_tp
@@ -79,53 +98,12 @@ guide: |
 
   ## Prerequisites
 
-  - Hardware: 1x GPU (small VRAM footprint)
-  - vLLM >= 0.11.1 (nightly if not released yet)
+  - Hardware: one compatible accelerator; see the platform-specific requirements below
+  - vLLM >= 0.11.1
   - AMD ROCm wheels require Python 3.12, ROCm 7.2.3, and glibc >= 2.35.
 
-  ### Install vLLM (NVIDIA)
-
-  ```bash
-  uv venv
-  source .venv/bin/activate
-  uv pip install -U vllm --pre \
-    --extra-index-url https://wheels.vllm.ai/nightly \
-    --extra-index-url https://download.pytorch.org/whl/cu129 \
-    --index-strategy unsafe-best-match
-  ```
-
-  ### Install vLLM (AMD ROCm)
-
-  ```bash
-  uv venv --python 3.12
-  source .venv/bin/activate
-  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
-  ```
-
-  ## Launch command
-
-  ```bash
-  vllm serve PaddlePaddle/PaddleOCR-VL \
-    --trust-remote-code \
-    --max-num-batched-tokens 16384 \
-    --no-enable-prefix-caching \
-    --mm-processor-cache-gb 0
-  ```
-
-  AMD MI300X/MI325X/MI355X:
-
-  ```bash
-  export SAFETENSORS_FAST_GPU=1
-
-  vllm serve PaddlePaddle/PaddleOCR-VL \
-    --trust-remote-code \
-    --max-num-batched-tokens 16384 \
-    --no-enable-prefix-caching \
-    --mm-processor-cache-gb 0
-  ```
-
-  Tip: OCR workloads don't benefit much from prefix caching or image reuse, so disable
-  those to avoid hashing/caching overhead.
+  OCR workloads do not benefit much from prefix caching or image reuse, so the
+  serving configuration disables those caches.
 
   ## Client Usage
 
@@ -157,14 +135,14 @@ guide: |
   print(response.choices[0].message.content)
   ```
 
-  ## Offline Inference with PP-DocLayoutV2
+  ## Offline Inference with PP-DocLayoutV2 (NVIDIA GPU)
 
   Use separate venvs for `vllm` and `paddlepaddle` to avoid conflicts. If you see
-  "The model PaddleOCR-VL-0.9B does not exist.", add `--served-model-name PaddleOCR-VL-0.9B`.
+  "The model PaddleOCR-VL-0.9B does not exist.", serve both client aliases with `--served-model-name PaddlePaddle/PaddleOCR-VL PaddleOCR-VL-0.9B`.
 
   ```bash
   uv pip install paddlepaddle-gpu==3.2.1 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
-  uv pip install -U "paddleocr[doc-parser]"
+  uv pip install "paddleocr[doc-parser]==3.3.2"
   uv pip install safetensors
   ```
 
@@ -183,6 +161,8 @@ guide: |
       res.save_to_json(save_path=f"output_{i}.json")
       res.save_to_markdown(save_path=f"output_{i}.md")
   ```
+
+  <!-- overlay:vllm-ascend:ascend -->
 
   ## References
 
