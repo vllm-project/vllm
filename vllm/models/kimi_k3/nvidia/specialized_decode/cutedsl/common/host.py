@@ -11,7 +11,7 @@ import cutlass.cute as cute
 import torch
 from cutlass.cute.runtime import make_fake_tensor
 
-from vllm.models.kimi_k3.nvidia.ops.cute_dsl.latent_moe_tail.primitives import to_cute
+from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
 
 _NAMES = ("BFloat16", "Float32", "Uint8", "Uint32", "Int32", "Int64")
 _DTYPES = {getattr(torch, name.lower()): getattr(cutlass, name) for name in _NAMES}

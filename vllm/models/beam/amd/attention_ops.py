@@ -69,7 +69,9 @@ def beam_output_gate(
     return output
 
 
-@triton.jit(do_not_specialize=["M"], do_not_specialize_on_alignment=["POS"])
+@triton.jit(
+    do_not_specialize=["M", "NUM_SLOTS"], do_not_specialize_on_alignment=["POS"]
+)
 def _qk_norm_rope_kernel(
     Q,
     K,
@@ -80,6 +82,16 @@ def _qk_norm_rope_kernel(
     OQ,
     OK,
     M,
+    V,
+    KV_CACHE,
+    SLOTS,
+    NUM_SLOTS,
+    WRITE_CACHE: tl.constexpr,
+    V_STRIDE: tl.constexpr,
+    CACHE_BLOCK_STRIDE: tl.constexpr,
+    CACHE_HEAD_STRIDE: tl.constexpr,
+    CACHE_TOKEN_STRIDE: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
     TOKENS: tl.constexpr,
     Q_HEADS: tl.constexpr,
     K_HEADS: tl.constexpr,
@@ -87,13 +99,9 @@ def _qk_norm_rope_kernel(
     Q_STRIDE: tl.constexpr,
     K_STRIDE: tl.constexpr,
     EPS: tl.constexpr,
-    Q_WEIGHT: tl.constexpr,
-    K_WEIGHT: tl.constexpr,
     ROTARY: tl.constexpr,
     NEOX: tl.constexpr,
     SSMAX: tl.constexpr,
-    OFFSET: tl.constexpr,
-    LOG_DIVISOR: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64) * TOKENS + tl.arange(0, TOKENS)
@@ -110,8 +118,7 @@ def _qk_norm_rope_kernel(
         else:
             total = tl.sum(x * x, 1)
         y = x * tl.rsqrt(total / DIM + EPS)[:, None]
-        if Q_WEIGHT:
-            y = y * tl.load(QW + c, c < DIM, 0).to(tl.float32)[None, :]
+        y = y * tl.load(QW + c, c < DIM, 0).to(tl.float32)[None, :]
         out = OQ + (token[:, None] * Q_HEADS + head) * DIM
     else:
         h = head - Q_HEADS
@@ -124,8 +131,7 @@ def _qk_norm_rope_kernel(
         else:
             total = tl.sum(x * x, 1)
         y = x * tl.rsqrt(total / DIM + EPS)[:, None]
-        if K_WEIGHT:
-            y = y * tl.load(KW + c, c < DIM, 0).to(tl.float32)[None, :]
+        y = y * tl.load(KW + c, c < DIM, 0).to(tl.float32)[None, :]
         out = OK + (token[:, None] * K_HEADS + h) * DIM
     y = y.to(Q.dtype.element_ty).to(tl.float32)
     if ROTARY:
@@ -152,37 +158,53 @@ def _qk_norm_rope_kernel(
             tl.fma(y, cos, -other * sin),
         )
         y = tl.where(c[None, :] < ROTARY, rotated, y)
-    elif SSMAX != "none":
+    elif SSMAX:
         if head < Q_HEADS:
-            p = tl.load(POS + token, token < M, 0).to(tl.float32) + OFFSET
-            if SSMAX == "default":
-                scale = libdevice.log(p) / LOG_DIVISOR
-            elif SSMAX == "root10":
-                scale = libdevice.exp(0.1 * libdevice.log1p(p / 2048.0))
-            else:
-                scale = tl.maximum(
-                    130.0 * libdevice.expm1(0.001 * libdevice.log(p)), 1.0
-                )
+            # (1 + (position + 1) / 2048) ** 0.1
+            p = tl.load(POS + token, token < M, 0).to(tl.float32) + 1
+            scale = libdevice.exp(0.1 * libdevice.log1p(p / 2048.0))
             y = y * scale[:, None]
     tl.store(out + c[None, :], y, mask)
+    if WRITE_CACHE and head >= Q_HEADS:
+        slot = tl.load(SLOTS + token, token < NUM_SLOTS, -1).to(tl.int64)
+        cache_mask = mask & (token[:, None] < NUM_SLOTS) & (slot[:, None] >= 0)
+        address = (
+            slot[:, None] // PAGE_SIZE * CACHE_BLOCK_STRIDE
+            + slot[:, None] % PAGE_SIZE * CACHE_TOKEN_STRIDE
+            + (head - Q_HEADS) * CACHE_HEAD_STRIDE
+            + c[None, :]
+        )
+        tl.store(KV_CACHE + address, y, cache_mask)
+        value = tl.load(
+            V + token[:, None] * V_STRIDE + (head - Q_HEADS) * DIM + c[None, :],
+            cache_mask,
+            0,
+        )
+        tl.store(KV_CACHE + address + DIM, value, cache_mask)
 
 
 def beam_qk_norm_rope(
     q: torch.Tensor,
     k: torch.Tensor,
-    q_weight: torch.Tensor | None,
-    k_weight: torch.Tensor | None,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
     eps: float,
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor | None,
     head_dim: int,
     rotary_dim: int = 0,
     is_neox_style: bool = True,
-    ssmax_mode: str = "none",
-    ssmax_offset: int = 1,
-    ssmax_log_divisor: float = 1.0,
+    *,
+    ssmax: bool = False,
+    value: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Round norm before applying the configured position transform."""
+    """Round norm before position transforms and optionally insert BF16 K/V."""
+    if kv_cache is not None:
+        assert value is not None and slot_mapping is not None
+        assert kv_cache.dtype == q.dtype == torch.bfloat16
+        assert kv_cache.ndim == 4 and kv_cache.stride(-1) == 1
     q_out, k_out = torch.empty_like(q), torch.empty_like(k)
     q_heads, k_heads = q.shape[-1] // head_dim, k.shape[-1] // head_dim
     if q.shape[0]:
@@ -202,6 +224,16 @@ def beam_qk_norm_rope(
             q_out,
             k_out,
             q.shape[0],
+            value,
+            kv_cache,
+            slot_mapping,
+            slot_mapping.numel() if slot_mapping is not None else 0,
+            kv_cache is not None,
+            value.stride(0) if value is not None else 0,
+            kv_cache.stride(0) if kv_cache is not None else 0,
+            kv_cache.stride(1) if kv_cache is not None else 0,
+            kv_cache.stride(2) if kv_cache is not None else 0,
+            kv_cache.shape[2] if kv_cache is not None else 1,
             tile,
             q_heads,
             k_heads,
@@ -209,13 +241,9 @@ def beam_qk_norm_rope(
             q.stride(0),
             k.stride(0),
             eps,
-            q_weight is not None,
-            k_weight is not None,
             rotary_dim,
             is_neox_style,
-            ssmax_mode,
-            ssmax_offset,
-            ssmax_log_divisor,
+            ssmax,
             triton.next_power_of_2(head_dim),
             num_warps=warps,
             enable_fp_fusion=False,

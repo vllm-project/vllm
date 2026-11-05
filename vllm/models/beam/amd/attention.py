@@ -6,6 +6,7 @@ from torch import nn
 
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -132,6 +133,16 @@ class BeamAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        backend = self.attn.attn_backend
+        self.fuse_kv_insert = (
+            not backend.forward_includes_kv_cache_update
+            and backend.supports_kv_cache_update_bypass
+            and self.attn.impl.dcp_world_size == 1
+            and self.attn.kv_sharing_target_layer_name is None
+            and self.attn.kv_cache_dtype in ("auto", "bfloat16")
+        )
+        self.attn.kv_cache_update_bypass = self.fuse_kv_insert
+
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
@@ -146,6 +157,17 @@ class BeamAttention(nn.Module):
             gate, _ = self.output_gate_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
+        kv_cache, slot_mapping = None, None
+        if (
+            self.fuse_kv_insert
+            and self.attn.kv_cache.dtype == q.dtype == torch.bfloat16
+        ):
+            slots = get_forward_context().slot_mapping
+            if isinstance(slots, dict):
+                slot_mapping = slots.get(self.attn.layer_name)
+                if slot_mapping is not None:
+                    kv_cache = self.attn.kv_cache
+
         rope = self.rotary_emb
         q, k = beam_qk_norm_rope(
             q,
@@ -158,10 +180,15 @@ class BeamAttention(nn.Module):
             self.head_dim,
             rope.rotary_dim if rope is not None else 0,
             rope.is_neox_style if rope is not None else True,
-            "root10" if self.disable_rope else "none",
+            ssmax=self.disable_rope,
+            value=v,
+            kv_cache=kv_cache,
+            slot_mapping=slot_mapping,
         )
 
-        attn_output = self.attn(q, k, v)
+        attn_output = (
+            self.attn(q, k, v) if kv_cache is None else self.attn(q, None, None)
+        )
         attn_output = beam_output_gate(
             attn_output,
             gate,

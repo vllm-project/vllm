@@ -19,6 +19,9 @@ from .dflash2_context_ops import store_context_kv
 
 
 class _NVIDIABackend:
+    def configure_attention(self, attention: DFlash2BeamAttention) -> None:
+        pass
+
     def forward_attention(
         self,
         attention: DFlash2BeamAttention,

@@ -5,6 +5,7 @@
 import torch
 
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 
 from ..common.dflash2 import (
     DFlash2BeamAttention,
@@ -18,6 +19,18 @@ from .dflash2_context_ops import transform_context_kv
 
 
 class _AMDBackend:
+    def configure_attention(self, attention: DFlash2BeamAttention) -> None:
+        attn = attention.attn
+        backend = attn.attn_backend
+        attention.fuse_kv_insert = (
+            not backend.forward_includes_kv_cache_update
+            and backend.supports_kv_cache_update_bypass
+            and attn.impl.dcp_world_size == 1
+            and attn.kv_sharing_target_layer_name is None
+            and attn.kv_cache_dtype in ("auto", "bfloat16")
+        )
+        attn.kv_cache_update_bypass = attention.fuse_kv_insert
+
     def forward_attention(
         self,
         attention: DFlash2BeamAttention,
@@ -28,6 +41,18 @@ class _AMDBackend:
     ) -> torch.Tensor:
         if attention.v_scale is not None:
             v = v * attention.v_scale
+        cache, slots = None, None
+        mapping = get_forward_context().slot_mapping
+        assert isinstance(mapping, dict)
+        if (
+            attention.fuse_kv_insert
+            and mapping
+            and attention.attn.kv_cache.dtype == q.dtype == torch.bfloat16
+        ):
+            slots = mapping[attention.attn.layer_name]
+            cache = attention.attn.kv_cache
+            assert cache.dtype == q.dtype == torch.bfloat16
+            assert cache.ndim == 4
         rope = attention.rotary_emb
         q, k = beam_qk_norm_rope(
             q,
@@ -40,9 +65,13 @@ class _AMDBackend:
             attention.head_dim,
             rope.rotary_dim,
             rope.is_neox_style,
+            value=v,
+            kv_cache=cache,
+            slot_mapping=slots,
         )
-        # ROCm backends own their cache layout and update path.
-        return attention.attn(q, k, v)
+        return (
+            attention.attn(q, k, v) if cache is None else attention.attn(q, None, None)
+        )
 
     def store_context_kv(
         self,
