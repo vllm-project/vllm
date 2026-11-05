@@ -98,6 +98,7 @@ class ExtensibleKVCache:
         self.capacity_blocks = kv_cache_config.num_blocks
         if self.capacity_blocks <= 0:
             raise ValueError(f"Invalid KV cache capacity {self.capacity_blocks}.")
+        self._is_block_outermost = layout.is_block_outermost
         self.segment_offsets, self.segment_strides = self._segments(tensors, layout)
         self.bytes_per_block = sum(self.segment_strides)
         self.num_committed_blocks = 0
@@ -169,9 +170,14 @@ class ExtensibleKVCache:
         return offsets, strides
 
     def allocate(self, size: int) -> torch.Tensor:
-        """Allocator hook for allocate_kv_cache; commits only the null block."""
+        """Allocator hook for allocate_kv_cache; commits the null block.
+
+        Under block-outermost layouts layers' views start inside block 0, so a
+        second block keeps at least half a granule mapped past each view's start
+        (see `pad_kv_cache_segments` for what reads it).
+        """
         assert size == self.size, f"Expected {self.size} bytes, got {size}."
-        self.commit(1)
+        self.commit(2 if self._is_block_outermost else 1)
         return self.buffer.full_view()
 
     def commit(
@@ -373,24 +379,31 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
 
 
 def pad_kv_cache_segments(
-    kv_cache_config: KVCacheConfig, layout: KVCacheLayout, granule: int
+    kv_cache_config: KVCacheConfig,
+    layout: KVCacheLayout,
+    granule: int,
+    *,
+    registers_memory: bool = False,
 ) -> KVCacheConfig:
     """Start every layer's region on a granule.
 
     Committing the null block then backs each layer's first granule, which
-    kernels may touch beyond the blocks they index. It also lets a
-    defragmenting commit of any block count back each segment with one
-    physical chunk, as RDMA registration requires.
+    TMA gathers with out-of-bounds indices touch beyond the rows they address.
+    It also lets a defragmenting commit of any block count back each segment
+    with one physical chunk, as RDMA registration (registers_memory) requires.
 
     Only address space grows: commits already map whole granules per segment.
-    Block-outermost layouts (one segment at offset 0) and layouts that are not
-    block-compact are returned as is.
+    Block-outermost layouts (one segment at offset 0, see `allocate`) are
+    returned as is, and so are other layouts that are not block-compact, unless
+    registers_memory.
     """
-    if layout.is_block_outermost or not layout.is_block_compact:
+    if layout.is_block_outermost:
+        return kv_cache_config
+    if not layout.is_block_compact:
+        assert not registers_memory, f"{layout.name} has no per-layer segments."
         return kv_cache_config
     num_blocks = kv_cache_config.num_blocks
-    # Host-resident tensors live outside the reservation and keep their place.
-    tensors = [t for t in kv_cache_config.kv_cache_tensors if not t.host_resident]
+    tensors = kv_cache_config.kv_cache_tensors
     assert all(t.layer_stride == num_blocks * t.block_stride for t in tensors)
     # Cache groups alias each other's layer regions.
     regions = {
@@ -407,15 +420,13 @@ def pad_kv_cache_segments(
         padded_end += round_up(regions[offset], granule)
     padded = copy.copy(kv_cache_config)
     padded.kv_cache_tensors = [
-        tensor
-        if tensor.host_resident
-        else replace(
+        replace(
             tensor,
             size=padded_end,
             offset=padded_offsets[tensor.offset],
             layer_stride=round_up(tensor.layer_stride, granule),
         )
-        for tensor in kv_cache_config.kv_cache_tensors
+        for tensor in tensors
     ]
     return padded
 

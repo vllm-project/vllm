@@ -501,14 +501,23 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
 
 def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     """Under the extensible cache the connector is created at the final extend,
-    not at init. The config, padded to granules even without a connector, is
-    what the cache is allocated from and kept for it."""
+    not at init, and the config is kept for it."""
+    from vllm.v1.kv_cache_layout import KVCacheLayout
     from vllm.v1.worker import gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
     def fail(*args, **kwargs):
         raise AssertionError("connector created at init")
 
+    monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
+    monkeypatch.setattr(gpu_worker, "granule_size", lambda device: 2 << 20)
+    log: list[str] = []
+    runner = SimpleNamespace(
+        initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
+        extensible_kv_cache=SimpleNamespace(
+            reserved_headroom_bytes=0, committable_blocks=lambda: 42
+        ),
+    )
     kv_cache_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_layout=None,
@@ -516,21 +525,11 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         hash_block_size=16,
         cache_hit_alignment_tokens=16,
     )
-    padded = SimpleNamespace(**vars(kv_cache_config))
-    monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
-    monkeypatch.setattr(gpu_worker, "pad_kv_cache_segments", lambda *args: padded)
-    monkeypatch.setattr(gpu_worker, "granule_size", lambda device: 2 << 20)
-    allocated = []
-    runner = SimpleNamespace(
-        initialize_kv_cache=lambda config, **kwargs: allocated.append(config),
-        extensible_kv_cache=SimpleNamespace(
-            reserved_headroom_bytes=0, committable_blocks=lambda: 42
-        ),
-    )
     worker = SimpleNamespace(
         cache_config=SimpleNamespace(
             enable_extensible_kv_cache=True,
-            get_resolved_kv_cache_layout=lambda: None,
+            # Block-outermost layouts are not padded, so the config is kept as is.
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
         ),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
         vllm_config=SimpleNamespace(kv_transfer_config=None),
@@ -542,8 +541,8 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value - 2)
     Worker.initialize_from_config(worker, kv_cache_config)
     assert runner.extensible_kv_cache.warmup_committable_blocks == 40
-    assert len(allocated) == 1 and allocated[0] is padded
-    assert worker._kv_cache_config is padded
+    assert log == ["initialize_kv_cache"]
+    assert worker._kv_cache_config is kv_cache_config
 
 
 @pytest.mark.parametrize(
