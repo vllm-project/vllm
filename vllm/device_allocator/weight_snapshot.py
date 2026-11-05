@@ -158,7 +158,7 @@ def save(roots: dict[str, nn.Module], path: Path) -> None:
         {"magic": _MAGIC, "tensors": _describe(tensors), "scalars": scalars}
     ).encode()
     data_off = _round_up(len(header) + 8)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(f".tmp{os.getpid()}")  # concurrent cold starts on one node
     path.parent.mkdir(parents=True, exist_ok=True)
     buf = _pinned()
     with open(tmp, "wb") as f:
