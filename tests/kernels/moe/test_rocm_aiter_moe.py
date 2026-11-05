@@ -846,9 +846,14 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
         )
 
 
-def test_aiter_fp8_channel_tkw1_accepts_metadata_without_token_counts():
+@pytest.mark.skipif(
+    not (on_gfx942() or on_gfx950()),
+    reason="AITER tkw1 asm MoE is gfx942/gfx950 only",
+)
+def test_aiter_fp8_channel_tkw1_metadata_token_counts():
     """Metadata without expert token counts (e.g. DeepEP v2 under CUDA graphs)
-    must take the tkw1 route exactly like no metadata."""
+    must reach the tkw1 kernel exactly like no metadata; metadata that carries
+    counts must still be rejected."""
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
     from vllm._aiter_ops import rocm_aiter_ops
@@ -891,32 +896,51 @@ def test_aiter_fp8_channel_tkw1_accepts_metadata_without_token_counts():
     )
     workspace = torch.empty(0, device="cuda")
 
-    def run(expert_tokens_meta: "mk.ExpertTokensMetadata | None") -> torch.Tensor:
+    def run(
+        expert_tokens_meta: "mk.ExpertTokensMetadata | None",
+    ) -> tuple[torch.Tensor, int]:
+        """Returns the output and how many times the tkw1 kernel was called."""
         output = torch.empty_like(hidden_states)
-        experts.apply(
-            output=output,
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=MoEActivation.SILU,
-            global_num_experts=num_experts,
-            expert_map=None,
-            a1q_scale=None,
-            a2_scale=None,
-            workspace13=workspace,
-            workspace2=workspace,
-            expert_tokens_meta=expert_tokens_meta,
-            apply_router_weight_on_input=True,
-        )
-        return output
+        with mock.patch.object(
+            rocm_aiter_ops, "asm_moe_tkw1", wraps=rocm_aiter_ops.asm_moe_tkw1
+        ) as tkw1_mock:
+            experts.apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                a1q_scale=None,
+                a2_scale=None,
+                workspace13=workspace,
+                workspace2=workspace,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=True,
+            )
+        return output, tkw1_mock.call_count
 
     without_counts = mk.ExpertTokensMetadata(
         expert_num_tokens=None, expert_num_tokens_cpu=None
     )
+    out_without_counts, calls_without_counts = run(without_counts)
+    out_no_meta, calls_no_meta = run(None)
+    # The generic route is numerically equivalent, so pin the kernel itself.
+    assert calls_without_counts == calls_no_meta == 1, (
+        "count-free metadata did not reach the tkw1 kernel"
+    )
     # tkw1 is not bitwise deterministic run to run (~1 bf16 ulp).
-    torch.testing.assert_close(run(without_counts), run(None), rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(out_without_counts, out_no_meta, rtol=1e-2, atol=1e-2)
+
+    with_counts = mk.ExpertTokensMetadata(
+        expert_num_tokens=torch.zeros(num_experts, dtype=torch.int32, device="cuda"),
+        expert_num_tokens_cpu=None,
+    )
+    with pytest.raises(AssertionError, match="num_local_tokens"):
+        run(with_counts)
 
 
 # Enum tests --------------------------------------------------------------

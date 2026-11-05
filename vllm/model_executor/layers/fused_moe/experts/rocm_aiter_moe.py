@@ -712,6 +712,11 @@ class AiterFp8ChannelExperts(AiterExperts):
         assert (
             expert_tokens_meta is None or expert_tokens_meta.expert_num_tokens is None
         ), "AITER tkw1 kernel does not support `num_local_tokens`"
+        # tkw1 quantizes the activation itself, so a dispatch-side `a1q_scale`
+        # would be silently dropped, unlike on the generic route.
+        assert a1q_scale is None, (
+            "AITER tkw1 kernel does not support pre-quantized activations"
+        )
         _assert_topk1_for_router_weight_on_input(topk_weights)
         activation_method, _ = _resolve_aiter_activation(activation)
         result = rocm_aiter_ops.asm_moe_tkw1(
