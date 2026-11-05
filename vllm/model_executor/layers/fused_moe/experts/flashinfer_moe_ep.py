@@ -8,11 +8,13 @@ combines in one launch, so it is paired with a pass-through prepare/finalize.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -25,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEpWeights,
     apply_topk_in_fc1,
     flashinfer_moe_ep_unsupported_reasons,
+    is_sm107_device,
     supports_current_device,
     validate_flashinfer_moe_ep_layer,
 )
@@ -137,9 +140,24 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
 
         The oracle has already put the weights in kernel format; the per-expert
         weight global scales arrive through the quant config and become the
-        epilogue alphas.
+        epilogue alphas. On SM107 the checkpoint's activation input scales also
+        set the activation and FC1-output quantization (``sm107_nvfp4_epilogue``).
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
+        epilogue = epilogue_from_quant_config(self.quant_config)
+        if epilogue.fc1_alpha is not None and is_sm107_device():
+            # Every rank refuses a reload here, before the epilogue's collective.
+            if getattr(layer, "_experts_sm107_loaded", False):
+                raise NotImplementedError(
+                    "reloading weights is not supported with "
+                    f"{self.moe_config.moe_backend} on SM107"
+                )
+            epilogue = sm107_nvfp4_epilogue(
+                epilogue,
+                getattr(layer, "w13_input_scale", None),
+                getattr(layer, "w2_input_scale", None),
+            )
+            layer._experts_sm107_loaded = True
         adapter = FlashInferMoeEp(
             self.moe_config,
             FlashInferMoeEpWeights(
@@ -148,7 +166,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 w13_scale=getattr(layer, "w13_weight_scale", None),
                 w2_scale=getattr(layer, "w2_weight_scale", None),
             ),
-            epilogue_from_quant_config(self.quant_config),
+            epilogue,
             apply_topk_in_fc1=apply_topk_in_fc1(
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
@@ -191,8 +209,9 @@ def epilogue_from_quant_config(
     """Per-expert epilogue constants from the canonical quant config.
 
     The weight global scales (``g1_alphas``/``g2_alphas``) become the fc1/fc2
-    alphas. Activations are quantized dynamically inside the megakernel, so the
-    checkpoint's input scales drop out. MXFP4 checkpoints carry no global scales
+    alphas. Activations are quantized dynamically inside the megakernel, so on
+    SM100/SM103 the checkpoint's input scales drop out; SM107 uses them
+    (``sm107_nvfp4_epilogue``). MXFP4 checkpoints carry no global scales
     and keep the default epilogue. The alphas alias the layer's parameters, so
     EPLB permutations reach the kernel.
     """
@@ -207,4 +226,50 @@ def epilogue_from_quant_config(
     return FlashInferMoeEpEpilogue(
         fc1_alpha=fc1_alpha.float().contiguous(),
         fc2_alpha=fc2_alpha.float().contiguous(),
+    )
+
+
+def sm107_nvfp4_epilogue(
+    epilogue: FlashInferMoeEpEpilogue,
+    w13_input_scale: torch.Tensor | None,
+    w2_input_scale: torch.Tensor | None,
+) -> FlashInferMoeEpEpilogue:
+    """NVFP4 epilogue of the SM107 megakernel from the checkpoint's activation
+    scales.
+
+    With unit norm constants small activations can underflow the E4M3 block scales.
+    Tokens are quantized on their source rank, so the activation grid is the
+    layer maximum over every EP rank. The alphas are scaled in place and keep
+    aliasing the layer's weight global scales. Collective over the EP group:
+    every EP rank must call it for the same MoE layers in the same order.
+    """
+    if w13_input_scale is None or w2_input_scale is None:
+        raise ValueError(
+            "the SM107 megakernel needs the checkpoint's NVFP4 activation input scales"
+        )
+    assert epilogue.fc1_alpha is not None and epilogue.fc2_alpha is not None
+    amax = torch.stack((w13_input_scale.amax(), w2_input_scale.amax())).float()
+    finite = torch.stack(
+        (torch.isfinite(w13_input_scale).all(), torch.isfinite(w2_input_scale).all())
+    )
+    amax = torch.where(finite, amax, torch.full_like(amax, math.inf))
+    ep_group = get_ep_group()
+    if ep_group.world_size > 1:
+        torch.distributed.all_reduce(
+            amax, op=torch.distributed.ReduceOp.MAX, group=ep_group.device_group
+        )
+    w13_amax, w2_amax = amax.tolist()
+    if not (0.0 < w13_amax < math.inf and 0.0 < w2_amax < math.inf):
+        raise ValueError(
+            "the SM107 megakernel needs finite NVFP4 activation input scales with "
+            f"a positive maximum per MoE layer over the EP group; got {w13_amax} "
+            f"(w13) and {w2_amax} (w2); inf means a non-finite entry on some rank"
+        )
+    epilogue.fc1_alpha.mul_(w13_amax)
+    epilogue.fc2_alpha.mul_(w2_amax)
+    return FlashInferMoeEpEpilogue(
+        input_norm_const=1.0 / w13_amax,
+        fc1_alpha=epilogue.fc1_alpha,
+        fc2_alpha=epilogue.fc2_alpha,
+        fc1_norm_const=torch.full_like(epilogue.fc2_alpha, 1.0 / w2_amax),
     )
