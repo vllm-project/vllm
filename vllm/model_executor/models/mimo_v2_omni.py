@@ -673,6 +673,38 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+def _video_timestamps_from_metadata(
+    num_frames: int,
+    metadata: object,
+) -> torch.Tensor | None:
+    """Media time (s) of each sampled frame, from the video loader's metadata.
+
+    The loader samples frames uniformly, so return evenly spaced times from
+    the first to the last sampled frame: keeping the timestamps arithmetic is
+    what lets ``get_video_replacement`` rebuild the exact same timestamp
+    labels from ``second_per_grid_ts`` and ``video_start_times``.
+
+    Returns None if the metadata cannot provide the frame times.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    frames_indices = metadata.get("frames_indices")
+    fps = metadata.get("fps")
+    if not frames_indices or not fps or fps <= 0:
+        return None
+    if len(frames_indices) != num_frames:
+        return None
+
+    start = float(frames_indices[0]) / float(fps)
+    if num_frames == 1:
+        return torch.tensor([start], dtype=torch.float32)
+    step = (float(frames_indices[-1]) - float(frames_indices[0])) / float(fps)
+    step /= num_frames - 1
+    if step <= 0:
+        return None
+    return start + step * torch.arange(num_frames, dtype=torch.float32)
+
+
 class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
     # Video stays raw: get_video_replacement also reads second_per_grid_ts and
     # video_start_times, which a metadata-only rewrite would not carry.
@@ -705,6 +737,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return MiMoV2OmniMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=24000.0,
+            video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
@@ -912,9 +945,8 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
       regenerate the exact same timestamp token IDs.
     """
 
-    # fps assumed for vllm-decoded video (numpy T,H,W,C arrays).
-    # The video loader samples ~32 frames; treat each frame as 1 s apart so
-    # MiMoVLProcessor sees 1 fps input and resamples internally.
+    # Fallback fps for videos without loader metadata (e.g. raw arrays).
+    # With metadata, timestamps come from the sampled frames' media time.
     _INPUT_FPS: float = 1.0
 
     def _get_mm_fields_config(
@@ -966,6 +998,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     assert isinstance(va_item, (list, tuple)) and len(va_item) == 2
                     vid, audio_src = va_item
                     va_item = VideoAudioInput(video=vid, audio=audio_src)
+                # A (video, metadata) tuple carries the loader's metadata
+                metadata = None
+                if (
+                    isinstance(vid, tuple)
+                    and len(vid) == 2
+                    and isinstance(vid[1], dict)
+                ):
+                    vid, metadata = vid
                 # Convert video frames to (TCHW, timestamps) if needed
                 if (
                     isinstance(vid, tuple)
@@ -986,7 +1026,11 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     else:
                         frames = frames.float()
                     T = frames.shape[0]
-                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                    timestamps = _video_timestamps_from_metadata(T, metadata)
+                    if timestamps is None:
+                        timestamps = (
+                            torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                        )
                     va_converted.append(
                         VideoAudioInput(
                             video=(frames, timestamps),
@@ -1000,6 +1044,15 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             videos = mm_data["videos"]
             assert isinstance(videos, Sequence)
             for video in videos:
+                # With video_needs_metadata=True the parser passes
+                # (video, metadata) tuples through.
+                metadata = None
+                if (
+                    isinstance(video, tuple)
+                    and len(video) == 2
+                    and isinstance(video[1], dict)
+                ):
+                    video, metadata = video
                 if (
                     isinstance(video, tuple)
                     and len(video) == 2
@@ -1024,7 +1077,11 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         frames = frames.float()
 
                     T = frames.shape[0]
-                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                    timestamps = _video_timestamps_from_metadata(T, metadata)
+                    if timestamps is None:
+                        timestamps = (
+                            torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                        )
                     converted.append((frames, timestamps))
 
             mm_data["videos"] = converted
@@ -1211,13 +1268,27 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
-            "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=target_num_frames,
-                num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
-            ),
+            "video": [
+                # Keep dummy videos at 1 fps so memory profiling is unchanged.
+                (
+                    video,
+                    {
+                        "fps": 1.0,
+                        "frames_indices": list(range(len(video))),
+                        "total_num_frames": len(video),
+                        "duration": float(len(video)),
+                        "video_backend": "opencv",
+                        "do_sample_frames": False,
+                    },
+                )
+                for video in self._get_dummy_videos(
+                    width=target_width,
+                    height=target_height,
+                    num_frames=target_num_frames,
+                    num_videos=mm_counts.get("video", 0),
+                    overrides=mm_options.get("video"),
+                )
+            ],
         }
 
 
