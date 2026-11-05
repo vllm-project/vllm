@@ -7,7 +7,7 @@ use tonic::server::NamedService;
 use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
 use tracing::{debug, info, warn};
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_llm::Llm;
 
 use super::{ControlGrpcService, InferenceGrpcService};
 
@@ -21,7 +21,7 @@ pub(crate) const LIVENESS_SERVICE: &str = "liveness";
 /// `NOT_SERVING` on shutdown or engine failure.
 pub(crate) const READINESS_SERVICE: &str = "readiness";
 
-/// The engine client signals that the gRPC health services follow.
+/// The [`Llm`] signals that the gRPC health services follow.
 pub(crate) struct EngineHealth {
     /// `false` once the engines fail, which is permanent.
     pub liveness: watch::Receiver<bool>,
@@ -30,10 +30,10 @@ pub(crate) struct EngineHealth {
 }
 
 impl EngineHealth {
-    pub fn subscribe(client: &EngineCoreClient) -> Self {
+    pub fn subscribe(llm: &dyn Llm) -> Self {
         Self {
-            liveness: client.subscribe_health(),
-            readiness: client.subscribe_readiness(),
+            liveness: llm.subscribe_health(),
+            readiness: llm.subscribe_readiness(),
         }
     }
 }
