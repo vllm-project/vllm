@@ -40,6 +40,13 @@ vllm serve $MODEL \
     --mm-encoder-attn-dtype fp8
 ```
 
+On ROCm, `VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128` zero-pads head_dims below 128
+to 128 so AITER runs its assembly FP8 head_dim-128 kernel instead of its
+CK-tile kernel. The attention result is the same (padded columns are zero and
+are sliced off). It is opt-in because it has only been validated on MI355X
+(gfx950) with head_dim 80, where it halves the attention time of large images;
+padding a smaller head_dim such as 64 or 72 nearly doubles the work.
+
 By default (no scale file), **dynamic scaling** is used: a 16-entry circular
 buffer of observed Q/K/V amax values drives per-forward scale updates. This
 matches BF16 accuracy without any calibration but adds a small per-forward
@@ -71,6 +78,17 @@ Saved scales are multiplied by `--mm-encoder-fp8-scale-save-margin` (default
 `1.5`) to leave headroom against activation outliers not present in the
 calibration set. The default has been validated to generalize across datasets
 (e.g. VisionArena-Chat calibration maintains BF16 accuracy on ChartQA).
+
+The file is written once, when the 16-entry amax history first wraps. Pass
+`--mm-encoder-fp8-scale-save-every-wrap` to rewrite it at every wrap instead,
+so it ends with the scales of the last 16 forwards (for example the images of
+an evaluation that follows warm-up traffic).
+
+With tensor parallelism only global rank 0 writes the file, so its scales
+come from rank 0's share of the work: its images with
+`--mm-encoder-tp-mode data` (about 1/TP of the calibration set, so size the
+set accordingly), its attention heads otherwise. The margin covers the
+difference to the other ranks.
 
 ## Scale File Format
 
