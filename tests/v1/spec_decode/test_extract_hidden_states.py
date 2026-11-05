@@ -10,11 +10,13 @@ from vllm.config import (
     ModelConfig,
     ParallelConfig,
     SpeculativeConfig,
+    VllmConfig,
 )
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.transformers_utils.configs.extract_hidden_states import (
     ExtractHiddenStatesConfig,
 )
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 
 model_dir = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
@@ -169,3 +171,59 @@ def test_extract_hidden_states_config_invalid_text_config():
     # … but validation still rejects the missing attribute.
     with pytest.raises(ValueError, match="num_attention_heads"):
         get_hf_text_config(extract_config)
+
+
+def _create_config_without_decode_drafts(
+    schedule: list[tuple[int, int, int]] | None = None, **vllm_config_kwargs
+) -> VllmConfig:
+    model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
+    return VllmConfig(
+        model_config=model_config,
+        speculative_config=SpeculativeConfig(
+            target_model_config=model_config,
+            target_parallel_config=ParallelConfig(),
+            method="extract_hidden_states",
+            num_speculative_tokens=1,
+            num_speculative_tokens_per_batch_size=schedule,
+            extract_hidden_states_decode_drafts=False,
+            draft_model_config={
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2]}
+            },
+        ),
+        **vllm_config_kwargs,
+    )
+
+
+def test_no_decode_drafts_maps_to_zero_schedule():
+    vllm_config = _create_config_without_decode_drafts()
+
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    assert speculative_config.num_speculative_tokens_per_batch_size == [(1, 1, 0)]
+    lookup = build_dynamic_sd_schedule_lookup(
+        speculative_config.num_speculative_tokens_per_batch_size,
+        vllm_max_batch_size=16,
+        vllm_num_speculative_tokens=speculative_config.num_speculative_tokens,
+    )
+    assert not any(lookup)
+
+
+def test_no_decode_drafts_rejects_data_parallelism():
+    with pytest.raises(ValueError, match="not supported with data parallelism"):
+        _create_config_without_decode_drafts(
+            parallel_config=ParallelConfig(data_parallel_size=2)
+        )
+
+
+def test_no_decode_drafts_rejects_other_schedule():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _create_config_without_decode_drafts(schedule=[(1, 1, 1)])
+
+
+def test_no_decode_drafts_rejects_other_methods():
+    with pytest.raises(ValueError, match="requires method='extract_hidden_states'"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            extract_hidden_states_decode_drafts=False,
+        )
