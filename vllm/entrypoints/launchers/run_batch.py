@@ -17,12 +17,13 @@ from typing import IO, Any, NoReturn, TypeAlias, TypedDict
 from urllib.parse import urlparse
 
 import aiohttp
+import orjson
 import pybase64 as base64
 import pydantic
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server
-from pydantic import Field, TypeAdapter, field_validator, model_validator
+from pydantic import Field, PrivateAttr, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
 from starlette.responses import Response, StreamingResponse
@@ -258,6 +259,16 @@ class BatchRequestOutput(OpenAIBaseModel):
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Any | None
+
+    # The handler's JSON body, written as is in place of response.body.
+    _raw_body: bytes | None = PrivateAttr(default=None)
+
+    def to_json_line(self) -> str:
+        if self._raw_body is None:
+            return self.model_dump_json()
+        line = self.model_dump(mode="json")
+        line["response"]["body"] = orjson.Fragment(self._raw_body)
+        return orjson.dumps(line).decode()
 
 
 @config
@@ -641,8 +652,28 @@ async def run_request(
         and not isinstance(response, StreamingResponse)
         and response.media_type == "application/json"
     ):
+        body = bytes(response.body)
+        data_start = body.find(b'"data":')
+        data_end = body.rfind(b'"usage":')
+        # Parsing the body back into the response models and dumping it again
+        # only rewrites what the handler serialized. orjson writes NaN and Inf
+        # as null, which the models reject, so those bodies are still parsed.
+        if (
+            request.url == "/v1/embeddings"
+            and response.status_code == HTTPStatus.OK
+            and 0 <= data_start < data_end
+            and b"null" not in body[data_start:data_end]
+        ):
+            output = BatchRequestOutput(
+                id=f"vllm-{random_uuid()}",
+                custom_id=request.custom_id,
+                response=BatchResponseData(request_id=f"vllm-batch-{random_uuid()}"),
+                error=None,
+            )
+            output._raw_body = body
+            return output
         with contextlib.suppress(pydantic.ValidationError):
-            response = _ALL_RESPONSE_ADAPTER.validate_json(response.body)
+            response = _ALL_RESPONSE_ADAPTER.validate_json(body)
 
     if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
@@ -1031,7 +1062,7 @@ async def dispatch_batch(
                 and engine_client.errored
             ):
                 raise engine_client.dead_error
-            finished[index] = response.model_dump_json()
+            finished[index] = response.to_json_line()
             while next_index in finished:
                 print(finished.pop(next_index), file=output_file)
                 next_index += 1

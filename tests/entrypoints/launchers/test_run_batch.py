@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -651,12 +651,56 @@ async def test_batch_embedding_json_responses(response_factory):
         INPUT_EMBEDDING_BATCH.splitlines()[0]
     )
     result = await run_batch_module.run_request(handler, request)
+    line = BatchRequestOutput.model_validate_json(result.to_json_line())
 
-    assert result.custom_id == request.custom_id
-    assert result.error is None
+    assert line.custom_id == request.custom_id
+    assert line.error is None
+    assert line.response is not None
+    assert line.response.status_code == 200
+    assert line.response.body == expected
+
+
+@pytest.mark.asyncio
+async def test_batch_embedding_json_body_is_written_as_is():
+    # Parsing this body back into EmbeddingResponse would add the usage
+    # defaults and rewrite 1e-06 as 1e-6.
+    body = (
+        b'{"id":"embd-test","object":"list","created":0,"model":"m",'
+        b'"data":[{"index":0,"object":"embedding","embedding":[1e-06]}],'
+        b'"usage":{"prompt_tokens":3,"total_tokens":3}}'
+    )
+
+    async def handler(request):
+        return Response(content=body, media_type="application/json")
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert body.decode() in result.to_json_line()
+
+
+@pytest.mark.asyncio
+async def test_batch_embedding_non_finite_response_is_an_error():
+    response = EmbeddingResponse(
+        id="embd-test",
+        model=EMBEDDING_MODEL_NAME,
+        data=[EmbeddingResponseData(index=0, embedding=[float("nan")])],
+        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+    )
+
+    async def handler(request):
+        return create_json_response(response.model_dump())
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.error is not None
     assert result.response is not None
-    assert result.response.status_code == 200
-    assert result.response.body == expected
+    assert result.response.status_code != 200
 
 
 @pytest.mark.asyncio
