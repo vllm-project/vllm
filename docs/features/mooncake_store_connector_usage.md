@@ -339,59 +339,15 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 #### Automatic cache prefix
 
-Enable automatic namespacing for **MooncakeStoreConnector** with:
-
-```json
-{
-  "kv_connector": "MooncakeStoreConnector",
-  "kv_role": "kv_both",
-  "kv_connector_extra_config": {"cache_prefix": "auto"}
-}
-```
-
-vLLM replaces `"auto"` with `auto-<SHA-256>` in every Store key and logs the
-resolved prefix. The fingerprint includes `VLLM_IMAGE_TAG`, `VLLM_BUILD_COMMIT`,
-the vLLM version, resolved model and quantization configuration, compute
-configuration hashes, loading and scheduling settings, and KV-cache and Store
-payload format settings. Scheduler capacities (`max_num_batched_tokens`,
-`max_num_seqs`, queue limits and derived CUDA graph batch sizes) are excluded.
-Changing these limits therefore preserves the namespace; batching itself can
-still introduce numerical differences when recomputing KV.
-Online quantization uses its declared arguments, including when composed with
-checkpoint quantization; loading timers and the runtime layer inventory are
-excluded.
-
-The environment fingerprint includes registered vLLM settings with their parsed
-defaults, unregistered `VLLM_*` settings, `NCCL_*`, `CUBLAS_*`, `CUBLASLT_*`,
-`FLASHINFER_*`, `TRITON_*`, `NVIDIA_TF32_OVERRIDE` and `LD_LIBRARY_PATH`.
-Explicit exclusions remove credentials, logging, ranks, ports and runtime cache
-directories. Invalid registered values fail startup rather than being skipped.
-Unrelated environment variables are not hashed; plugin settings outside these
-names must be represented in the vLLM configuration or added to the fingerprint
-before relying on automatic isolation. Engine IDs, Store addresses and
-producer/consumer roles do not affect the prefix.
-
-Official public release builds already pass both build identity arguments using
-`.buildkite/scripts/docker-build-metadata-args.sh`. For a custom Docker build,
-pass `--build-arg VLLM_IMAGE_TAG=<immutable-image-reference>` and
-`--build-arg VLLM_BUILD_COMMIT=<source-commit>`. Docker's `--tag` alone does not
-set the environment inside the image.
-
-Set an immutable `VLLM_IMAGE_TAG` or a known `VLLM_BUILD_COMMIT`. Startup fails
-when both are missing or only the default development identity is available.
-Rebuilding a mutable tag such as `latest` without changing the build identity
-cannot invalidate cached KV. Likewise, pin model revisions and replace the
-model identity when overwriting local weights; this feature does not hash
-weight files or detect live weight updates.
-
-Changing the code identity, quantization, KV dtype or other fingerprinted
-settings makes existing cached blocks invisible to the new deployment. Old
-blocks remain in Mooncake until normal eviction. Identically configured
-replicas share the fingerprint. Isolation is conservative: different compute
-settings (including TP sizes) may prevent reuse even when their Store payloads
-are compatible. Use a shared custom prefix when deliberately enabling such
-reuse. The exact string `"auto"` is now reserved; every other custom prefix and
-the empty default keep their previous behavior.
+Set `"cache_prefix": "auto"` in `kv_connector_extra_config` to derive the prefix
+from the deployment identity: `VLLM_IMAGE_TAG` (or `VLLM_BUILD_COMMIT`), the
+model configuration (path, revision, dtype, quantization) and the KV cache
+configuration (e.g. KV dtype, block size). Changing any of these isolates new
+blocks from previously cached ones; identically configured replicas share the
+prefix. Official release images set both build identity variables; custom builds
+must pass `--build-arg VLLM_IMAGE_TAG=<immutable-tag>`, otherwise startup fails.
+Environment flags and weight files are not hashed: use a custom prefix if they
+change while the image and model configuration stay the same.
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
 creates many transfer segments and may significantly reduce PUT/GET performance.
