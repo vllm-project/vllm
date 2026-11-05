@@ -28,6 +28,8 @@ from vllm.triton_utils import LOG2E, tl, triton
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
 from .utils import AutoWeightsLoader
 
+LOG2E = tl.constexpr(LOG2E)
+
 
 @triton.jit
 def _deepencoder_rel_pos_attention_kernel(

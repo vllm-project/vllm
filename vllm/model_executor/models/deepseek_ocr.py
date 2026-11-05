@@ -548,7 +548,7 @@ class DeepseekOCRForCausalLM(
         images_crop = images_crop.split(patches_per_image.tolist())
         for jdx in range(images_spatial_crop.size(0)):
             patches = images_crop[jdx]
-            image_ori = pixel_values[[jdx]]
+            image_ori = pixel_values[jdx : jdx + 1]
             crop_shape = images_spatial_crop[jdx]
 
             global_features = self._encode_global_features(image_ori)

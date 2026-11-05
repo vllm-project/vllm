@@ -213,7 +213,9 @@ _TEXT_GENERATION_MODELS = {
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
+    "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
+    "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
@@ -283,6 +285,8 @@ _LATE_INTERACTION_MODELS = {
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     # Inferred by Transformers for ModernVBERT checkpoints without `architectures`
     "ModernVBertModel": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    # Declared by ColUltraVBERT checkpoints since native Transformers support
+    "UltraVBertModel": ("colultravbert", "ColUltraVBertForRetrieval"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "ColQwen3_5": ("colqwen3_5", "ColQwen3_5Model"),
