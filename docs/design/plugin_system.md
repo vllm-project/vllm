@@ -106,12 +106,12 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
-    Platforms can also provide default fused MoE components during construction:
+    Platforms can also adapt selected fused MoE components during construction:
 
     - `get_fused_moe_router_constructor(selected_cls)` returns a callable accepting the selected router branch's constructor arguments and producing a `FusedMoERouter`. A compatible sibling router is allowed. Preserve the selected branch's routing semantics and optional EPLB state.
-    - `get_fused_moe_routed_experts_cls(default_cls)` and `get_fused_moe_runner_cls(default_cls)` return `RoutedExperts` and `MoERunner` subclasses when the model supplies no component class. Explicit model classes and the factory's expert-substitution implementation take priority over platform defaults.
+    - `get_fused_moe_routed_experts_cls(selected_cls)` and `get_fused_moe_runner_cls(selected_cls)` receive the class selected by the factory or model, including expert substitution. Adapt only classes with a compatible implementation, preserving constructor arguments, model-specific weight loading, and forward semantics. Return `selected_cls` unchanged for unsupported classes; a generic replacement may not preserve a model-specific class's contract.
 
-    All three hooks return their input class by default. They run during construction, without changing factory selection priority or adding forward-time platform lookups. A router explicitly supplied to `FusedMoEFactory` is used directly. EPLB statistics, weight transfer, and commit ordering remain owned by EPLB.
+    All three hooks return `selected_cls` by default. They run after component selection during construction, without adding forward-time platform lookups. A router explicitly supplied to `FusedMoEFactory` is used directly. EPLB statistics, weight transfer, and commit ordering remain owned by EPLB.
 
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 

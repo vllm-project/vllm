@@ -222,9 +222,9 @@ def FusedMoEFactory(
         bias_vl: Vision routing bias for image tokens (Deepseek V4)
         image_sentinel_lo: First of five consecutive in-vocab image sentinel
             ids (0 = vision routing disabled)
-        runner_cls: Custom MoERunner class (None = use platform default)
+        runner_cls: Custom MoERunner class (None = use default MoERunner)
         runner_args: Additional arguments for runner constructor
-        routed_experts_cls: Custom RoutedExperts class (None = select default)
+        routed_experts_cls: Custom RoutedExperts class (None = use default)
         moe_config_cls: Custom FusedMoEConfig class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
         skip_padding: Whether grouped routing should invalidate padding rows.
@@ -415,13 +415,14 @@ def FusedMoEFactory(
             "expert_substitution": expert_substitution,
         }
     elif routed_experts_cls is None:
-        routed_experts_cls = current_platform.get_fused_moe_routed_experts_cls(
-            RoutedExperts
-        )
-        if not isinstance(routed_experts_cls, type) or not issubclass(
-            routed_experts_cls, RoutedExperts
-        ):
-            raise TypeError("Platform must return a RoutedExperts class.")
+        routed_experts_cls = RoutedExperts
+    routed_experts_cls = current_platform.get_fused_moe_routed_experts_cls(
+        routed_experts_cls
+    )
+    if not isinstance(routed_experts_cls, type) or not issubclass(
+        routed_experts_cls, RoutedExperts
+    ):
+        raise TypeError("Platform must return a RoutedExperts class.")
 
     assert params_dtype is not None
     routed_experts = routed_experts_cls(
@@ -457,9 +458,10 @@ def FusedMoEFactory(
     )
 
     if runner_cls is None:
-        runner_cls = current_platform.get_fused_moe_runner_cls(MoERunner)
-        if not isinstance(runner_cls, type) or not issubclass(runner_cls, MoERunner):
-            raise TypeError("Platform must return a MoERunner class.")
+        runner_cls = MoERunner
+    runner_cls = current_platform.get_fused_moe_runner_cls(runner_cls)
+    if not isinstance(runner_cls, type) or not issubclass(runner_cls, MoERunner):
+        raise TypeError("Platform must return a MoERunner class.")
 
     runner = runner_cls(
         layer_name=layer_name,

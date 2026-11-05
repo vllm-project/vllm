@@ -146,42 +146,56 @@ def test_platform_router_constructor_rejects_non_router() -> None:
 
 
 @pytest.fixture
-def platform_moe_components(monkeypatch):
+def platform_moe_components(monkeypatch, request):
     class PlatformRoutedExperts(RoutedExperts):
+        pass
+
+    class PlatformGptOssRoutedExperts(GptOssRoutedExperts):
         pass
 
     class PlatformRunner(MoERunner):
         pass
 
+    class PlatformTransformersMoERunner(TransformersMoERunner):
+        pass
+
     class PlatformRouter(CPURouter):
         pass
+
+    experts_classes: dict[type, type] = {RoutedExperts: PlatformRoutedExperts}
+    runner_classes: dict[type, type] = {MoERunner: PlatformRunner}
+    if getattr(request, "param", False):
+        experts_classes[GptOssRoutedExperts] = PlatformGptOssRoutedExperts
+        runner_classes[TransformersMoERunner] = PlatformTransformersMoERunner
 
     class TestPlatform(Platform):
         _enum = current_platform._enum
 
         @classmethod
         def get_fused_moe_router_constructor(cls, selected_cls):
-            return PlatformRouter
+            if selected_cls in (CPURouter, FusedTopKRouter):
+                return PlatformRouter
+            return selected_cls
 
         @classmethod
         def get_fused_moe_routed_experts_cls(cls, selected_cls):
-            return PlatformRoutedExperts
+            return experts_classes.get(selected_cls, selected_cls)
 
         @classmethod
         def get_fused_moe_runner_cls(cls, selected_cls):
-            return PlatformRunner
+            return runner_classes.get(selected_cls, selected_cls)
 
     platform = TestPlatform()
     monkeypatch.setattr(moe_layer, "current_platform", platform, raising=False)
     monkeypatch.setattr(router_factory, "current_platform", platform)
-    return PlatformRoutedExperts, PlatformRunner, PlatformRouter
+    return experts_classes, runner_classes, PlatformRouter
 
 
 @pytest.mark.parametrize("enable_eplb", [False, True])
 def test_platform_provides_default_fused_moe_components(
     platform_moe_components, enable_eplb
 ):
-    experts_cls, runner_cls, router_cls = platform_moe_components
+    experts_classes, runner_classes, router_cls = platform_moe_components
     with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
         runner = moe_layer.FusedMoEFactory(
             num_experts=4,
@@ -195,17 +209,19 @@ def test_platform_provides_default_fused_moe_components(
             enable_eplb=enable_eplb,
             prefix="platform_defaults",
         )
-    assert isinstance(runner, runner_cls)
+    assert isinstance(runner, runner_classes[MoERunner])
     assert isinstance(runner.router, router_cls)
-    assert isinstance(runner.routed_experts, experts_cls)
+    assert isinstance(runner.routed_experts, experts_classes[RoutedExperts])
     assert (runner.eplb_state is not None) == enable_eplb
 
 
 @pytest.mark.parametrize("enable_eplb", [False, True])
-def test_platform_preserves_model_fused_moe_components(
-    platform_moe_components, enable_eplb
-):
-    """Explicit components retain model loading, runner arguments and routing."""
+@pytest.mark.parametrize(
+    "platform_moe_components", [False, True], indirect=True, ids=["fallback", "adapted"]
+)
+def test_platform_model_component_adaptation(platform_moe_components, enable_eplb):
+    """Selective adaptation and fallback preserve each model's component contract."""
+    experts_classes, runner_classes, _ = platform_moe_components
     moe_state = TransformersMoEState()
     eplb_state = EplbLayerState() if enable_eplb else None
     with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
@@ -226,9 +242,13 @@ def test_platform_preserves_model_fused_moe_components(
             enable_eplb=enable_eplb,
             prefix="platform_components",
         )
-    assert isinstance(runner, TransformersMoERunner)
+    assert type(runner) is runner_classes.get(
+        TransformersMoERunner, TransformersMoERunner
+    )
     assert runner.router is router
-    assert isinstance(runner.routed_experts, GptOssRoutedExperts)
+    assert type(runner.routed_experts) is experts_classes.get(
+        GptOssRoutedExperts, GptOssRoutedExperts
+    )
     assert runner.eplb_state is eplb_state
     assert runner._moe_state is moe_state
 

@@ -1237,14 +1237,20 @@ class Platform:
         return selected_cls
 
     @classmethod
-    def get_fused_moe_routed_experts_cls(cls, default_cls: type[Any]) -> type[Any]:
-        """Choose default routed experts when no model-specific class is selected."""
-        return default_cls
+    def get_fused_moe_routed_experts_cls(cls, selected_cls: type[Any]) -> type[Any]:
+        """Adapt selected routed experts, preserving loading and execution semantics.
+
+        Return selected_cls unchanged when no compatible implementation is available.
+        """
+        return selected_cls
 
     @classmethod
-    def get_fused_moe_runner_cls(cls, default_cls: type[Any]) -> type[Any]:
-        """Choose a default MoE runner when the model supplies no class."""
-        return default_cls
+    def get_fused_moe_runner_cls(cls, selected_cls: type[Any]) -> type[Any]:
+        """Adapt a selected MoE runner, preserving constructor and forward semantics.
+
+        Return selected_cls unchanged when no compatible implementation is available.
+        """
+        return selected_cls
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
