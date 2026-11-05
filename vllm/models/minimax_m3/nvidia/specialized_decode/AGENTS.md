@@ -56,7 +56,7 @@ configuration decides both:
 
 The routing record (`build_record` and its helpers, the ready words), the
 persistent GEMM skeleton (`RoutedExpertGemm`: `gather_b_warp`,
-`signal_ready`, `ready_target`) and the front's widths (`WIDTHS`, `width`)
+`signal_ready`, `ready_target`) and the front's widths (`width`)
 are imported from the DeepSeek-V4.1 low-batch MoE
 (`deepseek_v41/nvidia/specialized_decode/moe/`); `test_kernels.py` builds every
 kernel against them, so a change there that breaks these fails it.

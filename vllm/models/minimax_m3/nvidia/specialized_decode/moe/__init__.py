@@ -53,9 +53,6 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
     route_words,
     width,
 )
-from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (  # noqa: E501
-    WIDTHS as GEMM_WIDTHS,
-)
 from vllm.utils.torch_utils import aux_stream
 
 from .front_cute import (
@@ -113,9 +110,6 @@ SHARED_FC2_CTAS = 24
 SHARED_ROW_TILES = MAX_ROWS // TILE
 SHARED_FC1_WORDS = cta_words(SPLITS * SHARED_ROW_TILES)
 SHARED_FC2_WORDS = cta_words(SHARED_ROW_TILES)
-# The front's builds: the routed-expert GEMMs' row counts up to MAX_ROWS.
-WIDTHS = tuple(w for w in GEMM_WIDTHS if w <= MAX_ROWS)
-assert WIDTHS[-1] == MAX_ROWS
 
 
 class LowBatchFfn:
@@ -159,7 +153,8 @@ class LowBatchFfn:
         self.shared_fc1_records = torch.tensor(fc1, dtype=torch.int32, device=device)
         self.shared_fc2_records = torch.tensor(fc2, dtype=torch.int32, device=device)
         # Compile the kernels now, not inside a CUDA graph capture.
-        for built in WIDTHS:
+        # The front's builds run() takes (8, 16 and 32 rows).
+        for built in {width(rows) for rows in range(1, MAX_ROWS + 1)}:
             _front(self.device_index, built)
         for overlap in (False, True):
             _fc1(self.device_index, overlap)
