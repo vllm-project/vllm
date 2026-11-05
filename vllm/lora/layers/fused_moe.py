@@ -3,6 +3,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PreTrainedConfig
 
 from vllm import envs
@@ -109,6 +110,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     @property
     def intermediate_size_per_partition(self) -> int:
         return self.moe_config.intermediate_size_per_partition
+
+    @property
+    def _tp_shard_size(self) -> int:
+        """Per-rank stride of an adapter along the expert intermediate dim: the
+        base weights are sharded by the unpadded size even when a backend pads."""
+        unpadded = self.moe_config.intermediate_size_per_partition_unpadded
+        if unpadded is None:
+            return self.intermediate_size_per_partition
+        return unpadded
 
     def _init_lora_stream_context(self) -> None:
         self._lora_stream: torch.cuda.Stream | None = None
@@ -223,6 +233,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def _ep_check(self):
         if self.use_ep:
+            placement = self.base_layer.expert_placement_strategy
+            if placement != "linear":
+                raise ValueError(
+                    "Fused MoE LoRA with EP requires linear expert placement: "
+                    "adapter loading assumes a contiguous range of experts "
+                    f"on each rank, got '{placement}'. "
+                    "Set expert_placement_strategy='linear' to use MoE LoRA "
+                    "with expert parallelism."
+                )
             moe_config = self.moe_config
             all2all_backend = moe_config.moe_parallel_config.all2all_backend
             assert all2all_backend == "allgather_reducescatter", (
@@ -311,7 +330,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             return w13_lora_b
 
         # w13_lora_b shape (num_experts,output_size,rank)
-        shard_size = self.intermediate_size_per_partition
+        shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
 
@@ -322,7 +341,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         if self.tp_size == 1:
             return w2_lora_a
         # w2_lora_a shape (num_experts,rank,input_size)
-        shard_size = self.intermediate_size_per_partition
+        shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
 
@@ -536,7 +555,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             return w13_lora_b
 
         # w13_lora_b shape (num_experts,output_size,rank)
-        shard_size = self.intermediate_size_per_partition
+        shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         # HACK: Currently, only GPT-OSS is in interleaved order
@@ -557,6 +576,11 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             w3_lora_b = w13_lora_b[:, slice_size:, :]
             sliced_w1_lora_b = w1_lora_b[:, start_idx:end_idx, :]
             sliced_w3_lora_b = w3_lora_b[:, start_idx:end_idx, :]
+            # w3 starts at the allocated (possibly padded) per-rank size, as
+            # in the base w13 weight.
+            pad = self.intermediate_size_per_partition - sliced_w1_lora_b.shape[1]
+            if pad > 0:
+                sliced_w1_lora_b = F.pad(sliced_w1_lora_b, (0, 0, 0, pad))
 
             return torch.cat([sliced_w1_lora_b, sliced_w3_lora_b], dim=1)
 

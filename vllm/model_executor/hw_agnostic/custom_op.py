@@ -29,6 +29,45 @@ def maybe_get_oot_by_class(class_type: type) -> type:
     return class_type
 
 
+def _class_to_instantiate(cls: type, name: str) -> type:
+    """The out-of-tree override registered for `cls` as `name`, else `cls`.
+
+    The in-tree and the hw-agnostic path keep separate registries, both keyed on
+    the bare class name, so a class can be registered in the hw-agnostic path
+    but not in the in-tree one, and vice versa. This catches the two cases where
+    an override written against the in-tree class would go unnoticed:
+
+    * Registered in the hw-agnostic path, but not derived from `cls`: Python
+      would skip its `__init__`, so this raises.
+    * Registered in the in-tree path, but not in the hw-agnostic one: it would
+      never be used, so this warns.
+    """
+    override = op_registry_oot.get(name)
+    if override is None:
+        from vllm.model_executor.custom_op import op_registry_oot as in_tree_oot
+
+        if name in in_tree_oot:
+            logger.warning_once(
+                "Out-of-tree override %s is registered for the in-tree %s, so the "
+                "hw-agnostic path does not use it. To opt in, subclass "
+                "hw_agnostic.resolve(<module>, %r) and register it with that "
+                "class's register_oot.",
+                in_tree_oot[name].__name__,
+                name,
+                name,
+            )
+        return cls
+    if not issubclass(override, cls):
+        raise TypeError(
+            f"Out-of-tree override {override.__name__!r} for {name!r} does not "
+            f"derive from {cls.__module__}.{name}, the class the hw-agnostic path "
+            f"instantiates. Subclass hw_agnostic.resolve(<module>, {name!r}) "
+            f"instead."
+        )
+    logger.debug("Instantiating %s using %s", name, override)
+    return override
+
+
 class PluggableLayer(nn.Module):
     """Base class for pluggable layers.
 
@@ -53,16 +92,7 @@ class PluggableLayer(nn.Module):
                 f"@PluggableLayer.register, or it's the PluggableLayer itself."
             ) from None
 
-        if layer_class_name not in op_registry_oot:
-            layer_cls_to_instantiate = cls
-        else:
-            layer_cls_to_instantiate = op_registry_oot[layer_class_name]
-            logger.debug(
-                "Instantiating pluggable layer: %s using %s",
-                layer_class_name,
-                str(layer_cls_to_instantiate),
-            )
-        return super().__new__(layer_cls_to_instantiate)
+        return super().__new__(_class_to_instantiate(cls, layer_class_name))
 
     # Decorator to register pluggable layers.
     @classmethod
@@ -114,16 +144,7 @@ class CustomOp(nn.Module):
                 f"@CustomOp.register, or it's the CustomOp base class itself."
             ) from None
 
-        if op_name not in op_registry_oot:
-            op_cls_to_instantiate = cls
-        else:
-            op_cls_to_instantiate = op_registry_oot[op_name]
-            logger.debug(
-                "Instantiating custom op: %s using %s",
-                op_name,
-                str(op_cls_to_instantiate),
-            )
-        return super().__new__(op_cls_to_instantiate)
+        return super().__new__(_class_to_instantiate(cls, op_name))
 
     def __init__(self, *, enforce_enable: bool = False, compile_native: bool = False):
         super().__init__()

@@ -2,7 +2,7 @@
 #include "cutlass/half.h"
 #include "cuda_bf16.h"
 
-#include "cutlass_extensions/vllm_custom_types.cuh"
+#include "vllm_custom_types.cuh"
 
 namespace cutlass {
 
