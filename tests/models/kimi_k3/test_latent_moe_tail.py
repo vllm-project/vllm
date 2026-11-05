@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
@@ -32,24 +33,26 @@ EPS = 0.1
 TOP_K = 8
 
 
-def test_deferred_finalize_enabled_before_moe_kernel_setup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeMoEConfig:
-        tp_size = 8
-        dp_size = 1
-        ep_size = 1
-        pcp_size = 1
-        is_sequence_parallel = False
-        hidden_dim = LATENT_SIZE
-        hidden_dim_unpadded = LATENT_SIZE
-        experts_per_token = 16
-        _defer_moe_finalize = False
-        defer_moe_finalize_max_num_tokens = -1
-        defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
-        limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
-        use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
+class FakeMoEConfig:
+    tp_size = 8
+    dp_size = 1
+    ep_size = 1
+    pcp_size = 1
+    is_sequence_parallel = False
+    hidden_dim = LATENT_SIZE
+    hidden_dim_unpadded = LATENT_SIZE
+    experts_per_token = 16
+    _defer_moe_finalize = False
+    defer_moe_finalize_max_num_tokens = -1
+    defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
+    limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
+    use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
 
+
+def build_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    enable_sleep_mode: bool,
+) -> tuple[latent_moe_runner.LatentMoERunner, FakeMoEConfig, dict[str, object]]:
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
         experts_cls=TrtLlmMxfp4ExpertsMonolithic,
@@ -59,7 +62,8 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
     transform = SimpleNamespace(
         norm=SimpleNamespace(weight=norm_weight, variance_epsilon=EPS),
         up_proj=SimpleNamespace(
-            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE))
+            weight=SimpleNamespace(shape=(HIDDEN_SIZE, LATENT_SIZE)),
+            quant_method=UnquantizedLinearMethod(),
         ),
     )
 
@@ -92,16 +96,33 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         "get_current_vllm_config",
         lambda: SimpleNamespace(
             parallel_config=SimpleNamespace(use_ubatching=False),
-            model_config=SimpleNamespace(enable_sleep_mode=False),
+            model_config=SimpleNamespace(enable_sleep_mode=enable_sleep_mode),
         ),
     )
     monkeypatch.setattr(KimiK3LatentMoETailOp, "initialize", fake_tail_initialize)
 
-    latent_moe_runner.LatentMoERunner()
+    return latent_moe_runner.LatentMoERunner(), moe_config, initialized_with
 
-    assert moe_config.use_deferred_moe_finalize
+
+def test_deferred_finalize_enabled_before_moe_kernel_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, moe_config, initialized_with = build_runner(monkeypatch, False)
+
+    # The stand-in deliberately borrows the real config's property.
+    assert moe_config.use_deferred_moe_finalize  # type: ignore[misc]
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
+
+
+def test_sleep_mode_falls_back_to_default_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, moe_config, initialized_with = build_runner(monkeypatch, True)
+
+    assert not runner.enable_k3_latent_moe_tail_fusion
+    assert not initialized_with
+    assert not moe_config.use_deferred_moe_finalize  # type: ignore[misc]
 
 
 def _make_deferred_routed_output(

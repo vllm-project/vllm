@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
   date_added: 2026-08-27
-  date_updated: 2026-10-08
+  date_updated: 2026-10-19
   tasks:
     - text
     - multimodal
@@ -14,23 +14,26 @@ meta:
     b200: verified
     gb200: verified
     mi355x: verified
-    ascend_950pr_8x: verified
 
 model:
   model_id: "zai-org/GLM-5.3-Flash"
   min_vllm_version: "0.29.0"
   nightly_required: true
+  default_frontend: rust
   docker_image:
     nvidia: "vllm/vllm-openai:nightly"
     amd: "vllm/vllm-openai-rocm:nightly"
   install:
     docker:
-      note: "NVIDIA: use vllm/vllm-openai:glm53-flash until support lands in the standard image. AMD: use the official vllm/vllm-openai-rocm:nightly image, which includes merged GLM-5.3-Flash support. Ascend 950PR: pin quay.io/ascend/vllm-ascend:nightly-main-a5 (same as GLM-5.3) with GLM-5.3-Flash overlays vLLM#53906 and vllm-ascend#15127."
+      note: "Native GLM5Next rendering requires an image containing vllm-project/vllm#62424, including its Rust binary. Use NVIDIA/ROCm nightly images only once they include this change. Ascend 950PR also requires the nightly-main-a5 platform support and GLM-5.3-Flash overlays vLLM#53906 and vllm-ascend#15127."
     pip: false
   architecture: moe
   parameter_count: "321B"
   active_parameters: "18B"
   context_length: 1048576
+  base_args:
+    - "--tokenizer-mode"
+    - "glm5_next"
   base_env:
     VLLM_ENGINE_READY_TIMEOUT_S: "3600"
 
@@ -76,13 +79,6 @@ variants:
     vram_minimum_gb: 386
     description: "Default native FP8 checkpoint (zai-org/GLM-5.3-Flash)"
     hardware_overrides:
-      # Exact-GPU pin: computeDockerMeta has no Huawei brand, so a model-level
-      # docker_image string would only affect NVIDIA. Hide pip — official
-      # wheels have no NPU kernels.
-      ascend_950pr_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a5"
-        install:
-          pip: false
       mi350x: &gfx950_aiter
         extra_env:
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
@@ -116,26 +112,10 @@ kv_offload_support:
   offloading_cpu: verified
   offloading_fs: verified
 
-strategy_hardware:
-  single_node_tep:
-    npu: unsupported
-  single_node_dep:
-    npu: unsupported
-  multi_node_tp:
-    npu: unsupported
-  multi_node_tp_pp:
-    npu: unsupported
-  multi_node_tep:
-    npu: unsupported
-  multi_node_dep:
-    npu: unsupported
-  pd_cluster:
-    npu: unsupported
-
 hardware_overrides:
   hopper:
     extra_args:
-      - "--no-enable-flashinfer-autotune"
+      - "--disable-flashinfer-autotune"
   blackwell:
     # FP8 KV cache only works on Blackwell for this model; Hopper runs BF16 KV.
     extra_args:
@@ -149,34 +129,12 @@ hardware_overrides:
       - "ROCM_AITER_MLA_SPARSE"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
-  # Shared by 950PR 8x (8×128 GB). SFA / kpool indexer needs --block-size 512.
-  npu:
-    extra_args:
-      - "--trust-remote-code"
-      - "--block-size"
-      - "512"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-seqs"
-      - "16"
-      - "--max-num-batched-tokens"
-      - "8192"
-      - "--gpu-memory-utilization"
-      - "0.90"
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      HCCL_CONNECT_TIMEOUT: "7200"
 
 hardware_notes:
   mi350x: &cdna4_indexer_topk_notes
     title: "Long-context indexer top-k opt-in"
     body: "When serving long contexts (>=64k), add `--sparse-indexer-topk-backend aiter` for improved decode performance."
   mi355x: *cdna4_indexer_topk_notes
-  ascend_950pr_8x:
-    title: "vLLM Ascend A5 image required"
-    body: "Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vLLM#53906 / vllm-ascend#15127. Do not pass --quantization ascend. --block-size 512 is required (kpool indexer). EP is not available on this interconnect."
 
 strategy_overrides:
   pd_cluster:
@@ -219,7 +177,7 @@ guide: |
 
   - **Weights:** about 306 GiB for the default native FP8 checkpoint before runtime
     and KV-cache overhead; the BF16 variant requires roughly twice the weight memory
-  - **vLLM:** use docker before the integration is included in the public repo
+  - **vLLM:** an image containing [native GLM5Next support (#62424)](https://github.com/vllm-project/vllm/pull/62424), including the matching Rust frontend binary. Older images need an updated build for the commands below.
   - **FlashInfer:** 0.6.17 or newer is required for NoPE sparse MLA
 
   The default model ID, `zai-org/GLM-5.3-Flash`, is the FP8 checkpoint. Select the BF16
@@ -227,12 +185,26 @@ guide: |
   `RedHatAI/GLM-5.3-Flash-NVFP4`. Its MoE experts are quantized to 4-bit (NVFP4),
   and it requires NVIDIA Blackwell GPUs.
 
+  ## Frontends
+
+  The command builder defaults to **Rust** and adds `--tokenizer-mode glm5_next`.
+  With `VLLM_USE_RUST_FRONTEND=1`, this selects native GLM5Next chat rendering for
+  the GLM-5.3-Flash template, including tool calls and reasoning options. Image and
+  video inputs are not yet supported on the Rust frontend; use the Python frontend
+  for multimodal requests.
+
+  Select **Python** in the command builder, or set `VLLM_USE_RUST_FRONTEND=0`,
+  to use the Hugging Face renderer and processor on the same build. On older builds
+  that do not recognize `glm5_next`, also replace `--tokenizer-mode glm5_next` with
+  `--tokenizer-mode auto`.
+
   ## Launching the server
 
   ### FP8 with TP4 and MTP on one GB200 tray
 
   ```bash
-  vllm serve zai-org/GLM-5.3-Flash \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
     --tensor-parallel-size 4 \
     --kv-cache-dtype fp8 \
     --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
@@ -259,7 +231,9 @@ guide: |
   VLLM_KV_CACHE_LAYOUT=HND \
   UCX_NET_DEVICES=all \
   VLLM_NIXL_SIDE_CHANNEL_PORT=5557 \
+  VLLM_USE_RUST_FRONTEND=1 \
   vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
     --port 8001 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
@@ -275,7 +249,9 @@ guide: |
   VLLM_KV_CACHE_LAYOUT=HND \
   UCX_NET_DEVICES=all \
   VLLM_NIXL_SIDE_CHANNEL_PORT=5558 \
+  VLLM_USE_RUST_FRONTEND=1 \
   vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
     --port 8002 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
@@ -433,15 +409,16 @@ guide: |
   
   ## Running on AMD Instinct
 
-  Use the official `vllm/vllm-openai-rocm:nightly` image. GLM-5.3-Flash support
-  landed in [vLLM #53906](https://github.com/vllm-project/vllm/pull/53906).
+  Use a `vllm/vllm-openai-rocm:nightly` build containing #62424 for native Rust
+  rendering. Model support landed in [vLLM #53906](https://github.com/vllm-project/vllm/pull/53906).
 
   ```bash
   export VLLM_ROCM_USE_AITER=1
   # gfx950 (MI350X/MI355X) only
   export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
   export VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1
-  vllm serve zai-org/GLM-5.3-Flash \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
     --served-model-name zai-org/GLM-5.3-Flash \
     --tensor-parallel-size 4 \
     --max-num-seqs 512 \
@@ -466,7 +443,8 @@ guide: |
   (MI350X/MI355X), using the topk indexer backend from AITER is recommended:
 
   ```bash
-  vllm serve zai-org/GLM-5.3-Flash \
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
     --attention-backend ROCM_AITER_MLA_SPARSE \
     --sparse-indexer-topk-backend aiter
   ```

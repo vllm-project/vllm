@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +93,11 @@ class RoutedExpertsCapturer:
             )
 
         ctx = get_forward_context()
-        local_topk_ids = current_platform.get_routed_experts_local_rows(
-            topk_ids, ctx, self.dp_rank, self.tp_size
+        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        offset = dbo_current_ubatch_token_offset()
+        self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
+            local_topk_ids
         )
-        if local_topk_ids is None:
-            local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
