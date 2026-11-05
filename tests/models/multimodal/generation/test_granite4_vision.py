@@ -4,6 +4,8 @@
 import pytest
 from PIL import Image
 
+from vllm.platforms import current_platform
+
 from ...utils import check_logprobs_close
 
 MODEL = "ibm-granite/granite-vision-4.1-4b"
@@ -52,8 +54,9 @@ def test_mixed_tile_counts_across_requests(
         enforce_eager=True,
         max_model_len=8192,
         limit_mm_per_prompt={"image": 2},
-        # Two engines run one after the other in this process.
-        gpu_memory_utilization=0.4,
+        # Two engines run one after the other in this process. Weights plus
+        # encoder profiling need more than 0.4 of a 16 GiB XPU.
+        gpu_memory_utilization=0.85 if current_platform.is_xpu() else 0.4,
     )
 
     with vllm_runner(MODEL, **runner_kwargs) as vllm_model:
