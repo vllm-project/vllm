@@ -26,7 +26,10 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
+from vllm.v1.worker.gpu.spec_decode.utils import (
+    get_pp_safe_draft_load_config,
+    single_stage_pp_group,
+)
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 
@@ -123,7 +126,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config.parallel_config.data_parallel_index
         )
         self._draft_vllm_config = draft_vllm_config
-        with set_model_tag("draft_model"):
+        with set_model_tag("draft_model"), single_stage_pp_group():
             return get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
@@ -145,14 +148,17 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
     ) -> torch.Tensor:
         num_tokens = input_ids.shape[0]
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
-        with set_forward_context(
-            attn_metadata,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
-            slot_mapping=slot_mappings,
-            batch_descriptor=batch_descriptor,
+        with (
+            set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings,
+                batch_descriptor=batch_descriptor,
+            ),
+            single_stage_pp_group(),
         ):
             model_inputs = dict(input_ids=input_ids, positions=positions)
             if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:

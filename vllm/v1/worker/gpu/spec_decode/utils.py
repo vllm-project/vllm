@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
 from vllm.config import LoadConfig, replace
+import vllm.distributed.parallel_state as parallel_state
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -14,6 +17,27 @@ from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)
+
+# What model code sees of the PP group while a standalone draft model, which
+# runs whole on the last stage, is built or run.
+_SINGLE_STAGE_PP_GROUP = SimpleNamespace(
+    world_size=1, rank_in_group=0, is_first_rank=True, is_last_rank=True
+)
+
+
+@contextmanager
+def single_stage_pp_group() -> Iterator[None]:
+    """Hide pipeline stages from a standalone draft model's code, so it builds
+    all of its layers and takes no intermediate tensors."""
+    if get_pp_group().world_size == 1:
+        yield
+        return
+    pp_group = parallel_state._PP
+    parallel_state._PP = _SINGLE_STAGE_PP_GROUP  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        parallel_state._PP = pp_group
 
 
 def get_drafter_hidden_states(
