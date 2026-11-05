@@ -23,6 +23,7 @@ class ObjStoreConfig:
     region: str = ""
     scheme: str = "http"
     ca_bundle: str = ""
+    accelerated: str = ""
 
     def to_nixl_params(self) -> dict[str, str]:
         """Build the NIXL backend params dict.
@@ -39,7 +40,14 @@ class ObjStoreConfig:
         # AWS SDK can fall back to its default credential provider chain
         # (IAM roles, env vars, credential files, etc.).
         # https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md
-        for key in ("access_key", "secret_key", "session_token", "region", "ca_bundle"):
+        for key in (
+            "access_key",
+            "secret_key",
+            "session_token",
+            "region",
+            "ca_bundle",
+            "accelerated",
+        ):
             value = getattr(self, key)
             if value:
                 params[key] = value
