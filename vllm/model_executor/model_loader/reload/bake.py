@@ -107,7 +107,11 @@ def _storage_key(t: torch.Tensor) -> int | None:
 
 
 class _ValueRead(Exception):
-    """A loader needs a traced tensor's values; the bake cannot continue."""
+    """A loader needs a traced tensor's values, or an op on it fails on meta;
+    the bake cannot continue."""
+
+
+_VALUE_READ = "its loader reads tensor values (.item(), bool(), ...)"
 
 
 @dataclass
@@ -127,9 +131,10 @@ class _PlanSink(TraceSink):
     stand_ins: StandIns
     copies: dict[str, list[Copy]] = field(default_factory=lambda: defaultdict(list))
     fallback: dict[str, str] = field(default_factory=dict)
-    # Kept even though reads also raise: a loader may catch the exception and
-    # carry on, and the name must still be rerun without.
-    value_reads: list[str] = field(default_factory=list)
+    # Names that stopped the bake, and why. Kept even though these also raise:
+    # a loader may catch the exception and carry on, and the name must still
+    # be rerun without.
+    stops: dict[str, str] = field(default_factory=dict)
     wrote: set[str] = field(default_factory=set)  # copied anywhere
     last_writer: dict[int, str] = field(default_factory=dict)  # per storage
     # The name last handed to load_weights. A loader that reads ahead (as
@@ -162,7 +167,7 @@ class _PlanSink(TraceSink):
         return dest
 
     def value_read(self, func: Callable, trace: TraceTensor) -> Any:
-        self.value_reads.append(trace._name)
+        self.stops.setdefault(trace._name, _VALUE_READ)
         raise _ValueRead
 
     def unsupported(
@@ -190,8 +195,10 @@ class _PlanSink(TraceSink):
         meta_args, meta_kwargs = pytree.tree_unflatten(meta_flat, spec)
         try:
             out = func(*meta_args, **meta_kwargs)
-        except Exception as e:  # data-dependent: needs values
-            self.value_reads.append(traces[0]._name)
+        except Exception as e:  # no meta kernel, a shape error, ...
+            self.stops.setdefault(
+                traces[0]._name, f"{func.__name__} fails on meta stand-ins ({e!r})"
+            )
             raise _ValueRead from e
         originals = {id(m): a for m, a in zip(meta_flat, flat)}
         first = traces[0]
@@ -364,7 +371,7 @@ def _bake(
             with torch.no_grad(), _TargetGuard(sink):
                 model.load_weights(weights())
         except _ValueRead:
-            pass  # in sink.value_reads; the caller reruns without the name
+            pass  # in sink.stops; the caller reruns without the name
         finally:
             changed = snapshot.restore()
     return sink, changed
@@ -375,27 +382,29 @@ class Traced:
     copies: dict[str, list[Copy]]  # per name, from the full bake
     reasons: dict[str, str]  # fallback names and why
     lonely: list[str]  # fallbacks that write nothing when loaded alone
+    rebakes: int = 0  # full bakes rerun after a name stopped one
 
 
 def trace_loads(
     model: torch.nn.Module, metas: dict[str, "ParamMeta"], stand_ins: StandIns
 ) -> Traced:
-    """Bake all names. Each name whose loader reads tensor values reruns the
-    whole bake without it (one full bake per such name). Names that change
-    module state are then found by bisecting, only if the full bake did."""
+    """Bake all names. Each name whose loader reads tensor values (or runs an
+    op that fails on meta) reruns the whole bake without it (one full bake per
+    such name). Names that change module state are then found by bisecting,
+    only if the full bake did."""
     reasons: dict[str, str] = {}
     names = list(metas)
+    rebakes = -1
     while True:
+        rebakes += 1
         try:
             sink, changed = _bake(model, metas, names, stand_ins)
         except Exception as e:
             raise RuntimeError(f"load plan: tracing load_weights failed: {e!r}") from e
-        if not sink.value_reads:
+        if not sink.stops:
             break
-        for name in sink.value_reads:
-            reasons.setdefault(
-                name, "its loader reads tensor values (.item(), bool(), ...)"
-            )
+        for name, reason in sink.stops.items():
+            reasons.setdefault(name, reason)
         names = [n for n in names if n not in reasons]
 
     lonely = [n for n in sink.fallback if n not in sink.wrote]
@@ -403,7 +412,7 @@ def trace_loads(
         _bisect_state(model, metas, names, changed, sink, stand_ins, reasons, lonely)
     for name, reason in sink.fallback.items():
         reasons.setdefault(name, reason)
-    return Traced(sink.copies, reasons, lonely)
+    return Traced(sink.copies, reasons, lonely, rebakes)
 
 
 def _bisect_state(

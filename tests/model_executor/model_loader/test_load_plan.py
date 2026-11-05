@@ -476,6 +476,24 @@ def test_value_read_reruns_without_the_name():
     assert plan.get_dest("b.weight") is not None
 
 
+def test_meta_failure_is_not_called_a_value_read():
+    """An op that fails on meta stops the bake like a value read, but the
+    fallback reason is the error, not "reads tensor values"."""
+
+    def loader(model, param, loaded):
+        try:
+            loaded + torch.ones(3)  # a shape error, swallowed by the loader
+        except RuntimeError:
+            pass
+        param.copy_(loaded)
+
+    make, shapes = _two_names(loader)
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    reason = plan.entries["a.weight"].reason or ""
+    assert "fails on meta stand-ins" in reason and "reads tensor values" not in reason
+    assert plan.get_dest("b.weight") is not None
+
+
 def test_state_change_makes_only_its_name_a_fallback():
     def loader(model, param, loaded):
         param.copy_(loaded)
