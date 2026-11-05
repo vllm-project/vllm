@@ -317,12 +317,10 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
 
     for backend in AVAILABLE_BACKENDS:
-        kernel_cls, reason = oracle.try_backend(backend)
+        kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
-
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."

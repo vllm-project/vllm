@@ -83,7 +83,12 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """MXFP8 MoE backend selection for one deployment configuration."""
 
     name = "Mxfp8"
-    backend_to_kernel_cls = staticmethod(_mxfp8_backend_to_kernel_cls)
+
+    @staticmethod
+    def backend_to_kernel_cls(
+        backend: Fp8MoeBackend,
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return _mxfp8_backend_to_kernel_cls(backend)
 
 
 def _select_kernel_cls(

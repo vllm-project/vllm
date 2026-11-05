@@ -581,7 +581,12 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
     """MXFP4 MoE backend selection for one deployment configuration."""
 
     name = "Mxfp4"
-    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+    @staticmethod
+    def backend_to_kernel_cls(
+        backend: Mxfp4MoeBackend,
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
 
 
 def _requested_kernel_cls(
@@ -728,7 +733,6 @@ def select_mxfp4_moe_backend(
             logger.info_once(oracle.make_log_backend(backend))
             _warn_on_bf16_fallback(backend, requested_activation_key)
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
         unsupported_reasons.append((backend, reason))
 
     if current_platform.is_xpu():
@@ -811,13 +815,12 @@ def select_deepseek_v4_mxfp4_moe_backend(
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
     oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None, activation_format)
     for backend in priority_backends:
-        kernel_cls, reason = oracle.try_backend(
+        kernel_cls, _ = oracle.try_backend(
             backend, activation_key=_backend_activation_key(backend)
         )
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend))
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No MXFP4 MoE backend supports the deployment configuration."

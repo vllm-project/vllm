@@ -405,7 +405,12 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """FP8 MoE backend selection for one deployment configuration."""
 
     name = "Fp8"
-    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+    @staticmethod
+    def backend_to_kernel_cls(
+        backend: Fp8MoeBackend,
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
 
 
 def select_fp8_moe_backend(
@@ -497,11 +502,10 @@ def select_fp8_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        kernel_cls, reason = oracle.try_backend(backend)
+        kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list

@@ -285,7 +285,12 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
     """WNA16 MoE backend selection for one deployment configuration."""
 
     name = "WNA16"
-    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+    @staticmethod
+    def backend_to_kernel_cls(
+        backend: WNA16MoEBackend,
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
 
 
 def select_wna16_moe_backend(
@@ -351,11 +356,10 @@ def select_wna16_moe_backend(
         if reason is not None:
             logger.debug_once(oracle.make_log_unsupported(backend, reason))
             continue
-        kernel_cls, reason = oracle.try_backend(backend)
+        kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend))
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No WNA16 MoE backend supports the deployment configuration."

@@ -73,7 +73,11 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         self, backend: BackendT
     ) -> list[type[mk.FusedMoEExperts]]:
         """Map a backend enum value to its concrete `FusedMoEExperts`
-        subclasses, in selection priority order."""
+        subclasses, in selection priority order.
+
+        Implementations must forward to the module-level function at call time,
+        not alias it with `= staticmethod(fn)`, which snapshots it at import.
+        """
         raise NotImplementedError
 
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
@@ -178,10 +182,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     ) -> tuple[type[mk.FusedMoEExperts] | None, str | None]:
         """Probe `backend`'s candidate kernel classes, first supported wins.
 
-        A miss is an error for an explicitly requested backend and a debug line
-        plus the next candidate for the auto-selection loops, so the policy
-        stays with the caller. `activation_key` overrides this oracle's own key
-        for oracles whose activation key varies per backend.
+        A miss logs a DEBUG line and yields to the next candidate; whether that
+        is fatal stays with the caller. `activation_key` overrides this oracle's
+        own key for oracles whose activation key varies per backend.
 
         Returns:
             `(kernel_cls, None)`, or `(None, reason)` with the last reason.
@@ -203,6 +206,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             )
             if supported:
                 return kernel_cls, None
+            logger.debug_once(self.make_log_unsupported(backend, reason))
         return None, reason
 
     def return_or_raise(

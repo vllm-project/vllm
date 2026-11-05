@@ -204,7 +204,12 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
     """NVFP4 MoE backend selection for one deployment configuration."""
 
     name = "NvFp4"
-    backend_to_kernel_cls = staticmethod(backend_to_kernel_cls)
+
+    @staticmethod
+    def backend_to_kernel_cls(
+        backend: NvFp4MoeBackend,
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
 
 
 def select_nvfp4_moe_backend(
@@ -300,11 +305,10 @@ def select_nvfp4_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        kernel_cls, reason = oracle.try_backend(backend)
+        kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
-        logger.debug_once(oracle.make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
