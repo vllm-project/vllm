@@ -56,8 +56,9 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed):
     assert aggregator.aggregate([None]) is None
     if not normal.finished_recving:
         normal = aggregate()
-    assert early | (normal.finished_recving or set()) == {"request"}
-    assert not (early and normal.finished_recving)
-    # Failures arrive with the completion, so never through `early`.
+    # A step output with a vote may carry invalid blocks or a failure that the
+    # scheduler has not processed yet, so only all-early receives finish early.
+    assert early == ({"request"} if ordinary_rank is None else set())
+    assert (normal.finished_recving or set()) == {"request"} - early
     assert normal.failed_recving == ({"request"} if failed else set())
     assert aggregate().is_empty()
