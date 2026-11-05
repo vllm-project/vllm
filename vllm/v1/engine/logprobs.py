@@ -21,11 +21,14 @@ from vllm.tokenizers.detokenizer_utils import (
     convert_ids_list_to_tokens,
 )
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsRows, LogprobsTensors
 
 logger = init_logger(__name__)
 
 NONES = itertools.repeat(None)
+
+# Preceding positions that U+FFFD correction reads; 4 covers any UTF-8 sequence.
+MAX_CONTEXT_POSITIONS = 4
 
 
 @dataclass
@@ -82,31 +85,31 @@ class LogprobsProcessor:
           logprobs_lists: the lists of logprob tokens, logprobs, and ranks.
 
         """
+        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
+        rows = LogprobsRows(
+            token_ids_lst.tolist(), logprobs_lst.tolist(), ranks_lst.tolist()
+        )
+        self._update_sample_logprob_rows(rows)
+
+    def _update_sample_logprob_rows(self, rows: LogprobsRows) -> None:
+        """Update with sample logprobs from EngineCore, one row per position."""
         assert self.num_logprobs is not None
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
+        token_ids_lst, logprobs_lst, ranks_lst = rows
 
-        for rank_np, logprobs_np, token_ids_np in zip(
-            ranks_lst, logprobs_lst, token_ids_lst
-        ):
-            rank = rank_np.tolist()
-            logprobs = logprobs_np.tolist()
-            token_ids = token_ids_np.tolist()
+        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
             # Detokenize (non-incrementally).
             decoded_tokens: list[str] | Iterable[None]
             if self.tokenizer is None:
                 decoded_tokens = NONES
             else:
-                decoded_tokens_list = convert_ids_list_to_tokens(
-                    self.tokenizer, token_ids
-                )
-                context_token_ids = self._get_sampled_context_ids(self.logprobs)
                 decoded_tokens = self._verify_tokens(
-                    decoded_tokens_list=decoded_tokens_list,
+                    decoded_tokens_list=convert_ids_list_to_tokens(
+                        self.tokenizer, token_ids
+                    ),
                     tokens=token_ids,
-                    context_token_ids=context_token_ids,
                 )
 
             # Sampler puts the sampled logprob in first.
@@ -210,6 +213,17 @@ class LogprobsProcessor:
             self.prompt_logprobs = []
         return plp
 
+    def drop_returned_sample_logprobs(self) -> None:
+        """Forget the sample logprobs that DELTA outputs have returned, except
+        the context that U+FFFD correction reads.
+
+        This bounds the long-lived objects a streaming request holds, which the
+        garbage collector would otherwise rescan for the whole request.
+        """
+        logprobs = self.logprobs
+        if type(logprobs) is list and len(logprobs) > 2 * MAX_CONTEXT_POSITIONS:
+            del logprobs[:-MAX_CONTEXT_POSITIONS]
+
     def pop_prompt_token_id_logprobs(self) -> np.ndarray | None:
         """Pop and return the fixed-ID prompt scores."""
         scores = self.prompt_token_id_logprobs
@@ -219,7 +233,7 @@ class LogprobsProcessor:
     @staticmethod
     def _get_sampled_context_ids(
         logprobs_source: SampleLogprobs | PromptLogprobs | None,
-        max_context: int = 4,
+        max_context: int = MAX_CONTEXT_POSITIONS,
     ) -> list[int]:
         """Extract recent sampled token IDs from a logprobs source.
 
@@ -337,15 +351,14 @@ class LogprobsProcessor:
                 [sampled, top1, top2]), NOT sequential tokens.
             context_token_ids: Preceding sampled token IDs providing
                 sequential context. If None, extracted from
-                self.logprobs.
+                self.logprobs when a token needs correction.
 
         """
-        if context_token_ids is None:
-            context_token_ids = self._get_sampled_context_ids(self.logprobs)
-
         corrected_decoded_token_map = dict()
         for idx, text in enumerate(decoded_tokens_list):
             if text.endswith("�"):
+                if context_token_ids is None:
+                    context_token_ids = self._get_sampled_context_ids(self.logprobs)
                 # Replacement char at the end means a potential
                 # unfinished byte sequence from byte-fallback
                 # tokenization. Correct each token independently
@@ -360,7 +373,9 @@ class LogprobsProcessor:
         return decoded_tokens_list
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        if output.new_logprobs is not None:
+        if output.new_logprob_rows is not None:
+            self._update_sample_logprob_rows(output.new_logprob_rows)
+        elif output.new_logprobs is not None:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)

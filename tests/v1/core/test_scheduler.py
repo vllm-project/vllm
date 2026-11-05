@@ -71,9 +71,12 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
+    MAX_LOGPROB_ROWS_WIDTH,
     DraftTokenIds,
     ECConnectorOutput,
     KVConnectorOutput,
+    LogprobsLists,
+    LogprobsRows,
     ModelRunnerOutput,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
@@ -2216,6 +2219,110 @@ def test_update_from_output_routes_multi_position_sampling_masks():
         [[1, 6], [2]],
         [[3, 7, 8], [4], [5, 9]],
     ]
+
+
+def test_update_from_output_returns_logprob_rows_on_request():
+    """A request that asks for LogprobsRows gets the values of the array slice
+    the other request gets, for multi-token spec decode steps too."""
+    scheduler = create_scheduler(num_speculative_tokens=1)
+    requests = create_requests(
+        num_requests=2, sampling_params=SamplingParams(max_tokens=10, logprobs=1)
+    )
+    requests[1].return_logprob_rows = True
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 2 for req in requests},
+        total_num_scheduled_tokens=4,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={
+            requests[0].request_id: [10],
+            requests[1].request_id: [20],
+        },
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    logprobs = LogprobsLists(
+        np.array([[10, 3], [11, 4], [20, 5], [21, 6]], dtype=np.int64),
+        np.array(
+            [[-0.5, -1.5], [-0.0, -2.0], [-np.inf, -0.25], [-1e-45, -9.0]],
+            dtype=np.float32,
+        ),
+        np.array([1, 2, 3, 4], dtype=np.int64),
+        cu_num_generated_tokens=[0, 2, 4],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[10, 11], [20, 21]],
+        logprobs=logprobs,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)
+    arrays, rows = outputs[0].outputs
+
+    assert arrays.new_logprob_rows is None and rows.new_logprobs is None
+    assert arrays.new_logprobs is not None
+    assert arrays.new_logprobs.logprobs.tolist() == logprobs.logprobs[:2].tolist()
+    assert rows.new_logprob_rows == LogprobsRows(
+        logprobs.logprob_token_ids[2:].tolist(),
+        logprobs.logprobs[2:].tolist(),
+        logprobs.sampled_token_ranks[2:].tolist(),
+    )
+
+
+def test_update_from_output_keeps_arrays_for_wide_logprob_rows():
+    """Rows wider than MAX_LOGPROB_ROWS_WIDTH stay arrays even when requested,
+    since lists would cost EngineCore a Python object per value."""
+    scheduler = create_scheduler()
+    [req] = create_requests(
+        num_requests=1, sampling_params=SamplingParams(max_tokens=10, logprobs=1)
+    )
+    req.return_logprob_rows = True
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    for width, expect_rows in (
+        (MAX_LOGPROB_ROWS_WIDTH, True),
+        (MAX_LOGPROB_ROWS_WIDTH + 1, False),
+    ):
+        logprobs = LogprobsLists(
+            np.arange(width, dtype=np.int64)[None, :] + 10,
+            np.full((1, width), -0.5, dtype=np.float32),
+            np.array([1], dtype=np.int64),
+        )
+        model_output = ModelRunnerOutput(
+            req_ids=[req.request_id],
+            req_id_to_index={req.request_id: 0},
+            sampled_token_ids=[[10]],
+            logprobs=logprobs,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        outputs = scheduler.update_from_output(scheduler_output, model_output)
+        [output] = outputs[0].outputs
+
+        assert (output.new_logprob_rows is not None) == expect_rows
+        assert (output.new_logprobs is not None) == (not expect_rows)
 
 
 def test_stop_via_update_from_output():

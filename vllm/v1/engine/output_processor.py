@@ -499,6 +499,7 @@ class RequestState:
             # delta contains no new token IDs. [:0] preserves the concrete
             # list or FlatLogprobs representation while returning no entries.
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
+            self.logprobs_processor.drop_returned_sample_logprobs()
 
         sampling_mask = None
         if (delta or finished) and self.sampling_mask_chunks:
@@ -910,6 +911,8 @@ class OutputProcessor:
         del output.new_token_ids[num_kept:]
         if output.new_logprobs is not None:
             output.new_logprobs = output.new_logprobs.slice_request(0, num_kept)
+        if output.new_logprob_rows is not None:
+            output.new_logprob_rows = output.new_logprob_rows.slice_positions(num_kept)
         if output.new_sampling_mask is not None:
             output.new_sampling_mask = output.new_sampling_mask.slice_request(
                 0, num_kept

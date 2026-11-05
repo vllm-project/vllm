@@ -23,7 +23,12 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
+from vllm.v1.outputs import (
+    LogprobsLists,
+    LogprobsRows,
+    LogprobsTensors,
+    SamplingMaskLists,
+)
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -225,6 +230,12 @@ class EngineCoreRequest(
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
 
+    # Return sample logprobs in `EngineCoreOutput.new_logprob_rows` instead of
+    # `new_logprobs` when rows are at most MAX_LOGPROB_ROWS_WIDTH wide. Set by
+    # frontends that read both forms; other clients keep the array form.
+    # Appended last for array_like compatibility.
+    return_logprob_rows: bool = False
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -311,6 +322,12 @@ class EngineCoreOutput(
     # Sent once, on the first output, when watermark_config is set. Appended last
     # for array_like compatibility.
     watermarking: bool | None = None
+
+    # `new_logprobs` as Python lists, set instead of it for requests with
+    # `EngineCoreRequest.return_logprob_rows` in steps whose rows are at most
+    # MAX_LOGPROB_ROWS_WIDTH wide; readers must check both fields. Appended
+    # last for array_like compatibility.
+    new_logprob_rows: LogprobsRows | None = None
 
     @property
     def finished(self) -> bool:

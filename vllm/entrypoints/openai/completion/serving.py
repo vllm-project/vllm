@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import functools
 import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import Any, Final, TypeAlias, cast
 
+import pydantic_core
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -43,7 +45,7 @@ from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import RequestOutput
+from vllm.outputs import RequestOutput, WeightVersionSpan
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -52,6 +54,191 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
+
+# text_offset, token_logprobs, tokens, top_logprobs
+CompletionLogprobsFields: TypeAlias = tuple[
+    list[int], list[float | None], list[str], list[dict[str, float] | None]
+]
+
+
+def _make_stream_chunk(
+    *,
+    request_id: str,
+    created_time: int,
+    model_name: str,
+    index: int,
+    text: str,
+    logprobs: CompletionLogProbs | None,
+    finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
+    prompt_token_ids: list[int] | None = None,
+    token_ids: list[int] | None = None,
+    weight_versions: list[WeightVersionSpan] | None = None,
+    kv_transfer_params: dict[str, Any] | None = None,
+) -> CompletionStreamResponse:
+    return CompletionStreamResponse(
+        id=request_id,
+        object="text_completion",
+        created=created_time,
+        model=model_name,
+        choices=[
+            CompletionResponseStreamChoice(
+                index=index,
+                text=text,
+                logprobs=logprobs,
+                finish_reason=finish_reason,
+                stop_reason=stop_reason,
+                prompt_token_ids=prompt_token_ids,
+                token_ids=token_ids,
+                weight_versions=weight_versions,
+            )
+        ],
+        kv_transfer_params=kv_transfer_params,
+    )
+
+
+def _completion_logprobs(fields: CompletionLogprobsFields) -> CompletionLogProbs:
+    text_offset, token_logprobs, tokens, top_logprobs = fields
+    return CompletionLogProbs(
+        text_offset=text_offset,
+        token_logprobs=token_logprobs,
+        tokens=tokens,
+        top_logprobs=top_logprobs,
+    )
+
+
+def _logprobs_json(fields: CompletionLogprobsFields) -> str:
+    """`CompletionLogProbs(...)` as `model_dump_json` writes it."""
+    text_offset, token_logprobs, tokens, top_logprobs = fields
+    # The serializer behind model_dump_json, which dumps inf and nan as null.
+    return pydantic_core.to_json(
+        {
+            "text_offset": text_offset,
+            "token_logprobs": token_logprobs,
+            "tokens": tokens,
+            "top_logprobs": top_logprobs,
+        },
+        inf_nan_mode="null",
+    ).decode()
+
+
+def _has_plain_types(text: str, fields: CompletionLogprobsFields) -> bool:
+    """Whether validating the chunk models would leave every value as is."""
+    if type(text) is not str:
+        return False
+    text_offset, token_logprobs, tokens, top_logprobs = fields
+    for offset in text_offset:
+        if type(offset) is not int:
+            return False
+    for value in token_logprobs:
+        if value is not None and type(value) is not float:
+            return False
+    for token in tokens:
+        if type(token) is not str:
+            return False
+    for top in top_logprobs:
+        if top is not None:
+            for key, value in top.items():
+                if type(key) is not str or type(value) is not float:
+                    return False
+    return True
+
+
+_PROBE_TEXT: Final = "\x00vllm-text-probe\x00"
+_EMPTY_LOGPROBS: Final[CompletionLogprobsFields] = ([], [], [], [])
+
+
+class _LogprobsFrameTemplate:
+    """The SSE frame of a choice's chunk that has logprobs and has not
+    finished, split around its text and logprobs.
+
+    The split comes from a probe chunk built and dumped like any other chunk,
+    and the parts go through the serializer `model_dump_json` uses, so
+    rendered frames are byte-identical to the model path. `render` returns
+    None when the chunk needs the model path instead.
+    """
+
+    __slots__ = ("prefix", "infix", "suffix")
+
+    def __init__(self, prefix: str, infix: str, suffix: str) -> None:
+        self.prefix = prefix
+        self.infix = infix
+        self.suffix = suffix
+
+    @classmethod
+    def build(
+        cls, request_id: str, created_time: int, model_name: str, index: int
+    ) -> "_LogprobsFrameTemplate | None":
+        try:
+            chunk = _make_stream_chunk(
+                request_id=request_id,
+                created_time=created_time,
+                model_name=model_name,
+                index=index,
+                text=_PROBE_TEXT,
+                logprobs=_completion_logprobs(_EMPTY_LOGPROBS),
+            )
+            frame = f"data: {chunk.model_dump_json(exclude_unset=True)}\n\n"
+            text_json = pydantic_core.to_json(_PROBE_TEXT).decode()
+        except Exception:
+            # The model path hits and reports the same error.
+            return None
+        head = frame.split(text_json)
+        if len(head) != 2:
+            return None
+        tail = head[1].split(_logprobs_json(_EMPTY_LOGPROBS))
+        if len(tail) != 2:
+            return None
+        return cls(head[0], *tail)
+
+    def render(self, text: str, fields: CompletionLogprobsFields) -> str | None:
+        if not _has_plain_types(text, fields):
+            return None
+        try:
+            text_json = pydantic_core.to_json(text).decode()
+            logprobs_json = _logprobs_json(fields)
+        except Exception:
+            # e.g. lone surrogates, which the model path reports as an error.
+            return None
+        return self.prefix + text_json + self.infix + logprobs_json + self.suffix
+
+
+@functools.cache
+def _logprobs_frame_templates_match() -> bool:
+    """Check once that templates reproduce the model path, e.g. after a
+    pydantic upgrade."""
+    fields: CompletionLogprobsFields = (
+        [0, 3, 3, 9],
+        [-0.0, -1.2345e-05, None, -9999.0],
+        [' "a"\\', "", "é中\U0001f600\x00\x1f", "</s>\n"],
+        [
+            {' "a"\\': -0.0, "�": -3.0517578125e-05},
+            {"": -1e-45, "b": float("nan")},
+            None,
+            {"</s>\n": -9999.0, "\u2028": float("-inf")},
+        ],
+    )
+    text = 'téxt "\\\n'
+    template = _LogprobsFrameTemplate.build("cmpl-check-0", 1, "mé", 3)
+    try:
+        chunk = _make_stream_chunk(
+            request_id="cmpl-check-0",
+            created_time=1,
+            model_name="mé",
+            index=3,
+            text=text,
+            logprobs=_completion_logprobs(fields),
+        )
+        expected = f"data: {chunk.model_dump_json(exclude_unset=True)}\n\n"
+    except Exception:
+        expected = None
+    if template is None or template.render(text, fields) != expected:
+        logger.warning(
+            "Completion stream frames with logprobs differ from the pydantic "
+            "path; rendering them through pydantic models instead."
+        )
+        return False
+    return True
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -321,6 +508,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
             stream_options, self.enable_force_include_usage
         )
 
+        # Per-choice frame templates for chunks with logprobs, which otherwise
+        # build and dump three pydantic models per token. Token IDs and
+        # continuous usage differ per chunk, so they keep the model path.
+        frame_templates: dict[int, _LogprobsFrameTemplate | None] | None = None
+        if (
+            request.logprobs is not None
+            and not request.return_token_ids
+            and not include_continuous_usage
+            and _logprobs_frame_templates_match()
+        ):
+            frame_templates = {}
+
         last_res: RequestOutput | None = None
         try:
             async for prompt_idx, res in result_generator:
@@ -399,9 +598,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             # Chunked prefill case, don't return empty chunks
                             continue
 
+                    logprobs = None
+                    frame = None
                     if request.logprobs is not None:
                         assert out_logprobs is not None, "Did not output logprobs"
-                        logprobs = self._create_completion_logprobs(
+                        logprobs_fields = self._completion_logprobs_fields(
                             token_ids=delta_token_ids,
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
@@ -410,14 +611,33 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
+                        text_offset, _, tokens, _ = logprobs_fields
                         # Advance by the tokens just reported, not by delta_text:
                         # text held back for stop strings lags the tokens.
-                        if logprobs.tokens:
-                            next_text_offsets[i] = logprobs.text_offset[-1] + len(
-                                logprobs.tokens[-1]
+                        if tokens:
+                            next_text_offsets[i] = text_offset[-1] + len(tokens[-1])
+                        if (
+                            frame_templates is not None
+                            and finish_reason is None
+                            and output.stop_reason is None
+                            and prompt_token_ids_to_return is None
+                            and (
+                                output.weight_versions is None
+                                or not request.return_weight_versions
                             )
-                    else:
-                        logprobs = None
+                        ):
+                            if i in frame_templates:
+                                template = frame_templates[i]
+                            else:
+                                template = frame_templates[i] = (
+                                    _LogprobsFrameTemplate.build(
+                                        request_id, created_time, model_name, i
+                                    )
+                                )
+                            if template is not None:
+                                frame = template.render(delta_text, logprobs_fields)
+                        if frame is None:
+                            logprobs = _completion_logprobs(logprobs_fields)
 
                     previous_num_tokens[i] += len(output.token_ids)
                     stop_reason = output.stop_reason
@@ -435,31 +655,30 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 delta=True,
                             )
 
-                    chunk = CompletionStreamResponse(
-                        id=request_id,
-                        object="text_completion",
-                        created=created_time,
-                        model=model_name,
-                        choices=[
-                            CompletionResponseStreamChoice(
-                                index=i,
-                                text=delta_text,
-                                logprobs=logprobs,
-                                finish_reason=finish_reason,
-                                stop_reason=stop_reason,
-                                prompt_token_ids=prompt_token_ids_to_return,
-                                token_ids=(
-                                    as_list(output.token_ids)
-                                    if request.return_token_ids
-                                    else None
-                                ),
-                                weight_versions=(
-                                    output.weight_versions
-                                    if request.return_weight_versions
-                                    else None
-                                ),
-                            )
-                        ],
+                    if frame is not None:
+                        yield frame
+                        continue
+
+                    chunk = _make_stream_chunk(
+                        request_id=request_id,
+                        created_time=created_time,
+                        model_name=model_name,
+                        index=i,
+                        text=delta_text,
+                        logprobs=logprobs,
+                        finish_reason=finish_reason,
+                        stop_reason=stop_reason,
+                        prompt_token_ids=prompt_token_ids_to_return,
+                        token_ids=(
+                            as_list(output.token_ids)
+                            if request.return_token_ids
+                            else None
+                        ),
+                        weight_versions=(
+                            output.weight_versions
+                            if request.return_weight_versions
+                            else None
+                        ),
                         kv_transfer_params=(
                             res.kv_transfer_params
                             if finish_reason is not None
@@ -722,6 +941,29 @@ class OpenAIServingCompletion(GenerateBaseServing):
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
+        return _completion_logprobs(
+            self._completion_logprobs_fields(
+                token_ids,
+                top_logprobs,
+                num_output_top_logprobs,
+                tokenizer,
+                logprob_token_ids,
+                initial_text_offset,
+                return_as_token_id,
+            )
+        )
+
+    def _completion_logprobs_fields(
+        self,
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[dict[int, Logprob] | None],
+        num_output_top_logprobs: int,
+        tokenizer: TokenizerLike | None,
+        logprob_token_ids: list[int] | None = None,
+        initial_text_offset: int = 0,
+        return_as_token_id: bool | None = None,
+    ) -> CompletionLogprobsFields:
+        """The field values of `_create_completion_logprobs`."""
         out_text_offset: list[int] = []
         out_token_logprobs: list[float | None] = []
         out_tokens: list[str] = []
@@ -796,9 +1038,4 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 out_text_offset.append(out_text_offset[-1] + last_token_len)
             last_token_len = len(token)
 
-        return CompletionLogProbs(
-            text_offset=out_text_offset,
-            token_logprobs=out_token_logprobs,
-            tokens=out_tokens,
-            top_logprobs=out_top_logprobs,
-        )
+        return out_text_offset, out_token_logprobs, out_tokens, out_top_logprobs

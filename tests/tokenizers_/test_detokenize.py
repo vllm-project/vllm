@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import random
 from collections.abc import Generator
 from typing import Any, cast
 
@@ -9,6 +10,8 @@ from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.detokenizer_utils import (
+    _convert_ids_list_to_tokens,
+    _get_token_str_cache,
     convert_ids_list_to_tokens,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
@@ -425,3 +428,30 @@ def test_logprobs_count_stable_across_k():
     assert len(top4) == 4
     assert len(top10) == 10
     assert top4[" true"] == top10[" true"]
+
+
+@pytest.mark.parametrize(
+    "tokenizer_name",
+    [
+        "openai-community/gpt2",
+        "codellama/CodeLlama-7b-hf",
+        "mistralai/Pixtral-12B-2409",
+    ],
+)
+def test_cached_token_strings_match_fresh_decodes(tokenizer):
+    """Single-token strings depend only on the id, so the cache returns what a
+    fresh decode does: byte-level, SentencePiece (leading-space restore) and
+    Tekken tokenizers, with cold and warm caches."""
+    rng = random.Random(0)
+    vocab_size = len(tokenizer)
+    rows = [[rng.randrange(vocab_size) for _ in range(6)] for _ in range(500)] + [
+        list(range(start, start + 6)) for start in range(0, 600, 6)
+    ]
+    for _ in range(2):
+        for ids in rows:
+            assert convert_ids_list_to_tokens(
+                tokenizer, ids
+            ) == _convert_ids_list_to_tokens(tokenizer, ids)
+    cache = _get_token_str_cache(tokenizer)
+    assert cache is not None
+    assert cache[1].keys() == {tid for ids in rows for tid in ids}

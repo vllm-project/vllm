@@ -140,6 +140,27 @@ def convert_prompt_ids_to_tokens(
     return new_tokens, prefix_offset, read_offset
 
 
+_TOKEN_STR_CACHE_KEY = "_vllm_token_str_cache"
+
+
+def _get_token_str_cache(
+    tokenizer: TokenizerLike,
+) -> tuple[int, dict[int, str]] | None:
+    """The tokenizer's cache of single-token strings, with the vocab size it
+    covers, or None if the tokenizer cannot hold one."""
+    try:
+        attrs = vars(tokenizer)
+    except TypeError:
+        return None
+    cache = attrs.get(_TOKEN_STR_CACHE_KEY)
+    if cache is None:
+        try:
+            cache = attrs[_TOKEN_STR_CACHE_KEY] = (len(tokenizer), {})
+        except Exception:
+            return None
+    return cache
+
+
 def convert_ids_list_to_tokens(
     tokenizer: TokenizerLike,
     token_ids: list[int],
@@ -149,6 +170,9 @@ def convert_ids_list_to_tokens(
     Uses decode() for human-readable output, then checks the raw vocab
     piece via convert_ids_to_tokens() to restore any leading spaces that
     decode() stripped (SentencePiece add_dummy_prefix inverse).
+
+    Each id's string depends only on the id, so it is cached on the tokenizer
+    for ids inside the vocab the cache was created with.
 
     Args:
       tokenizer: tokenizer used by model under test
@@ -160,6 +184,25 @@ def convert_ids_list_to_tokens(
     """
     if not token_ids:
         return []
+    cache = _get_token_str_cache(tokenizer)
+    if cache is None:
+        return _convert_ids_list_to_tokens(tokenizer, token_ids)
+    vocab_size, token_strs = cache
+    try:
+        return [token_strs[tid] for tid in token_ids]
+    except KeyError:
+        pass
+    tokens = _convert_ids_list_to_tokens(tokenizer, token_ids)
+    for tid, token in zip(token_ids, tokens):
+        if 0 <= tid < vocab_size:
+            token_strs[tid] = token
+    return tokens
+
+
+def _convert_ids_list_to_tokens(
+    tokenizer: TokenizerLike,
+    token_ids: list[int],
+) -> list[str]:
     marker = get_leading_space_marker(tokenizer)
     if marker is None:
         return [tokenizer.decode([tid]) or "" for tid in token_ids]

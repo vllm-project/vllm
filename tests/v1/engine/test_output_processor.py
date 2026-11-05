@@ -702,10 +702,12 @@ def _validate_logprobs(
 )
 @pytest.mark.parametrize("num_sample_logprobs", [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 @pytest.mark.parametrize("num_prompt_logprobs", [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
+@pytest.mark.parametrize("logprob_rows", [False, True])
 def test_logprobs_processor(
     request_output_kind: RequestOutputKind,
     num_sample_logprobs: int | None,
     num_prompt_logprobs: int | None,
+    logprob_rows: bool,
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
@@ -748,6 +750,7 @@ def test_logprobs_processor(
         if num_prompt_logprobs is None
         else dummy_test_vectors.prompt_logprobs,
         request_ids=[req.request_id for req in requests],
+        logprob_rows=logprob_rows,
     )
 
     # Add requests to the detokenizer.
@@ -994,9 +997,11 @@ def test_stop_token(
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 @pytest.mark.parametrize("num_sample_logprobs", [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
+@pytest.mark.parametrize("logprob_rows", [False, True])
 def test_stop_string(
     include_stop_str_in_output: bool,
     num_sample_logprobs: int | None,
+    logprob_rows: bool,
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
@@ -1037,6 +1042,7 @@ def test_stop_string(
         else None,
         prompt_logprobs_raw=None,
         request_ids=[req.request_id for req in requests],
+        logprob_rows=logprob_rows,
     )
 
     # Add requests to the detokenizer.

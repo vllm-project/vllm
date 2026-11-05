@@ -72,7 +72,12 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    MAX_LOGPROB_ROWS_WIDTH,
+    DraftTokenIds,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -2331,6 +2336,10 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
+        send_logprob_rows = (
+            logprobs is not None
+            and logprobs.logprobs.shape[-1] <= MAX_LOGPROB_ROWS_WIDTH
+        )
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         prompt_token_id_logprobs_dict = (
             model_runner_output.prompt_token_id_logprobs_dict
@@ -2458,6 +2467,7 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
+            new_logprob_rows = None
             new_sampling_mask = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
@@ -2551,7 +2561,12 @@ class Scheduler(SchedulerInterface):
                 and request.sampling_params.num_logprobs is not None
                 and logprobs
             ):
-                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+                if send_logprob_rows and request.return_logprob_rows:
+                    new_logprob_rows = logprobs.slice_request_rows(
+                        req_index, len(new_token_ids)
+                    )
+                else:
+                    new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             finish_reason = None
             if stopped:
@@ -2601,6 +2616,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
+                        new_logprob_rows=new_logprob_rows,
                         new_sampling_mask=new_sampling_mask,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         prompt_token_id_logprobs=prompt_token_id_logprobs,
