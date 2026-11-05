@@ -67,6 +67,10 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    InputHadamardOCPMXEmulationExperts,
+)
+from vllm.model_executor.layers.quantization.input_hadamard import hadamard_matrix
 from vllm.model_executor.layers.quantization.quark.utils import (
     QuarkQTensorHint,
     parse_w4a16_int4_weight_config,
@@ -264,6 +268,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         weight_quant_key: QuantKey | None,
         activation_quant_key: QuantKey | None,
         layer_name: str | None = None,
+        rotation_size: int | None = None,
     ) -> "QuarkMoEMethod":
         if weight_quant_key is None:
             raise RuntimeError("Unsupported FusedMoe scheme")
@@ -282,7 +287,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             # All OCP MX schemes (W4A16, W4A8, etc.) handled by QuarkOCP_MX_MoEMethod
             # Backend selection happens inside via oracle
             return QuarkOCP_MX_MoEMethod(
-                module.moe_config, weight_quant_key, activation_quant_key
+                module.moe_config,
+                weight_quant_key,
+                activation_quant_key,
+                rotation_size=rotation_size,
             )
         elif method_cls is QuarkW8A8Mxfp8MoEMethod:
             return QuarkW8A8Mxfp8MoEMethod(
@@ -1582,8 +1590,21 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         moe: FusedMoEConfig,
         weight_quant_key: QuantKey,
         activation_quant_key: QuantKey | None,
+        rotation_size: int | None = None,
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
+        self.rotation_size = rotation_size
+        if rotation_size is not None:
+            # w2's K is the TP-sharded intermediate size. A 128-wide block that
+            # crosses a rank boundary cannot be rotated on one rank, and
+            # padding the shard does not restore the other rank's values.
+            shard = moe.intermediate_size_per_partition
+            if shard % rotation_size != 0 or moe.hidden_dim % rotation_size != 0:
+                raise ValueError(
+                    f"MoE input rotation of {rotation_size} requires the hidden "
+                    f"size ({moe.hidden_dim}) and the per-rank intermediate size "
+                    f"({shard}) to both be multiples of {rotation_size}."
+                )
         self.weight_dtype = next(
             dtype
             for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
@@ -1668,6 +1689,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.experts_cls is None:
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
 
+        if self.rotation_size is not None:
+            # The fused kernel quantizes the second GEMM's input itself, so the
+            # SwiGLU output cannot be rotated from Python. Emulation quantizes
+            # after the activation, which is where the second rotation runs.
+            self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
+            self.experts_cls = InputHadamardOCPMXEmulationExperts
+
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
@@ -1719,6 +1747,17 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        if self.rotation_size is not None:
+            n_fused = getattr(
+                getattr(layer, "expert_map_manager", None),
+                "num_fused_shared_experts",
+                0,
+            )
+            if n_fused:
+                raise NotImplementedError(
+                    "Online input rotation cannot run with a fused shared "
+                    "expert: that slot's weights are not rotated."
+                )
         # Add the quantization method used (per tensor/grouped/channel)
         # to ensure the weight scales are loaded in properly
         extra_weight_attrs.update(
@@ -1817,7 +1856,60 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+        if self.rotation_size is not None:
+            # One matrix per GEMM, shared by every expert. w1 and w3 both load
+            # into w13; the loader rejects a shard that disagrees.
+            for name in ("w13_input_rotation", "w2_input_rotation"):
+                param = torch.nn.Parameter(
+                    torch.zeros(
+                        self.rotation_size, self.rotation_size, dtype=torch.int8
+                    ),
+                    requires_grad=False,
+                )
+                set_weight_attrs(param, {"weight_loader": self._load_input_rotation})
+                layer.register_parameter(name, param)
+
+    def _load_input_rotation(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        *args,
+        **kwargs,
+    ) -> None:
+        expected = (
+            hadamard_matrix(self.rotation_size, loaded_weight.device)
+            * self.rotation_size**0.5
+        ).round()
+        if not torch.equal(loaded_weight.float(), expected):
+            raise NotImplementedError(
+                "Only the Sylvester Hadamard input rotation is supported; random "
+                "or trained rotations are not."
+            )
+        loaded = loaded_weight.to(device=param.device, dtype=param.dtype)
+        if param.any() and not torch.equal(param.data, loaded):
+            raise NotImplementedError(
+                "w1, w2 and w3 of a rotated MoE must share one Sylvester matrix."
+            )
+        param.data.copy_(loaded)
+
+    def _check_and_drop_input_rotations(self, layer: RoutedExperts) -> None:
+        w13: torch.Tensor = layer.w13_input_rotation
+        w2: torch.Tensor = layer.w2_input_rotation
+        if not w13.any() or not w2.any():
+            raise ValueError(
+                "The checkpoint did not provide the input_rotation of an "
+                "online-rotated MoE layer."
+            )
+        if not torch.equal(w13, w2):
+            raise NotImplementedError(
+                "w1/w3 and w2 must share one input rotation."
+            )
+        del layer.w13_input_rotation
+        del layer.w2_input_rotation
+
     def process_weights_after_loading(self, layer):
+        if self.rotation_size is not None and hasattr(layer, "w13_input_rotation"):
+            self._check_and_drop_input_rotations(layer)
         self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: RoutedExperts):
@@ -1866,6 +1958,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # Build quant config and kernel
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.rotation_size is not None and self.moe_quant_config is not None:
+            self.moe_quant_config.input_rotation_size = self.rotation_size
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -1987,6 +2081,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
+        if self.rotation_size is not None:
+            # Emulation is not monolithic. A direct call would also skip
+            # MiniMax's score-correction bias and routed scaling.
+            raise NotImplementedError(
+                "Online MoE input rotation is only implemented on the modular "
+                "expert path."
+            )
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(

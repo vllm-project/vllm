@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
+import re
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.quantization.input_hadamard import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod,
+    QuarkOCP_MX_MoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkNVFP4,
@@ -76,6 +78,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -127,6 +130,9 @@ class QuarkConfig(QuantizationConfig):
         # Checkpoint layer name -> rotation size, for linear layers exported
         # with an online input rotation (`input_rotation` tensor).
         self.input_rotation_sizes: dict[str, int] = {}
+        # Routed-experts module prefix -> rotation size. w1/w2/w3 of one layer
+        # share one matrix; shared experts and dense layers are absent.
+        self.moe_input_rotation_sizes: dict[str, int] = {}
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -173,6 +179,9 @@ class QuarkConfig(QuantizationConfig):
         self.input_rotation_sizes = hf_to_vllm_mapper.apply_dict(
             self.input_rotation_sizes
         )
+        self.moe_input_rotation_sizes = hf_to_vllm_mapper.apply_dict(
+            self.moe_input_rotation_sizes
+        )
 
     def maybe_update_config(
         self,
@@ -204,6 +213,55 @@ class QuarkConfig(QuantizationConfig):
                     "Trained rotations are not supported."
                 )
             self.input_rotation_sizes[name.removesuffix(suffix)] = shape[0]
+        self._collect_moe_input_rotations()
+
+    # `language_model.model.layers.3.block_sparse_moe.experts.0.w1`
+    _EXPERT_ROTATION = re.compile(
+        r"^(?P<experts>.+\.experts)\.(?P<idx>\d+)\.(?P<proj>w[123])$"
+    )
+
+    def _collect_moe_input_rotations(self) -> None:
+        """Group routed-expert rotations onto the fused MoE module.
+
+        Metadata only carries dtype and shape, so this checks that every expert
+        has int8 [128, 128] w1, w2 and w3. The Sylvester check happens when the
+        tensor is loaded.
+        """
+        grouped: dict[str, dict[int, dict[str, int]]] = {}
+        for name, size in list(self.input_rotation_sizes.items()):
+            match = self._EXPERT_ROTATION.match(name)
+            if match is None:
+                continue
+            del self.input_rotation_sizes[name]
+            grouped.setdefault(match["experts"], {}).setdefault(int(match["idx"]), {})[
+                match["proj"]
+            ] = size
+        self.moe_input_rotation_sizes = {}
+        for experts, by_idx in grouped.items():
+            if set(by_idx) != set(range(max(by_idx) + 1)):
+                raise NotImplementedError(
+                    f"{experts}: expert input rotations must cover experts "
+                    f"0..{max(by_idx)} without gaps, got {sorted(by_idx)}."
+                )
+            sizes: set[int] = set()
+            for idx, projs in by_idx.items():
+                if set(projs) != {"w1", "w2", "w3"}:
+                    raise NotImplementedError(
+                        f"{experts}.{idx}: online input rotation requires w1, w2 "
+                        f"and w3, got {sorted(projs)}."
+                    )
+                sizes.update(projs.values())
+            if sizes != {128}:
+                raise NotImplementedError(
+                    f"{experts}: MoE input rotations must all be int8 [128, 128], "
+                    f"got sizes {sorted(sizes)}."
+                )
+            self.moe_input_rotation_sizes[experts] = 128
+
+    def _moe_input_rotation_size(self, prefix: str) -> int | None:
+        if not self.moe_input_rotation_sizes:
+            return None
+        return self.moe_input_rotation_sizes.get(prefix)
 
     def _input_rotation_size(self, prefix: str) -> int | None:
         if not self.input_rotation_sizes:
@@ -279,6 +337,17 @@ class QuarkConfig(QuantizationConfig):
         if method_cls is QuarkKVCacheMethod:
             return QuarkKVCacheMethod(self)
         if method_cls is not None and issubclass(method_cls, QuarkMoEMethod):
+            moe_rotation_size = self._moe_input_rotation_size(prefix)
+            if moe_rotation_size is not None and not (
+                method_cls is QuarkOCP_MX_MoEMethod
+                and weight_quant_key == kMxfp4Static
+                and activation_quant_key == kMxfp4Dynamic
+            ):
+                raise NotImplementedError(
+                    f"{prefix}: Quark MoE online input rotation is only supported "
+                    "on MXFP4 experts with MXFP4 activations, not with "
+                    f"weight={weight_quant_key} activation={activation_quant_key}."
+                )
             return QuarkMoEMethod.get_moe_method(
                 self,
                 module=layer,
@@ -286,6 +355,7 @@ class QuarkConfig(QuantizationConfig):
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
                 layer_name=prefix,
+                rotation_size=moe_rotation_size,
             )
 
         return None
