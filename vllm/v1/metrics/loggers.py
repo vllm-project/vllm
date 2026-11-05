@@ -27,6 +27,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
+    ADMISSION_REFUSAL_REASONS,
     KV_FETCH_STAGES,
     CachingMetrics,
     IterationStats,
@@ -626,6 +627,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        counter_kv_admission_refusals = self._counter_cls(
+            name="vllm:kv_admission_refusals",
+            documentation=(
+                "Waiting requests refused KV cache blocks, once per request and "
+                "reason while it keeps being refused. Reason labels, most "
+                "fundamental first: 'exceeds_pool_capacity' = needs more blocks "
+                "than the pool has; 'insufficient_free_blocks' = not enough free "
+                "blocks; 'watermark' = would fit without the --watermark "
+                "headroom; 'inflight_load_reserve' = would fit without the "
+                "blocks reserved for in-flight prefills (async KV loads)."
+            ),
+            labelnames=labelnames + ["reason"],
+        )
+        self.counter_kv_admission_refusals: dict[str, dict[int, Counter]] = {
+            reason: create_metric_per_engine(
+                counter_kv_admission_refusals,
+                {
+                    idx: labelvalues + [reason]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                },
+            )
+            for reason in ADMISSION_REFUSAL_REASONS
+        }
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1163,6 +1188,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
                 )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            for reason, count in scheduler_stats.kv_admission_refusals.items():
+                counters = self.counter_kv_admission_refusals.get(reason)
+                if counters is not None:
+                    counters[engine_idx].inc(count)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

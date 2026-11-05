@@ -185,6 +185,19 @@ class MultiModalCacheStats(BaseCacheStats):
         self.hits += num_hits
 
 
+# Why a waiting request was refused KV cache blocks, most fundamental first.
+ADMISSION_REFUSAL_EXCEEDS_POOL_CAPACITY = "exceeds_pool_capacity"
+ADMISSION_REFUSAL_INSUFFICIENT_FREE_BLOCKS = "insufficient_free_blocks"
+ADMISSION_REFUSAL_WATERMARK = "watermark"
+ADMISSION_REFUSAL_INFLIGHT_LOAD_RESERVE = "inflight_load_reserve"
+ADMISSION_REFUSAL_REASONS = (
+    ADMISSION_REFUSAL_EXCEEDS_POOL_CAPACITY,
+    ADMISSION_REFUSAL_INSUFFICIENT_FREE_BLOCKS,
+    ADMISSION_REFUSAL_WATERMARK,
+    ADMISSION_REFUSAL_INFLIGHT_LOAD_RESERVE,
+)
+
+
 @dataclass
 class KVCacheEvictionEvent:
     """Single KV cache block eviction sample."""
@@ -242,6 +255,9 @@ class SchedulerStats:
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+    # Waiting requests refused KV cache blocks since the last stats, by reason;
+    # once per request and reason while it keeps being refused.
+    kv_admission_refusals: dict[str, int] = field(default_factory=dict)
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
