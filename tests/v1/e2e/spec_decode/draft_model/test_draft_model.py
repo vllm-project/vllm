@@ -107,6 +107,37 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runne
 
 
 @single_gpu_only
+def test_draft_model_warmup_respects_token_budget(vllm_runner, monkeypatch):
+    """Draft prefill must fit the budget even when target prefill fills it."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model = "Qwen/Qwen3-0.6B"
+    with vllm_runner(
+        model,
+        enforce_eager=False,
+        max_model_len=256,
+        max_num_batched_tokens=8192,
+        max_num_seqs=1024,
+        gpu_memory_utilization=0.8,
+        speculative_config={
+            "model": model,
+            "method": "draft_model",
+            "num_speculative_tokens": 6,
+        },
+    ) as runner:
+        outputs = runner.llm.generate(
+            ["Name three fruits."],
+            SamplingParams(temperature=0, max_tokens=16, ignore_eos=True),
+        )
+
+    assert len(outputs) == 1
+    assert len(outputs[0].outputs) == 1
+    completion = outputs[0].outputs[0]
+    assert len(completion.token_ids) == 16
+    assert completion.finish_reason == "length"
+    assert completion.text
+
+
+@single_gpu_only
 def test_draft_model_realistic_example(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",

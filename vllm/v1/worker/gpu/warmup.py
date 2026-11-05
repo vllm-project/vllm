@@ -460,10 +460,16 @@ def _warmup_kernels(
     decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
     max_blocks_per_req = sum(decode_block_counts)
 
+    speculative_config = model_runner.speculative_config
+    num_draft_slots = (
+        speculative_config.max_num_new_slots_for_drafting
+        if speculative_config is not None
+        else 0
+    )
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
-        // max(prompt_len, decode_query_len),
+        // max(prompt_len + num_draft_slots, decode_query_len),
     )
     block_tables = getattr(model_runner, "block_tables", None)
     null_blocks = block_tables is not None and (

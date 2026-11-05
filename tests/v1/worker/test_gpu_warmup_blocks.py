@@ -91,7 +91,11 @@ def _make_runner(
     """Stub model runner exposing only what the warmup entry points read."""
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
-        speculative_config=SimpleNamespace() if num_spec_steps else None,
+        speculative_config=(
+            SimpleNamespace(max_num_new_slots_for_drafting=0)
+            if num_spec_steps
+            else None
+        ),
         adaptive_verification=None,
         speculator=None,
         rejection_sampler=None,
