@@ -570,6 +570,21 @@ def test_bind_commit_capture():
     assert stale.module.spec_verify_kernel is None
 
 
+@pytest.mark.parametrize("plan_kind", ["chain", "tree"])
+def test_bind_one_kernel_for_verify_and_commit(plan_kind):
+    """A kernel a provider gives for both a recurrent layer's verify and its
+    state commit is bound once to each layer, and commits above a chain."""
+    kernel = ToyKernel()
+    registry = KernelRegistry([Provider({GDN_VERIFY: kernel, STATE_COMMIT: kernel})])
+    layers = [_mamba_layer("m.0"), _mamba_layer("m.1")]
+    registry.bind(_ctx(plan_kind), layers)
+    assert kernel.binds == [["m.0", "m.1"]]
+    assert all(layer.module.spec_verify_kernel is kernel for layer in layers)
+    step = CommitStep(result=None, num_reqs=2, rows=None, seq_lens=None)
+    registry.commit(step)
+    assert kernel.steps == ([step] if plan_kind == "tree" else [])
+
+
 NUM_TOKENS = 4
 
 

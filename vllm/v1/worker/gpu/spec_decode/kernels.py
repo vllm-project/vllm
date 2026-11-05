@@ -252,7 +252,9 @@ class KernelRegistry:
         kernels), which it runs on chains too. Commit kernels are bound only
         for plans above a chain: a chain commits nothing."""
         commits = plan_kind_rank(ctx.plan_kind) > plan_kind_rank("chain")
-        served: dict[int, tuple[KernelKey, SpecKernel, list[SpecLayerSpec]]] = {}
+        # One kernel may serve several keys: bind it once to its unique layers
+        # and commit with it if any of its ops is a commit.
+        served: dict[int, tuple[SpecKernel, set[Op], dict[str, SpecLayerSpec]]] = {}
         for layer in layers:
             if layer.kind.family == "mamba":
                 layer.module.spec_verify_kernel = None
@@ -262,13 +264,17 @@ class KernelRegistry:
                 kernel = self.kernel_for(key, layer)
                 if kernel is None or ctx.plan_kind not in kernel.supports(layer):
                     continue
-                served.setdefault(id(kernel), (key, kernel, []))[2].append(layer)
+                _, ops, served_layers = served.setdefault(
+                    id(kernel), (kernel, set(), {})
+                )
+                ops.add(key[1])
+                served_layers[layer.name] = layer
                 if key[1] == "verify":
                     layer.module.spec_verify_kernel = kernel
         self._commits = []
-        for key, kernel, served_layers in served.values():
-            kernel.bind(ctx, served_layers)
-            if key[1] == "commit":
+        for kernel, ops, served_layers in served.values():
+            kernel.bind(ctx, list(served_layers.values()))
+            if "commit" in ops:
                 self._commits.append(kernel)
 
     def commit(self, step: CommitStep) -> None:
