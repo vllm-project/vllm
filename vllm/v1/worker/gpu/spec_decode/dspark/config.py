@@ -9,6 +9,9 @@ from vllm.config.speculative import (
     _validate_qwen3_omni_dspark,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import (
+    check_draft_lm_head_quantization,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
@@ -19,7 +22,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )
-    supported_options = frozenset({"dspark_draft_topk"})
+    supported_options = frozenset({"dspark_draft_topk", "draft_lm_head_quantization"})
     uses_separate_workspace_lane = True
     # DSpark predicts acceptance with its own confidence head.
     adaptive_verification_uses_draft_logits = False
@@ -96,6 +99,17 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                     "Qwen3DSparkModel and Qwen3OmniDSparkModel"
                 )
             hf_config.dspark_draft_topk = dspark_draft_topk
+
+        if spec.draft_lm_head_quantization is not None:
+            # Other drafters may read lm_head.weight directly (e.g. Muse Spark).
+            if not {"DSparkDraftModel", "DSparkV41DraftModel"} & set(
+                draft.architectures
+            ):
+                raise ValueError(
+                    "draft_lm_head_quantization is only supported by the "
+                    "DeepSeek-V4/V4.1 DSpark drafters"
+                )
+            check_draft_lm_head_quantization(spec)
 
         assert spec.target_model_config is not None
         _validate_qwen3_omni_dspark(

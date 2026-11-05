@@ -191,6 +191,46 @@ def test_fused_routing_writes_into_preallocated_buffers():
     assert (ids[num_tokens:] == -7).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("num_experts", [32, 256])
+def test_routing_padding_is_zero_with_nonfinite_logits(num_experts):
+    """Padding must not introduce NaNs, or change any active route, on replay."""
+    torch.manual_seed(23)
+    logits = torch.randn(8, num_experts, device="cuda")
+    bias = torch.randn(num_experts, device="cuda")
+    padding = torch.zeros(8, dtype=torch.bool, device="cuda")
+    router = MuseSpark1xRouter(8, num_experts, bias, 1.0)
+    expected_weights, expected_ids = router._compute_routing(None, logits, None)
+
+    def route():
+        return fused_musespark1x_routing(logits, bias, 8, 1.0, is_padding=padding)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            route()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        weights, ids = route()
+    for active in (7, 3, 0):
+        padding[active:] = True
+        logits[active:] = float("nan")
+        graph.replay()
+        torch.testing.assert_close(
+            weights[:active], expected_weights[:active], rtol=0, atol=0
+        )
+        assert torch.equal(ids[:active], expected_ids[:active])
+        assert (weights[active:] == 0).all()
+        assert (ids[active:] == -1).all()
+    routed_weights, routed_ids = router._compute_routing(
+        None, logits, None, is_padding=padding
+    )
+    assert torch.equal(routed_weights, weights)
+    assert torch.equal(routed_ids, ids)
+
+
 def _triton_routing_reference(logits, bias, multiplier, scale, eps, padding):
     from vllm.models.muse_spark.common.ops.fused_routing import _routing_kernel
     from vllm.platforms import current_platform

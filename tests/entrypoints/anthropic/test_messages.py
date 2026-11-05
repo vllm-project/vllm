@@ -197,7 +197,7 @@ async def test_anthropic_structured_output(client: anthropic.AsyncAnthropic):
 @pytest.mark.asyncio
 async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic):
     async def get_stream_usage(resp):
-        prompt_tokens = None
+        start_usage = None
         usage = None
         async for chunk in resp:
             if (
@@ -205,7 +205,7 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
                 and chunk.message is not None
                 and chunk.message.usage is not None
             ):
-                prompt_tokens = chunk.message.usage.input_tokens
+                start_usage = chunk.message.usage
             elif chunk.type == "message_delta" and chunk.usage is not None:
                 usage = chunk.usage
 
@@ -218,7 +218,12 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
         assert cache_created is not None
         assert cache_created >= 0
         assert cache_read >= 0
-        assert prompt_tokens == usage.input_tokens + cache_created + cache_read
+        # As in Anthropic's API, message_start already splits the prompt into
+        # uncached input and cache counts, the same split message_delta reports.
+        assert start_usage is not None
+        assert start_usage.input_tokens == usage.input_tokens
+        assert start_usage.cache_read_input_tokens == cache_read
+        assert start_usage.cache_creation_input_tokens == cache_created
         return usage
 
     request = dict(
@@ -304,3 +309,21 @@ async def test_anthropic_server_tool_is_rejected(client: anthropic.AsyncAnthropi
     message = exc_info.value.body["error"]["message"]
     assert "'web_search_20250305' is not supported" in message
     assert "Field required" not in message
+
+
+@pytest.mark.asyncio
+async def test_min_tokens_delays_stop_sequence(client: anthropic.AsyncAnthropic):
+    kwargs = dict(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=64,
+        stop_sequences=["\n"],
+        messages=[{"role": "user", "content": "Write two short lines of poetry."}],
+    )
+    baseline = await client.messages.create(**kwargs, extra_body={"temperature": 0.0})
+    assert baseline.stop_reason == "stop_sequence"
+    assert baseline.usage.output_tokens < 16
+
+    resp = await client.messages.create(
+        **kwargs, extra_body={"temperature": 0.0, "min_tokens": 16}
+    )
+    assert resp.usage.output_tokens >= 16

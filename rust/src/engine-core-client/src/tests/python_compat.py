@@ -84,7 +84,7 @@ class EngineCoreRequest(
     omit_defaults=True,
 ):
     request_id: str
-    prompt_token_ids: list[int] | None
+    prompt_token_ids: object | None
     mm_features: object | None
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
@@ -105,6 +105,7 @@ class EngineCoreRequest(
     abort_immediately: bool = False
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+    block_hashes: list[bytes] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,9 +164,15 @@ class EngineCoreOutputs(
     weight_version: str | None = None
 
 
+def token_ids(ids: list[int]) -> list:
+    # Prompt token ids as the Python frontend sends them, an int32 ndarray.
+    array = np.array(ids, dtype=np.int32)
+    return [array.dtype.str, list(array.shape), msgspec.msgpack.Ext(3, array.tobytes())]
+
+
 request = EngineCoreRequest(
     request_id="req-1",
-    prompt_token_ids=[11, 22],
+    prompt_token_ids=token_ids([11, 22]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
@@ -202,12 +209,13 @@ request = EngineCoreRequest(
             )
         ],
     ),
+    block_hashes=[b"\x01" * 32, b"\x02" * 32],
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
 defaults_request = EngineCoreRequest(
     request_id="req-defaults",
-    prompt_token_ids=[5, 6, 7],
+    prompt_token_ids=token_ids([5, 6, 7]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
@@ -217,7 +225,7 @@ defaults_request = EngineCoreRequest(
 # Embedded in a full request so the fixture also pins the `lora_request` slot.
 lora_request = EngineCoreRequest(
     request_id="req-lora",
-    prompt_token_ids=[5, 6, 7],
+    prompt_token_ids=token_ids([5, 6, 7]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
@@ -270,7 +278,11 @@ multimodal_features = [
 ]
 multimodal_request_wire = [
     "req-mm",
-    [101, 102, 103, 104],
+    [
+        "<i4",
+        [4],
+        msgpack.ExtType(3, np.array([101, 102, 103, 104], dtype=np.int32).tobytes()),
+    ],
     multimodal_features,
     None,
     None,
@@ -499,6 +511,14 @@ class KVEventsConfig:
 
 
 @dataclass
+class PrefixHashConfig:
+    hash_algo: str
+    hash_block_size: int
+    none_hash: bytes
+    num_lookahead_tokens: int = 0
+
+
+@dataclass
 class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
@@ -525,6 +545,7 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
+    prefix_hash_config: PrefixHashConfig | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -549,6 +570,12 @@ ready_response = EngineCoreReadyResponse(
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
+    prefix_hash_config=PrefixHashConfig(
+        hash_algo="sha256",
+        hash_block_size=16,
+        none_hash=bytes(range(32)),
+        num_lookahead_tokens=1,
+    ),
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",

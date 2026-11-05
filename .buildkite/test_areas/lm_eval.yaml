@@ -63,13 +63,18 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_watermarking_e2e.py
+  - vllm/config/vllm.py
   - vllm/config/watermarking.py
   - vllm/sampling_params.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
   - vllm/v1/watermarking/
   - vllm/v1/worker/gpu/
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+  - pytest -s -v watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       automatic_shard: true
@@ -144,6 +149,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) LM Eval Small Models"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       num_devices: 1
@@ -212,6 +218,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval HiSparse"
   key: lm-eval-hisparse-nightly-4xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   num_devices: 4
@@ -269,6 +276,7 @@ steps:
   - tests/watermarking/test_compatibility.py
   - tests/watermarking/test_engine_compatibility.py
   - tests/watermarking/test_parallel_compatibility.py
+  - tests/watermarking/test_watermarking_e2e.py
   - vllm/config/speculative.py
   - vllm/config/vllm.py
   - vllm/config/watermarking.py
@@ -286,6 +294,7 @@ steps:
     watermarking/test_compatibility.py
     watermarking/test_engine_compatibility.py
     watermarking/test_parallel_compatibility.py
+    watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       automatic_shard: true
@@ -385,6 +394,32 @@ steps:
       - vllm/distributed/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
+
+- label: ":nvidia: (B200) [Nightly] LM Eval ReplaySSM"
+  key: lm-eval-replayssm-2xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/configs/models-replayssm.txt
+  - tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-NVFP4-ReplaySSM-align.yaml
+  - tests/evals/gsm8k/test_gsm8k_correctness.py
+  - tests/evals/gsm8k/gsm8k_eval.py
+  - tests/evals/gsm8k/conftest.py
+  - vllm/model_executor/layers/mamba/abstract.py
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+  - vllm/model_executor/layers/mamba/ops/replayssm_config.py
+  - vllm/model_executor/warmup/kernel_warmup.py
+  - vllm/model_executor/warmup/replayssm_warmup.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/worker/mamba_utils.py
+  - vllm/v1/worker/replayssm_utils.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
@@ -495,6 +530,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 TP"
   key: lm-eval-deepseek-r1-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -505,6 +541,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -539,6 +576,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 DP"
   key: lm-eval-deepseek-r1-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -548,6 +586,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -583,6 +622,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 TP"
   key: lm-eval-deepseek-v32-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -593,6 +633,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -627,6 +668,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 DP"
   key: lm-eval-deepseek-v32-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -636,6 +678,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -1130,6 +1173,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   optional: true
@@ -1143,6 +1187,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI300) GPQA Eval (GPT-OSS)"
+      automatic_shard: true
       dind: false
       device: mi300_2
       num_devices: 2

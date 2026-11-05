@@ -326,6 +326,13 @@ class AnthropicMessagesRequest(BaseModel):
             "Whether to apply the engine's configured watermark to this request."
         ),
     )
+    min_tokens: int = Field(
+        default=0,
+        description=(
+            "Minimum number of tokens to generate before EOS or a stop "
+            "sequence can end the response."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
