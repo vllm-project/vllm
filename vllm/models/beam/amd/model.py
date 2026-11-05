@@ -21,6 +21,7 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsPP,
     SupportsQuant,
 )
@@ -255,8 +256,9 @@ class BeamForCausalLM(
     MixtureOfExperts,
     SupportsQuant,
     SupportsEagle3,
+    SupportsLoRA,
 ):
-    """Beam causal LM. LoRA support is deferred to a follow-up change."""
+    """Beam causal LM."""
 
     hf_to_vllm_mapper = BeamModel.hf_to_vllm_mapper
     packed_modules_mapping = {
