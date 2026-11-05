@@ -242,10 +242,17 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         if a16_max_tokens is not None:
             # Every row of a call shares its activation scale, so uninitialized
             # padding rows (CUDA graphs, data parallelism) must never reach it.
-            if a16_max_tokens < max(capture_sizes, default=0):
+            max_graph_size = max(
+                [
+                    *capture_sizes,
+                    *config.compilation_config.decoder_replay_cudagraph_capture_sizes,
+                ],
+                default=0,
+            )
+            if a16_max_tokens < max_graph_size:
                 raise ValueError(
                     f"b12x_nvfp4_w4a16_a16_max_tokens={a16_max_tokens} is below "
-                    f"the largest CUDA graph capture size {max(capture_sizes)}"
+                    f"the largest CUDA graph capture size {max_graph_size}"
                 )
             if (
                 config.parallel_config.data_parallel_size > 1

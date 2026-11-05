@@ -429,8 +429,9 @@ class KernelConfig:
     computed from their absolute maximum and shared by every request in the
     step, and run the FP4 GEMM, which speeds up long prefills but is lossy.
     Outputs therefore depend on batch composition. Must be at least the largest
-    CUDA graph capture size; not supported with data parallelism or encoder CUDA
-    graphs. None (default) keeps BF16 activations for every input."""
+    CUDA graph capture size; not supported with data parallelism (including
+    elastic EP), encoder CUDA graphs, or client-supplied prompt or multimodal
+    embeddings. None (default) keeps BF16 activations for every input."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod
