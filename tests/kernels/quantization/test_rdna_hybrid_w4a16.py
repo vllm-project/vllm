@@ -107,8 +107,8 @@ def _rdna_hybrid_w4a16_reference(
     ids=[
         "M=1_decode",
         "M=5_decode",
-        "M=6_wide_decode",
-        "M=8_wide_decode",
+        "M=6",
+        "M=8",
         "M=9_prefill",
         "M=64_prefill",
         "M=256_dense",
