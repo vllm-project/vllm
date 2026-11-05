@@ -30,24 +30,28 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
 
     def __init__(self, expected_finished_count: int) -> None:
         super().__init__(expected_finished_count)
-        # Loads a worker reported in a step output, as it does on a failure or
-        # invalid blocks. The scheduler may apply that output well after
-        # aggregate() (a synchronous utility RPC aggregates pending steps), so
-        # the other workers' votes also go through step outputs, behind it.
-        self._recving_in_outputs = set[str]()
+        # Unfinished receives with a vote from a step output.
+        self._step_output_recving = set[str]()
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
     ) -> ModelRunnerOutput | None:
-        if outputs[output_rank]:
-            kv_outputs = [o.kv_connector_output for o in outputs if o]
-            for kv_output in chain(self._salvaged_outputs, kv_outputs):
-                if kv_output:
-                    self._recving_in_outputs |= kv_output.finished_recving or set()
-                    self._recving_in_outputs |= kv_output.failed_recving
+        voted = {
+            req_id
+            for kv_output in chain(
+                self._salvaged_outputs,
+                (o.kv_connector_output for o in outputs if o is not None),
+            )
+            if kv_output is not None
+            for req_id in kv_output.finished_recving or ()
+        }
         output = super().aggregate(outputs, output_rank)
-        if output and (kv_output := output.kv_connector_output):
-            self._recving_in_outputs -= kv_output.finished_recving or set()
+        if output is not None and (voted or self._step_output_recving):
+            self._step_output_recving = {
+                req_id
+                for req_id in self._step_output_recving | voted
+                if req_id in self._recv_remaining_count
+            }
         return output
 
     def add_finished_recving(self, req_ids: set[str]) -> set[str]:
@@ -55,9 +59,10 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
 
         Each worker reports a load once, so votes are not deduplicated.
         """
-        deferred = req_ids & self._recving_in_outputs
+        deferred = req_ids & (self._failed_recving_pending | self._step_output_recving)
         if deferred:
-            # Count these votes in the next aggregate() instead.
+            # Complete through a later step output, so the scheduler sees the
+            # failure or invalid blocks first.
             self.ft_defer_kv_connector_outputs(
                 [KVConnectorOutput(finished_recving=deferred)]
             )

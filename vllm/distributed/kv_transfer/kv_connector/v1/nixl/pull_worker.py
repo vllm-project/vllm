@@ -69,9 +69,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         post_processed = super()._finish_recved(done_recving, failed_recv_reqs)
         succeeded = done_recving - failed_recv_reqs
         if self._early_recved is not None and succeeded:
-            # Hold post-processed receives until the device has run it: a poll,
-            # unlike the step output, does not wait for the stream, and an
-            # aborted request's blocks are freed once it is reported.
+            # Hold post-processed receives until the device has run the work;
+            # reporting an aborted request allows its blocks to be freed.
             event = None
             if post_processed:
                 event = torch.Event()
