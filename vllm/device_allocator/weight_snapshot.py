@@ -280,6 +280,9 @@ def _bind(roots, key: str, t) -> bool:
     """Point the attribute path `key` at tensor t if it is missing or None."""
     root_name, mod_name, path = key.split("/", 2)
     obj = roots[root_name].get_submodule(mod_name)
+    # A plain view: binding a Parameter would register it on the module.
+    if isinstance(t, nn.Parameter) and not path.startswith("_parameters"):
+        t = t.detach()
     try:
         _set_path(obj, path, t, create=True)
         return True
