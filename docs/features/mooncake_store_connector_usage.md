@@ -298,6 +298,16 @@ Set `tenant_id` in the Mooncake JSON config when different vLLM deployments shou
 
 Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
 
+### Early Receive Reporting
+
+By default, a completed load is reported to the scheduler with the output of a later step, so the request is scheduled several steps after its KV cache has been loaded, and the delay grows with the PP size. Set `enable_early_recv` to report successful loads before that output. Failed loads are still reported with the step output.
+
+```bash
+--kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","enable_early_recv":true}'
+```
+
+PP > 1 is supported, unlike with NixlConnector (pull). See [Early Receive Reporting](nixl_connector_usage.md#early-receive-reporting) for the other supported setups and the polling overhead.
+
 ## Environment Variables
 
 | Variable | Description | Default |
