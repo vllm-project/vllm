@@ -38,6 +38,7 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.utils import extract_json_member_object
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -257,18 +258,12 @@ class InklingParser(ParserEngine):
             if token_id in special_ids:
                 break
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         vocab = self.vocab
-        thinking_id = vocab.get(CONTENT_THINKING)
-        text_id = vocab.get(CONTENT_TEXT)
-        model_id = vocab.get(MESSAGE_MODEL)
-        end_sampling_id = vocab.get(CONTENT_MODEL_END_SAMPLING)
-        for token_id in reversed(input_ids):
-            if token_id in (thinking_id, model_id):
-                return False
-            if token_id in (text_id, end_sampling_id):
-                return True
-        return False
+        reasoning_ids = {vocab.get(CONTENT_THINKING), vocab.get(MESSAGE_MODEL)}
+        ended_ids = {vocab.get(CONTENT_TEXT), vocab.get(CONTENT_MODEL_END_SAMPLING)}
+        i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
+        return i >= 0 and input_ids[i] in ended_ids
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         vocab = self.vocab
