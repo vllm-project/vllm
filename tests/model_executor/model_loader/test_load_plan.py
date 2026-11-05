@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Load plan on tiny CPU models.
 
-Invariant: planning leaves the model unchanged, and a direct reload that copies
-each name's boxes into its ``get_dest`` tensors (and sends fallbacks in full
-through ``load_weights``) leaves every tensor byte for byte as a cold start on
-the same weights, at the same addresses.
+Invariant: planning (after ``start_reload``, as the NCCL engine does at the
+first update) leaves the model unchanged, and a direct reload that copies each
+name's boxes into its ``get_dest`` tensors (and sends fallbacks in full through
+``load_weights``) leaves every tensor byte for byte as a cold start on the same
+weights, at the same addresses, on the first update and on later ones that
+reuse the plan.
 """
 
 from types import SimpleNamespace
@@ -92,9 +94,9 @@ def _cold_start(make, weights):
 
 
 def _planned_reload(model, plan: LoadPlan, weights) -> None:
-    """What an engine does: boxes into their destinations, fallbacks in full,
-    in batches of two as a packed transfer hands them over."""
-    start_reload(model)
+    """What an engine does after ``start_reload``: boxes into their
+    destinations, fallbacks in full, in batches of two as a packed transfer
+    hands them over."""
     items = list(weights.items())
     for i in range(0, len(items), 2):
         load_planned(model, plan, items[i : i + 2])
@@ -121,8 +123,8 @@ def _registrations(model):
 
 
 def _plan(model, shapes) -> LoadPlan:
-    """``plan_loads``, checking that planning changed no tensor, address,
-    registration or module attribute."""
+    """``plan_loads`` (after ``start_reload``), checking that planning changed
+    no tensor, address, registration or module attribute."""
     state, registrations = _state(model), _registrations(model)
     plan = plan_loads(model, _metadata(shapes))
     assert _registrations(model) == registrations
@@ -133,19 +135,26 @@ def _plan(model, shapes) -> LoadPlan:
 
 
 def _check_plan_equals_cold_start(make, shapes):
-    """Plan at init, then a planned update with new random weights must equal
-    a cold start on them, byte for byte, and keep every address."""
+    """Plan at the first update's start; that update and a second one reusing
+    the plan, with new random weights, must each equal a cold start on them,
+    byte for byte, and keep every address."""
     model = _cold_start(make, _checkpoint(shapes, seed=0))
     ptrs = {n: s[3] for n, s in _state(model).items()}
+    start_reload(model)
     plan = _plan(model, shapes)
-    new = _checkpoint(shapes, seed=1)
-    _planned_reload(model, plan, new)
-    actual, expected = _state(model), _state(_cold_start(make, new))
-    assert actual.keys() == expected.keys()
-    for name, (dtype, shape, data, ptr) in actual.items():
-        assert (dtype, shape) == expected[name][:2], name
-        assert torch.equal(data.view(torch.uint8), expected[name][2].view(torch.uint8))
-        assert ptr == ptrs[name], f"{name} moved"
+    for seed in (1, 2):
+        if seed > 1:
+            start_reload(model)
+        new = _checkpoint(shapes, seed=seed)
+        _planned_reload(model, plan, new)
+        actual, expected = _state(model), _state(_cold_start(make, new))
+        assert actual.keys() == expected.keys()
+        for name, (dtype, shape, data, ptr) in actual.items():
+            assert (dtype, shape) == expected[name][:2], name
+            assert torch.equal(
+                data.view(torch.uint8), expected[name][2].view(torch.uint8)
+            )
+            assert ptr == ptrs[name], f"{name} moved"
     return model, plan
 
 
@@ -475,6 +484,7 @@ def test_state_change_makes_only_its_name_a_fallback():
     make, shapes = _two_names(loader)
     model = _cold_start(make, _checkpoint(shapes, 0))
     del model.a.loads
+    start_reload(model)
     plan = _plan(model, shapes)  # also checks the change was undone
     assert "changes module state" in (plan.entries["a.weight"].reason or "")
     assert plan.get_dest("b.weight") is not None
@@ -512,6 +522,7 @@ def test_paired_loader_is_refused(monkeypatch, keep_stash):
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
     model = _cold_start(_Paired, _checkpoint(shapes, 0))
     model.__dict__.pop("stash", None)
+    start_reload(model)
     with pytest.raises(RuntimeError, match="write nothing when loaded alone"):
         plan_loads(model, _metadata(shapes))
     assert model.pending == [] and not hasattr(model, "stash")
@@ -547,15 +558,16 @@ def test_layerwise_mode_is_refused(monkeypatch):
 def test_duplicate_names_are_refused():
     make, shapes = _single(None)
     model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
     with pytest.raises(ValueError, match="declared twice"):
         plan_loads(model, _metadata(shapes) * 2)
 
 
-def test_model_without_recorded_layout_is_refused():
+def test_plan_outside_a_direct_reload_is_refused():
+    """The plan takes its layout from what ``begin_direct_reload`` applied."""
     make, shapes = _single(None)
-    model = make()
-    model.load_weights(_checkpoint(shapes, 0).items())  # no post-load step
-    with pytest.raises(RuntimeError, match="no checkpoint layout"):
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    with pytest.raises(RuntimeError, match="between start_reload and finish_reload"):
         plan_loads(model, _metadata(shapes))
 
 
@@ -564,5 +576,6 @@ def test_eplb_is_refused():
     model = _cold_start(make, _checkpoint(shapes, 0))
     parallel = SimpleNamespace(enable_eplb=True)
     model.layer.moe_config = SimpleNamespace(moe_parallel_config=parallel)
+    start_reload(model)
     with pytest.raises(RuntimeError, match="EPLB"):
         plan_loads(model, _metadata(shapes))

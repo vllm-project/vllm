@@ -85,9 +85,10 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     use_load_plan: bool = False
     """Have the workers write received tensors of the target model through a
     load plan instead of `load_weights` where the plan allows (off by default).
-    The workers plan at init from `source.metadata`, which this engine sends
-    them, so the init must not overlap inference. The inference server must run
-    with `VLLM_RELOAD_MODE=direct`."""
+    The workers get `source.metadata` at init and plan from it at the first
+    weight update, inside `start_weight_update`, so that update's start takes
+    longer (the plan's trace time). The inference server must run with
+    `VLLM_RELOAD_MODE=direct`."""
 
 
 @dataclass
@@ -133,7 +134,7 @@ def _check_planned(plan: "LoadPlan", update_info: NCCLWeightTransferUpdateInfo) 
         ):
             raise ValueError(
                 f"NCCL weight transfer: {name!r} ({dtype_name}, {list(shape)}) "
-                "does not match the load plan built at init; re-init the engine "
+                "does not match the load plan's metadata; re-init the engine "
                 "to re-plan"
             )
 
@@ -170,7 +171,9 @@ class NCCLWeightTransferEngine(
         self._last_update_info: dict[
             tuple[torch.nn.Module, int], NCCLWeightTransferUpdateInfo
         ] = {}
-        # Built at init with `use_load_plan`, for the target model.
+        # With `use_load_plan`: the trainer's metadata from init, and the plan
+        # for the target model, built at its first update.
+        self._plan_metadata: list[ParamMeta] | None = None
         self._plan: LoadPlan | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
@@ -183,42 +186,50 @@ class NCCLWeightTransferEngine(
                       rank offset, world size, and the packed wire params
 
         """
-        from vllm.model_executor.model_loader.reload import plan_loads
-        from vllm.model_executor.model_loader.reload.direct import (
-            direct_reload_enabled,
-        )
-
-        self._plan = None
-        if init_info.use_load_plan:
-            if not direct_reload_enabled():
-                raise ValueError(
-                    "NCCL weight transfer: use_load_plan requires "
-                    "VLLM_RELOAD_MODE=direct"
-                )
-            if not init_info.metadata:
-                raise ValueError(
-                    "NCCL weight transfer: use_load_plan needs the trainer's "
-                    "metadata in the init info"
-                )
-            metadata = [
-                ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
-                for name, dtype_name, shape in init_info.metadata
-            ]
-            self._plan = plan_loads(self._default_model, metadata)
         self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
         self._last_update_info.clear()
+        self._plan = self._plan_metadata = None
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
+        # After the group forms, so this error reaches the trainer instead of
+        # leaving it in the rendezvous. Planning happens at the first update.
+        if init_info.use_load_plan:
+            if not init_info.metadata:
+                raise ValueError(
+                    "NCCL weight transfer: use_load_plan needs the trainer's "
+                    "metadata in the init info"
+                )
+            self._plan_metadata = [
+                ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
+                for name, dtype_name, shape in init_info.metadata
+            ]
 
     def start_weight_update(self) -> None:
-        """Begin reloading the incoming checkpoint weights."""
-        from vllm.model_executor.model_loader.reload import start_reload
+        """Begin reloading the incoming checkpoint weights; with
+        `use_load_plan`, the first target update also builds the load plan."""
+        from vllm.model_executor.model_loader.reload import plan_loads, start_reload
 
         start_reload(self.model)
+        if (
+            self._plan_metadata is not None
+            and self._plan is None
+            and self.model is self._default_model  # not a draft session
+        ):
+            # The bake runs here on purpose, on a real direct-mode restore
+            # (after `start_reload` -> `begin_direct_reload` viewed every
+            # tensor back to its checkpoint layout): the plan then takes each
+            # tensor's layout, offsets and destinations from what direct mode
+            # applied, its single layout source. Do not move it back to init
+            # or before `start_reload`: re-deriving the layout there disagrees
+            # with `begin` (e.g. a storage moved by `set_` into a fused
+            # buffer) and the plan would write at the wrong offset. A failure
+            # raises from this call, which the trainer makes before it
+            # broadcasts anything.
+            self._plan = plan_loads(self.model, self._plan_metadata)
 
     def finish_weight_update(self) -> None:
         """Finish reloading after all weights have been received."""

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The load plan's bake: run ``load_weights`` once over ``TraceTensor``s with
-every parameter and persistent buffer replaced by a meta stand-in in its
-checkpoint layout, and record each ``copy_`` and every reason a name cannot be
-written directly."""
+every parameter and persistent buffer replaced by a meta stand-in of itself as
+``begin_direct_reload`` left it, and record each ``copy_`` and every reason a
+name cannot be written directly."""
 
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -17,7 +17,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.model_executor.utils import storage_view
 
-from .direct import apply_checkpoint_attrs, checkpoint_layout, loadable_slots
+from .direct import loadable_slots
 from .trace import TraceSink, TraceTensor
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ class Target:
     module: str
     tensor: str
     real: torch.Tensor
-    byte_offset: int  # of its checkpoint layout in its storage
+    byte_offset: int  # in its storage, as `begin_direct_reload` viewed it
 
 
 class _Slot(NamedTuple):
@@ -47,9 +47,15 @@ class _Slot(NamedTuple):
 
 
 class StandIns:
-    """What ``begin_direct_reload`` would make of every parameter and
-    persistent buffer, on meta: one meta storage per real storage, so tensors
-    sharing storage (tied weights) alias exactly as in the model."""
+    """Every parameter and persistent buffer as it is now, on meta: one meta
+    storage per real storage, so tensors sharing storage (tied weights) alias
+    exactly as in the model.
+
+    Built after ``begin_direct_reload``, so each tensor's current layout and
+    loader attributes are the ones ``begin`` applied: the stand-ins copy them
+    rather than re-deriving the checkpoint layout from the cold-start record
+    (``begin`` uses the current storage offset of a tensor whose storage
+    moved, for example by a ``set_`` into a fused buffer)."""
 
     def __init__(self, model: torch.nn.Module):
         self.slots: list[_Slot] = []
@@ -71,13 +77,12 @@ class StandIns:
     def _stand_in(
         self, module_name: str, key: str, t: torch.Tensor, meta: torch.UntypedStorage
     ) -> torch.Tensor:
-        shape, stride, dtype, offset = checkpoint_layout(t)
-        stand_in = storage_view(meta, offset, shape, stride, dtype)
+        offset = t.storage_offset()
+        stand_in = storage_view(meta, offset, t.shape, t.stride(), t.dtype)
         stand_in.__class__ = t.__class__
         stand_in.__dict__ = t.__dict__.copy()
         if hasattr(t, "_ckpt"):  # a checkpoint tensor: a write target
-            apply_checkpoint_attrs(stand_in)
-            target = Target(module_name, key, t, offset * dtype.itemsize)
+            target = Target(module_name, key, t, offset * t.dtype.itemsize)
             # writes into this storage are labelled with its first target
             self.by_storage.setdefault(meta._cdata, target)
             self.by_name[(module_name, key)] = target

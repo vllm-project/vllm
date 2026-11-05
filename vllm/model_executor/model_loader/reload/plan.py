@@ -3,11 +3,13 @@
 """Load plan: which part of each checkpoint tensor this rank needs, and where
 in live memory those bytes go.
 
-``plan_loads`` traces the model's ``load_weights`` once at init (``bake.py``)
-and reduces each traced ``copy_`` to a box of the checkpoint tensor and a
-strided region of the target's storage (``geometry.py``). A name is direct
-only if every byte it writes is a copy of one incoming byte; anything else is
-a fallback, which the engine sends in full through ``load_weights``.
+``plan_loads`` traces the model's ``load_weights`` once (``bake.py``), on
+the first weight update after ``start_reload`` (so on the layout direct mode
+actually restored), and reduces each traced ``copy_`` to a box of the
+checkpoint tensor and a strided region of the target's storage
+(``geometry.py``). A name is direct only if every byte it writes is a copy of
+one incoming byte; anything else is a fallback, which the engine sends in full
+through ``load_weights``. The plan is reused for every later update.
 
 Engines call only ``LoadPlan.get_boxes`` and ``LoadPlan.get_dest``.
 """
@@ -26,7 +28,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, StandIns, Traced, trace_loads
-from .direct import check_direct_reload, direct_reload_enabled
+from .direct import direct_reload_enabled
 from .geometry import (
     Box,
     Fallback,
@@ -80,6 +82,10 @@ class LoadPlan:
 def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadPlan:
     """Trace ``model.load_weights`` over the declared checkpoint tensors once
     and return where each lands on this rank.
+
+    Call between ``start_reload`` and ``finish_reload``: the plan takes every
+    tensor's layout from what ``begin_direct_reload`` applied, its single
+    source. It is a dry run on meta stand-ins and changes nothing in the model.
 
     Raises:
         ValueError: a name is declared twice.
@@ -141,10 +147,15 @@ def load_planned(
 
 
 def _check_plannable(model: torch.nn.Module) -> None:
-    """Direct reload's own refusals, plus layerwise mode and EPLB."""
+    """Layerwise mode, a model outside a direct reload, and EPLB. Direct
+    reload's own refusals ran in ``begin_direct_reload``."""
     if not direct_reload_enabled():
         raise RuntimeError("load plan: requires VLLM_RELOAD_MODE=direct")
-    check_direct_reload(model)
+    if not getattr(model, "_direct_reload_begun", False):
+        raise RuntimeError(
+            "load plan: plan between start_reload and finish_reload, on the "
+            "layout the direct reload restored"
+        )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)
         parallel = getattr(moe_config, "moe_parallel_config", None)

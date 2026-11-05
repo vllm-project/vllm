@@ -108,8 +108,10 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     use_load_plan: bool = False
     """Dense backend only: write received tensors of the target model through a
-    load plan (`plan_loads`), built at init from `metadata`, instead of
-    `load_weights` where the plan allows. Requires `VLLM_RELOAD_MODE=direct`."""
+    load plan (`plan_loads`) instead of `load_weights` where the plan allows.
+    The plan is built from `metadata` at the first target weight update, after
+    `start_reload`, and reused for every later one. Requires
+    `VLLM_RELOAD_MODE=direct`."""
     metadata: list[tuple[str, str, list[int]]] | None = None
     """(name, dtype name, shape) of every tensor the trainer sends; required
     with `use_load_plan`."""

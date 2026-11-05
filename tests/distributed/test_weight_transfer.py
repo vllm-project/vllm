@@ -294,20 +294,14 @@ class TestNCCLEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
         assert update_info.src == 1
 
-    def test_use_load_plan_requires_direct_reload(self, monkeypatch):
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-        init_info = NCCLWeightTransferInitInfo(
-            master_address="127.0.0.1",
-            master_port=12345,
-            rank_offset=1,
-            world_size=2,
-            use_load_plan=True,
-        )
-        with pytest.raises(ValueError, match="VLLM_RELOAD_MODE=direct"):
-            self._make_engine().init_transfer_engine(init_info)
-
     def test_use_load_plan_requires_metadata(self, monkeypatch):
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+        # The group forms first, so the refusal reaches the trainer.
+        group = MagicMock()
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
+        )
         init_info = NCCLWeightTransferInitInfo(
             master_address="127.0.0.1",
             master_port=12345,
@@ -315,8 +309,79 @@ class TestNCCLEngineParsing:
             world_size=2,
             use_load_plan=True,
         )
+        engine = self._make_engine()
         with pytest.raises(ValueError, match="metadata"):
-            self._make_engine().init_transfer_engine(init_info)
+            engine.init_transfer_engine(init_info)
+        assert engine.model_update_group is group
+
+    def test_use_load_plan_plans_at_the_first_target_update(self, monkeypatch):
+        """Not at init: after `start_reload`, once, and not for a draft."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+        import vllm.model_executor.model_loader.reload as reload_mod
+
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+        )
+        calls = []
+        monkeypatch.setattr(
+            reload_mod, "start_reload", lambda model: calls.append(("start", model))
+        )
+
+        def plan_loads(model, metas):
+            calls.append(("plan", model, list(metas)))
+            return "plan"
+
+        monkeypatch.setattr(reload_mod, "plan_loads", plan_loads)
+        engine = self._make_engine()
+        engine.init_transfer_engine(
+            NCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12345,
+                rank_offset=1,
+                world_size=2,
+                use_load_plan=True,
+                metadata=[("w", "float32", [4])],
+            )
+        )
+        assert calls == []
+        target, draft = engine.model, MagicMock(spec=torch.nn.Module)
+        engine.set_weight_update_target(draft, None)
+        engine.start_weight_update()
+        engine.reset_weight_update_target()
+        assert calls == [("start", draft)]
+        for _ in range(2):
+            engine.start_weight_update()
+        assert calls[1:] == [
+            ("start", target),
+            ("plan", target, [ParamMeta("w", torch.float32, (4,))]),
+            ("start", target),
+        ]
+        assert engine._plan == "plan"
+
+    def test_use_load_plan_refusal_raises_from_start(self, monkeypatch):
+        """The engine leaves the direct-mode check to `plan_loads`, at the
+        first update's start, which the trainer calls before broadcasting."""
+        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+        import vllm.model_executor.model_loader.reload as reload_mod
+
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+        monkeypatch.setattr(
+            nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+        )
+        monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
+        engine = self._make_engine()
+        engine.init_transfer_engine(
+            NCCLWeightTransferInitInfo(
+                master_address="127.0.0.1",
+                master_port=12345,
+                rank_offset=1,
+                world_size=2,
+                use_load_plan=True,
+                metadata=[("w", "float32", [4])],
+            )
+        )
+        with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
+            engine.start_weight_update()
 
 
 def test_nccl_trainer_sends_metadata_with_use_load_plan(monkeypatch):

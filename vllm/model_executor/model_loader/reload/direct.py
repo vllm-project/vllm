@@ -29,10 +29,7 @@ from vllm.model_executor.utils import (
 logger = init_logger(__name__)
 
 __all__ = [
-    "apply_checkpoint_attrs",
     "begin_direct_reload",
-    "check_direct_reload",
-    "checkpoint_layout",
     "direct_reload_enabled",
     "finish_direct_reload",
     "loadable_slots",
@@ -63,19 +60,6 @@ def direct_reload_enabled() -> bool:
 
 def _layout(t: torch.Tensor) -> tuple:
     return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
-
-
-def checkpoint_layout(t: torch.Tensor) -> tuple:
-    """(shape, stride, dtype, storage_offset) a reload views ``t`` back to."""
-    ckpt = getattr(t, "_ckpt", None)
-    return ckpt[1] if ckpt is not None else _layout(t)
-
-
-def apply_checkpoint_attrs(t: torch.Tensor) -> None:
-    """Restore the loader metadata ``t`` had at cold start."""
-    for k in _LOADER_ATTRS:
-        t.__dict__.pop(k, None)
-    t.__dict__.update(t._ckpt[2])
 
 
 def loadable_slots(
@@ -212,17 +196,6 @@ def _checkpoint_views(
     return views
 
 
-def check_direct_reload(
-    model: torch.nn.Module,
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """Raise if a direct reload cannot start; else the views `begin` applies.
-    Does not modify the model."""
-    if not hasattr(model, "_ckpt_param_names"):
-        raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    _check_params_kept(model)
-    return _checkpoint_views(model)
-
-
 @torch.no_grad()
 def begin_direct_reload(model: torch.nn.Module) -> None:
     """Make every tensor writable by its checkpoint weight loader.
@@ -230,15 +203,21 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
-    views = check_direct_reload(model)
+    if not hasattr(model, "_ckpt_param_names"):
+        raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    _check_params_kept(model)
+    views = _checkpoint_views(model)
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
     for _, t in _loadable_tensors(model):
-        if _owned(model, t):
-            apply_checkpoint_attrs(t)
+        if not _owned(model, t):
+            continue
+        for k in _LOADER_ATTRS:
+            t.__dict__.pop(k, None)
+        t.__dict__.update(t._ckpt[2])
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
