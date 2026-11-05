@@ -29,11 +29,13 @@ from vllm.entrypoints.speech_to_text.base.serving import (
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
 )
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
 from vllm.model_executor.models.interfaces import (
+    DiarizedTranscriptionSegment,
     StreamingTranscriptionPostProcessor,
     SupportsTranscription,
 )
@@ -395,3 +397,63 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
         assert not isinstance(out_zh, ErrorResponse)
         assert isinstance(out_zh, TranscriptionResponse)
         assert out_zh.text == "你好世界"
+
+
+class _StubDiarizedModel(_StubTranscriptionModel):
+    supports_diarized_transcription = True
+
+    @classmethod
+    def post_process_output(cls, text: str, model_config) -> str:
+        raise AssertionError("Diarized output must not be post-processed")
+
+    @classmethod
+    def parse_diarized_transcript(
+        cls, text: str, model_config
+    ) -> list[DiarizedTranscriptionSegment]:
+        return [DiarizedTranscriptionSegment(1.0, 2.0, "0", text)]
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_diarized_offsets_each_chunk():
+    """Each chunk is parsed on its own and placed at its offset in the audio."""
+
+    async def gen(text: str) -> AsyncGenerator[RequestOutput, None]:
+        yield _request_output(text)
+
+    engine_client = MagicMock()
+    engine_client.model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config.max_model_len = 8192
+    engine_client.errored = False
+    engine_client.generate.side_effect = [gen("hello"), gen("world")]
+
+    models = MagicMock(spec=OpenAIServingModels)
+    models.lora_requests = {}
+    models.is_base_model.return_value = True
+
+    with (
+        patch(
+            "vllm.model_executor.model_loader.get_model_cls",
+            return_value=_StubDiarizedModel,
+        ),
+        patch.object(
+            SpeechToTextBaseServing,
+            "_preprocess_speech_to_text",
+            AsyncMock(return_value=([MagicMock(), MagicMock()], 40.0, [0.0, 29.5])),
+        ),
+    ):
+        serving = OpenAIServingTranscription(engine_client, models, request_logger=None)
+        response = await serving.create_transcription(
+            b"\x00\x00",
+            TranscriptionRequest.model_construct(
+                file=MagicMock(),
+                model="stub-model",
+                language="en",
+                stream=False,
+                response_format="diarized_json",
+            ),
+            raw_request=None,
+        )
+
+    assert isinstance(response, TranscriptionResponseDiarized)
+    assert response.text == "hello world"
+    assert [(s.start, s.end) for s in response.segments] == [(1.0, 2.0), (30.5, 31.5)]

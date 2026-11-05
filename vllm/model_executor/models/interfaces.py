@@ -1467,8 +1467,9 @@ class SupportsTranscription(Protocol):
     ) -> list[DiarizedTranscriptionSegment]:
         """Parse the model-specific diarized transcript format.
 
-        Receives the raw decoded model output, without `post_process_output`
-        applied. Only models that set `supports_diarized_transcription` must
+        Receives the raw decoded output of one audio chunk, without
+        `post_process_output` applied, and returns timestamps relative to that
+        chunk. Only models that set `supports_diarized_transcription` must
         override this method.
         """
         raise NotImplementedError
