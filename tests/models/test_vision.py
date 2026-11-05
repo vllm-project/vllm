@@ -252,22 +252,17 @@ class SimpleMRopeVisionModel(torch.nn.Module):
 
 
 class MixedDtypeMRopeVisionModel(SimpleMRopeVisionModel):
-    """Keeps its first parameter in fp32 but computes and returns bf16, like
-    MiniMax-M3's vision tower (fp32 patch embedding)."""
+    """Keeps its first parameter in fp32 but returns bf16, like MiniMax-M3's
+    vision tower (fp32 patch embedding)."""
 
     def __init__(self, declare_dtype: bool = True):
-        torch.nn.Module.__init__(self)
-        self.input_scale = torch.nn.Parameter(torch.ones((), dtype=torch.float32))
-        self.spatial_merge_size = 2
-        self.out_hidden_size = 64
-        self.linear = torch.nn.Linear(768, 64, dtype=torch.bfloat16)
+        super().__init__()
+        self.linear.to(torch.float32)
         if declare_dtype:
             self.dtype = torch.bfloat16
 
     def forward(self, pixel_values: torch.Tensor, grid_thw_list: list[list[int]]):
-        return super().forward(
-            (pixel_values * self.input_scale).to(torch.bfloat16), grid_thw_list
-        )
+        return super().forward(pixel_values, grid_thw_list).to(torch.bfloat16)
 
 
 @multi_gpu_test(num_gpus=2)
