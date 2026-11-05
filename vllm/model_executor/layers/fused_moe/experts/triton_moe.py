@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -64,6 +65,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
+logger = init_logger(__name__)
+
 
 @triton.jit
 def _silu_mul_quant_sorted_kernel(
@@ -87,18 +90,17 @@ def _silu_mul_quant_sorted_kernel(
     )
     gate = gate.to(tl.float32)
     up = up.to(tl.float32)
-    # match silu_and_mul: round SiLU before multiplying the other half.
-    silu = tl.div_rn(gate, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
-    silu = silu.to(input_ptr.dtype.element_ty).to(tl.float32)
-    result = (silu * up).to(input_ptr.dtype.element_ty).to(tl.float32)
-    amax = tl.maximum(tl.max(tl.abs(result), 1), 1e-10)
+    # Same arithmetic as the route-major silu_and_mul_per_block_quant kernel,
+    # so both layouts produce bitwise-identical activations and scales.
+    sigmoid = tl.div_rn(1.0, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
+    result = gate * sigmoid * up
+    scale = tl.div_rn(tl.max(tl.abs(result), 1), 448.0)
+    scale = tl.maximum(scale, 1.0 / (448.0 * 512.0))
     if USE_UE8M0:
-        scale = tl.math.exp2(tl.ceil(tl.log2(amax * (1.0 / 448.0))))
-        quantized = tl.div_rn(result, scale[:, None])
-    else:
-        # match per_token_group_quant_fp8: scale = amax / max, q = x * (1 / scale)
-        scale = tl.div_rn(amax, 448.0)
-        quantized = result * tl.div_rn(1.0, scale)[:, None]
+        scale = tl.extra.cuda.libdevice.exp2(
+            tl.ceil(tl.extra.cuda.libdevice.log2(scale))
+        )
+    quantized = tl.div_rn(result, scale[:, None])
     quantized = tl.minimum(tl.maximum(quantized, -448.0), 448.0)
     tl.store(
         output_ptr + rows[:, None] * intermediate + cols[None, :],
@@ -149,6 +151,33 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    def _use_fused_silu_block_quant(
+        self, activation: MoEActivation, has_lora: bool
+    ) -> bool:
+        """Whether SiLU+Mul and the FP8 block quant of the GEMM2 input can
+        run as one kernel. Warns once with the reason when they cannot."""
+        if (
+            not self.quant_config.use_fp8_w8a8
+            or self.block_shape is None
+            or self.quantization_emulation
+        ):
+            return False
+        if activation != MoEActivation.SILU:
+            reason = f"activation {activation.value} is not silu"
+        elif self.block_shape[1] not in (64, 128):
+            reason = f"group size {self.block_shape[1]} is not 64 or 128"
+        elif has_lora:
+            reason = "LoRA needs the unquantized activation output"
+        else:
+            return True
+        logger.warning_once(
+            "%s: FP8 block-quant MoE is not using the fused SiLU+Mul+quant "
+            "kernel because %s; running separate activation and quant kernels.",
+            type(self).__name__,
+            reason,
+        )
+        return False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -470,9 +499,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self._lora_context is None
             and not hooked
             and not self.quantization_emulation
-            # The sorted kernel mirrors the unfused activation path, which the
-            # route-major layout takes only when DeepGEMM E8M0 is enabled.
-            and is_deep_gemm_e8m0_used()
             and a2_scale is None
             and sorted_token_ids is not None
             and expert_map is None
@@ -618,11 +644,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         a2q_scale: torch.Tensor | None = None
 
-        # Fuse SiLU+Mul + FP8 block quantize into a single kernel
-        # when conditions permit (gated SiLU, fp8 block quant with
-        # group_size=128, no LoRA requiring the BF16 intermediate).
-        # The fused kernel has no clamp parameter, so a configured
-        # SwiGLU clamp limit falls through to the unfused path.
         if use_sorted_a:
             qintermediate_cache2 = intermediate_cache1.new_empty(
                 (num_sorted_rows, cache2_dim),
@@ -644,18 +665,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 GROUP_K=128,
                 USE_UE8M0=sorted_use_ue8m0,
             )
-        elif (
-            activation == MoEActivation.SILU
-            and self.activation_config.clamp_limit is None
-            and self.quant_config.use_fp8_w8a8
-            and self.block_shape == [128, 128]
-            and lora_context is None
-            and not is_deep_gemm_e8m0_used()
-        ):
+        elif self._use_fused_silu_block_quant(activation, lora_context is not None):
+            assert self.block_shape is not None
+            use_ue8m0 = self.quant_config.use_ue8m0_act_scales
+            if use_ue8m0 is None:
+                use_ue8m0 = is_deep_gemm_e8m0_used()
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
                 intermediate_cache1.view(-1, N),
-                group_size=128,
+                group_size=self.block_shape[1],
                 quant_dtype=current_platform.fp8_dtype(),
+                use_ue8m0=use_ue8m0,
+                clamp_limit=self.activation_config.clamp_limit,
             )
         else:
             self.activation(

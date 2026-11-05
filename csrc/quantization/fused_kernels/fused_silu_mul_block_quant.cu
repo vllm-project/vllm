@@ -12,7 +12,7 @@ namespace vllm {
 // Logic: one thread block per (token, group) pair
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
-          int32_t group_size>
+          int32_t group_size, bool use_ue8m0, bool has_clamp>
 __global__ void silu_and_mul_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // Output: [num_tokens, hidden_size] in
                                      // FP8/INT8
@@ -21,8 +21,8 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                                  // num_tokens]
     scalar_t const* __restrict__ input,  // Input: [num_tokens, hidden_size * 2]
     float const* scale_ub,               // Optional scale upper bound
-    int32_t const hidden_size  // Output hidden size (input is 2x this)
-) {
+    int32_t const hidden_size,  // Output hidden size (input is 2x this)
+    float const clamp_limit) {
   static_assert((group_size & (group_size - 1)) == 0,
                 "group_size must be a power of 2 for correct reduction");
 
@@ -54,6 +54,10 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   // Step 1: Each thread loads one element, computes SiLU, stores in register
   float gate = static_cast<float>(token_input_gate[tid]);
   float up = static_cast<float>(token_input_up[tid]);
+  if constexpr (has_clamp) {
+    gate = fminf(gate, clamp_limit);
+    up = fminf(fmaxf(up, -clamp_limit), clamp_limit);
+  }
 
   // Compute SiLU(gate) * up
   float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
@@ -88,6 +92,10 @@ __global__ void silu_and_mul_per_block_quant_kernel(
     // Use minimum safe scaling factor
     group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
 
+    if constexpr (use_ue8m0) {
+      group_scale = exp2f(ceilf(log2f(group_scale)));
+    }
+
     // Store scale to global memory
     *group_scale_ptr = group_scale;
 
@@ -107,14 +115,14 @@ __global__ void silu_and_mul_per_block_quant_kernel(
 // warp, each loading 8 contiguous 16-bit elements of gate and up (16B loads)
 // and storing 8 quantized bytes. The group max is reduced with warp shuffles,
 // so there is no shared memory or __syncthreads. Requires 16B-aligned input
-// and 8B-aligned output rows. Same arithmetic as the kernel above.
+// and 8B-aligned output rows.
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
-          int32_t group_size>
+          int32_t group_size, bool use_ue8m0, bool has_clamp>
 __global__ void silu_and_mul_per_block_quant_vec_kernel(
     scalar_out_t* __restrict__ out, float* __restrict__ scales,
     scalar_t const* __restrict__ input, float const* scale_ub,
     int32_t const hidden_size, int32_t const num_groups,
-    int64_t const num_tokens) {
+    int64_t const num_tokens, float const clamp_limit) {
   constexpr int kVec = 16 / sizeof(scalar_t);
   constexpr int kLanes = group_size / kVec;
   static_assert(kVec == 8, "expects 16-bit input");
@@ -145,9 +153,14 @@ __global__ void silu_and_mul_per_block_quant_vec_kernel(
   float local_max = 0.f;
 #pragma unroll
   for (int i = 0; i < kVec; ++i) {
-    float const gate = static_cast<float>(g[i]);
+    float gate = static_cast<float>(g[i]);
+    float up = static_cast<float>(u[i]);
+    if constexpr (has_clamp) {
+      gate = fminf(gate, clamp_limit);
+      up = fminf(fmaxf(up, -clamp_limit), clamp_limit);
+    }
     float const sigmoid_gate = 1.0f / (1.0f + expf(-gate));
-    r[i] = gate * sigmoid_gate * static_cast<float>(u[i]);
+    r[i] = gate * sigmoid_gate * up;
     local_max = fmaxf(local_max, fabsf(r[i]));
   }
 #pragma unroll
@@ -161,6 +174,9 @@ __global__ void silu_and_mul_per_block_quant_vec_kernel(
     group_scale = fminf(group_scale, *scale_ub);
   }
   group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+  if constexpr (use_ue8m0) {
+    group_scale = exp2f(ceilf(log2f(group_scale)));
+  }
   if (!valid) {
     return;
   }
@@ -188,7 +204,8 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
                                   torch::stable::Tensor& scales,
                                   int64_t group_size,
                                   std::optional<torch::stable::Tensor> scale_ub,
-                                  bool is_scale_transposed) {
+                                  bool is_scale_transposed, bool use_ue8m0,
+                                  std::optional<double> clamp_limit) {
   static torch::headeronly::ScalarType kFp8Type =
       is_fp8_ocp() ? torch::headeronly::ScalarType::Float8_e4m3fn
                    : torch::headeronly::ScalarType::Float8_e4m3fnuz;
@@ -242,37 +259,48 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
               VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
                 VLLM_STABLE_DISPATCH_BOOL(
                     is_scale_transposed, transpose_scale, [&] {
-                      if constexpr (sizeof(scalar_in_t) == 2) {
-                        if (use_vec) {
-                          constexpr int kLanes = gs / 8;
-                          int64_t const total =
-                              static_cast<int64_t>(num_tokens) * num_groups *
-                              kLanes;
-                          dim3 vgrid(static_cast<unsigned>(
-                              (total + kVecBlock - 1) / kVecBlock));
-                          vllm::silu_and_mul_per_block_quant_vec_kernel<
-                              scalar_in_t, scalar_out_t, transpose_scale, gs>
-                              <<<vgrid, kVecBlock, 0, stream>>>(
+                      VLLM_STABLE_DISPATCH_BOOL(use_ue8m0, ue8m0, [&] {
+                        VLLM_STABLE_DISPATCH_BOOL(
+                            clamp_limit.has_value(), clamp, [&] {
+                              if constexpr (sizeof(scalar_in_t) == 2) {
+                                if (use_vec) {
+                                  constexpr int kLanes = gs / 8;
+                                  int64_t const total =
+                                      static_cast<int64_t>(num_tokens) *
+                                      num_groups * kLanes;
+                                  dim3 vgrid(static_cast<unsigned>(
+                                      (total + kVecBlock - 1) / kVecBlock));
+                                  vllm::silu_and_mul_per_block_quant_vec_kernel<
+                                      scalar_in_t, scalar_out_t,
+                                      transpose_scale, gs, ue8m0, clamp>
+                                      <<<vgrid, kVecBlock, 0, stream>>>(
+                                          out.mutable_data_ptr<scalar_out_t>(),
+                                          scales.mutable_data_ptr<float>(),
+                                          input.const_data_ptr<scalar_in_t>(),
+                                          scale_ub.has_value()
+                                              ? scale_ub
+                                                    ->const_data_ptr<float>()
+                                              : nullptr,
+                                          hidden_size, num_groups, num_tokens,
+                                          static_cast<float>(
+                                              clamp_limit.value_or(0.0)));
+                                  return;
+                                }
+                              }
+                              vllm::silu_and_mul_per_block_quant_kernel<
+                                  scalar_in_t, scalar_out_t, transpose_scale,
+                                  gs, ue8m0, clamp><<<grid, block, 0, stream>>>(
                                   out.mutable_data_ptr<scalar_out_t>(),
                                   scales.mutable_data_ptr<float>(),
                                   input.const_data_ptr<scalar_in_t>(),
                                   scale_ub.has_value()
                                       ? scale_ub->const_data_ptr<float>()
                                       : nullptr,
-                                  hidden_size, num_groups, num_tokens);
-                          return;
-                        }
-                      }
-                      vllm::silu_and_mul_per_block_quant_kernel<
-                          scalar_in_t, scalar_out_t, transpose_scale, gs>
-                          <<<grid, block, 0, stream>>>(
-                              out.mutable_data_ptr<scalar_out_t>(),
-                              scales.mutable_data_ptr<float>(),
-                              input.const_data_ptr<scalar_in_t>(),
-                              scale_ub.has_value()
-                                  ? scale_ub->const_data_ptr<float>()
-                                  : nullptr,
-                              hidden_size);
+                                  hidden_size,
+                                  static_cast<float>(
+                                      clamp_limit.value_or(0.0)));
+                            });
+                      });
                     });
               });
             });
