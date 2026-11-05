@@ -98,6 +98,10 @@ class SpecializedDraft(LayerStages):
         self.fused_embedding = self.ar_norm is not None and self._build_embedding()
         self.head: Any = None
         self.argmax = self._build_argmax() if greedy else None
+        if not greedy:
+            logger.info_once(
+                "Specialized draft: stock argmax (use_local_argmax_reduction off)"
+            )
 
     def _build_embedding(self) -> bool:
         """Whether the embedding's all-reduce can take the boundary mailbox."""

@@ -21,7 +21,9 @@ raises with all of them at startup:
   a relaxed check.
 - FP8 KV cache; BF16 KDA conv state and FP32 recurrent state; no
   ReplaySSM/RecoverSSM.
-- Speculative decoding: none, or MTP with at most 7 tokens.
+- Speculative decoding: none, or MTP with at most 7 tokens. The vocab-parallel
+  draft argmax (`draft_argmax.py`) runs only when the speculative config sets
+  `use_local_argmax_reduction`; the GLM-5.3-Flash recipe documents the flag.
 
 ## Structure
 
