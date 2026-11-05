@@ -73,6 +73,9 @@ class BlockTables:
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs), dtype=torch.int32
         )
+        # CPU rows of num_blocks are written only in append_block_ids; skip the
+        # per-step flush when nothing changed.
+        self._num_blocks_dirty = False
         self.fused_writer: FusedStagedWriter | None = None
         if self.num_kv_cache_groups > 1:
             # Only the multi-group path uses the fused writer.
@@ -142,6 +145,7 @@ class BlockTables:
                 )
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
+            self._num_blocks_dirty = True
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
@@ -155,7 +159,11 @@ class BlockTables:
             self.fused_writer.apply(
                 self.block_tables, self.block_table_ptrs, self.block_table_strides
             )
-        self.num_blocks.copy_to_uva()
+        if self._num_blocks_dirty:
+            self.num_blocks.copy_to_uva()
+            # Clear only after a successful copy so a failed flush is retried
+            # on the next step instead of leaving the device buffer stale.
+            self._num_blocks_dirty = False
 
     def gather_block_tables(
         self,

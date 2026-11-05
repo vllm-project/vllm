@@ -430,6 +430,54 @@ def test_shared_block_tables_clear_rows_from_larger_batch(
                 torch.testing.assert_close(view[:num_reqs], expected.to(torch.int32))
 
 
+def test_num_blocks_flush_skipped_when_clean():
+    """No-op steps must not copy num_blocks to the device.
+
+    num_blocks.np is written only in append_block_ids, so a
+    apply_staged_writes() call without a preceding append must leave the
+    device buffer untouched (no pool copy), while appending blocks flushes
+    exactly once.
+    """
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=4,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[8],
+        device=device,
+    )
+    copy_calls = 0
+    orig_copy = block_tables.num_blocks.pool.copy_to_uva
+
+    def counting_copy_to_uva(x):
+        nonlocal copy_calls
+        copy_calls += 1
+        return orig_copy(x)
+
+    block_tables.num_blocks.pool.copy_to_uva = counting_copy_to_uva
+
+    # Nothing staged: the per-step flush must not touch the device buffer.
+    block_tables.apply_staged_writes()
+    assert copy_calls == 0
+
+    # Appending blocks dirties num_blocks; the flush copies once.
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([1, 2],),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+    assert copy_calls == 1
+    assert torch.equal(
+        block_tables.num_blocks.gpu[:, :1],
+        torch.tensor([[2]], dtype=torch.int32, device=device),
+    )
+
+    # A second flush with nothing appended is skipped again.
+    block_tables.apply_staged_writes()
+    assert copy_calls == 1
+
+
 def test_external_block_table_output_preserves_shared_rows(populated_block_tables):
     """PCP-local gathers must neither clear shared rows nor reset their tracking."""
     tables = populated_block_tables
