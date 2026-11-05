@@ -1,18 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Verification of a plan that is not a chain: the walk down the tree.
-
-Every plan row gets the target's token: the argmax for a greedy request, else a
-draw from the row's processed target distribution at its plan position. The walk
-then goes from the root to the child whose token equals the current row's target
-token, until a row has no such child. The accepted rows are the path (root
-first); the committed tokens are the target tokens of the path rows, the last of
-which is the bonus token.
-
-Each committed token is the target's draw at its prefix, so the walk is lossless
-whenever the drafted tokens do not depend on that draw (deterministic drafts,
-such as a draft model's top-k).
-"""
+"""Verification of a plan that is not a chain: from the root, walk to the child
+whose token is the target's token at the current row (argmax, or a draw at the
+plan position). Lossless when the drafts do not depend on that draw."""
 
 from dataclasses import dataclass
 

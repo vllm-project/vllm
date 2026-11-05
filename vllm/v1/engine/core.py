@@ -266,11 +266,8 @@ class EngineCore:
         enable_envs_cache()
 
     def _set_spec_resources(self, vllm_config: VllmConfig) -> None:
-        """Lower a branching speculator's declared resources to what the model's
-        layers verify on every rank (pipeline ranks hold different layers) and
-        run every worker with them. Before capture; memory stays sized for the
-        declared resources, which the effective ones never exceed. A chain runs
-        as declared, which each worker checks against its own layers."""
+        """Lower a branching speculator's declared resources to what every rank's
+        layers verify and run every worker with them, before capture."""
         speculative_config = vllm_config.speculative_config
         if speculative_config is None:
             return

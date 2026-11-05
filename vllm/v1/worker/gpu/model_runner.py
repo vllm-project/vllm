@@ -1732,10 +1732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return block_tables, slot_mappings
 
     def set_spec_resources(self, resources: SpecResources) -> None:
-        """Run speculation with ``resources``, the engine core's adaptation of
-        the declared ones to what every rank verifies. Called once, before the
-        CUDA graphs are captured; the memory stays sized for the declared
-        resources."""
+        """Run speculation with the adapted ``resources``, before capture."""
         assert self.spec_round is not None
         if self.cudagraph_manager is not None:
             self.cudagraph_manager.set_spec_resources(resources)
@@ -2638,12 +2635,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 def skips_drafter(
     scheduler_output: SchedulerOutput, dp_sync_state: DPSyncState | None
 ) -> bool:
-    """Whether the step skips the drafter: only when the candidate budget chose
-    no drafts (budget 1) and there is one DP rank. A step whose requests cannot
-    use drafts (``skip_drafts``) still proposes K=0, so a drafter with its own
-    KV writes it; under DP the drafter's forward runs in lockstep on every rank.
-    A skipped drafter leaves the step's draft KV unwritten; the target verifies
-    every draft, so outputs do not change."""
+    """Whether the step skips the drafter: the candidate budget chose no drafts
+    and there is one DP rank (under DP the drafter runs in lockstep)."""
     return dp_sync_state is None and scheduler_output.num_spec_tokens_to_schedule == 0
 
 

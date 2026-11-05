@@ -63,10 +63,8 @@ class SpeculatorConfig:
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
-    # Fully qualified names of `(vllm_config) -> SpecKernelProvider` factories
-    # whose spec kernels overlay the in-tree ones, in order: a later one wins a
-    # key (vllm/v1/worker/gpu/spec_decode/kernels.py). A provider may supply any
-    # subset of keys.
+    # Qualified names of `(vllm_config) -> SpecKernelProvider` factories that
+    # overlay the in-tree spec kernels in order (spec_decode/kernels.py).
     spec_kernel_providers: ClassVar[tuple[str, ...]] = ()
 
     # --- SpeculativeConfig setup ---
@@ -155,11 +153,8 @@ class SpeculatorConfig:
 
     def resources(self, max_num_seqs: int) -> "SpecResources":
         """What speculation holds, declared once at startup; memory is sized for
-        it. The engine core may lower it to what the model verifies
-        (`adapt_resources`). The default is a chain of up to K drafts: one
-        decode graph of K + 1 rows per request, or one per K of a Dynamic SD
-        schedule (adaptive verification captures its variable-length graphs
-        itself).
+        it. The default is a chain of up to K drafts with one decode graph of
+        K + 1 rows, or one per K of a Dynamic SD schedule.
         """
         from vllm.v1.spec_decode.dynamic.utils import dynamic_sd_decode_tiers
         from vllm.v1.spec_decode.resources import SpecResources
@@ -172,29 +167,19 @@ class SpeculatorConfig:
     def adapt_resources(
         self, declared: "SpecResources", caps: "SpecCapabilities"
     ) -> "SpecResources":
-        """The resources to run with on a model whose layers verify at most
-        ``caps.plan_kind`` (at least ``"chain"``), at most ``declared``.
-
-        The default runs a speculator that branches as a chain of the same
-        length. A tree speculator overrides it to pick its chain (a 64-row tree
-        is not a 64-token chain).
+        """The resources to run with, at most ``declared``, on layers that verify
+        at most ``caps.plan_kind``. The default runs a branching speculator as a
+        chain of the same length; a tree speculator may pick its own chain.
         """
         if caps.plan_kind == "chain":
             return replace(declared, max_branching=1)
         return declared
 
     def candidate_budget(self, view: "BudgetView") -> int:
-        """The rows per request, the root included, that the drafts proposed
-        after this step may take, in ``[1, num_speculative_tokens + 1]``.
-
-        The scheduler calls it once per `schedule()` that schedules requests,
-        in the scheduler process: state kept on this object stays there. The
-        drafts proposed now are verified next step, so the budget binds one
-        step later, as the Dynamic SD schedule does. 1 proposes no drafts
-        (`skip_drafts`): the next step is a plain decode, which replays the
-        plain-decode graph when 1 is among ``capture_rows``.
-        The default is K + 1, or the Dynamic SD schedule's K + 1 at this
-        batch size.
+        """The rows per request, root included, that the drafts proposed after
+        this step may take, in ``[1, num_speculative_tokens + 1]``; 1 proposes
+        none. Called once per `schedule()` in the scheduler process; it binds
+        one step later. The default is K + 1, or the Dynamic SD schedule's.
         """
         k = self.num_speculative_tokens
         if not self.spec_config.uses_dynamic_speculative_decoding():

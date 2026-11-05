@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The layout a :class:`VerifyPlan` gives the target's verify forward.
-
-Each request verifies the last ``rows[b]`` rows of its query; row 0 of those is the
-root. The runner computes the batch's positions and slot mappings as for a chain
-(``num_computed_tokens + i``) and keeps the slot mappings: every row writes its KV at
-the chain slot of its row index, and the commit compacts the accepted path afterwards.
-For a plan that is not a chain, :meth:`PlanLayout.apply` then moves each row's
-position to ``num_computed_tokens + depth`` and computes its ancestor set (bit ``j``
-set iff row ``j`` is the row or one of its ancestors), which tree attention reads.
-"""
+"""The layout a :class:`VerifyPlan` gives the target's verify forward: plan
+positions (``num_computed_tokens + depth``) and ancestor sets over the chain slot
+mappings, which stay as they are."""
 
 import torch
 
@@ -109,16 +102,10 @@ def _plan_layout_kernel(
 
 
 class PlanLayout:
-    """The batch's verify rows laid out per query token, in buffers CUDA graphs
-    replay, and the chain positions to put back after the forward.
-
-    Per query token: ``tree_parents`` (the parent as a row of the request's query,
-    -1 for the query's first token; a chain's ``i - 1`` for tokens that are not plan
-    rows), ``tree_ancestors`` (the row's ancestor bits over the query rows for a
-    branching plan, 0 for every token of a chain: attend causally) and
-    ``pos_delta`` (plan position minus chain position). The first two are what
-    ``CommonAttentionMetadata.tree_parents`` / ``tree_ancestors`` point at.
-    """
+    """Per query token, in static buffers: ``tree_parents`` (parent row in the
+    query, -1 for its first token), ``tree_ancestors`` (ancestor bits; 0 =
+    causal) and ``pos_delta`` (plan minus chain position), plus the chain
+    positions to put back after the forward."""
 
     def __init__(
         self,

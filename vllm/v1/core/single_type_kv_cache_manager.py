@@ -1789,12 +1789,8 @@ class MambaManager(SingleTypeKVCacheManager):
         prefill_end: int = 0,
         num_draft_tokens: int | None = None,
     ) -> int:
-        """See `SingleTypeKVCacheManager.get_num_blocks_to_allocate`.
-
-        `num_draft_tokens` is the number of drafts the request verifies this
-        step; the request then needs one spec block per draft instead of
-        `num_speculative_blocks`. None keeps `num_speculative_blocks`.
-        """
+        """See `SingleTypeKVCacheManager.get_num_blocks_to_allocate`; with
+        `num_draft_tokens`, one spec block per draft."""
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
             len(new_computed_blocks) > 0
@@ -1906,12 +1902,8 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens_main_model: int,
         num_draft_tokens: int | None = None,
     ) -> list[KVCacheBlock]:
-        """See `SingleTypeKVCacheManager.allocate_new_blocks`.
-
-        With `num_draft_tokens`, first frees the speculative blocks past what
-        this step and the state the previous verify accepted need; see
-        `take_spec_state_block_counts`.
-        """
+        """See `SingleTypeKVCacheManager.allocate_new_blocks`; with
+        `num_draft_tokens`, first frees the spec blocks no step still needs."""
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
             state_idx = cdiv(num_tokens, self.block_size) - 1

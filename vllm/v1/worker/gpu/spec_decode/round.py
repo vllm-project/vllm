@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Types of the speculative round contract.
+"""Types of the speculative round contract (see ``round_contract.md``).
 
-A speculative step is a round: the speculator plans the rows the target verifies
-(:class:`VerifyPlan`), the target runs them, the runner accepts a path through them
-(:class:`AcceptResult`) and commits the KV and the recurrent state along that
-path. What speculation holds is :class:`vllm.v1.spec_decode.resources.SpecResources`.
-
-Everything a speculator hands the runner is either a frozen dataclass of host integers
-or a device tensor in a buffer the speculator owns and keeps alive for the step. The
-runner never reads a device value on the host.
-
-Shapes use ``R = max_num_reqs`` (indexed by batch row, the order of ``idx_mapping``)
-and ``C = num_speculative_tokens + 1`` (rows per request, the root included).
+Shapes use ``R = max_num_reqs`` (by batch row, the order of ``idx_mapping``) and
+``C = num_speculative_tokens + 1`` (rows per request, the root included).
 """
 
 from collections.abc import Sequence
@@ -24,21 +15,11 @@ import torch
 
 @dataclass
 class VerifyPlan:
-    """The rows the target verifies this step, per scheduled request, as device tensors.
+    """The rows the target verifies this step, per scheduled request.
 
-    Row 0 of a request is the root: its last committed token, whose logits sample the
-    bonus token. Rows ``1..rows[r]-1`` are candidates; ``parent[r, i]`` is the row
-    that candidate ``i`` continues, in ``[0, i)``, so rows are ordered parent first and
-    any prefix of them is a plan too. A chain has ``parent[r, i] == i - 1``. Entries
-    past a request's rows are ignored.
-
-    The runner derives from the plan the position of each row (``num_computed_tokens``
-    plus its depth), its ancestor set, and its KV slot: every row writes its KV
-    at the chain slot of its row index, and the commit compacts the accepted path
-    afterwards.
-
-    Buffers belong to whoever built the plan and stay valid until the commit returns,
-    so CUDA graph replays read stable addresses.
+    Row 0 is the root; ``parent[r, i]`` is in ``[0, i)``, so rows are ordered
+    parent first and a chain has ``parent[r, i] == i - 1``. Entries past a
+    request's rows are ignored. Buffers stay valid until the commit returns.
     """
 
     parent: torch.Tensor
@@ -48,10 +29,8 @@ class VerifyPlan:
     known). None only for the runner's chain plan, whose tokens are in its draft
     buffer."""
     is_chain: bool = False
-    """Host flag set by the builder when every ``parent[r, i] == i - 1`` by
-    construction. The runner then runs the chain-only path: positions stay
-    ``num_computed_tokens + i``, no ancestor sets, no KV compaction. Never derived
-    from the device tensors."""
+    """Host flag: every ``parent[r, i] == i - 1`` by construction. The runner
+    then keeps chain positions and compacts no KV."""
     rows: np.ndarray | None = None
     """``[num_reqs]`` host int32: the rows each request verifies, at most the
     ``PlanInputs.scheduled_rows`` the scheduler reserved; the drafts past them leave
@@ -87,14 +66,11 @@ class PlanInputs:
 
 @dataclass
 class AcceptResult:
-    """Which rows of each request the target confirmed, and the token that follows.
+    """The accepted rows of each request and the committed tokens.
 
-    ``path[r, :path_len[r]]`` lists the accepted rows from the root (row 0) down, each
-    a child of the previous one, so ``path[r, j] >= j``. ``sampled[r, :path_len[r]]``
-    are the committed tokens: the accepted candidates' tokens followed by the bonus
-    token sampled from the logits of the last accepted row. The runner commits the KV
-    and the recurrent state along ``path``; every other row is rejected. Whether the
-    commit moves anything is the plan's ``is_chain``, not a property of the result.
+    ``path[r, :path_len[r]]`` lists the accepted rows from the root down
+    (``path[r, j] >= j``); ``sampled[r, :path_len[r]]`` are the accepted tokens
+    followed by the bonus token.
     """
 
     path: torch.Tensor

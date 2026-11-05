@@ -225,11 +225,8 @@ class Sampler:
 
     def reads_row_prefix(self, idx_mapping_np: np.ndarray) -> bool:
         """Whether a request of the batch has logits processing that reads the
-        tokens before each verify row: penalties, bad words, a thinking budget,
-        or a custom logits processor (assumed to). Such a processor is handed the
-        rows before a row of its request as the row's prefix, which only holds for
-        a chain. Logit bias (also allowed tokens and min_tokens) reads only the
-        row's position."""
+        tokens before each row (penalties, bad words, a thinking budget, custom
+        processors), which only a chain lays out as the row's prefix."""
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return False
         for processor in self.logits_processors:

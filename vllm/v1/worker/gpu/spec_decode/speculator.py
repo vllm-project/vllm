@@ -76,11 +76,9 @@ class BaseSpeculator(ABC):
     drafting consumes target model state), which the model runner loads and
     allocates draft KV cache for.
 
-    `propose` is not called on a step whose next round verifies no drafts
-    (candidate budget 1, `num_speculative_tokens == 0`), unless another data
-    parallel rank drafts. A drafter that keeps its own KV then has no entries
-    for the tokens accepted on that step; it may catch up in its next `propose`
-    from `input_batch`, or leave them, at a possible cost in acceptance.
+    `propose` is skipped on a step whose next round verifies no drafts unless
+    another data parallel rank drafts; a drafter keeping its own KV may catch
+    up from `input_batch` in its next `propose`.
     """
 
     num_query_per_req: int = 1
@@ -94,11 +92,8 @@ class BaseSpeculator(ABC):
     resources: SpecResources | None = None
 
     def bind_resources(self, resources: SpecResources) -> None:
-        """Run with ``resources``: the config's declared resources lowered to
-        what the target's layers verify (``SpeculatorConfig.adapt_resources``).
-        Called once on every worker, before capture. With
-        ``resources.max_branching == 1`` every batch is ``PlanInputs.chain_only``.
-        """
+        """Run with ``resources`` (``SpeculatorConfig.adapt_resources``); called
+        once per worker, before capture."""
         self.resources = resources
 
     @abstractmethod
@@ -141,10 +136,8 @@ class BaseSpeculator(ABC):
         """Propose up to `num_speculative_tokens` drafts per request (the
         speculator's K when None), -1 where it proposes fewer.
 
-        With `num_speculative_tokens == 0` (budget 1; called only when another
-        data parallel rank drafts) it proposes nothing and may write draft KV
-        only at this step's target positions, which `slot_mappings` cover: it
-        must run no draft decode step, whose KV slots exist for drafts.
+        With `num_speculative_tokens == 0` it proposes nothing and must run no
+        draft decode step: KV slots exist only at `slot_mappings`.
         """
 
     def prepare_watermarking(
@@ -154,19 +147,13 @@ class BaseSpeculator(ABC):
         return
 
     def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
-        """The rows the target verifies this step.
+        """The rows the target verifies this step (``round_contract.md``, step 2).
 
-        Called once per scheduled batch that carries drafts, before its inputs are
-        built; adaptive verification (which sets its own budget) refuses a
-        speculator that overrides it. Called eagerly, outside any captured CUDA
-        graph: the runner copies the plan into its own static buffers, so the plan's
-        tensors need not be static. Return None (the default) to verify every
-        scheduled draft as a chain. Otherwise return a plan whose tensors cover
-        ``inputs``' batch rows and stay valid until the step commits. Request ``r``
-        verifies ``plan.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``); the
-        drafts past it leave the batch and count as rejected. A plan that is not a
-        chain needs ``SpecResources.max_branching > 1`` (in the bound resources, see
-        `bind_resources`) and a batch that is not ``inputs.chain_only``.
+        Called eagerly once per batch with drafts, before its inputs are built.
+        None (the default) verifies every scheduled draft as a chain. Request
+        ``r`` verifies ``plan.rows[r] <= inputs.scheduled_rows[r]`` rows; the
+        rest count as rejected. A branching plan needs ``max_branching > 1`` and
+        a batch that is not ``inputs.chain_only``.
         """
         return None
 

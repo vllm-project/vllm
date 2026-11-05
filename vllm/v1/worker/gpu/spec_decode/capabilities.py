@@ -1,18 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""What the target model can verify: chains, or trees.
-
-A speculator declares the plans it wants to verify (``SpecResources.plan_kind``).
-Each worker applies one rule to its layers after the attention backends are
-built: the model verifies trees when every target layer is full attention on a
-backend that verifies trees or has provider kernels for its kind, and chains
-otherwise. It reports the result with a reason for each layer kind or setting
-that lowers it (``SpecCapabilities``). The engine core reduces the reports of
-every rank, lets the speculator adapt its resources to them
-(``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
-to every worker. A tree speculator on a model that cannot verify trees
-therefore runs as a chain.
-"""
+"""What the target model can verify, chains or trees, and the startup rule that
+lowers a speculator's resources to it (see ``round_contract.md``, Startup)."""
 
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -43,11 +32,8 @@ class SpecLayerKind:
 
     family: Literal["attn", "mamba", "layout"]
     variant: str
-    """attn: the ``KVCacheSpecKind`` value; mamba: the layer class's
-    ``spec_layer_variant``; layout: what a commit moves,
-    ``"paged_token"`` (KV of one tensor per layer, any element size),
-    ``"paged_split_scale"`` (KV with separate scales: nvfp4, per-token-head) or
-    ``"mamba_state"``."""
+    """attn: the ``KVCacheSpecKind`` value; mamba: ``spec_layer_variant``;
+    layout: ``"paged_token"``, ``"paged_split_scale"`` or ``"mamba_state"``."""
     state_mode: str = ""
     """mamba and layout ``mamba_state`` only: how drafts keep recurrent state,
     ``"slots"``, ``"replay"``, ``"recover"`` or ``"align"``."""
@@ -96,11 +82,8 @@ def reduce_spec_capabilities(
 def spec_layers(
     attn_groups: Iterable[Iterable["AttentionGroup"]], layers: Mapping[str, Any]
 ) -> Iterator[tuple["AttentionGroup", str, Any, Any]]:
-    """``(group, name, spec, layer)`` for each target layer a speculative round
-    verifies: its attention group, KV cache spec and module. Draft layers,
-    hidden-state caches and encoder or cross attention (whose rows do not
-    attend to each other) are not verified.
-    """
+    """``(group, name, spec, layer)`` for each target layer a round verifies:
+    not draft layers, hidden-state caches, or encoder or cross attention."""
     from vllm.v1.kv_cache_interface import (
         CrossAttentionSpec,
         EncoderOnlyAttentionSpec,
@@ -141,17 +124,9 @@ def layer_spec_limits(
     mamba_state_mode: str,
     kernels: "KernelRegistry | None" = None,
 ) -> list[SpecLimit]:
-    """The plan kind caps of the target's layers, one per (layer kind, reason)
-    with its layer count.
-
-    A model verifies trees when every target layer is full attention on a
-    backend that verifies trees (``AttentionBackend.serves_trees``) or
-    has provider kernels for its kind; otherwise it verifies chains. A layer
-    verifies what the spec kernels it needs support for it
-    (``KernelRegistry.plan_kind``; ``kernels`` defaults to the reference
-    kernels). Other attention kinds, and recurrent layers (``MambaBase``) that
-    declare no ``spec_layer_variant``, verify chains. Only the layers of
-    :func:`spec_layers` count.
+    """The plan kind caps of the target's layers (:func:`spec_layers`), one per
+    (layer kind, reason) with its layer count. ``kernels`` defaults to the
+    in-tree kernels.
     """
     from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry, SpecLayerSpec
@@ -208,10 +183,8 @@ def attn_layer_kind(spec: Any) -> SpecLayerKind:
 
 
 def attn_layout(layer: Any, spec: Any) -> str:
-    """What committing an attention layer's accepted path moves: ``""`` for a
-    cache not paged by slot (its model keeps its own commit),
-    ``"paged_split_scale"`` for KV quantised with separate scales, else
-    ``"paged_token"``."""
+    """What committing an attention layer's accepted path moves (``""``: a
+    cache not paged by slot, whose model keeps its own commit)."""
     from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
 
     if not getattr(spec, "uses_slot_mapping", True):
@@ -227,14 +200,8 @@ def resolve_spec_resources(
     declared: "SpecResources",
     capabilities: Sequence[SpecCapabilities],
 ) -> "SpecResources":
-    """The resources speculation runs with: the speculator's declaration adapted
-    to what every rank verifies (``capabilities``, one per worker).
-
-    Logs one line per cap that lowers the declared plan kind, and one when the
-    adapted ``capture_rows`` lower ``max_rows``. Raises when the
-    adapted resources exceed the declared ones or the capabilities. A speculator
-    that must not run with a lower plan kind raises in its ``adapt_resources``.
-    """
+    """The speculator's declared resources adapted to what every rank verifies
+    (``capabilities``, one per worker); logs each lowering."""
     caps = reduce_spec_capabilities(capabilities)
     lowering = [
         limit
@@ -262,9 +229,7 @@ def resolve_spec_resources(
 def validate_effective_resources(
     declared: "SpecResources", effective: "SpecResources", caps: SpecCapabilities
 ) -> None:
-    """Check ``SpeculatorConfig.adapt_resources``: memory and graphs are sized
-    for ``declared``, so ``effective`` may only take less of them, and its plan
-    kind must be one every layer verifies."""
+    """Check that ``effective`` takes no more than ``declared`` and ``caps``."""
     problems = []
     if plan_kind_rank(effective.plan_kind) > plan_kind_rank(
         min_plan_kind((declared.plan_kind, caps.plan_kind))

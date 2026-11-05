@@ -1,51 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The kernels speculative decoding adds to verify and commit, by key.
+"""The kernels speculative decoding adds to verify and commit, by key, and the
+registry that binds them (see ``docs/features/speculative_decoding/round_contract.md``).
 
-A spec kernel serves one :data:`KernelKey`: a layer kind (``SpecLayerKind.key()``)
-and an op.
-
-- ``verify`` runs the convolution and recurrence of a recurrent layer's
-  spec-decode rows (keys ``"mamba:<variant>@<state mode>"``). The layer calls it
-  from its forward, so it runs inside the captured decode graphs.
-- ``commit`` moves what the accepted path wrote to where the next step reads it
-  (``"layout:paged_token"`` for attention KV, ``"layout:mamba_state@<state
-  mode>"`` for recurrent state). The runner calls it after acceptance on a step
-  whose plan is not a chain; a chain commits nothing.
-
-:class:`KernelRegistry` is :class:`ReferenceKernels` overlaid by the providers
-the speculator names in ``SpeculatorConfig.spec_kernel_providers``, in order: a
-later provider wins a key. The registry also decides what the target verifies:
-a layer verifies the highest plan kind that every kernel it needs
-(:meth:`KernelRegistry.required_keys`) supports for it, and a chain when one is
-missing. So a provider may supply any subset of keys; a key it leaves out keeps
-the reference kernel, or lowers the plan kind when there is none, and a missing
-kernel is never called.
-
-A provider, for example of GDN tree verify (a recurrent layer needs a verify and
-a state commit kernel to verify trees)::
-
-    class MyGDNVerify(SpecKernel):
-        def supports(self, layer):
-            return frozenset({"chain", "tree"})
-
-        def verify(self, rows: GDNSpecRows) -> None: ...
-
-
-    class MyProvider:
-        name = "my_provider"
-
-        def __init__(self, vllm_config): ...
-
-        def kernels(self):
-            return {
-                ("mamba:gdn@slots", "verify"): MyGDNVerify(),
-                ("layout:mamba_state@slots", "commit"): MyConvWindowCommit(),
-            }
-
-
-    class MySpeculatorConfig(SpeculatorConfig):
-        spec_kernel_providers = ("my_package.MyProvider",)
+A provider named in ``SpeculatorConfig.spec_kernel_providers`` may supply any subset
+of keys; a later provider wins a key, and a layer missing a kernel verifies chains.
 """
 
 import functools
@@ -74,9 +33,6 @@ KernelKey = tuple[str, Op]
 def key_name(key: KernelKey) -> str:
     """``"mamba:gdn@slots/verify"``: a key as logs and docs spell it."""
     return f"{key[0]}/{key[1]}"
-
-
-# --- what a kernel is handed -------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -174,36 +130,21 @@ class GDNSpecRows:
     """``[T, num_v_heads, head_v_dim]``, written by the kernel."""
 
 
-# --- kernels and providers ---------------------------------------------------
-
-
 class SpecKernel:
-    """A kernel for one key. Subclass it, implement :meth:`supports` and the
-    key's op:
-
-    - ``verify(rows) -> None`` (``mamba:gdn@*`` keys): ``rows`` is the layer's
-      :class:`GDNSpecRows`. Write every row's output
-      to ``rows.out`` and keep the in-tree state layout: row ``i`` of request
-      ``b`` stores its convolution and recurrent state at ``state_indices[b, i]``
-      and continues from row ``parents[i]`` (row ``i - 1`` when ``parents`` is
-      None); the root continues from ``state_indices[b, num_accepted_tokens[b] -
-      1]``. Called by every forward with spec-decode rows, CUDA graph captures
-      included: no host syncs and no allocations sized by data.
-    - ``commit(step: CommitStep) -> None`` (``layout:*`` keys): move what the
-      rows on ``step.result.path`` wrote to where the next step reads it.
+    """A kernel for one key: implement :meth:`supports` and the key's op,
+    ``verify(rows: GDNSpecRows)`` for ``mamba:gdn@*`` keys or
+    ``commit(step: CommitStep)`` for ``layout:*`` keys. A verify kernel keeps the
+    in-tree state layout and runs inside captured graphs: no host syncs and no
+    allocations sized by data.
     """
 
     def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
-        """The plan kinds this kernel runs for ``layer``; empty declines the
-        layer (e.g. on its state dtype, head size or conv width), which then
-        verifies chains. A verify kernel without ``"chain"`` is not used: its
-        layer runs it on chain batches too. Called before :meth:`bind`."""
+        """The plan kinds this kernel runs for ``layer``; empty declines it.
+        A verify kernel without ``"chain"`` is not used."""
         raise NotImplementedError
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
-        """Called once per worker, before capture, with every layer the kernel
-        runs on. Allocate here, and raise here on what it cannot run, not at
-        the first step."""
+        """Called once per worker before capture; allocate and raise here."""
 
 
 class SpecKernelProvider(Protocol):
@@ -238,9 +179,6 @@ class ReferenceKernels:
         from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
 
         return {("layout:paged_token", "commit"): KvCompactor()}
-
-
-# --- the registry ------------------------------------------------------------
 
 
 class KernelRegistry:

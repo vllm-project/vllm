@@ -1,19 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Commit of a speculative round along the accepted path.
-
-Every verify row wrote its KV at the chain slot of its row index
-(``num_computed_tokens + row``). After acceptance the accepted rows of a plan that is
-not a chain are not a prefix of the rows, so :class:`KvCompactor` copies the KV of
-path row ``path[j]`` to chain slot ``j`` in every attention layer; the next step then
-sees the cache a chain round would have left. A chain plan's path is ``arange``: the
-commit moves nothing and launches nothing.
-
-The recurrent state of hybrid models commits by row index instead: the model state
-resumes from the state the last accepted row wrote (``accepted_row``). Lining the
-conv window up with the path is the ``layout:mamba_state@<state mode>/commit``
-kernel a provider brings with its recurrent tree verify.
-"""
+"""Commit of a speculative round along the accepted path: :class:`KvCompactor`
+copies the KV of path row ``path[j]`` to chain slot ``j``, so the next step sees
+the cache a chain round would have left. Recurrent state resumes from the last
+accepted row (``accepted_row``)."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -36,12 +26,8 @@ from vllm.v1.worker.gpu.spec_decode.round import AcceptResult
 def accept_result_of(
     sampler_output: SamplerOutput, chain_path: torch.Tensor
 ) -> AcceptResult:
-    """The round's :class:`AcceptResult`: the path the speculator's ``accept``
-    chose, else the chain's.
-
-    ``chain_path`` is the constant ``[R, C]`` table ``path[r, j] == j``; nothing is
-    computed, so a chain step pays no launch for the result.
-    """
+    """The round's :class:`AcceptResult`; a chain's path is a view of the
+    constant ``chain_path``, so it costs no launch."""
     sampled = sampler_output.sampled_token_ids
     path = sampler_output.accept_path
     if path is None:
@@ -76,13 +62,8 @@ class KvCacheLayout:
 
 
 def kv_cache_layout(kv_cache: torch.Tensor, num_blocks: int) -> KvCacheLayout:
-    """The layout of a layer's KV cache tensor as the attention backend views it.
-
-    vLLM gives every paged attention layer a ``[blocks, heads, block_size,
-    content]`` view (K and V packed in the content), and MLA layers squeeze it to
-    ``[blocks, block_size, content]``; the strides are the tensor's own, so a
-    permuted physical order is read correctly. A packed content row moves whole.
-    """
+    """The layout of a layer's ``[blocks, heads, block_size, content]`` (MLA:
+    ``[blocks, block_size, content]``) KV cache view, by its own strides."""
     shape, stride = kv_cache.shape, kv_cache.stride()
     if kv_cache.dim() not in (3, 4) or shape[0] != num_blocks:
         raise NotImplementedError(
@@ -160,13 +141,8 @@ def _compact_kv_kernel(
 
 class KvCompactor(SpecKernel):
     """The ``layout:paged_token`` commit: moves the KV of accepted path rows to
-    the chain slots in the layers it is bound to.
-
-    Each layer is read through its KV cache group's block table as the forward
-    got it (the batch's rows) and that group's tokens per block. Layers that
-    share one layout go in one launch. A layer that reads another layer's cache
-    (KV sharing) must not be bound: it would be compacted twice.
-    """
+    the chain slots, one launch per KV layout. A layer that shares another
+    layer's cache must not be bound: it would be compacted twice."""
 
     def __init__(self) -> None:
         self.launches: list[
@@ -231,9 +207,7 @@ class KvCompactor(SpecKernel):
             )
 
 
-# The copy moves bits, so any cache dtype (fp8 included) copies as an integer.
-# Names, resolved at launch: where vLLM disables Triton, ``tl`` is a placeholder
-# without int8 / int16, and the runner imports this module.
+# Any cache dtype copies as an integer; names, as ``tl`` may be a placeholder.
 _BITS = {1: "int8", 2: "int16", 4: "int32"}
 
 
