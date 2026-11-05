@@ -372,6 +372,7 @@ def _compute_window_segment_bounds(
     SLIDING_WINDOW: tl.constexpr,
     NUM_SEGMENTS: tl.constexpr,
     MIN_TILES_PER_SEGMENT: tl.constexpr,
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr,
 ):
     TILE_SIZE: tl.constexpr = 32
     segm_idx = tl.program_id(0)
@@ -393,6 +394,7 @@ def _compute_window_segment_bounds(
         False,  # USE_MM_PREFIX
         True,  # IS_3D
         USE_CAUSAL,
+        NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS_PER_SEQ,
     )
     tl.store(output_ptr + 2 * segm_idx, loop_lo)
     tl.store(output_ptr + 2 * segm_idx + 1, loop_hi)
@@ -400,9 +402,10 @@ def _compute_window_segment_bounds(
 
 @pytest.mark.parametrize("min_tiles", [1, 2, NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT])
 @pytest.mark.parametrize("causal", [True, False])
-@pytest.mark.parametrize("seq_len", [40, 600, 4096, 32768])
+@pytest.mark.parametrize("num_segments_per_seq", [0, 16])
+@pytest.mark.parametrize("seq_len", [40, 600, 1100, 1200, 1500, 4096, 32768])
 def test_splitk_segments_split_sliding_window(
-    causal: bool, seq_len: int, min_tiles: int
+    causal: bool, seq_len: int, min_tiles: int, num_segments_per_seq: int
 ) -> None:
     """3D segments tile the pruned window exactly, using only the segments
     that reduce_segments reads."""
@@ -416,6 +419,7 @@ def test_splitk_segments_split_sliding_window(
         SLIDING_WINDOW=window,
         NUM_SEGMENTS=num_segments,
         MIN_TILES_PER_SEGMENT=min_tiles,
+        NUM_SEGMENTS_PER_SEQ=num_segments_per_seq,
     )
     bounds = bounds.view(num_segments, 2).tolist()
 

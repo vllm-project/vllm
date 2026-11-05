@@ -543,6 +543,8 @@ def kernel_unified_attention(
         MAX_MM_RANGES,
         mm_prefix_range_ptr,
         seq_idx,
+        NUM_SEGMENTS_PER_SEQ,
+        MIN_TILES_PER_SEGMENT,
     )
 
     # iterate through tiles (now limited to the sliding window range)
