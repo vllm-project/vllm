@@ -132,8 +132,8 @@ For external load balancing, start one `vllm-rs serve` per rank with `--data-par
 
 ### Engine-free renderer
 
-`vllm-rs render` serves text-only request preprocessing without starting or
-connecting to a Python inference engine:
+`vllm-rs render` serves request preprocessing without starting or connecting
+to a Python inference engine:
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
@@ -142,8 +142,23 @@ cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
 ```
 
 It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
-tokenizer and model configuration files are loaded; model weights, PyTorch,
-and vLLM kernels are not required.
+tokenizer, model and processor configuration files are loaded; model weights,
+PyTorch, and vLLM kernels are not required.
+
+For multimodal models, chat render fetches and preprocesses images, video and
+audio, and returns them as the `features` object that `/inference/v1/generate`
+accepts, in the format the Python render API uses. The tensors are produced in
+`--dtype`, which must match the engine's: `auto` (the default) follows the
+model config, running float32 checkpoints in bfloat16 like vLLM. Set
+`"mm_payload": "none"` on a render request to get only item hashes and
+placeholder ranges, for example for cache-aware routing; such a response cannot
+be sent to generate. Pass `--language-model-only` to skip multimodal
+processing, and set `--limit-mm-per-prompt` to the engine's limits so that
+render rejects the same requests.
+
+Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
+`model`; rendering does not load the adapter weights, and the adapter name is
+passed through to generate.
 
 To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
 in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from

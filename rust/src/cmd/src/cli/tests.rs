@@ -5,11 +5,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
+use vllm_chat::multimodal::MmModality;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
     Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderDtype,
+    RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -52,6 +55,10 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
+        "--dtype",
+        "float16",
+        "--lora-modules",
+        "adapter-a=org/adapter-a",
         "--max-model-len",
         "32768",
         "--served-model-name",
@@ -60,6 +67,8 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        "--limit-mm-per-prompt",
+        r#"{"image": 2, "video": {"count": 1, "num_frames": 32}}"#,
         // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
         // hidden flag.
         "--skip-model-name-validation",
@@ -87,6 +96,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
+    assert_eq!(config.dtype, RenderDtype::Fixed(ModelDtype::Float16));
+    assert_eq!(config.lora_modules[0].name, "adapter-a");
+    assert!(!config.language_model_only);
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
@@ -95,6 +107,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    let limit = |modality| config.limit_mm_per_prompt[&modality].count();
+    assert_eq!(limit(MmModality::Image), Some(2));
+    assert_eq!(limit(MmModality::Video), Some(1));
     assert!(config.tls.is_none());
 }
 

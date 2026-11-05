@@ -21,7 +21,8 @@ use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
-    GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
+    GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
+    validate_request_compat as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -46,30 +47,41 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
+/// Base cards carry `max_model_len` and `root` = model path; LoRA cards carry
+/// `root` = adapter path and `parent` = base model.
 async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsResponse> {
     let created = unix_timestamp() as i64;
+    let base_cards = state.served_model_names.names().iter().map(|model| ModelObject {
+        id: model.clone(),
+        object: "model".to_string(),
+        created,
+        owned_by: "vllm".to_string(),
+        root: Some(state.model.clone()),
+        parent: None,
+        max_model_len: state.max_model_len,
+    });
+    let primary = state.served_model_names.primary().to_string();
+    let lora_cards = state.lora_modules.iter().map(|module| ModelObject {
+        id: module.name.clone(),
+        object: "model".to_string(),
+        created,
+        owned_by: "vllm".to_string(),
+        root: Some(module.path.clone()),
+        parent: Some(module.base_model_name.clone().unwrap_or_else(|| primary.clone())),
+        max_model_len: None,
+    });
     Json(ListModelsResponse {
         object: "list".to_string(),
-        data: state
-            .served_model_names
-            .names()
-            .iter()
-            .map(|model| ModelObject {
-                id: model.clone(),
-                object: "model".to_string(),
-                created,
-                owned_by: "vllm".to_string(),
-                root: Some(state.model.clone()),
-                parent: None,
-                max_model_len: state.max_model_len,
-            })
-            .collect(),
+        data: base_cards.chain(lora_cards).collect(),
     })
 }
 
+/// Accept LoRA adapter names as the model, like Python. Rendering does not use
+/// the adapter, so no LoRA request is resolved; the adapter name is passed
+/// through as the generate request's model.
 fn model_resolution(state: &RenderState) -> LoraModelResolution {
     LoraModelResolution {
-        model_names: state.served_model_names.clone(),
+        model_names: state.model_names(),
         lora_request: None,
     }
 }
@@ -89,12 +101,17 @@ fn lower_render_request(
     stream: bool,
     stream_options: Option<StreamOptions>,
     return_token_ids: Option<bool>,
+    mm_payload: MmPayload,
 ) -> Result<GenerateRequest, ApiError> {
     let prepared = state
         .text
         .prepare(text_request)
         .map_err(|error| text_submit_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
+    let features = (prepared.generate_request.mm_features)
+        .filter(|features| !features.is_empty())
+        .map(|features| MultiModalFeatures::from_prepared(features, mm_payload))
+        .transpose()?;
     let mut text_request = prepared.text_request;
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
@@ -118,6 +135,7 @@ fn lower_render_request(
         kv_transfer_params,
         ec_transfer_params,
         content_parts: None,
+        features,
         return_token_ids,
         output_mode: None,
         // Carry what the chat route would pass to the engine, so the engine
@@ -128,7 +146,7 @@ fn lower_render_request(
         .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
-    validate_generate_request(&request, &state.served_model_names)?;
+    validate_generate_request(&request, &state.model_names())?;
     Ok(request)
 }
 
@@ -166,6 +184,10 @@ async fn render_chat(
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
+    let mm_payload = body.mm_payload.unwrap_or(match body.return_mm_kwargs {
+        Some(false) => MmPayload::None,
+        _ => MmPayload::Tensors,
+    });
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     // Lowering has checked that `n` is at least 1.
@@ -191,6 +213,7 @@ async fn render_chat(
         stream,
         stream_options,
         return_token_ids,
+        mm_payload,
     )?))
 }
 
@@ -226,5 +249,6 @@ async fn render_completion(
         stream,
         stream_options,
         return_token_ids,
+        MmPayload::Tensors,
     )?]))
 }

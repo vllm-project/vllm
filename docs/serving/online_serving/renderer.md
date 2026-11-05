@@ -177,6 +177,12 @@ both fields.
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
 and is ignored when `mm_payload` is set.
 
+The Rust `vllm-rs render` server returns the same `features` object, except
+`mm_metadata`, and adds an `is_embed` mask to placeholder ranges of models with
+sparse placeholders, such as Qwen-VL. The Rust `/inference/v1/generate` accepts
+`features` with `kwargs_data` for every item, and ignores `mm_metadata`. Set the
+render server's `--dtype` to the engine's dtype.
+
 ## Example
 
 The example below shows how a disaggregated encode / prefill coordinator can
