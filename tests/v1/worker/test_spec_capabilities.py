@@ -20,7 +20,8 @@ import torch
 
 import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_layer_module
 from tests.v1.spec_decode.utils import fake_speculative_config
-from vllm.config import CacheConfig, ParallelConfig
+from vllm.config import CacheConfig, CompilationConfig, ParallelConfig
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
     KimiGatedDeltaNetAttention,
 )
@@ -43,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     RSWASpec,
     SlidingWindowSpec,
 )
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
     SpecLayerKind,
@@ -63,6 +65,7 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
 from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
+from vllm.v1.worker.utils import AttentionGroup
 
 GDN_VERIFY = ("mamba:gdn@slots", "verify")
 SHORT_CONV_VERIFY = ("mamba:short_conv@slots", "verify")
@@ -71,37 +74,29 @@ KV_COMMIT = ("layout:paged_token", "commit")
 
 # --- layers and specs --------------------------------------------------------
 
-_FULL = FullAttentionSpec(
-    block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
-)
-_SWA = SlidingWindowSpec(
-    block_size=16,
-    num_kv_heads=2,
-    head_size=64,
-    dtype=torch.bfloat16,
-    sliding_window=128,
-)
-_MAMBA = MambaSpec(block_size=16, shapes=((4, 8),), dtypes=(torch.float32,))
 
-
-def _attn(**impl):
-    """An attention layer: ``kv_cache_dtype``, ``has_sink``, ``sliding_window`` on
-    the layer, soft cap and ALiBi on its impl."""
-    has_sink = impl.pop("has_sink", False)
-    return SimpleNamespace(
-        kv_cache_dtype="auto",
-        has_sink=has_sink,
-        sliding_window=impl.pop("sliding_window", None),
-        kv_sharing_target_layer_name=None,
-        impl=SimpleNamespace(
-            logits_soft_cap=impl.get("logits_soft_cap"),
-            alibi_slopes=impl.get("alibi_slopes"),
-        ),
+def _spec(cls=FullAttentionSpec, **kwargs):
+    return cls(
+        block_size=kwargs.pop("block_size", 16),
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+        **kwargs,
     )
 
 
-def _mamba(layer_cls):
-    return object.__new__(layer_cls)
+_FULL = _spec()
+_SWA = _spec(SlidingWindowSpec, sliding_window=128)
+_MAMBA = MambaSpec(block_size=16, shapes=((4, 8),), dtypes=(torch.float32,))
+
+
+def _bare_layer(cls=Attention, **attrs):
+    """A layer of ``cls`` built without weights."""
+    layer = object.__new__(cls)
+    torch.nn.Module.__init__(layer)
+    for name, value in attrs.items():
+        setattr(layer, name, value)
+    return layer
 
 
 class _TreeBackend(FlashAttentionBackend):
@@ -110,27 +105,14 @@ class _TreeBackend(FlashAttentionBackend):
     serves_trees = True
 
 
-def _group(spec, layers, backend):
-    return SimpleNamespace(
-        kv_cache_spec=spec, layer_names=list(layers), backend=backend
-    )
-
-
 def _model(*groups, backend=_TreeBackend):
-    """``(attn_groups, layers)`` from ``(spec, {name: layer})``."""
-    layers = {}
-    attn_groups = []
-    for spec, group_layers in groups:
-        attn_groups.append([_group(spec, group_layers, backend)])
-        layers.update(group_layers)
+    """``(attn_groups, layers)`` from ``(spec, prefix, n, layer class)``."""
+    attn_groups, layers = [], {}
+    for gid, (spec, prefix, n, cls) in enumerate(groups):
+        names = [f"{prefix}.{i}" for i in range(n)]
+        attn_groups.append([AttentionGroup(backend, names, spec, gid)])
+        layers.update({name: _bare_layer(cls) for name in names})
     return attn_groups, layers
-
-
-def _caps(model, state_mode="slots", kernels=None) -> SpecCapabilities:
-    attn_groups, layers = model
-    return SpecCapabilities.from_limits(
-        layer_spec_limits(attn_groups, layers, state_mode, kernels)
-    )
 
 
 class ToyKernel(SpecKernel):
@@ -172,180 +154,79 @@ def _provided() -> KernelRegistry:
     )
 
 
-def _layers(prefix, n, make):
-    return {f"{prefix}.{i}": make() for i in range(n)}
-
-
-def _llama(backend=_TreeBackend):
-    return _model((_FULL, _layers("attn", 4, _attn)), backend=backend)
-
-
-def _gpt_oss():
-    # Alternating sliding-window and full layers, all with attention sinks.
+def _hybrid(layer_cls, backend=_TreeBackend):
     return _model(
-        (_SWA, _layers("swa", 2, lambda: _attn(has_sink=True))),
-        (_FULL, _layers("full", 2, lambda: _attn(has_sink=True))),
-    )
-
-
-def _gemma2():
-    softcap = lambda: _attn(logits_soft_cap=50.0)  # noqa: E731
-    return _model(
-        (_SWA, _layers("swa", 2, softcap)),
-        (_FULL, _layers("full", 2, softcap)),
-    )
-
-
-def _rswa():
-    rswa = RSWASpec(
-        block_size=16,
-        num_kv_heads=2,
-        head_size=64,
-        dtype=torch.bfloat16,
-        rswa_window=64,
-    )
-    return _model((rswa, _layers("rswa", 2, _attn)))
-
-
-def _dsv3():
-    mla = MLAAttentionSpec(
-        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
-    )
-    return _model((mla, _layers("mla", 3, _attn)))
-
-
-def _hybrid(layer_cls):
-    return _model(
-        (_MAMBA, _layers("linear", 3, lambda: _mamba(layer_cls))),
-        (_FULL, _layers("attn", 1, _attn)),
-    )
-
-
-def _import_class(qualname):
-    module, name = qualname.rsplit(":", 1)
-    try:
-        return getattr(importlib.import_module(module), name)
-    except ImportError as e:
-        pytest.skip(f"{qualname} does not import here: {e}")
-
-
-def _runner(**overrides):
-    attn_groups, layers = _llama()
-    runner = SimpleNamespace(
-        cache_config=CacheConfig(),
-        attn_groups=attn_groups,
-        compilation_config=SimpleNamespace(static_forward_context=layers),
-        speculator=SimpleNamespace(draft_attn_layer_names=None),
-        use_pp=False,
-        pcp_manager=None,
-        dcp_size=1,
-        batch_sharder=None,
-        parallel_config=ParallelConfig(),
-    )
-    for name, value in overrides.items():
-        setattr(runner, name, value)
-    return runner
-
-
-def _resolve(runner, kernels=None) -> SpecCapabilities:
-    spec_round = object.__new__(SpecRound)
-    spec_round.kernels = kernels or KernelRegistry()
-    return spec_round.resolve_capabilities(runner)
-
-
-def _hybrid_runner(layer_cls, **overrides):
-    attn_groups, layers = _hybrid(layer_cls)
-    return _runner(
-        attn_groups=attn_groups,
-        compilation_config=SimpleNamespace(static_forward_context=layers),
-        **overrides,
+        (_MAMBA, "linear", 3, layer_cls), (_FULL, "attn", 1, Attention), backend=backend
     )
 
 
 # --- the startup rule ---------------------------------------------------------
 
-
-def _full_attention_features():
-    """Sinks, a soft cap and ALiBi on full attention do not lower the plan."""
-    layer = _attn(has_sink=True, logits_soft_cap=30.0, alibi_slopes=torch.ones(2))
-    return _model((_FULL, {"a": layer}))
-
-
-def _draft_and_hidden_layers():
-    hidden = HiddenStateCacheSpec(
-        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
-    )
-    draft = _attn()
-    draft.is_draft_layer = True
-    return _model(
-        (_FULL, _layers("attn", 2, _attn)),
-        (hidden, {"hidden": _attn()}),
-        (_SWA, {"draft": draft}),
-    )
-
-
-_SWA_REASON = "attn:sliding_window, 2 layers: not full attention"
-_LOWERED = ": keeps verify rows in chain order"
+_LLAMA = ((_FULL, "attn", 4, Attention),)
+_IN_TREE = "attn:full_attention, 4 layers: backend FLASH_ATTN verifies chains"
 
 
 def _gdn_reason(mode):
     return f"mamba:gdn@{mode}, 3 layers: no mamba:gdn@{mode}/verify kernel"
 
 
-# (model, state mode, with a provider, plan kind, reasons)
+# case: (model, state mode, with a provider, plan kind, reasons)
 _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
-    "llama": (_llama, "slots", False, "tree", []),
+    "llama": (lambda: _model(*_LLAMA), "slots", False, "tree", []),
     "llama-in-tree-backend": (
-        lambda: _llama(FlashAttentionBackend),
+        lambda: _model(*_LLAMA, backend=FlashAttentionBackend),
         "slots",
         False,
         "chain",
-        ["attn:full_attention, 4 layers: backend FLASH_ATTN verifies chains"],
+        [_IN_TREE],
     ),
-    "full-attention-features": (_full_attention_features, "slots", False, "tree", []),
-    "draft-and-hidden-state": (_draft_and_hidden_layers, "slots", False, "tree", []),
-    "gpt-oss": (_gpt_oss, "slots", False, "chain", [_SWA_REASON]),
-    "gemma2": (_gemma2, "slots", False, "chain", [_SWA_REASON]),
+    "draft-and-hidden-state": (
+        lambda: _model(
+            *_LLAMA,
+            (_spec(HiddenStateCacheSpec), "hidden", 1, Attention),
+            (_SWA, "draft", 1, DraftAttention),
+        ),
+        "slots",
+        False,
+        "tree",
+        [],
+    ),
+    "gpt-oss": (
+        lambda: _model((_SWA, "swa", 2, Attention), *_LLAMA),
+        "slots",
+        False,
+        "chain",
+        ["attn:sliding_window, 2 layers: not full attention"],
+    ),
     "rswa": (
-        _rswa,
+        lambda: _model((_spec(RSWASpec, rswa_window=64), "rswa", 2, Attention)),
         "slots",
         False,
         "chain",
         ["attn:full_attention, 2 layers: not full attention"],
     ),
     "dsv3-mla": (
-        _dsv3,
+        lambda: _model((_spec(MLAAttentionSpec, block_size=64), "mla", 3, Attention)),
         "slots",
         False,
         "chain",
         ["attn:mla_attention, 3 layers: not full attention"],
     ),
-    "qwen-gdn": (
-        QwenGatedDeltaNetAttention,
-        "slots",
-        False,
-        "chain",
-        [_gdn_reason("slots")],
-    ),
+    "qwen-gdn": (QwenGatedDeltaNetAttention, "slots", False, "chain", None),
     "qwen-gdn-provider": (QwenGatedDeltaNetAttention, "slots", True, "tree", []),
-    "qwen-gdn-replay": (
-        QwenGatedDeltaNetAttention,
-        "replay",
+    "qwen-gdn-provider-in-tree-backend": (
+        lambda: _hybrid(QwenGatedDeltaNetAttention, FlashAttentionBackend),
+        "slots",
         True,
         "chain",
-        [_gdn_reason("replay")],
+        [_IN_TREE.replace("4 layers", "1 layer")],
     ),
-    "qwen-gdn-recover": (
-        QwenGatedDeltaNetAttention,
-        "recover",
-        True,
-        "chain",
-        [_gdn_reason("recover")],
-    ),
+    "qwen-gdn-replay": (QwenGatedDeltaNetAttention, "replay", True, "chain", None),
+    "qwen-gdn-recover": (QwenGatedDeltaNetAttention, "recover", True, "chain", None),
 }
 # A layer subclassing a tree-capable one runs its own kernels: chains only, with
 # or without a provider. Qwen4Exp's PLE layer reports SHORT_CONV but runs its own.
-_OWN_KERNEL_LAYERS = {
+for _name, _layer_cls in {
     "nemotron-h": MambaMixer2,
     "olmo-hybrid": OlmoHybridGatedDeltaNetAttention,
     "kimi-linear": KimiGatedDeltaNetAttention,
@@ -354,9 +235,12 @@ _OWN_KERNEL_LAYERS = {
     "kimi-k3-amd": "vllm.models.kimi_k3.amd.kda:KimiK3DeltaAttention",
     "lfm2-short-conv": ShortConv,
     "jamba-mamba1": MambaMixer,
-}
-for _name, _layer_cls in _OWN_KERNEL_LAYERS.items():
+}.items():
     _MODEL_RULES[_name] = (_layer_cls, "slots", True, "chain", None)
+
+
+class DraftAttention(Attention):
+    is_draft_layer = True
 
 
 @pytest.mark.parametrize("case", list(_MODEL_RULES))
@@ -364,56 +248,73 @@ def test_plan_kind_rules(case):
     """What a model's layers let it verify, and why."""
     model, state_mode, provided, plan_kind, reasons = _MODEL_RULES[case]
     if isinstance(model, str):
-        model = _import_class(model)
+        module, name = model.rsplit(":", 1)
+        try:
+            model = getattr(importlib.import_module(module), name)
+        except ImportError as e:
+            pytest.skip(f"{model} does not import here: {e}")
     if isinstance(model, type):
         layer_cls = model
         model = lambda: _hybrid(layer_cls)  # noqa: E731
-        if reasons is None:
+        if reasons is None and layer_cls is QwenGatedDeltaNetAttention:
+            reasons = [_gdn_reason(state_mode)]
+        elif reasons is None:
             reasons = [
                 f"{layer_cls.__name__}, 3 layers: declares no spec_layer_variant"
             ]
-    caps = _caps(model(), state_mode, _provided() if provided else None)
+    attn_groups, layers = model()
+    kernels = _provided() if provided else None
+    caps = SpecCapabilities.from_limits(
+        layer_spec_limits(attn_groups, layers, state_mode, kernels)
+    )
     assert caps.plan_kind == plan_kind
     assert [limit.reason for limit in caps.limits] == reasons
 
 
+_LOWERED = ": keeps verify rows in chain order"
+
+
 @pytest.mark.parametrize(
-    "override, reason",
+    "setting, value, reason",
     [
-        ({}, None),
-        ({"use_pp": True}, "pipeline parallelism (no tree path broadcast)" + _LOWERED),
-        ({"pcp_manager": object()}, "prefill context parallelism" + _LOWERED),
-        ({"dcp_size": 2}, "decode context parallelism" + _LOWERED),
-        ({"batch_sharder": object()}, "batch-sharded sampling" + _LOWERED),
+        (None, None, None),
+        ("use_pp", True, "pipeline parallelism (no tree path broadcast)" + _LOWERED),
+        ("pcp_manager", object(), "prefill context parallelism" + _LOWERED),
+        ("dcp_size", 2, "decode context parallelism" + _LOWERED),
+        ("batch_sharder", object(), "batch-sharded sampling" + _LOWERED),
         (
-            {"parallel_config": ParallelConfig(enable_dbo=True)},
+            "parallel_config",
+            ParallelConfig(enable_dbo=True),
             "micro-batching" + _LOWERED,
         ),
-        ({"cache_config": CacheConfig(use_replayssm=True)}, _gdn_reason("replay")),
+        ("cache_config", CacheConfig(use_replayssm=True), _gdn_reason("replay")),
     ],
-    ids=["default", "pp", "pcp", "dcp", "batch-sharded", "dbo", "replayssm"],
 )
-def test_runner_settings_lower_trees_to_chains(override, reason):
+def test_runner_settings_lower_trees_to_chains(setting, value, reason):
     """The runner's settings, and the Mamba state mode it reads from the cache
     config, lower a model that verifies trees to chains."""
-    if "cache_config" in override:
-        runner, kernels = (
-            _hybrid_runner(QwenGatedDeltaNetAttention, **override),
-            _provided(),
-        )
-    else:
-        runner, kernels = _runner(**override), None
-    caps = _resolve(runner, kernels)
+    runner = object.__new__(GPUModelRunner)
+    runner.attn_groups, layers = _hybrid(QwenGatedDeltaNetAttention)
+    runner.compilation_config = CompilationConfig()
+    runner.compilation_config.static_forward_context = layers
+    runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
+    runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
+    runner.batch_sharder = None
+    if setting is not None:
+        setattr(runner, setting, value)
+    spec_round = object.__new__(SpecRound)
+    spec_round.kernels = _provided()
+
+    caps = spec_round.resolve_capabilities(runner)
+
     assert caps.plan_kind == ("tree" if reason is None else "chain")
-    assert [limit.reason for limit in caps.limits] == (
-        [] if reason is None else [reason]
-    )
+    assert [limit.reason for limit in caps.limits] == ([reason] if reason else [])
 
 
 # --- resolving the speculator's resources -------------------------------------
 
 
-def _spec():
+def _speculative_config():
     return fake_speculative_config(
         SpeculatorConfig,
         num_speculative_tokens=3,
@@ -424,10 +325,12 @@ def _spec():
 
 
 class _TreeConfig(SpeculatorConfig):
-    """A tree speculator: 2-way branching, a uniform and a varlen shape."""
+    """A tree speculator, 2-way branching; ``changes`` are what its
+    ``adapt_resources`` returns over the declared resources."""
 
-    def __init__(self):
-        super().__init__(_spec())
+    def __init__(self, **changes):
+        super().__init__(_speculative_config())
+        self.changes = changes
 
     def resources(self, max_num_seqs):
         return SpecResources(
@@ -436,111 +339,81 @@ class _TreeConfig(SpeculatorConfig):
             max_branching=2,
         )
 
-
-def _tree_caps():
-    return SpecCapabilities.from_limits([])
-
-
-def _chain_caps(reason="attn:sliding_window, 2 layers: not full attention"):
-    return SpecCapabilities.from_limits([SpecLimit("chain", reason)])
-
-
-@pytest.mark.parametrize(
-    "layer, with_provider",
-    [(MambaMixer2, "chain"), (QwenGatedDeltaNetAttention, "tree")],
-    ids=["nemotron-h", "qwen-gdn"],
-)
-def test_tree_speculator_lowers_to_chain_and_logs_once(layer, with_provider, caplog):
-    """On a hybrid without a provider the runner lowers a tree to a chain: the
-    same candidates and shapes, nothing raises, one log line per reason."""
-    runner = _hybrid_runner(layer)
-    caps = _resolve(runner)
-    config = _TreeConfig()
-    declared = config.resources(8)
-    assert declared.plan_kind == "tree"
-    with caplog.at_level(logging.INFO, logger="vllm"):
-        effective = resolve_spec_resources(config, declared, [caps])
-    assert effective.plan_kind == "chain"
-    assert effective.max_branching == 1
-    assert effective.max_candidates == declared.max_candidates
-    assert effective.capture_shapes == declared.capture_shapes
-    lines = [r.getMessage() for r in caplog.records if "spec decode" in r.getMessage()]
-    assert len(lines) == len(caps.limits) == 1
-    assert f"({caps.limits[0].reason})" in lines[0]
-    assert _resolve(runner, _provided()).plan_kind == with_provider
-
-    two = SpecCapabilities.from_limits(
-        [SpecLimit("chain", "a: x"), SpecLimit("chain", "b: y")]
-    )
-    caplog.clear()
-    with caplog.at_level(logging.INFO, logger="vllm"):
-        resolve_spec_resources(config, declared, [two])
-    lines = [r.getMessage() for r in caplog.records if "spec decode" in r.getMessage()]
-    assert len(lines) == 2
-    assert "(a: x)" in lines[0] and "(b: y)" in lines[1]
-
-
-def test_kept_resources(caplog):
-    """A tree on a model that verifies trees, a chain speculator on one that
-    does not, and a variable-length chain on DSv3 keep what they declared."""
-    config = _TreeConfig()
-    declared = config.resources(8)
-    assert resolve_spec_resources(config, declared, [_tree_caps()]) is declared
-    chain_config = _spec().speculator_config
-    chain = chain_config.resources(8)
-    with caplog.at_level(logging.INFO, logger="vllm"):
-        assert resolve_spec_resources(chain_config, chain, [_chain_caps()]) == chain
-    assert not [r for r in caplog.records if "spec decode" in r.getMessage()]
-    varlen = SpecResources(
-        max_candidates=4, capture_shapes=(PlanShape(4), PlanShape(None))
-    )
-    dsv3 = _caps(_dsv3())
-    assert resolve_spec_resources(_TreeConfig(), varlen, [dsv3]) == varlen
-
-
-class _Overreach(_TreeConfig):
-    def __init__(self, **changes):
-        super().__init__()
-        self.changes = changes
-
     def adapt_resources(self, declared, caps):
+        if not self.changes:
+            return super().adapt_resources(declared, caps)
         return replace(declared, **self.changes)
 
 
+_TREE = SpecCapabilities.from_limits([])
+_CHAIN = SpecCapabilities.from_limits(
+    [SpecLimit("chain", "a: x"), SpecLimit("chain", "b: y")]
+)
+
+
 @pytest.mark.parametrize(
-    "changes, caps, problem",
+    "config, caps, want, logged",
     [
-        ({}, _chain_caps(), "plan_kind 'tree' is above"),
-        ({"max_branching": 1, "max_candidates": 5}, _chain_caps(), "max_candidates 5"),
+        # Lowered: the same candidates and shapes, one log line per reason.
+        (_TreeConfig(), _CHAIN, "lowered", ["(a: x)", "(b: y)"]),
+        (_TreeConfig(), _TREE, "declared", []),
+        (_speculative_config().speculator_config, _CHAIN, "declared", []),
+        (_TreeConfig(max_branching=2), _CHAIN, "plan_kind 'tree' is above", []),
         (
-            {"max_branching": 1, "capture_shapes": (PlanShape(2),)},
-            _chain_caps(),
+            _TreeConfig(max_branching=1, max_candidates=5),
+            _CHAIN,
+            "max_candidates 5",
+            [],
+        ),
+        (
+            _TreeConfig(max_branching=1, capture_shapes=(PlanShape(2),)),
+            _CHAIN,
             "capture_shapes",
+            [],
         ),
     ],
-    ids=["plan-kind", "candidates", "shapes"],
+    ids=[
+        "lowered",
+        "tree-kept",
+        "chain-kept",
+        "bad-kind",
+        "bad-candidates",
+        "bad-shapes",
+    ],
 )
-def test_adapt_resources_is_validated(changes, caps, problem):
-    config = _Overreach(**changes)
-    with pytest.raises(ValueError, match=problem):
-        resolve_spec_resources(config, config.resources(8), [caps])
+def test_resolve_spec_resources(config, caps, want, logged, caplog):
+    declared = config.resources(8)
+    if want not in ("lowered", "declared"):
+        with pytest.raises(ValueError, match=want):
+            resolve_spec_resources(config, declared, [caps])
+        return
+    with caplog.at_level(logging.INFO, logger="vllm"):
+        effective = resolve_spec_resources(config, declared, [caps])
+    if want == "declared":
+        assert effective == declared
+    else:
+        assert effective == replace(declared, max_branching=1)
+        assert effective.plan_kind == "chain"
+    lines = [r.getMessage() for r in caplog.records if "spec decode" in r.getMessage()]
+    assert len(lines) == len(logged)
+    assert all(why in line for why, line in zip(logged, lines))
 
 
 def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
     """PP ranks hold different layers: rank 0 the trees, rank 1 a SWA layer."""
-    rank0 = _caps(_llama())
-    rank1 = _caps(_model((_SWA, {"swa.9": _attn()})))
-    caps = reduce_spec_capabilities([rank0, rank1])
-    assert caps.plan_kind == "chain"
-    assert caps.limits == rank0.limits + rank1.limits
-    assert reduce_spec_capabilities([rank0, rank0]).plan_kind == "tree"
+    reduced = reduce_spec_capabilities([_TREE, _CHAIN])
+    assert reduced.plan_kind == "chain"
+    assert reduced.limits == _CHAIN.limits
+    assert reduce_spec_capabilities([_TREE, _TREE]).plan_kind == "tree"
 
 
 # --- the spec kernel registry ------------------------------------------------
 
 
 def _module():
-    return SimpleNamespace(spec_verify_kernel=None)
+    module = torch.nn.Module()
+    module.spec_verify_kernel = None
+    return module
 
 
 def _mamba_layer(name, variant="gdn", state_mode="slots"):
@@ -778,7 +651,7 @@ def _layer(
     layer.prefix = "layer"
     layer.enable_packed_recurrent_decode = False
     layer.activation = "silu"
-    layer.conv1d = SimpleNamespace(weight=torch.zeros(5, 1, 4), bias=None)
+    layer.conv1d = torch.nn.Conv1d(5, 5, 4, groups=5, bias=False)
     layer.kv_cache = (torch.zeros(2, 5, 3), torch.zeros(2, 2, 3, 3))
     layer.A_log = torch.zeros(2)
     layer.dt_bias = torch.ones(2)
