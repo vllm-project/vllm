@@ -366,6 +366,24 @@ def test_replayssm_validation_uses_decode_backend(
 
 
 @pytest.mark.parametrize(
+    ("shared_backend", "decode_backend", "expected"),
+    [
+        ("triton", "flashinfer", True),
+        ("flashinfer", "triton", False),
+        ("flashinfer", None, True),
+    ],
+)
+def test_use_flashinfer_replayssm_follows_decode_backend(
+    shared_backend, decode_backend, expected
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(use_replayssm=True),
+        mamba_config=MambaConfig(backend=shared_backend, decode_backend=decode_backend),
+    )
+    assert VllmConfig.use_flashinfer_replayssm.fget(config) is expected
+
+
+@pytest.mark.parametrize(
     ("settings", "suggestion"),
     [
         (

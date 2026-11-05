@@ -579,7 +579,8 @@ class VllmConfig:
     def use_flashinfer_replayssm(self) -> bool:
         return (
             self.cache_config.use_replayssm
-            and self.mamba_config.effective_decode_backend == MambaBackendEnum.FLASHINFER
+            and self.mamba_config.effective_decode_backend
+            == MambaBackendEnum.FLASHINFER
         )
 
     @property

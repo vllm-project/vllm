@@ -17,6 +17,9 @@ from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.ssd_dispatch import (
+    initialize_mamba_ssd_backend,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -420,6 +423,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config.mamba_config,
             self.kv_cache_config,
             use_replayssm=self.cache_config.use_replayssm,
+        )
+        initialize_mamba_ssd_backend(
+            self.vllm_config.mamba_config, self.kv_cache_config
         )
         if self.cache_config.kv_sharing_fast_prefill:
             self.fast_prefill = FastPrefillHelper()
