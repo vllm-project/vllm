@@ -16,14 +16,21 @@ from vllm.model_executor.layers.mamba.gdn.replayssm import (
 )
 
 
-@pytest.mark.parametrize("width,mode", [(1, "stp"), (4, "mtp"), (8, "mtp")])
+@pytest.mark.parametrize(
+    "width,mode", [(1, "stp"), (4, "mtp"), (8, "mtp"), (4, "umma")]
+)
 def test_dependencies_import_only_selected_decode_api(monkeypatch, width, mode):
     """An MTP-only FlashInfer installation must not need the STP module."""
     module = ModuleType("provider")
     kernel = lambda **kwargs: None
-    setattr(module, f"gated_delta_rule_{mode}_ucache_flush", kernel)
-    suffix = "stp" if mode == "stp" else "flush"
-    expected = f"flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_{suffix}"
+    if mode == "umma":
+        api_name = "gated_delta_rule_mtp_ucache_flush_umma"
+        expected = "flashinfer.gdn_kernels.gdn_replay_mtp_umma"
+    else:
+        api_name = f"gated_delta_rule_{mode}_ucache_flush"
+        suffix = "stp" if mode == "stp" else "flush"
+        expected = f"flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_{suffix}"
+    setattr(module, api_name, kernel)
     original_import = builtins.__import__
 
     def import_provider(name, *args, **kwargs):
@@ -36,7 +43,8 @@ def test_dependencies_import_only_selected_decode_api(monkeypatch, width, mode):
     monkeypatch.setattr(builtins, "__import__", import_provider)
     check_gdn_replayssm_dependencies.cache_clear()
     try:
-        assert check_gdn_replayssm_dependencies(width, False) is kernel
+        state_dtype = torch.float16 if mode == "umma" else torch.bfloat16
+        assert check_gdn_replayssm_dependencies(width, False, state_dtype) is kernel
     finally:
         check_gdn_replayssm_dependencies.cache_clear()
 
@@ -174,20 +182,33 @@ def _reconstruct_replayssm_state(
     reason="FlashInfer GDN ReplaySSM requires an SM90+ CUDA device",
 )
 @pytest.mark.parametrize(
-    "width,query_len,accepted",
-    [(1, 1, 1), (4, 3, 2), (4, 4, 2), (8, 6, 4), (8, 8, 4)],
+    "width,query_len,accepted,state_dtype",
+    [
+        (1, 1, 1, torch.bfloat16),
+        (4, 3, 2, torch.bfloat16),
+        (4, 4, 2, torch.bfloat16),
+        (8, 6, 4, torch.bfloat16),
+        (8, 8, 4, torch.bfloat16),
+        (4, 3, 2, torch.float16),
+        (8, 6, 4, torch.float16),
+    ],
 )
 @torch.inference_mode()
 def test_gdn_replayssm_output_and_accepted_state(
-    monkeypatch, width, query_len, accepted
+    monkeypatch, width, query_len, accepted, state_dtype
 ):
     """Check nonzero outputs and accepted state through replay, wrap, and flush."""
     monkeypatch.setenv("SGLANG_GDN_WY_STRIDED_QKV", "1")
-    module = (
-        "gdn_decode_bf16_wy_ucache_stp"
-        if width == 1
-        else "gdn_decode_bf16_wy_ucache_flush"
-    )
+    if state_dtype == torch.float16:
+        if torch.cuda.get_device_capability()[0] != 10:
+            pytest.skip("FP16 GDN ReplaySSM requires an SM100-class CUDA device")
+        module = "gdn_replay_mtp_umma"
+    else:
+        module = (
+            "gdn_decode_bf16_wy_ucache_stp"
+            if width == 1
+            else "gdn_decode_bf16_wy_ucache_flush"
+        )
     pytest.importorskip(f"flashinfer.gdn_kernels.{module}")
     device, dtype = torch.device("cuda"), torch.bfloat16
     generator = torch.Generator(device=device).manual_seed(20260909 + width)
@@ -203,7 +224,7 @@ def test_gdn_replayssm_output_and_accepted_state(
         (1, ring_slots, 128),
         (2, ring_slots),
     ]
-    dtypes = [dtype, dtype, dtype, torch.float32]
+    dtypes = [state_dtype, dtype, dtype, torch.float32]
     sizes = [math.prod(shape) * dt.itemsize for shape, dt in zip(shapes, dtypes)]
     pages = torch.zeros(2, sum(sizes) + 16, dtype=torch.uint8, device=device)
     states = []
@@ -220,13 +241,15 @@ def test_gdn_replayssm_output_and_accepted_state(
     dt_bias = torch.nn.Parameter(random_tensor(2) * 0.2)
     accepted_state = checkpoint[1].float().clone()
     padding_page = pages[0].clone()
+    capture = width == 1 or (state_dtype == torch.float16 and width == 4)
     graph = None
 
     # Eighteen steps cross the native STP flush and the MTP ring boundary.
     for step in range(18):
-        if width == 1 and step == 9:
+        if capture and step == 9:
             # Captured execution must observe an in-place weight reload.
             A_log.add_(2.0)
+            dt_bias.add_(1.0)
         q, k = random_tensor(query_len, 1, 128), random_tensor(query_len, 1, 128)
         v = random_tensor(query_len, 2, 128) * 0.1
         a, b = random_tensor(query_len, 2) * 0.2, random_tensor(query_len, 2)
@@ -237,12 +260,18 @@ def test_gdn_replayssm_output_and_accepted_state(
             mixed_qkv = projection[:, : mixed_qkv.shape[1]]
             gates = torch.stack((a, b), dim=1)
             a, b = gates[:, 0], gates[:, 1]
-        if width == 1:
+        if capture:
             # Captured padding has input storage but no token or live state.
-            mixed_qkv = torch.cat((mixed_qkv, torch.ones_like(mixed_qkv)))
+            padding_tokens = 1 if width == 1 else width
+            mixed_qkv = torch.cat(
+                (
+                    mixed_qkv,
+                    torch.ones_like(mixed_qkv[:1]).expand(padding_tokens, -1),
+                )
+            )
             a, b = (
-                torch.cat((a, torch.ones_like(a))),
-                torch.cat((b, torch.ones_like(b))),
+                torch.cat((a, torch.ones_like(a[:1]).expand(padding_tokens, -1))),
+                torch.cat((b, torch.ones_like(b[:1]).expand(padding_tokens, -1))),
             )
         inputs = dict(
             mixed_qkv=mixed_qkv,
@@ -255,15 +284,17 @@ def test_gdn_replayssm_output_and_accepted_state(
             ring_start=ring_start,
             num_committed=committed,
             query_start_loc=torch.tensor(
-                [0, 1, 1] if width == 1 else [0, query_len],
+                [0, query_len, query_len] if capture else [0, query_len],
                 dtype=torch.int32,
                 device=device,
             ),
             state_indices=torch.tensor(
-                [1, 0] if width == 1 else [1], dtype=torch.int32, device=device
+                [1, 0] if capture else [1], dtype=torch.int32, device=device
             ),
-            output_indices=torch.arange(
-                2 if width == 1 else query_len, dtype=torch.int32, device=device
+            output_indices=torch.tensor(
+                list(range(query_len)) + ([width] if capture else []),
+                dtype=torch.int32,
+                device=device,
             ),
             executed_query_width=width,
             uniform_query_length=query_len,
@@ -272,7 +303,7 @@ def test_gdn_replayssm_output_and_accepted_state(
             head_k_dim=128,
             head_v_dim=128,
         )
-        if width == 1:
+        if capture:
             if graph is None:
                 graph_inputs = inputs
                 saved_pages = pages.clone()
@@ -290,10 +321,10 @@ def test_gdn_replayssm_output_and_accepted_state(
                 for name in ("mixed_qkv", "a", "b"):
                     graph_inputs[name].copy_(inputs[name])
             graph.replay()
-            output = graph_output[:1]
-            assert graph_output[1].eq(0).all()
+            output = graph_output[:query_len]
+            assert graph_output[query_len:].eq(0).all()
             torch.testing.assert_close(pages[0], padding_page, rtol=0, atol=0)
-            a, b = a[:1], b[:1]
+            a, b = a[:query_len], b[:query_len]
         else:
             output = run_gdn_replayssm(**inputs)
         expected_output, _ = _reference_gdn_step(

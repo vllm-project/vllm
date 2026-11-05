@@ -83,8 +83,8 @@ vllm serve Qwen/Qwen3.5-0.8B \
 ```
 
 This backend supports standard decoding and one to seven speculative tokens.
-Omit `--speculative-config` for standard decoding. It requires BF16 state and
-128-element key and value heads. Pipeline parallelism, microbatching, and KV
+Omit `--speculative-config` for standard decoding. The default path uses BF16 state
+and 128-element key and value heads. Pipeline parallelism, microbatching, and KV
 connectors are unsupported. Ragged scheduled rows are supported. Adaptive
 verification is unsupported because it changes row lengths on the GPU after the
 CPU metadata builder determines the output indices.
@@ -100,6 +100,14 @@ missing kernels or change FlashInfer.
 
 Set `SGLANG_GDN_WY_STRIDED_QKV=1` before process startup. FlashInfer reads this
 setting when its kernel module is imported; setting it later is insufficient.
+
+For speculative decoding on SM100-class GPUs, set
+`--mamba-ssm-cache-dtype float16` to select FlashInfer 0.7.3's direct UMMA API.
+Keep model activations and convolution state in BF16. This path supports at most
+four value heads per key head. It requires `--mamba-cache-mode none` and disabled
+prefix caching. FP16 standard decoding, prefix materialization, and Mamba cache
+stochastic rounding are unsupported.
+The state and rings retain the existing paged allocation.
 
 ## Notes
 

@@ -15,27 +15,43 @@ GDN_REPLAY_LOGICAL_WINDOW = 16
 
 @cache
 def check_gdn_replayssm_dependencies(
-    executed_width: int, needs_materializer: bool
+    executed_width: int,
+    needs_materializer: bool,
+    state_dtype: torch.dtype = torch.bfloat16,
 ) -> Callable[..., torch.Tensor]:
     """Validate the environment and return only the selected decode API."""
     if executed_width not in (1, 4, 8):
         raise ValueError(f"Unsupported GDN ReplaySSM executed width: {executed_width}")
+    if state_dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError(f"Unsupported GDN ReplaySSM state dtype: {state_dtype}")
+    use_umma = state_dtype == torch.float16
+    if use_umma and (executed_width == 1 or needs_materializer):
+        raise ValueError(
+            "FP16 GDN ReplaySSM requires speculative decoding without prefix caching"
+        )
     if os.environ.get("SGLANG_GDN_WY_STRIDED_QKV") != "1":
         raise RuntimeError(
             "FlashInfer GDN ReplaySSM requires "
             "SGLANG_GDN_WY_STRIDED_QKV=1 before importing FlashInfer"
         )
-    api = (
-        "gated_delta_rule_stp_ucache_flush"
-        if executed_width == 1
-        else "gated_delta_rule_mtp_ucache_flush"
-    )
+    if use_umma:
+        api = "gated_delta_rule_mtp_ucache_flush_umma"
+    else:
+        api = (
+            "gated_delta_rule_stp_ucache_flush"
+            if executed_width == 1
+            else "gated_delta_rule_mtp_ucache_flush"
+        )
     mode = f"executed width={executed_width}, cache mode=" + (
         "align" if needs_materializer else "none"
     )
     try:
         # MTP-only providers need not ship the separate STP API.
-        if executed_width == 1:
+        if use_umma:
+            from flashinfer.gdn_kernels.gdn_replay_mtp_umma import (
+                gated_delta_rule_mtp_ucache_flush_umma as kernel,
+            )
+        elif executed_width == 1:
             from flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_stp import (
                 gated_delta_rule_stp_ucache_flush as kernel,
             )
@@ -156,10 +172,15 @@ def run_gdn_replayssm(
         raise ValueError(
             "FlashInfer GDN ReplaySSM requires exactly three auxiliary rings"
         )
-    if mixed_qkv.dtype != torch.bfloat16 or checkpoint_state.dtype != torch.bfloat16:
+    if mixed_qkv.dtype != torch.bfloat16 or checkpoint_state.dtype not in (
+        torch.bfloat16,
+        torch.float16,
+    ):
         raise ValueError(
-            "FlashInfer GDN ReplaySSM requires bfloat16 inputs and checkpoint state"
+            "FlashInfer GDN ReplaySSM requires bfloat16 inputs and BF16 or FP16 state"
         )
+    if checkpoint_state.dtype == torch.float16 and executed_query_width == 1:
+        raise ValueError("FP16 GDN ReplaySSM requires speculative decoding")
 
     # Native STP's public contract is T=1, but its serving fast path consumes a
     # caller-owned zero-padded T=4 buffer. Packing a shared QKV allocation here
@@ -235,7 +256,9 @@ def run_gdn_replayssm(
     )
 
     if kernel is None:
-        kernel = check_gdn_replayssm_dependencies(executed_query_width, False)
+        kernel = check_gdn_replayssm_dependencies(
+            executed_query_width, False, checkpoint_state.dtype
+        )
     if executed_query_width == 1:
         # STP updates these cursor copies. Every layer must start from the
         # same pre-step values; model-wide postprocess publishes the update.

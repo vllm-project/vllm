@@ -890,6 +890,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             check_gdn_replayssm_dependencies(
                 self.replayssm_executed_query_width,
                 needs_materializer=self.cache_config.mamba_cache_mode == "align",
+                state_dtype=self.get_state_dtype()[1],
             )
         elif self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
@@ -934,14 +935,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return "value heads must be an integer multiple of key heads"
         if vllm_config.model_config.dtype != torch.bfloat16:
             return "the GDN ReplaySSM adapter requires bfloat16 model activations"
-        if (
-            conv_state_dtype != torch.bfloat16
-            or recurrent_state_dtype != torch.bfloat16
-        ):
-            return (
-                "the GDN ReplaySSM adapter requires bfloat16 convolution "
-                "and recurrent state"
-            )
+        if conv_state_dtype != torch.bfloat16:
+            return "the GDN ReplaySSM adapter requires bfloat16 convolution state"
+        if recurrent_state_dtype == torch.float16:
+            if not current_platform.is_device_capability_family(100):
+                return "FP16 GDN ReplaySSM requires an SM100-class CUDA device"
+            if self.num_v_heads // self.num_k_heads > 4:
+                return (
+                    "FP16 GDN ReplaySSM supports at most four value heads per key head"
+                )
+        elif recurrent_state_dtype != torch.bfloat16:
+            return "the GDN ReplaySSM adapter requires BF16 or FP16 recurrent state"
         if not current_platform.has_device_capability(90):
             return "the initial integration requires an SM90+ CUDA device"
         return None

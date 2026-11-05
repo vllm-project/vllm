@@ -4016,7 +4016,7 @@ class VllmConfig:
                     "FlashInfer GDN ReplaySSM requires --replayssm-buffer-len=16"
                 )
             gdn_replayssm_geometry(self.num_speculative_tokens)
-            # This integration selects the provider's BF16 path.
+            # Both provider paths require BF16 activations and convolution state.
             if self.model_config is not None:
                 if self.model_config.dtype != torch.bfloat16:
                     raise ValueError(
@@ -4035,10 +4035,27 @@ class VllmConfig:
             if self.cache_config.mamba_ssm_cache_dtype not in (
                 "auto",
                 "bfloat16",
+                "float16",
             ):
                 raise ValueError(
-                    "FlashInfer GDN ReplaySSM requires a bfloat16 recurrent state"
+                    "FlashInfer GDN ReplaySSM requires BF16 or FP16 recurrent state"
                 )
+            if self.cache_config.mamba_ssm_cache_dtype == "float16":
+                if self.mamba_config.enable_stochastic_rounding:
+                    raise ValueError(
+                        "FP16 GDN ReplaySSM does not support "
+                        "--enable-mamba-cache-stochastic-rounding"
+                    )
+                if self.num_speculative_tokens == 0:
+                    raise ValueError("FP16 GDN ReplaySSM requires speculative decoding")
+                if (
+                    self.cache_config.mamba_cache_mode != "none"
+                    or self.cache_config.enable_prefix_caching
+                ):
+                    raise ValueError(
+                        "FP16 GDN ReplaySSM requires --mamba-cache-mode=none "
+                        "and disabled prefix caching"
+                    )
             # These execution modes need additional tracker lifecycle support.
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
