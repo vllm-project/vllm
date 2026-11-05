@@ -245,8 +245,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         return False
     parallel_config = vllm_config.parallel_config
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
     )
 
@@ -453,7 +452,8 @@ class MiniMaxM3MLP(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            # Under SP the forward reduce-scatters the output itself.
+            reduce_results=reduce_results and not use_sequence_parallel,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
@@ -1421,8 +1421,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
             )
         else:
             # MXFP8 output when qkv_proj consumes it (checked per call: LoRA
-            # wrappers installed after construction change the key).
-            mxfp8 = _consumes_mxfp8_128x4(self.self_attn.qkv_proj)
+            # wrappers installed after construction change the key), but not
+            # under sequence parallelism, which all-gathers the norm output.
+            mxfp8 = not self.use_sequence_parallel and _consumes_mxfp8_128x4(
+                self.self_attn.qkv_proj
+            )
             if residual is None:
                 residual = hidden_states
                 hidden_states = self.input_layernorm(hidden_states, mxfp8=mxfp8)
@@ -1632,6 +1635,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
+            if residual is not None:
+                residual = sp_shard(residual)
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
@@ -1660,6 +1665,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.end_layer, hidden_states, residual
             )
+            if self.use_sequence_parallel:
+                # PP transport expects tensors replicated across TP ranks.
+                hidden_size = hidden_states.shape[-1]
+                packed = torch.cat([hidden_states, residual, *aux_hidden_states], -1)
+                packed = sp_all_gather(packed)[:num_tokens]
+                hidden_states, residual, *aux_hidden_states = packed.split(
+                    hidden_size, dim=-1
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,

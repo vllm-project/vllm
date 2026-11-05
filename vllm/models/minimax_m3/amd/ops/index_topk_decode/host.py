@@ -27,7 +27,7 @@ def _get_prefill_kernel(strips: int):
 
 @functools.lru_cache(maxsize=1)
 def _get_decode_kernel():
-    return _kernel.compile_topk_prefill(26, decode=True)
+    return _kernel.compile_topk_prefill(16, decode=True)
 
 
 def supports_index_topk(topk_blocks: int, block_size: int) -> bool:
