@@ -1434,10 +1434,10 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         pp_group = get_pp_group()
         if pp_group.world_size > 1 and self._pp_transport is None:
-            # No memory profiling ran: NCCL without send buffers.
+            # No memory profiling ran, so no transport was set up: use NCCL.
             from vllm.distributed.pp_transport.nccl import NcclTransport
 
-            self._pp_transport = NcclTransport(get_tp_group(), None)
+            self._pp_transport = NcclTransport(get_tp_group())
         if self._pp_transport is not None:
             self._pp_transport.before_forward()
 

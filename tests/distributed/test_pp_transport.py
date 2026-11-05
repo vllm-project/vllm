@@ -100,9 +100,7 @@ def _copy_engine(pp_group, persistent, profile_send) -> PPTransport:
 @ray.remote(num_gpus=1, max_calls=1)
 def nccl_chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     _run_chain(
-        lambda pp_group, persistent, profile_send: NcclTransport(
-            get_tp_group(), profile_send
-        ),
+        lambda pp_group, persistent, profile_send: NcclTransport(get_tp_group()),
         pp_size,
         rank,
         distributed_init_port,
