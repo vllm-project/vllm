@@ -3094,6 +3094,41 @@ def test_sparse_disk_patches_reach_worker_model(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+class _DerivedStateModel(_CheckpointModel):
+    """A model holding a weight-derived tensor that its post-load hook
+    rebuilds, as kernels keep transposed or rescaled copies of weights."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("w_sum", torch.zeros(()))
+
+    def process_weights_after_loading(self):
+        self.w_sum.copy_(self.w.sum())
+
+
+def test_sparse_disk_finish_rebuilds_derived_state(tmp_path):
+    """Finishing a sparse update reruns the model's post-load hook, so state
+    derived from the patched weights is not left stale."""
+    model = _DerivedStateModel()
+    trainer = WeightTransferTrainerFactory.trainer_init(
+        init_info=SparseDiskTrainerInitInfo(patch_dir=str(tmp_path), rank=0),
+        client=_WorkerClient(model),
+    )
+
+    trainer.send_weights(
+        [
+            SparseWeightPatch(
+                name="w",
+                indices=torch.tensor([1, 5], dtype=torch.int32),
+                values=torch.tensor([1.5, -2.0]),
+                full_shape=(2, 3),
+            )
+        ]
+    )
+
+    assert model.w_sum.item() == pytest.approx(-0.5)
+
+
 def test_sparse_disk_worker_rejects_other_safetensors_files(tmp_path):
     """Pointing the worker at a full checkpoint must fail without loading it."""
     from safetensors.torch import save_file

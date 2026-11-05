@@ -134,8 +134,12 @@ class SparseDiskWeightTransferEngine(
         pass
 
     def finish_weight_update(self) -> None:
-        """No-op: sparse patches are applied in place, no layerwise reload."""
-        pass
+        """No layerwise reload; rebuild model-level derived state once."""
+        from vllm.model_executor.model_loader.weight_utils import (
+            finalize_model_weights,
+        )
+
+        finalize_model_weights(self.model)
 
     def receive_weights(self, update_info: SparseDiskWeightTransferUpdateInfo) -> None:
         patches = load_sparse_patches(update_info.patch_path, self.device)
