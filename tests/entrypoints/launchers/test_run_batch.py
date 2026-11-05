@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -21,6 +23,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers import run_batch as run_batch_module
 from vllm.entrypoints.launchers.run_batch import (
     BatchProgressTracker,
+    BatchRequestInput,
     BatchRequestOutput,
     BatchTranscriptionRequest,
     batch_output_writer,
@@ -31,6 +34,7 @@ from vllm.entrypoints.launchers.run_batch import (
     make_arg_parser,
     make_transcription_wrapper,
     open_batch_input,
+    run_request,
     upload_data,
     url_matches,
     validate_batch,
@@ -39,7 +43,7 @@ from vllm.entrypoints.launchers.run_batch import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -1066,6 +1070,42 @@ async def test_download_bytes_backslash_bypass():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_translation", [False, True])
+@pytest.mark.parametrize(
+    "error, status_code, error_type",
+    [
+        (EngineDeadError(), 500, "InternalServerError"),
+        (RetryableRequestError("Engine is busy"), 503, "ServiceUnavailableError"),
+        (VLLMValidationError("Invalid audio"), 400, "BadRequestError"),
+    ],
+)
+async def test_batch_audio_preserves_handler_error_status(
+    is_translation, error, status_code, error_type
+):
+    operation = "translations" if is_translation else "transcriptions"
+    request = BatchRequestInput(
+        custom_id="audio-error",
+        method="POST",
+        url=f"/v1/audio/{operation}",
+        body={
+            "model": SPEECH_LARGE_MODEL_NAME,
+            "file_url": "data:audio/wav;base64,AA==",
+        },
+    )
+    handler = AsyncMock(side_effect=error)
+    wrapped_handler = make_transcription_wrapper(is_translation)(handler)
+
+    output = await run_request(wrapped_handler, request)
+
+    assert output.response is not None
+    assert output.response.status_code == status_code
+    assert output.error is not None
+    assert output.error.error.code == status_code
+    assert output.error.error.type == error_type
+    handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_transcription_wrapper_rejects_oversized_data_url_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1249,6 +1289,43 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         pytest.raises(ValueError, match=f"line {bad_line}:"),
     ):
         validate_batch(f)
+
+
+@pytest.mark.asyncio
+async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
+    """Building a TypeAdapter rebuilds its schema, too slow to do per request."""
+    type_adapter = MagicMock(wraps=TypeAdapter)
+    monkeypatch.setattr(run_batch_module, "TypeAdapter", type_adapter)
+
+    fallback_line = json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/unknown",
+            "body": {"model": EMBEDDING_MODEL_NAME, "input": "Hello world!"},
+        }
+    )
+    lines = [
+        *INPUT_EMBEDDING_BATCH.split("\n"),
+        *INPUT_SCORE_BATCH.split("\n"),
+        fallback_line,
+    ]
+    requests = [BatchRequestInput.model_validate_json(line) for line in lines]
+
+    async def handler(_body):
+        error = {"message": "bad", "type": "BadRequestError", "code": 400}
+        return JSONResponse(content={"error": error}, status_code=400)
+
+    output = await run_request(handler, requests[0])
+
+    assert [type(r.body).__name__ for r in requests] == [
+        *["EmbeddingCompletionRequest"] * 4,
+        *["ScoreQueriesDocumentsRequest"] * 2,
+        "EmbeddingCompletionRequest",
+    ]
+    assert isinstance(output.error, ErrorResponse)
+    assert output.response.status_code == 400
+    type_adapter.assert_not_called()
 
 
 @pytest.mark.asyncio

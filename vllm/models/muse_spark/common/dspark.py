@@ -29,6 +29,7 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     materialize_residual_path_constants,
@@ -94,6 +95,8 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
+        # derived from the weights after loading, refilled in place on reloads
+        self._stacked_kv_weight: torch.Tensor
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         if not isinstance(config, MuseSparkDSparkConfig):
@@ -149,6 +152,9 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             has_weight=config.norm_affine,
             zero_centered_gamma=config.norm_zero_centered_gamma,
         )
+        # Context K/V is projected in _project_muse_context_kv, never by the
+        # parent's MXFP8 context projection.
+        self._context_kv_proj = None
         self.markov_head = DSparkMarkovHead(
             config.vocab_size,
             config.draft_vocab_size,
@@ -172,13 +178,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
         self._context_pre_norms = tuple(attn.pre_qkv_proj_norm for attn in layers_attn)
-        self._stacked_kv_weight = torch.stack(
-            [
-                attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
-                for attn in layers_attn
-            ],
-            dim=0,
-        )
+        kv = [
+            attn.qkv_proj.weight[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            for attn in layers_attn
+        ]
+        refill_derived(self, "_stacked_kv_weight", torch.stack(kv, dim=0))
         self._num_attn_layers = len(layers_attn)
         self._kv_size = attn0.kv_size
         self._head_dim = attn0.head_dim
@@ -372,12 +376,13 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             },
             orig_to_new_stacked=self.hf_to_vllm_mapper.orig_to_new_stacked,
         )
-        loaded = AutoWeightsLoader(self).load_weights(
+        return AutoWeightsLoader(self).load_weights(
             model_weights.items(), mapper=mapper
         )
-        self.model._build_fused_kv_buffers()
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
         materialize_residual_path_constants(self.model)
-        return loaded
 
 
 EntryClass = MuseSparkDSparkForCausalLM

@@ -4,8 +4,9 @@
 
 Keys score as ``e4m3_rn_satfinite(e2m1 * scale)`` with AITER's init / local
 sentinels; the top-k writes logical block ids for the NVFP4 attend, no page
-table. With ``indexer_decode_cp`` at TP4, decode steps of 4 rows per request
-and at most 256 requests score context-parallel (``ops/index_cp``).
+table. With ``indexer_decode_cp`` at TP4, decode steps 4/8 rows
+per request (DSpark 3/7) and at most 256 4-row requests score
+context-parallel (``ops/index_cp``).
 """
 
 import torch
@@ -22,7 +23,10 @@ from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAMetadata,
     _score_width,
 )
-from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerImpl
+from vllm.models.minimax_m3.common.indexer import (
+    MiniMaxM3IndexerDecodeMetadata,
+    MiniMaxM3IndexerImpl,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import dbo_enabled
 
@@ -30,9 +34,21 @@ logger = init_logger(__name__)
 
 # Index heads per rank (TP4 / TP2 / TP1).
 NUM_INDEX_HEADS = (1, 2, 4)
-# Decode CP: rows per request (DSpark 3) and the request cap.
+# Decode CP: rows per request (DSpark 3); DSpark 7 splits each request in two.
 CP_QUERY_LEN = 4
-CP_MAX_REQS = 256
+
+
+def _cp_requests(
+    d: MiniMaxM3IndexerDecodeMetadata,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The CP scorer's 4-row requests. DSpark 7's 8-row request scores as two on
+    its block table row, the first 4 tokens shorter, so every row keeps its
+    causal length."""
+    if d.decode_query_len == CP_QUERY_LEN:
+        return d.block_table, d.seq_lens
+    first = (d.seq_lens - CP_QUERY_LEN).clamp_(min=0)  # padding stays 0
+    seq_lens = torch.stack((first, d.seq_lens), dim=1).flatten()
+    return d.block_table.repeat_interleave(2, dim=0), seq_lens
 
 
 def rocm_nvfp4_indexer_unsupported_reason(
@@ -134,8 +150,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             # The push has no back-pressure; under DBO no all-reduce orders it.
             or dbo_enabled()
             or self.num_index_heads != 1
-            or query_len != CP_QUERY_LEN
-            or num_decodes > CP_MAX_REQS
+            or query_len not in (CP_QUERY_LEN, 2 * CP_QUERY_LEN)
             or num_decodes * query_len > cp.max_rows
         ):
             return None
@@ -181,12 +196,15 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             assert d is not None
             cp = self._decode_cp(md.num_decodes, d.decode_query_len)
             if cp is not None:
+                if md.cp_requests is None:
+                    md.cp_requests = _cp_requests(d)
+                block_table, seq_lens = md.cp_requests
                 # A view of the receive buffer, valid until the next call.
                 score = cp.score_push(
                     iq[:nd, 0],
                     kv,
-                    d.block_table,
-                    d.seq_lens,
+                    block_table,
+                    seq_lens,
                     self.init_blocks,
                     self.local_blocks,
                     _score_width(d.max_seq_len, self.block_size),

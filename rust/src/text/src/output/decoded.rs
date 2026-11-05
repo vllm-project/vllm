@@ -10,7 +10,10 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-use vllm_llm::{FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage};
+use vllm_llm::{
+    FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
+    WeightVersionSpan,
+};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
@@ -79,6 +82,8 @@ pub struct Finished {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding statistics emitted by the engine.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    /// Weight-version spans over all generated token positions.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
     pub timestamps: RequestTimestamps,
 }
 
@@ -219,6 +224,7 @@ pub async fn decoded_text_event_stream(
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
         let spec_decode_metrics = output.spec_decode_metrics.map(|metrics| *metrics);
+        let mut weight_versions = output.weight_versions;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -309,6 +315,14 @@ pub async fn decoded_text_event_stream(
                 }
                 .into());
             }
+            // The spans cover every token received; cut them at the stop-string
+            // truncated count, like Python's spans over its truncated output.
+            if let Some(spans) = weight_versions.as_mut() {
+                spans.retain(|span| span.start < output_token_count);
+                if let Some(last) = spans.last_mut() {
+                    last.end = last.end.min(output_token_count);
+                }
+            }
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
             let text_len = full_decoded.text.len();
@@ -358,6 +372,7 @@ pub async fn decoded_text_event_stream(
                     ec_transfer_params,
                     sampling_mask,
                     spec_decode_metrics,
+                    weight_versions,
                     timestamps: output.timestamps,
                 })),
             })
@@ -638,6 +653,7 @@ mod tests {
                                 first_token_ts: 10.0,
                                 last_token_ts: 11.5,
                             },
+                            weight_versions: None,
                         }),
                     ),
                 ],
@@ -671,6 +687,7 @@ mod tests {
                             ec_transfer_params: None,
                             sampling_mask: None,
                             spec_decode_metrics: None,
+                            weight_versions: None,
                             timestamps: Default::default(),
                         }),
                     ),
@@ -890,6 +907,39 @@ mod tests {
             })
         );
         assert_eq!(output.usage.output_token_count, 4);
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_cuts_weight_version_spans_at_truncated_count() {
+        let span = |version: &str, start, end| WeightVersionSpan {
+            version: version.into(),
+            start,
+            end,
+        };
+        let mut first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
+        first.weight_versions = Some(vec![span("v1", 0, 2)]);
+        // One merged output whose tokens span two more weight versions; the
+        // stop string ends inside the `v2` span.
+        let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
+        second.weight_versions = Some(vec![span("v1", 0, 2), span("v2", 2, 5), span("v3", 5, 6)]);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test-weight-versions-stop".into(),
+            tokenizer,
+            stream::iter([Ok(first), Ok(second)]),
+            opts(&["cx"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.token_ids, ascii_tokens("abcx"));
+        assert_eq!(
+            output.weight_versions,
+            Some(vec![span("v1", 0, 2), span("v2", 2, 4)])
+        );
     }
 
     #[tokio::test]

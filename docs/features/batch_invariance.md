@@ -144,6 +144,7 @@ Batch invariance has been tested and verified on the following models:
 - **Granite MoE SWA**: `ibm-granite/granite-swash-3b-a600m` (MoE + sliding-window attention; FLASH_ATTN and TRITON_ATTN backends; FLEX_ATTENTION and decode-vs-prefill test excluded due to per-layer SWA KV window differences)
 - **Granite SWA**: `ibm-granite/granite-swash-2b` (sliding-window attention; FLASH_ATTN and TRITON_ATTN backends)
 - **Qwen3-0.6B**: `Qwen/Qwen3-0.6B`
+- **LFM2 (MoE)**: `LiquidAI/LFM2-8B-A1B`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 

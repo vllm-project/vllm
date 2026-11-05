@@ -4,6 +4,7 @@
 
 import pytest
 
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
@@ -116,3 +117,35 @@ async def test_lora_functions_async():
         await run_check(llm.remove_lora, 12, [10, 11])
         await run_check(llm.remove_lora, 11, [10])
         await run_check(llm.remove_lora, 10, [])
+
+
+def test_same_lora_name_with_different_ids(
+    qwen3_meowing_lora_files, qwen3_woofing_lora_files
+):
+    """An adapter unloaded and loaded again under the same name gets a new id
+    while requests for the old id may still be running; each request in the
+    shared batch must use its own adapter."""
+    llm = LLM(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
+    messages = [
+        {"role": "system", "content": "Follow the instructions to make animal noises"},
+        {"role": "user", "content": "Make your favorite animal noise."},
+    ]
+    outputs = llm.chat(
+        [messages, messages],
+        SamplingParams(temperature=0, max_tokens=10),
+        chat_template_kwargs={"enable_thinking": False},
+        lora_request=[
+            LoRARequest("pet", 1, qwen3_meowing_lora_files),
+            LoRARequest("pet", 2, qwen3_woofing_lora_files),
+        ],
+    )
+    assert "Meow Meow Meow" in outputs[0].outputs[0].text
+    assert "Woof Woof Woof" in outputs[1].outputs[0].text

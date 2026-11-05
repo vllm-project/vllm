@@ -148,3 +148,52 @@ def test_python_argument_conversion_and_partial_values():
         "bare": 7,
         "text": "  a<b",
     }
+
+
+@pytest.mark.parametrize(
+    "partial_tag", ['<｜DSML｜ parameter name="j', "<｜DSML｜ parameter na"]
+)
+def test_partial_tag_after_gt_is_held_back(partial_tag):
+    config = deepseek_v41_config()
+    assert config.arg_converter is not None
+    assert config.arg_value_extender is not None
+    raw = '<｜DSML｜ parameter name="k" string="true">a > b' + partial_tag
+    assert json.loads(config.arg_converter(raw, True)) == {"k": "a > b"}
+    assert config.arg_value_extender(raw) is None
+
+
+def test_long_string_argument_streams_before_close():
+    # Regression for #52846: a string body has no ">" so it used to be
+    # buffered until the closing parameter tag arrived.
+    body = "A" * 4096
+    text = (
+        '<｜DSML｜ calls>\n<｜DSML｜ invoke name="emit">\n'
+        f'<｜DSML｜ parameter name="text" string="true">{body}'
+        "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "emit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    tokenizer, tokens = tokenizer_for(text, False)
+    parser = parser_for(tokenizer, {"thinking": False})
+    results = replay_streaming(
+        parser, tokens, chunk_size=32, finished_on_last=True, tools=tools
+    )
+    arg_chunks = [
+        tool_call.function.arguments
+        for result in results
+        if result
+        for tool_call in result.tool_calls or []
+        if tool_call.function and tool_call.function.arguments
+    ]
+    assert len(arg_chunks) > len(body) // 64
+    assert json.loads("".join(arg_chunks)) == {"text": body}

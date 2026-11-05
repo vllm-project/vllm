@@ -159,6 +159,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self._has_flashinfer_topk = has_flashinfer()
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
+            and not current_platform.is_device_capability_family(110)
             and not current_platform.is_device_capability_family(120)
         )
         self._is_rocm = current_platform.is_rocm()
@@ -233,6 +234,27 @@ class SparseIndexerTopk(torch.nn.Module):
             )
         return self._backend
 
+    def takes_bf16_logits(
+        self, logits: torch.Tensor, topk_tokens: int, num_rows: int
+    ) -> bool:
+        """Whether this decode call can consume BF16 without a full FP32 copy."""
+        if logits.dtype != torch.bfloat16:
+            return False
+        if self._backend == "deep_select":
+            return (
+                self._has_deep_select
+                and _HAS_DEEP_SELECT_C
+                and is_deep_select_supported(logits, topk_tokens)
+            )
+        return (
+            self._backend in ("auto", "persistent")
+            and self._is_cuda
+            and current_platform.is_device_capability_family(100)
+            and logits.stride(1) == 1
+            and topk_tokens in (512, 1024, 2048)
+            and self.resolve_backend(logits, topk_tokens, num_rows) == "persistent"
+        )
+
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
@@ -272,7 +294,9 @@ class SparseIndexerTopk(torch.nn.Module):
                 f"logits.stride(0) must be divisible by 4, got {logits.stride(0)}"
             )
         if self._is_cuda and not self._cooperative_capable:
-            failures.append("requires SM90+ and is not supported on the SM12x family")
+            failures.append(
+                "requires SM90+ and is not supported on the SM11x/SM12x families"
+            )
         return failures
 
     @staticmethod

@@ -642,6 +642,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         mamba_enabled=True,
         num_blocks=10000,
     )
+    kv_cache_config.hash_block_size = BLOCK_SIZE
 
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
 

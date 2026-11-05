@@ -308,6 +308,81 @@ def test_index_decode_cp_push_all_padding(grid):
     _check_cp_push([0] * 5, 1, 1, 2, grid)
 
 
+@pytest.mark.parametrize("num_reqs", [1, 5, 17, 45])
+@pytest.mark.parametrize("grid", [3, 768])
+def test_index_decode_cp_push_split_requests(num_reqs, grid):
+    """DSpark 7 (8 rows a request) scored as two 4-row CP requests
+    (``indexer_nvfp4._cp_requests``): the four ranks' blocks of every row's
+    visible context match the single-head scorer bit for bit, and so do the
+    top-k ids."""
+    from vllm.models.minimax_m3.amd.indexer_msa import _score_width
+    from vllm.models.minimax_m3.amd.indexer_nvfp4 import _cp_requests
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.host import (
+        minimax_m3_index_topk_decode_indices,
+    )
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerDecodeMetadata
+
+    torch.manual_seed(num_reqs)
+    query_len, heads, init_blocks, local_blocks = 8, cp.HEADS, 1, 2
+    lens = [s and max(s, query_len) for s in _lens(num_reqs, 9000)]  # 0: padding
+    lens[0] = 16 * cp.CP_CH * BLOCK + 2  # the first rows' last block opens a run
+    table, num_blocks = _block_table(lens, share=True)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    cache = _index_cache(num_blocks)
+    rows = num_reqs * query_len
+    q = (torch.randn(rows, heads, D, device="cuda") * 0.5).to(torch.float8_e4m3fn)
+    max_seq_len = max(lens)
+    width = _score_width(max_seq_len, BLOCK)  # the top-k's slots
+    expected = torch.full((heads, rows, width), float("nan"), device="cuda")
+    for h in range(heads):
+        decode_host.minimax_m3_nvfp4_index_score_decode(
+            q[:, h : h + 1], cache, expected[h : h + 1], table, seq_lens,
+            init_blocks, local_blocks, query_len, max_seq_len,
+        )  # fmt: skip
+    meta = MiniMaxM3IndexerDecodeMetadata(
+        seq_lens, table, max_seq_len, query_len, query_len
+    )
+    cp_table, cp_lens = _cp_requests(meta)
+    blocks = torch.arange(width, device="cuda")
+    gathered = torch.full_like(expected, float("nan"))
+    for rank in range(cp.WORLD):
+        counts = torch.zeros(cp.CNT_WORDS, dtype=torch.int32, device="cuda")
+        flags = torch.zeros(cp.FLAG_BYTES // 4, dtype=torch.int32, device="cuda")
+        flags[cp.SC_FLAGS : cp.SC_FLAGS + cp.WORLD] = 1 << 30
+        flags[cp.SC_FLAGS + rank] = 0
+        iq_buf = torch.full((heads, rows, D), 0x7F, dtype=torch.uint8, device="cuda")
+        iq_buf = iq_buf.view(torch.float8_e4m3fn)
+        for p in range(heads):
+            if p != rank:
+                iq_buf[p] = q[:, p]
+                w = cp.SC_IQ + p * cp.SC_MAX_REQS
+                flags[w : w + cp.SC_MAX_REQS] = 1 << 30
+        actual = torch.full_like(expected, float("nan"))
+        dests = [actual[h].data_ptr() for h in range(heads)]
+        decode_host.minimax_m3_nvfp4_index_score_push_cp(
+            q[:, rank].contiguous(), cache, dests, width, rows * width * 4,
+            cp_table, cp_lens, init_blocks, local_blocks,
+            rank, counts, [flags.data_ptr()] * 4, [iq_buf.data_ptr()] * 4, rows,
+            grid=grid,
+        )  # fmt: skip
+        mine = (blocks // cp.CP_CH) % cp.WORLD == rank
+        gathered[:, :, mine] = actual[:, :, mine]
+    torch.accelerator.synchronize()
+    row = torch.arange(rows, device="cuda")
+    visible = seq_lens.repeat_interleave(query_len) - query_len + 1 + row % query_len
+    seen = blocks[None, :] < ((visible + BLOCK - 1) // BLOCK)[:, None]
+    seen = seen[None].expand(heads, -1, -1)
+    assert torch.equal(
+        gathered[seen].view(torch.int32), expected[seen].view(torch.int32)
+    )
+    ids = [torch.empty(heads, rows, 16, dtype=torch.int32, device="cuda") for _ in "ab"]
+    for score, out in zip((expected, gathered), ids):
+        minimax_m3_index_topk_decode_indices(
+            score, out, seq_lens, max_seq_len=max_seq_len, query_len=query_len
+        )
+    assert torch.equal(ids[0], ids[1])
+
+
 def _prefill_case(q_lens, seq_lens_list, num_heads, page_step=1):
     torch.manual_seed(0)
     table, num_blocks = _block_table(seq_lens_list)
