@@ -66,7 +66,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
 )
 from vllm.models.deepseek_v4.attention import fill_short_context_topk_indices
-from vllm.models.deepseek_v41.common.grouped_wo_a import DeepseekV4GroupedWoA
+from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
