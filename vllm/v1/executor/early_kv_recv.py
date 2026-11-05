@@ -4,6 +4,7 @@
 
 import os
 import time
+from itertools import chain
 
 import torch
 import zmq
@@ -13,7 +14,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 logger = init_logger(__name__)
 
@@ -27,20 +28,42 @@ _ACTIVE_WINDOW_S = 1.0
 class EarlyKVOutputAggregator(KVOutputAggregator):
     """Also counts receives that workers report between step outputs."""
 
+    def __init__(self, expected_finished_count: int) -> None:
+        super().__init__(expected_finished_count)
+        # Loads a worker reported in a step output, as it does on a failure or
+        # invalid blocks. The scheduler may apply that output well after
+        # aggregate() (a synchronous utility RPC aggregates pending steps), so
+        # the other workers' votes also go through step outputs, behind it.
+        self._recving_in_outputs = set[str]()
+
+    def aggregate(
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
+    ) -> ModelRunnerOutput | None:
+        if outputs[output_rank]:
+            kv_outputs = [o.kv_connector_output for o in outputs if o]
+            for kv_output in chain(self._salvaged_outputs, kv_outputs):
+                if kv_output:
+                    self._recving_in_outputs |= kv_output.finished_recving or set()
+                    self._recving_in_outputs |= kv_output.failed_recving
+        output = super().aggregate(outputs, output_rank)
+        if output and (kv_output := output.kv_connector_output):
+            self._recving_in_outputs -= kv_output.finished_recving or set()
+        return output
+
     def add_finished_recving(self, req_ids: set[str]) -> set[str]:
         """Count one worker's report and return the requests now finished.
 
         Each worker reports a load once, so votes are not deduplicated.
         """
-        failed = req_ids & self._failed_recving_pending
-        if failed:
-            # Let normal aggregation count these votes and deliver the failure.
+        deferred = req_ids & self._recving_in_outputs
+        if deferred:
+            # Count these votes in the next aggregate() instead.
             self.ft_defer_kv_connector_outputs(
-                [KVConnectorOutput(finished_recving=failed)]
+                [KVConnectorOutput(finished_recving=deferred)]
             )
         finished = set[str]()
         expected = self._expected_finished_count
-        for req_id in req_ids - failed:
+        for req_id in req_ids - deferred:
             remaining = self._recv_remaining_count.get(req_id, expected) - 1
             if remaining:
                 self._recv_remaining_count[req_id] = remaining

@@ -42,10 +42,13 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed):
     normal = KVConnectorOutput()
     for rank in range(2):
         if rank == ordinary_rank:
+            # A worker reports a load in its step output only with an error:
+            # a failure, or (Mooncake Store) invalid blocks alone.
             normal = aggregate(
                 KVConnectorOutput(
                     finished_recving={"request"},
                     failed_recving={"request"} if failed else set(),
+                    invalid_block_ids=set() if failed else {7},
                 ),
             )
         else:
@@ -57,7 +60,8 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed):
     if not normal.finished_recving:
         normal = aggregate()
     assert early | (normal.finished_recving or set()) == {"request"}
-    assert not (early and normal.finished_recving)
-    # Failures arrive with the completion, so never through `early`.
+    # The scheduler may apply an aggregated step output later (a utility RPC
+    # aggregates pending steps), so an error is never overtaken by `early`.
+    assert bool(early) == (ordinary_rank is None)
     assert normal.failed_recving == ({"request"} if failed else set())
     assert aggregate().is_empty()
