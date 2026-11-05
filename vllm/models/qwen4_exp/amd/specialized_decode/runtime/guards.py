@@ -214,11 +214,13 @@ def model_reasons(model, tp: int) -> list[str]:
     return reasons
 
 
-def cache_reasons(model, tp: int) -> list[str]:
-    """Every reason the kernels cannot update the GDN states vLLM bound."""
+def cache_reasons(model, tp: int, q: int = 1) -> list[str]:
+    """Every reason the kernels cannot update the GDN states vLLM bound (with
+    MTP, ``q`` > 1, the conv state also keeps the drafts' entries)."""
     by_reason: dict[str, list[int]] = {}
     if is_conv_state_dim_first():
         return ["conv states stored dim-first"]
+    conv = (L.CONV_TAPS - 1 + q - 1, L.CONV_DIM)
     for layer in model.layers:
         if layer.layer_type != "linear_attention":
             continue
@@ -226,13 +228,12 @@ def cache_reasons(model, tp: int) -> list[str]:
         why = []
         if (
             conv_state.dtype != torch.bfloat16
-            or tuple(conv_state.shape[1:]) != (L.CONV_TAPS - 1, L.CONV_DIM)
+            or tuple(conv_state.shape[1:]) != conv
             or tuple(conv_state.stride()[1:]) != (L.CONV_DIM, 1)
         ):
             why.append(
                 f"conv state {conv_state.dtype} {tuple(conv_state.shape[1:])} "
-                f"{tuple(conv_state.stride()[1:])}, needs bf16 dense "
-                f"({L.CONV_TAPS - 1}, {L.CONV_DIM})"
+                f"{tuple(conv_state.stride()[1:])}, needs bf16 dense {conv}"
             )
         if (
             rstate.dtype != torch.float32
