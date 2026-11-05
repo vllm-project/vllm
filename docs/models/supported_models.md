@@ -764,7 +764,6 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
-| `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
 
@@ -789,6 +788,12 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
+
+Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
+
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
 #### Realtime Transcription
 
