@@ -61,6 +61,8 @@ QUERY_LEN = 32
 # (one empty) span two chunks, three short ones fit in one.
 MULTI_CHUNK_CONTEXTS = [480] * 9 + [0]
 SINGLE_CHUNK_CONTEXTS = [200, 64, 333]
+MIXED_BATCH_CONTEXTS = [100, 200, 0, 333]
+MIXED_BATCH_QUERY_LENS = [1, QUERY_LEN, QUERY_LEN, QUERY_LEN]
 
 # k/v come out of a different GEMM than torch's and can differ by one bf16 ulp;
 # measured output error on MI355 is 2e-3.
@@ -116,7 +118,11 @@ def _make_impl(device: torch.device):
     return impl
 
 
-def _build_metadata(context_lens: list[int], device: torch.device):
+def _build_metadata(
+    context_lens: list[int],
+    device: torch.device,
+    query_lens: list[int] | None = None,
+):
     """Run the production builder; returns (metadata, num_blocks)."""
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -130,7 +136,8 @@ def _build_metadata(context_lens: list[int], device: torch.device):
     )
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-    seq_lens = [context + QUERY_LEN for context in context_lens]
+    query_lens = query_lens or [QUERY_LEN] * len(context_lens)
+    seq_lens = [context + query for context, query in zip(context_lens, query_lens)]
     num_blocks = len(seq_lens) * cdiv(max(seq_lens), BLOCK_SIZE)
     vllm_config = create_vllm_config(
         model_name="deepseek-ai/DeepSeek-R1",
@@ -166,7 +173,7 @@ def _build_metadata(context_lens: list[int], device: torch.device):
             v_head_dim=V_HEAD_DIM,
         )
     )
-    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=[QUERY_LEN] * len(seq_lens))
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     with set_current_vllm_config(vllm_config):
         builder = AiterMLAMetadataBuilder(spec, ["placeholder"], vllm_config, device)
         common_attn_metadata = create_common_attn_metadata(
@@ -310,3 +317,48 @@ def test_k_concat_matches_torch_cat(dtype):
 
     expected = torch.cat([k_nope, k_pe.expand(-1, NUM_HEADS, -1)], dim=-1)
     assert torch.equal(k, expected)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_fused_prefill_matches_two_pass(kv_cache_dtype):
+    """One causal launch over [context | new] reproduces the two-pass merge."""
+    from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    metadata, num_blocks = _build_metadata(
+        MIXED_BATCH_CONTEXTS, device, MIXED_BATCH_QUERY_LENS
+    )
+    assert metadata.fused_prefill is not None
+
+    impl = _make_impl(device)
+    impl.kv_cache_dtype = kv_cache_dtype
+    impl.scale = SCALE
+    impl.dcp_world_size = 1
+    impl.flash_attn_varlen_func = (
+        metadata.prefill.prefill_backend.flash_attn_varlen_func
+    )
+    kv_cache = torch.randn(
+        num_blocks, BLOCK_SIZE, HEAD_SIZE, dtype=DTYPE, device=device
+    )
+    if kv_cache_dtype == "fp8":
+        kv_cache = kv_cache.to(current_platform.fp8_dtype()).view(torch.uint8)
+    num_tokens = sum(MIXED_BATCH_QUERY_LENS[1:])
+    q = torch.randn(num_tokens, NUM_HEADS, QK_HEAD_DIM, dtype=DTYPE, device=device)
+    kv_c_normed = torch.randn(num_tokens, KV_LORA_RANK, dtype=DTYPE, device=device)
+    k_pe = torch.randn(num_tokens, 1, QK_ROPE_HEAD_DIM, dtype=DTYPE, device=device)
+    k_scale = torch.ones(1, dtype=torch.float32, device=device)
+    output = torch.empty(num_tokens, NUM_HEADS * V_HEAD_DIM, dtype=DTYPE, device=device)
+    expected = torch.empty_like(output)
+
+    # AITER's varlen attention takes its autograd path outside inference mode.
+    with torch.inference_mode():
+        impl.forward_mha(q, kv_c_normed, k_pe, kv_cache, metadata, k_scale, output)
+        metadata.fused_prefill = None
+        metadata.context_chunk_kv_indices = None
+        MLACommonImpl.forward_mha(
+            impl, q, kv_c_normed, k_pe, kv_cache, metadata, k_scale, expected
+        )
+
+    torch.testing.assert_close(output, expected, atol=ATOL, rtol=RTOL)
