@@ -119,6 +119,7 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferB12xMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     FlashInferTrtllmMxfp8LinearKernel,
@@ -320,6 +321,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         FlashInferCudnnNvFp4LinearKernel,
     },
     "flashinfer_b12x": {
+        FlashInferB12xMxfp8LinearKernel,
         FlashInferB12xNvFp4LinearKernel,
     },
     "humming": {
@@ -570,6 +572,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
+        FlashInferB12xMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
         B12xMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,

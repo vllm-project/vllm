@@ -43,6 +43,10 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
     supports_pre_processed_weights = True
 
+    def select_mm_backend(self, m: int) -> str:
+        # Subclasses reuse the weight layout and may swap the kernel per M.
+        return "cutlass"
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -113,7 +117,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             input_scale,
             weight_scale,
             out_dtype=out_dtype,
-            backend="cutlass",
+            backend=self.select_mm_backend(input_mxfp8.shape[0]),
         )
 
         if bias is not None:
@@ -121,6 +125,33 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         output_shape = (*input_shape[:-1], N)
         return output.view(output_shape)
+
+
+class FlashInferB12xMxfp8LinearKernel(FlashInferCutlassMxfp8LinearKernel):
+    """MXFP8 W8A8 GEMM via FlashInfer's b12x backend (SM12x).
+
+    Same inputs and weight layout as the CUTLASS kernel. On RTX PRO 6000 b12x
+    wins up to M=512 and CUTLASS wins from M=1024, so large prefill chunks
+    keep CUTLASS.
+    """
+
+    max_b12x_m = 512
+
+    def select_mm_backend(self, m: int) -> str:
+        return "b12x" if m <= self.max_b12x_m else "cutlass"
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        ):
+            return False, "requires SM12x (Blackwell)"
+        if not has_flashinfer():
+            return False, "requires FlashInfer"
+        return True, None
 
 
 class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
