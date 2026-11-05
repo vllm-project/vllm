@@ -5,6 +5,7 @@ import pytest
 import regex as re
 import torch
 
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -371,3 +372,27 @@ def test_weights_mapper_literal_rules_compile_to_regex():
     assert mapper.map_name("w.s") == "root.w.t"
     assert mapper.map_name("w.s.s2") == "root.w.s.s2"
     assert mapper.map_name("a.drop.b") is None
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("h.0.self_attn.k_proj.k_scale", "h.0.self_attn.attn.k_scale"),
+        ("h.0.block.k_proj.k_scale", "h.0.mixer.attn.k_scale"),
+        ("h.0.self_attn.qkv_proj.v_scale", "h.0.self_attn.attn.v_scale"),
+        ("h.0.self_attn.q_scale", "h.0.self_attn.attn.q_scale"),
+    ],
+)
+def test_cache_scale_mapper_matches_names_after_model_rules(name, expected):
+    """Scale rules run after the model's renames and before its stacked rules."""
+    mapper = WeightsMapper(
+        orig_to_new_substr={".block.": ".mixer."},
+        orig_to_new_stacked={
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+    )
+
+    mapped = mapper | QuantizationConfig.get_cache_scale_mapper()
+
+    assert mapped.map_name(name) == expected

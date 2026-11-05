@@ -360,16 +360,16 @@ class TestKvCacheScaleMapper:
         assert self._map(once) == once
 
     def test_composes_with_qkv_mapper(self):
-        """Applied together with a model's qkv/gate_up mapper, the regex scale
-        rules run before the substr rename, so scales are normalized to `.attn.`
-        and regular projections are still fused correctly."""
+        """Applied together with a model's qkv/gate_up mapper, the scale rules
+        run before the stacked rules, so scales are normalized to `.attn.` and
+        regular projections are still fused correctly."""
         from vllm.model_executor.models.utils import WeightsMapper
 
         model_mapper = WeightsMapper(
-            orig_to_new_substr={
-                ".q_proj": ".qkv_proj.q",
-                ".k_proj": ".qkv_proj.k",
-                ".v_proj": ".qkv_proj.v",
+            orig_to_new_stacked={
+                ".q_proj": (".qkv_proj", "q"),
+                ".k_proj": (".qkv_proj", "k"),
+                ".v_proj": (".qkv_proj", "v"),
             }
         )
         # AutoWeightsLoader does `mapper |= cache_scale_mapper`
@@ -377,7 +377,7 @@ class TestKvCacheScaleMapper:
 
         assert (
             combined._map_name("model.layers.0.self_attn.q_proj.weight")
-            == "model.layers.0.self_attn.qkv_proj.q.weight"
+            == "model.layers.0.self_attn.qkv_proj.weight"
         )
         assert (
             combined._map_name("model.layers.0.self_attn.k_proj.k_scale")

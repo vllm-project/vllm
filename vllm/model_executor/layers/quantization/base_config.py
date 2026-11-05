@@ -241,16 +241,10 @@ class QuantizationConfig(ABC):
         orig_to_new_regex = {
             # Deprecated fused kv_scale -> attn.k_scale
             re.compile(r"\.kv_scale$"): r".attn.k_scale",
-            # ModelOpt: .self_attn.{k,v}_proj.{k,v}_scale -> .self_attn.attn.*
-            re.compile(r"\.self_attn\.[kv]_proj\.([kv])_scale$"): (
-                r".self_attn.attn.\1_scale"
-            ),
-            # Fused QKV / qkqkv proj: .self_attn.qk(qk)v_proj.{k,v}_scale -> attn
-            re.compile(r"\.self_attn\.qk(?:qk)?v_proj\.([kv])_scale$"): (
-                r".self_attn.attn.\1_scale"
-            ),
-            # NemotronH: .mixer.{k,v}_proj.{k,v}_scale -> .mixer.attn.*
-            re.compile(r"\.mixer\.[kv]_proj\.([kv])_scale$"): r".mixer.attn.\1_scale",
+            # ModelOpt: .{k,v}_proj.{k,v}_scale -> .attn.*
+            re.compile(r"\.[kv]_proj\.([kv])_scale$"): r".attn.\1_scale",
+            # Fused QKV / qkqkv proj: .qk(qk)v_proj.{k,v}_scale -> .attn.*
+            re.compile(r"\.qk(?:qk)?v_proj\.([kv])_scale$"): r".attn.\1_scale",
             # HYV3: .self_attn.q.scale -> .self_attn.attn.q_scale
             re.compile(r"\.self_attn\.q\.scale$"): r".self_attn.attn.q_scale",
             # HYV3: .self_attn.{k,v}_cache.scale -> .self_attn.attn.{k,v}_scale
