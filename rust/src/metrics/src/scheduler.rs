@@ -148,9 +148,12 @@ impl EncodeLabelValue for LoraAdapterNames {
     }
 }
 
-/// Labels for `vllm:lora_requests_info`.
+/// Labels for `vllm:lora_requests_info`. Field order is the exposition order,
+/// which matches Python's (sorted by name).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct LoraInfoLabels {
+    /// The engine's `max_loras`, constant for the server's lifetime.
+    pub max_lora: u32,
     pub running_lora_adapters: LoraAdapterNames,
     pub waiting_lora_adapters: LoraAdapterNames,
 }

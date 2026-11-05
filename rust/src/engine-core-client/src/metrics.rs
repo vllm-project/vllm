@@ -567,12 +567,20 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
 /// frontend fills them in from per-request lifecycle events tracked by
 /// `LoRARequestStates` in `vllm/v1/engine/output_processor.py`. The Rust
 /// frontend mirrors that, deriving the sets from the request registry.
-#[derive(Default)]
 pub(crate) struct LoraInfoExporter {
+    /// The engines' `max_loras`, reported as the `max_lora` label.
+    max_lora: u32,
     current: Option<LoraInfoLabels>,
 }
 
 impl LoraInfoExporter {
+    pub(crate) fn new(max_lora: u32) -> Self {
+        Self {
+            max_lora,
+            current: None,
+        }
+    }
+
     pub(crate) fn update(
         &mut self,
         metrics: &SchedulerMetrics,
@@ -580,6 +588,7 @@ impl LoraInfoExporter {
         waiting: BTreeSet<String>,
     ) {
         let next = (!running.is_empty() || !waiting.is_empty()).then_some(LoraInfoLabels {
+            max_lora: self.max_lora,
             running_lora_adapters: LoraAdapterNames(running),
             waiting_lora_adapters: LoraAdapterNames(waiting),
         });
@@ -641,7 +650,7 @@ mod tests {
     #[test]
     fn lora_info_emits_clears_stale_and_drains() {
         let metrics = Metrics::new();
-        let mut exporter = LoraInfoExporter::default();
+        let mut exporter = LoraInfoExporter::new(4);
 
         // No adapters: nothing emitted.
         exporter.update(&metrics.scheduler, names(&[]), names(&[]));
@@ -650,21 +659,21 @@ mod tests {
         // Two running (sorted), one waiting.
         exporter.update(&metrics.scheduler, names(&["b", "a"]), names(&["c"]));
         expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="a,b",waiting_lora_adapters="c"} <ts>"#
+            r#"vllm:lora_requests_info{max_lora="4",running_lora_adapters="a,b",waiting_lora_adapters="c"} <ts>"#
         ]]
         .assert_eq(&lora_series(&metrics.render().unwrap()));
 
         // "c" gets scheduled and "d" arrives: the stale series is replaced.
         exporter.update(&metrics.scheduler, names(&["a", "b", "c"]), names(&["d"]));
         expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="a,b,c",waiting_lora_adapters="d"} <ts>"#
+            r#"vllm:lora_requests_info{max_lora="4",running_lora_adapters="a,b,c",waiting_lora_adapters="d"} <ts>"#
         ]]
         .assert_eq(&lora_series(&metrics.render().unwrap()));
 
         // Everything but "d" finishes.
         exporter.update(&metrics.scheduler, names(&["d"]), names(&[]));
         expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="d",waiting_lora_adapters=""} <ts>"#
+            r#"vllm:lora_requests_info{max_lora="4",running_lora_adapters="d",waiting_lora_adapters=""} <ts>"#
         ]]
         .assert_eq(&lora_series(&metrics.render().unwrap()));
 
