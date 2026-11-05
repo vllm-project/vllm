@@ -2557,6 +2557,7 @@ class VllmConfig:
                     ):
                         from vllm.v1.spec_decode.dynamic.utils import (
                             build_dynamic_sd_schedule_lookup,
+                            dynamic_sd_decode_tiers,
                         )
 
                         schedule = (
@@ -2577,14 +2578,9 @@ class VllmConfig:
                         except ValueError:
                             pass
                         else:
-                            # Ascending batch size, so the last write per
-                            # query length is the widest batch running at it.
-                            widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
-                            ):
-                                widest_batch[num_spec + 1] = batch_size
-                            decode_tiers = list(widest_batch.items())
+                            decode_tiers = list(
+                                dynamic_sd_decode_tiers(dense_schedule).items()
+                            )
 
                     uniform_decode_sizes = sorted(
                         {

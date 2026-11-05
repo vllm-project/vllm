@@ -8,7 +8,10 @@ import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+from vllm.v1.spec_decode.dynamic.utils import (
+    build_dynamic_sd_schedule_lookup,
+    dynamic_sd_decode_tiers,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 
 
@@ -149,6 +152,17 @@ def test_scheduler_initializes_dynamic_sd_lookup_from_speculative_config():
     assert resources.capture_rows == (4,)
     # Over every batch size the schedule reaches, one decode graph per K.
     assert config.resources(256).capture_rows == (1, 3, 4)
+
+
+def test_dynamic_sd_decode_tiers_are_the_captured_rows():
+    """The config's CUDA-graph sizes and the speculator's capture rows come
+    from the same tiers: each K + 1 with the widest batch that runs at it."""
+    lookup = build_dynamic_sd_schedule_lookup(
+        [(1, 16, 3), (64, 128, 2), (256, 4096, 0)],
+        vllm_max_batch_size=300,
+        vllm_num_speculative_tokens=3,
+    )
+    assert dynamic_sd_decode_tiers(lookup) == {4: 63, 3: 255, 1: 300}
 
 
 def test_scheduler_uses_dsd_k_based_on_number_of_scheduled_requests():

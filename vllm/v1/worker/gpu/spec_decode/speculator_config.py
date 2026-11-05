@@ -161,13 +161,13 @@ class SpeculatorConfig:
         schedule (adaptive verification captures its variable-length graphs
         itself).
         """
+        from vllm.v1.spec_decode.dynamic.utils import dynamic_sd_decode_tiers
         from vllm.v1.spec_decode.resources import SpecResources
 
-        if self.spec_config.uses_dynamic_speculative_decoding():
-            rows = {n + 1 for n in self._dynamic_sd_schedule(max_num_seqs)[1:]}
-        else:
-            rows = {self.num_speculative_tokens + 1}
-        return SpecResources(capture_rows=tuple(sorted(rows)))
+        if not self.spec_config.uses_dynamic_speculative_decoding():
+            return SpecResources(capture_rows=(self.num_speculative_tokens + 1,))
+        tiers = dynamic_sd_decode_tiers(self._dynamic_sd_schedule(max_num_seqs))
+        return SpecResources(capture_rows=tuple(sorted(tiers)))
 
     def adapt_resources(
         self, declared: "SpecResources", caps: "SpecCapabilities"

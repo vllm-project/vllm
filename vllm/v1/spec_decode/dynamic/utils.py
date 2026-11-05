@@ -146,3 +146,14 @@ def build_dynamic_sd_schedule_lookup(
         )
 
     return dense_schedule
+
+
+def dynamic_sd_decode_tiers(dense_schedule: list[int]) -> dict[int, int]:
+    """The decode query length (K + 1) of each K of a dense Dynamic SD lookup,
+    mapped to the widest batch that runs at it. Each needs its own uniform
+    decode CUDA graphs."""
+    widest_batch: dict[int, int] = {}
+    # Ascending batch size, so the last write per query length is the widest.
+    for batch_size, num_spec in enumerate(dense_schedule[1:], start=1):
+        widest_batch[num_spec + 1] = batch_size
+    return widest_batch
