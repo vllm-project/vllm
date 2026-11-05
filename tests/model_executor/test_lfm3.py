@@ -6,6 +6,7 @@ import torch
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.models.lfm3 import get_rotary_embedding
 from vllm.transformers_utils.configs.lfm3 import Lfm3Config
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 # rope_parameters as written by the released hub checkpoints
 HUB_ROPE_PARAMETERS = {
@@ -20,7 +21,11 @@ HUB_ROPE_PARAMETERS = {
 
 @pytest.fixture
 def cpu_vllm_config():
-    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig("cpu"))):
+    # get_rope uses the default dtype, which earlier tests can leave at bf16
+    with (
+        set_current_vllm_config(VllmConfig(device_config=DeviceConfig("cpu"))),
+        set_default_torch_dtype(torch.float32),
+    ):
         yield
 
 

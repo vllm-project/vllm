@@ -123,6 +123,10 @@ def causal_conv1d_update_ref(
 
 
 @pytest.mark.parametrize("width", [1, 8])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason="The width check lives in the Triton wrappers, which CPU bypasses.",
+)
 def test_causal_conv1d_rejects_unsupported_width(width):
     # The kernels branch on widths 2 to 7; any other width would compute
     # wrong values silently.
