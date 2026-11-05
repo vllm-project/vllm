@@ -7,8 +7,7 @@ A provider named in ``SpeculatorConfig.spec_kernel_providers`` may supply any su
 of keys; a later provider wins a key, and a layer missing a kernel verifies chains.
 """
 
-import functools
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 
@@ -370,32 +369,3 @@ class KernelRegistry:
         """Run every bound commit kernel on ``step``."""
         for kernel in self._commits:
             kernel.commit(step)  # type: ignore[attr-defined]
-
-    def capture(
-        self,
-        ctx: KernelContext,
-        run: Callable[[Callable[[], object]], object] = lambda fn: fn(),
-    ) -> None:
-        """Run every bound commit kernel once per capture shape, each through
-        ``run``, on identity paths (each row stays where it is), so their
-        compilation and launch failures surface at startup, not in serving.
-        Verify kernels run in the layers' forward when the decode graphs are
-        captured."""
-        from vllm.v1.worker.gpu.spec_decode.round import AcceptResult
-
-        if not self._commits:
-            return
-        num_reqs, rows = ctx.max_num_reqs, ctx.max_rows
-        path = torch.arange(rows, dtype=torch.int32, device=ctx.device)
-        path = path.expand(num_reqs, rows).contiguous()
-        for n in ctx.capture_rows:
-            rows = torch.full((num_reqs,), n, dtype=torch.int32, device=ctx.device)
-            step = CommitStep(
-                result=AcceptResult(
-                    path=path, path_len=rows, sampled=torch.zeros_like(path)
-                ),
-                num_reqs=num_reqs,
-                rows=rows,
-                seq_lens=rows,
-            )
-            run(functools.partial(self.commit, step))

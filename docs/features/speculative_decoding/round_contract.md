@@ -240,8 +240,8 @@ Token `t` of request `b` is kernel token `block_table[b, t // table_block_size]
 slot.
 
 **Capture rules.** `verify` runs inside captured graphs: no host syncs and no
-data-sized allocations. The runner runs each bound `commit` kernel once per capture
-shape at startup, so failures surface there.
+data-sized allocations. A `commit` kernel that needs a warm-up runs it in `bind`,
+so failures surface at startup.
 
 ## Example: a tree speculator
 

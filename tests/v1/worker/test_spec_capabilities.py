@@ -576,11 +576,10 @@ def test_registry_plan_kind(providers, layer, plan_kind, why):
         assert why in reason
 
 
-def test_bind_commit_capture():
+def test_bind_and_commit():
     """Bind binds each kernel once to its layers (a chain binds the verify
     kernels only, no spec decode unbinds them, and a layer without one runs its
-    own); commit and capture run every bound commit kernel, capture once per
-    shape with identity paths."""
+    own); commit runs every bound commit kernel."""
     verify, state, kv = ToyKernel(), ToyKernel(), ToyKernel()
     registry = KernelRegistry(
         [Provider({GDN_VERIFY: verify, STATE_COMMIT: state, KV_COMMIT: kv})]
@@ -593,13 +592,9 @@ def test_bind_commit_capture():
     ]
     registry.bind(_ctx("chain"), layers)
     assert verify.binds == [["m.0", "m.1"]] and not state.binds and not kv.binds
-    registry.capture(_ctx("chain"))
-    assert not state.steps and not kv.steps
 
-    shapes = (4, 2)
-    ctx = _ctx("tree", shapes)
     verify.binds.clear()
-    registry.bind(ctx, layers)
+    registry.bind(_ctx("tree"), layers)
     assert verify.binds == state.binds == [["m.0", "m.1"]]
     assert kv.binds == [["a.0"]]
     assert [len(c.kv_layouts) for c in kv.ctxs] == [1]
@@ -608,20 +603,6 @@ def test_bind_commit_capture():
     step = CommitStep(result=None, num_reqs=2, rows=None, seq_lens=None)
     registry.commit(step)
     assert state.steps == [step] and kv.steps == [step]
-    state.steps.clear()
-    kv.steps.clear()
-    runs = []
-    registry.capture(ctx, run=lambda fn: runs.append(fn()))
-    assert len(runs) == len(shapes)
-    for kernel in (state, kv):
-        assert [step.rows.tolist() for step in kernel.steps] == [
-            [4, 4, 4],
-            [2, 2, 2],
-        ]
-        for step in kernel.steps:
-            assert step.num_reqs == ctx.max_num_reqs
-            assert step.result.path.tolist() == [[0, 1, 2, 3]] * 3
-            assert torch.equal(step.result.path_len, step.rows)
 
     stale = _mamba_layer("m.0")
     stale.module.spec_verify_kernel = "stale"

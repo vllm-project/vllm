@@ -88,7 +88,6 @@ class SpecRound:
             self.rows = torch.ones(max_num_reqs, dtype=torch.int32, device=device)
         # The spec verify and commit kernels (registry), bound by set_resources.
         self.kernels: KernelRegistry | None = None
-        self.kernel_context: KernelContext | None = None
 
     def registry(self) -> KernelRegistry:
         """The speculator's spec kernels, built once per worker."""
@@ -144,24 +143,19 @@ class SpecRound:
         if resources.max_branching == 1:
             # Chains (perhaps lowered to): batches keep the chain layout.
             self.rows = None
-        self.kernel_context = KernelContext(
+        ctx = KernelContext(
             device=self.device,
             plan_kind=resources.plan_kind,
             max_num_reqs=self.max_num_reqs,
             max_rows=resources.max_rows,
             capture_rows=resources.capture_rows,
         )
-        self.registry().bind(self.kernel_context, layers)
+        self.registry().bind(ctx, layers)
         # Built after binding: until then (the memory profile) dummy batches
         # verify chains, which the layers' own kernels run.
         if resources.max_branching > 1:
             self.layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
             input_buffers.tree_parents = self.layout.tree_parents
-
-    def capture(self) -> None:
-        """Capture the bound spec kernels' graphs, if they have any."""
-        if self.kernel_context is not None:
-            self.registry().capture(self.kernel_context)
 
     def plan_batch(
         self,
@@ -298,9 +292,7 @@ class SpecRound:
         if result is None or is_chain(plan):
             return None
         assert self.rows is not None
-        assert self.kernels is not None and self.kernel_context is not None, (
-            "set_resources binds the commit kernels"
-        )
+        assert self.kernels is not None, "set_resources binds the commit kernels"
         num_reqs = input_batch.num_reqs
         self.kernels.commit(
             CommitStep(result, num_reqs, self.rows[:num_reqs], input_batch.seq_lens)
