@@ -296,7 +296,7 @@ enum Modality {
 message MediaItem {
   Modality modality = 1;
   oneof source {
-    string url = 2;       // http:// or https://
+    string url = 2;       // http://, https://, or file:// under --allowed-local-media-path
     string data_uri = 3;  // data:
     bytes raw_bytes = 4;
     PreprocessedMediaFeatures features = 7;

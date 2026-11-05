@@ -14,9 +14,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use itertools::{Either, izip};
 use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
@@ -68,8 +69,48 @@ pub struct MultimodalModelInfo {
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
+    /// Canonical `--allowed-local-media-path`; `file://` media is refused
+    /// without it.
+    local_media_root: Option<PathBuf>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
+}
+
+/// Where request media may be fetched from, beyond `data:` URLs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct MediaFetchPolicy {
+    /// `--allowed-local-media-path`: `file://` media must resolve inside this
+    /// directory.
+    pub allowed_local_media_path: Option<PathBuf>,
+    /// `--allowed-media-domains`: the only host names HTTP(S) media may name.
+    /// Unlike Python, with no list only public addresses are fetched; a host
+    /// on the list is fetched by name even when it is loopback or private.
+    pub allowed_media_domains: Option<Vec<String>>,
+}
+
+fn media_connector(policy: &MediaFetchPolicy) -> Result<MediaConnector> {
+    let allowed_domains =
+        llm_multimodal::effective_allowed_domains(policy.allowed_media_domains.as_deref());
+    Ok(MediaConnector::new(
+        // The connector finishes the build (forcing its redirect policy
+        // and DNS resolver). llm-multimodal enables no reqwest TLS
+        // backend; this workspace's `native-tls` feature provides it.
+        reqwest_0_13::Client::builder(),
+        MediaConnectorConfig {
+            allow_private_hosts: allowed_domains.is_some(),
+            allowed_domains,
+            ..MediaConnectorConfig::default()
+        },
+    )?)
+}
+
+/// The path a `file:` URL names, or `None` for any other URL.
+fn file_url_path(url: &str) -> Option<std::result::Result<PathBuf, ()>> {
+    let (scheme, _) = url.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+    Some(url::Url::parse(url).map_err(drop).and_then(|url| url.to_file_path()))
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -465,13 +506,7 @@ impl MultimodalModelInfo {
             return Ok(None);
         }
 
-        let media_connector = Arc::new(MediaConnector::new(
-            // The connector finishes the build (forcing its redirect policy
-            // and DNS resolver). llm-multimodal enables no reqwest TLS
-            // backend; this workspace's `native-tls` feature provides it.
-            reqwest_0_13::Client::builder(),
-            MediaConnectorConfig::default(),
-        )?);
+        let media_connector = Arc::new(media_connector(&MediaFetchPolicy::default())?);
 
         let placeholder_token_ids = [
             image.as_ref().map(|support| support.placeholder.marker_token_ids.as_slice()),
@@ -491,8 +526,70 @@ impl MultimodalModelInfo {
             video,
             audio,
             media_connector,
+            local_media_root: None,
             limit_mm_per_prompt,
         }))
+    }
+
+    /// Apply `--allowed-local-media-path` and `--allowed-media-domains`.
+    pub fn with_media_fetch_policy(mut self, policy: &MediaFetchPolicy) -> Result<Self> {
+        self.media_connector = Arc::new(media_connector(policy)?);
+        self.local_media_root = policy
+            .allowed_local_media_path
+            .as_deref()
+            .map(|path| {
+                let root = fs::canonicalize(path).map_err(|error| {
+                    multimodal!("--allowed-local-media-path {}: {error}", path.display())
+                })?;
+                if !root.is_dir() {
+                    bail_multimodal!(
+                        "--allowed-local-media-path {} must be a directory",
+                        path.display()
+                    );
+                }
+                Ok::<_, Error>(root)
+            })
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// Replace a `file:` URL with the file's bytes as a `data:` URL, once the
+    /// file is checked to lie under `--allowed-local-media-path`.
+    async fn inline_local_file(&self, mut part: MediaContentPart) -> Result<MediaContentPart> {
+        let (url, kind) = match &mut part {
+            MediaContentPart::ImageUrl { url, .. } => (url, "image"),
+            MediaContentPart::VideoUrl { url, .. } => (url, "video"),
+            MediaContentPart::AudioUrl { url, .. } => (url, "audio"),
+            _ => return Ok(part),
+        };
+        let Some(path) = file_url_path(url) else {
+            return Ok(part);
+        };
+        let path = path.map_err(|()| Error::LocalMedia(format!("invalid file URL `{url}`")))?;
+        let Some(root) = &self.local_media_root else {
+            return Err(Error::LocalMedia(
+                "Cannot load local files without `--allowed-local-media-path`.".into(),
+            ));
+        };
+        let outside = || {
+            Error::LocalMedia(format!(
+                "The file path {} must be a subpath of `--allowed-local-media-path {}`.",
+                path.display(),
+                root.display()
+            ))
+        };
+        let canonical = tokio::fs::canonicalize(&path).await.map_err(|_| outside())?;
+        if canonical == *root || !canonical.starts_with(root) {
+            return Err(outside());
+        }
+        let bytes = tokio::fs::read(&canonical).await.map_err(|error| {
+            Error::LocalMedia(format!("failed to read {}: {error}", path.display()))
+        })?;
+        *url = format!(
+            "data:{kind}/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        Ok(part)
     }
 
     /// Resolve the spec-backed vision lanes (image and video).
@@ -1294,7 +1391,7 @@ impl MultimodalModelInfo {
                 .with_default_video_sample_fps(video_io.fps.or(default_fps));
         }
         for part in media_parts {
-            tracker.push_part(part)?;
+            tracker.push_part(self.inline_local_file(part).await?)?;
         }
 
         let mut tracker_output = tracker.finalize().await?;
@@ -2374,6 +2471,107 @@ mod tests {
         assert_eq!(salted.identifier, *salted.mm_hash.as_ref().unwrap());
         let pinned = prepare(red_image(Some("caller")), options).await;
         assert_eq!(pinned.identifier, "caller");
+    }
+
+    fn image_url(url: String) -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url,
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        }
+    }
+
+    async fn prepare_one(
+        info: &MultimodalModelInfo,
+        part: MediaContentPart,
+    ) -> Result<MmFeatureSpec> {
+        let mut tokens = vec![QWEN3_IMAGE_PAD_ID];
+        Ok(info
+            .prepare_multimodal(vec![part], &mut tokens, ModelDtype::Float32, None)
+            .await?
+            .remove(0))
+    }
+
+    fn png_bytes(rgb: [u8; 3]) -> Vec<u8> {
+        let image = ::image::RgbImage::from_pixel(64, 64, ::image::Rgb(rgb));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[tokio::test]
+    async fn file_urls_load_only_under_the_allowed_local_media_path() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let base64_png = RED_64_PNG.split_once(',').unwrap().1;
+        let png = base64::engine::general_purpose::STANDARD.decode(base64_png).unwrap();
+        fs::write(root.path().join("red.png"), &png).unwrap();
+        fs::write(outside.path().join("red.png"), &png).unwrap();
+        let file_url = |path: &Path| url::Url::from_file_path(path).unwrap().to_string();
+        let inside_url = file_url(&root.path().join("red.png"));
+
+        let refused =
+            prepare_one(&qwen3_vl_info(), image_url(inside_url.clone())).await.unwrap_err();
+        assert!(refused.is_request_validation_error(), "{refused}");
+        assert!(refused.to_string().contains("--allowed-local-media-path"));
+
+        let info = qwen3_vl_info()
+            .with_media_fetch_policy(&MediaFetchPolicy {
+                allowed_local_media_path: Some(root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+        let from_file = prepare_one(&info, image_url(inside_url)).await.unwrap();
+        let from_data = prepare_one(&info, red_image(None)).await.unwrap();
+        assert_eq!(from_file.mm_hash, from_data.mm_hash);
+        assert_eq!(from_file.identifier, from_data.identifier);
+        assert_eq!(from_file.mm_position.length, from_data.mm_position.length);
+
+        let escapes = [
+            file_url(&outside.path().join("red.png")),
+            format!("{}/../{}/red.png", file_url(root.path()), {
+                outside.path().file_name().unwrap().to_str().unwrap()
+            }),
+            file_url(root.path()),
+            file_url(&root.path().join("missing.png")),
+        ];
+        for url in escapes {
+            let error = prepare_one(&info, image_url(url.clone())).await.unwrap_err();
+            assert!(error.is_request_validation_error(), "{url}: {error}");
+        }
+    }
+
+    #[test]
+    fn allowed_local_media_path_must_be_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        fs::write(&file, b"").unwrap();
+        for path in [file, root.path().join("missing")] {
+            let policy = MediaFetchPolicy {
+                allowed_local_media_path: Some(path),
+                ..Default::default()
+            };
+            assert!(qwen3_vl_info().with_media_fetch_policy(&policy).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn content_identity_separates_different_images_of_one_size() {
+        let info = qwen3_vl_info();
+        let data_url = |rgb| {
+            image_url(format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png_bytes(rgb))
+            ))
+        };
+        let red = prepare_one(&info, data_url([255, 0, 0])).await.unwrap();
+        let red_again = prepare_one(&info, data_url([255, 0, 0])).await.unwrap();
+        let blue = prepare_one(&info, data_url([0, 0, 255])).await.unwrap();
+        assert_eq!(red.mm_position.length, blue.mm_position.length);
+        assert_eq!(red.identifier, red_again.identifier);
+        assert_ne!(red.identifier, blue.identifier);
+        assert_ne!(red.mm_hash, blue.mm_hash);
     }
 
     #[tokio::test]

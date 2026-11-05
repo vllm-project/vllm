@@ -5627,6 +5627,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "asynk-strim-attr",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
@@ -5661,6 +5662,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trait-set",
+ "url",
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",

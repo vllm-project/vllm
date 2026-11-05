@@ -428,7 +428,7 @@ fn raw_part_from_proto(index: usize, item: pb::MediaItem) -> Result<MediaContent
         })?;
         match &source {
             pb::media_item::Source::Url(url) => {
-                validate_media_uri(index, "url", url, &["http", "https"])?;
+                validate_media_uri(index, "url", url, &["http", "https", "file"])?;
             }
             pb::media_item::Source::DataUri(uri) => {
                 validate_media_uri(index, "data_uri", uri, &["data"])?;
@@ -852,9 +852,17 @@ mod tests {
         );
         let bad = pb::MediaItem {
             detail: Some("ultra".into()),
-            ..image
+            ..image.clone()
         };
         let error = raw_parts_from_proto(vec![bad]).unwrap_err();
         assert!(error.message().contains("auto, low or high"));
+
+        let with_url = |url: &str| pb::MediaItem {
+            source: Some(pb::media_item::Source::Url(url.into())),
+            ..image.clone()
+        };
+        raw_parts_from_proto(vec![with_url("file:///media/a.png")]).unwrap();
+        let error = raw_parts_from_proto(vec![with_url("ftp://x/a.png")]).unwrap_err();
+        assert!(error.message().contains("scheme"), "{}", error.message());
     }
 }
