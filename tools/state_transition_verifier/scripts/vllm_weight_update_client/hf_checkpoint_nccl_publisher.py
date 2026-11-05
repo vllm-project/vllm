@@ -16,7 +16,9 @@ import json
 import mmap
 import os
 import struct
+import sys
 import time
+import traceback
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -488,6 +490,30 @@ class _TargetWeightSyncClient(HTTPVLLMWeightSyncClient):
         self._post(endpoint)
 
 
+def _fail_fast_trainer_init(engine_cls: Any, *args: Any, **kwargs: Any) -> Any:
+    """``trainer_init`` that exits instead of hanging when the trainer endpoint fails.
+
+    The rendezvous joins the worker-init RPC thread before re-raising, and the
+    workers wait in NCCL init for a trainer that is gone, so a trainer-side error
+    would otherwise hang the publisher with the error never printed.
+    """
+    open_endpoint = engine_cls._open_trainer_endpoint
+
+    def _open(self: Any, init_info: Any) -> None:
+        try:
+            open_endpoint(self, init_info)
+        except BaseException:
+            traceback.print_exc()
+            sys.stderr.flush()
+            os._exit(3)
+
+    engine_cls._open_trainer_endpoint = _open
+    try:
+        return engine_cls.trainer_init(*args, **kwargs)
+    finally:
+        engine_cls._open_trainer_endpoint = open_endpoint
+
+
 class NcclCheckpointPublisher:
     """Own one Vime-compatible trainer-side NCCL group and ordered updates."""
 
@@ -530,7 +556,8 @@ class NcclCheckpointPublisher:
             self.base_url,
             timeout=self.timeout_seconds,
         )
-        trainer_engine = NCCLTrainerWeightTransferEngine.trainer_init(
+        trainer_engine = _fail_fast_trainer_init(
+            NCCLTrainerWeightTransferEngine,
             init_info,
             client=self.client,
             source=SafetensorsCheckpointSource(self.manifest, self.device),
