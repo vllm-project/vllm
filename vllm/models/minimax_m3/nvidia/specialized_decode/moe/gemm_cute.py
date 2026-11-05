@@ -25,11 +25,11 @@ to the FP32 accumulator in the epilogue:
   the tile's ``h`` rows to per-token NVFP4, FC2's input;
 * FC2 (:class:`RoutedFc2`) multiplies token tile ``c`` of the quantized
   ``h`` and stores the BF16 rows ``8c ..`` of the output in the same
-  permuted order, unweighted. It does not wait for the FC1 grid: its CTAs
-  take the SMs FC1 leaves (the stage counts let one CTA of each share an SM)
-  and stream their weights at once, and each item waits only for its token
-  tile, through the record's ready words (``signal_ready`` /
-  ``ready_target`` of ``RoutedExpertGemm``).
+  permuted order, unweighted. Above 8 rows (``overlap``) it does not wait
+  for the FC1 grid: its CTAs take the SMs FC1 leaves and stream their weights
+  at once, and each item waits only for its token tile, through the record's
+  ready words (``signal_ready`` / ``ready_target`` of
+  ``RoutedExpertGemm``); otherwise it waits for the FC1 grid.
 """
 
 from __future__ import annotations
@@ -166,23 +166,23 @@ def quantize_h_tile(
     words = cute.make_rmem_tensor((6, 4), Uint32)
     block_amax = cute.make_rmem_tensor((3,), Float32)
     for c in cutlass.range_constexpr(6):
-        loaded = load_global_u32x4(h.iterator + row * (H_ROW_WORDS) + lane * 24 + 4 * c)
+        loaded = load_global_u32x4(h.iterator + row * H_ROW_WORDS + lane * 24 + 4 * c)
         for i in cutlass.range_constexpr(4):
             words[c, i] = loaded[i] & keep
+    # Eight values (four words) a chunk, two chunks a 16-value block.
+    chunks = [[words[c, i] for i in range(4)] for c in range(6)]
     row_amax = Float32(0.0)
     for b in cutlass.range_constexpr(3):
-        first = [words[2 * b, i] for i in range(4)]
-        second = [words[2 * b + 1, i] for i in range(4)]
-        block_amax[b] = max_f32(local_amax(first), local_amax(second))
+        block_amax[b] = max_f32(
+            local_amax(chunks[2 * b]), local_amax(chunks[2 * b + 1])
+        )
         row_amax = max_f32(row_amax, block_amax[b])
     for shift in cutlass.range_constexpr(4):
         row_amax = max_f32(row_amax, cute.arch.shuffle_sync_bfly(row_amax, 1 << shift))
     pt, encode = per_token_scales(row_amax)
     for b in cutlass.range_constexpr(3):
-        lo, sf = quantize_x8([words[2 * b, i] for i in range(4)], block_amax[b], encode)
-        hi, _ = quantize_x8(
-            [words[2 * b + 1, i] for i in range(4)], block_amax[b], encode
-        )
+        lo, sf = quantize_x8(chunks[2 * b], block_amax[b], encode)
+        hi, _ = quantize_x8(chunks[2 * b + 1], block_amax[b], encode)
         block = lane * 3 + b
         if r < valid:
             h_quant[row * (H_ROW_WORDS // 4) + 2 * block] = lo
@@ -202,7 +202,7 @@ class RoutedFc1(RoutedExpertGemm):
     gathered with its linear scales by the B load warp, so accumulator column
     ``r`` is tile row ``r``.
 
-    FC2's input. FC2's per-token NVFP4 scale needs a whole ``h`` row, which
+    FC2's per-token NVFP4 scale needs a whole ``h`` row, which
     the tile's 12 items (m tiles) write. Each item's epilogue counts itself in
     the tile's ``done`` word (acquire-release); the item that completes the
     count quantizes the tile's rows (:func:`quantize_h_tile`) before the

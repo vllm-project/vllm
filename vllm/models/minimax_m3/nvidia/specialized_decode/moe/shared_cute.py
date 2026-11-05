@@ -149,10 +149,9 @@ class SharedInputQuant:
 
 class SharedFc1(RoutedExpertGemm):
     """gate_up, split over K (module docstring). The A operand's batch mode
-    and the routing record's tile expert are the split; B's token tile ``s``
-    is the input's columns of split ``s``. Item (split, m tile) stores its
-    FP32 partial sums [split, 8 rows, 1536]. With ``r`` row tiles, B's tile
-    ``s r + t`` is rows ``8t ..`` of split ``s``."""
+    and the routing record's tile expert are the split; B's tile ``s r + t``
+    (``r`` row tiles) is rows ``8t ..`` of split ``s``. Each item stores
+    its FP32 partial sums [split, 8 r rows, 1536]."""
 
     def __init__(self, cta_k: int = 256, num_ab_stage: int = 6) -> None:
         super().__init__(

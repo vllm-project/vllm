@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Front and FC2-input kernels of the MiniMax-M3 low-batch FFN in CuTe DSL.
+"""Front kernel of the MiniMax-M3 low-batch FFN in CuTe DSL.
 
 :class:`LowBatchFront` replaces the routing kernel and the routed input's
 quantization of the stock chain with one launch (grid ``1 + rows``, 768

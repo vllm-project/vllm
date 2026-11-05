@@ -207,8 +207,9 @@ class LowBatchFfn:
         weights = torch.empty((rows, TOP_K), dtype=torch.bfloat16, device=device)
         permuted = torch.empty((rows, TOP_K), dtype=torch.int32, device=device)
         # The record, then one FC1 item count per tile (zeroed by the front).
+        counts = route_words(tiles)
         record = torch.empty(
-            route_words(tiles) + cta_words(tiles), dtype=torch.int32, device=device
+            counts + cta_words(tiles), dtype=torch.int32, device=device
         )
         x_quant = torch.empty((rows, HIDDEN // 2), dtype=torch.uint8, device=device)
         x_scale = torch.empty((rows, HIDDEN // 16), dtype=torch.uint8, device=device)
@@ -250,7 +251,7 @@ class LowBatchFfn:
             _ptr(cutlass.Uint8, h_scale),
             _ptr(cutlass.Float32, h_pt),
             _ptr(cutlass.Int32, record),
-            _ptr(cutlass.Int32, record[route_words(tiles) :]),
+            _ptr(cutlass.Int32, record[counts:]),
             Int32(rows),
             Int32(EXPERTS),
             words,
