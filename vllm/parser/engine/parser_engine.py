@@ -37,6 +37,7 @@ from vllm.tool_parsers.utils import (
     find_tool_name,
     find_tool_properties,
 )
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -192,6 +193,14 @@ class ParserEngine(Parser):
         self._reasoning_end_token_ids: frozenset[int] = (
             self._derive_reasoning_end_token_ids(parser_engine_config, vocab)
         )
+        # The tokens is_reasoning_end looks for, newest first.
+        self._reasoning_boundary_token_ids: frozenset[int | None] = frozenset(
+            {
+                *self._reasoning_end_token_ids,
+                self._reasoning_start_token_id,
+                *self._turn_boundary_token_ids,
+            }
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -244,7 +253,7 @@ class ParserEngine(Parser):
         self._prompt_closes_reasoning = (
             self.parser_engine_config.initial_state is ParserState.REASONING
             and bool(self._turn_boundary_token_ids)
-            and self.is_reasoning_end(list(prompt_token_ids))
+            and self.is_reasoning_end(prompt_token_ids)
         )
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
@@ -721,7 +730,7 @@ class ParserEngine(Parser):
                 return ReasoningEnd(offset, token_id != self._reasoning_end_token_id)
         return ReasoningEnd(len(token_ids), False)
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         config = self.parser_engine_config
         wait_for_reasoning = config.wait_for_reasoning
         if wait_for_reasoning is None:
@@ -731,18 +740,15 @@ class ParserEngine(Parser):
             start_transition is not None
             and start_transition.next_state is ParserState.REASONING
         )
-        end_ids = self._reasoning_end_token_ids
-        start_id = self._reasoning_start_token_id
-        boundary_ids = self._turn_boundary_token_ids
-        for token_id in reversed(input_ids):
-            if token_id in end_ids:
+        # The newest end, start or turn-boundary token decides; a start that
+        # doesn't open reasoning, or a boundary, leaves the default.
+        i = rfind_tokens(input_ids, self._reasoning_boundary_token_ids)
+        if i >= 0:
+            token_id = input_ids[i]
+            if token_id in self._reasoning_end_token_ids:
                 return True
-            if token_id == start_id:
-                if start_opens_reasoning:
-                    return False
-                break
-            if token_id in boundary_ids:
-                break
+            if token_id == self._reasoning_start_token_id and start_opens_reasoning:
+                return False
         return not wait_for_reasoning
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
