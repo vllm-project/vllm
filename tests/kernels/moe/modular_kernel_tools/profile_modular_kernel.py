@@ -122,6 +122,7 @@ def profile_modular_kernel(
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1
         and config.supports_apply_weight_on_input(),
+        "quant_config": quant_config,
     }
 
     num_tokens = hidden_states.shape[0]
