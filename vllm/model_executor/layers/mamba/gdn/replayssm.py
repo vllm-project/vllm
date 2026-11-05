@@ -69,13 +69,28 @@ def pack_replayssm_rows(
     offsets: torch.Tensor | None = None,
     padding_value: float = 0.0,
     uniform: bool = False,
+    single_token: bool = False,
+    allow_strided_rows: bool = False,
 ) -> torch.Tensor:
-    """Pack flattened ragged rows into fixed-width rows."""
+    """Pack ragged rows; single_token requires at most one token per row."""
     num_rows = query_start_loc.numel() - 1
+    if single_token and padding_value == 0.0 and values.shape[0] == num_rows:
+        packed = values.new_zeros((num_rows, executed_query_width, *values.shape[1:]))
+        packed[:, 0].copy_(values)
+        return packed
     if (
         uniform
         and values.shape[0] == num_rows * executed_query_width
-        and values.is_contiguous()
+        and (
+            values.is_contiguous()
+            or (
+                allow_strided_rows
+                and values.ndim == 2
+                and values.stride(1) == 1
+                and values.stride(0) >= values.shape[1]
+                and values.stride(0) * values.element_size() % 16 == 0
+            )
+        )
         and values.data_ptr() % 16 == 0
     ):
         return values.view(num_rows, executed_query_width, *values.shape[1:])
@@ -151,8 +166,20 @@ def run_gdn_replayssm(
     # preserves the common token stride required by block-strided cache pools.
     packed_width = 4 if executed_query_width == 1 else executed_query_width
     uniform = executed_query_width > 1 and uniform_query_length == packed_width
+    # STP metadata permits only zero or one token per row. Eager zero-length
+    # rows use the packer's fallback. Captured padding can have input storage;
+    # its negative state index makes FlashInfer skip that row.
+    single_token = executed_query_width == 1
     packed_qkv = pack_replayssm_rows(
-        mixed_qkv, query_start_loc, packed_width, offsets, uniform=uniform
+        mixed_qkv,
+        query_start_loc,
+        packed_width,
+        offsets,
+        uniform=uniform,
+        single_token=single_token,
+        # FlashInfer accepts Q/K/V views with a common aligned token stride.
+        # Gates keep their compact layout independently of this QKV path.
+        allow_strided_rows=True,
     )
     # CuTe requires every input pointer to be 16-byte aligned. Packing the two
     # gates together and splitting them can leave ``b`` at a small byte offset
@@ -171,9 +198,15 @@ def run_gdn_replayssm(
         offsets,
         padding_value=0.0 if executed_query_width == 1 else -torch.inf,
         uniform=uniform,
+        single_token=single_token,
     )
     packed_b = pack_replayssm_rows(
-        b, query_start_loc, packed_width, offsets, uniform=uniform
+        b,
+        query_start_loc,
+        packed_width,
+        offsets,
+        uniform=uniform,
+        single_token=single_token,
     )
     local_k_dim = num_k_heads * head_k_dim
     local_v_dim = num_v_heads * head_v_dim

@@ -72,14 +72,38 @@ def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
     torch.testing.assert_close(aligned, packed)
     strided = torch.zeros(2 * width, 8, dtype=values.dtype)[:, ::2]
     strided.copy_(values)
-    torch.testing.assert_close(
-        pack_replayssm_rows(strided, starts, width, uniform=True), packed
+    repacked = pack_replayssm_rows(
+        strided, starts, width, uniform=True, allow_strided_rows=True
     )
+    assert repacked.is_contiguous()
+    torch.testing.assert_close(repacked, packed)
+    projection = torch.zeros(2 * width, 8, dtype=values.dtype)[:, :4]
+    projection.copy_(values)
+    viewed = pack_replayssm_rows(
+        projection, starts, width, uniform=True, allow_strided_rows=True
+    )
+    assert viewed.data_ptr() == projection.data_ptr()
+    assert viewed.stride() == (width * 8, 8, 1)
+    torch.testing.assert_close(viewed, packed)
     # Eager staging can include a zero-token graph-padding row.
     padded_starts = torch.tensor([0, width, width])
     padded = pack_replayssm_rows(values[:width], padded_starts, width, uniform=True)
     torch.testing.assert_close(padded[0], values[:width])
     assert padded[1].eq(0).all()
+
+
+@pytest.mark.parametrize("query_lens", [[1, 1], [1, 0]])
+def test_single_token_packing_matches_ragged_path(query_lens):
+    """STP copies strided inputs and preserves zero-token padding rows."""
+    num_tokens = sum(query_lens)
+    values = torch.arange(num_tokens * 8, dtype=torch.bfloat16).view(num_tokens, 8)
+    values = values[:, ::2]
+    starts = torch.tensor([0, *torch.tensor(query_lens).cumsum(0).tolist()])
+    packed = pack_replayssm_rows(values, starts, 4, single_token=True)
+    expected = pack_replayssm_rows(values, starts, 4)
+    torch.testing.assert_close(packed, expected, rtol=0, atol=0)
+    assert packed.data_ptr() % 16 == 0
+    assert packed[:, 1:].eq(0).all()
 
 
 def _reference_gdn_step(
@@ -184,20 +208,35 @@ def test_gdn_replayssm_output_and_accepted_state(
         states.append(pages[:, offset : offset + size].view(dt).view(2, *shape))
         offset += size
     checkpoint, u_cache, k_cache, g_cache = states
+    pages[0].fill_(17)  # Nonzero canaries catch writes to the padding page.
     checkpoint.copy_(random_tensor(2, 2, 128, 128) * 0.03)
     ring_start = torch.zeros(2, dtype=torch.int32, device=device)
     committed = torch.zeros_like(ring_start)
     A_log = torch.full((2,), -3.0, device=device)
     dt_bias = random_tensor(2).float() * 0.2
     accepted_state = checkpoint[1].float().clone()
+    padding_page = pages[0].clone()
+    graph = None
 
     # Eighteen steps cross the native STP flush and the MTP ring boundary.
     for _ in range(18):
         q, k = random_tensor(query_len, 1, 128), random_tensor(query_len, 1, 128)
         v = random_tensor(query_len, 2, 128) * 0.1
         a, b = random_tensor(query_len, 2) * 0.2, random_tensor(query_len, 2)
-        output = run_gdn_replayssm(
-            mixed_qkv=torch.cat((q.flatten(1), k.flatten(1), v.flatten(1)), dim=-1),
+        mixed_qkv = torch.cat((q.flatten(1), k.flatten(1), v.flatten(1)), dim=-1)
+        if width == query_len and width in (4, 8):
+            projection = mixed_qkv.new_zeros(query_len, mixed_qkv.shape[1] + 128)
+            projection[:, : mixed_qkv.shape[1]].copy_(mixed_qkv)
+            mixed_qkv = projection[:, : mixed_qkv.shape[1]]
+        if width == 1:
+            # Captured padding has input storage but no token or live state.
+            mixed_qkv = torch.cat((mixed_qkv, torch.ones_like(mixed_qkv)))
+            a, b = (
+                torch.cat((a, torch.ones_like(a))),
+                torch.cat((b, torch.ones_like(b))),
+            )
+        inputs = dict(
+            mixed_qkv=mixed_qkv,
             a=a,
             b=b,
             A_log=A_log,
@@ -207,10 +246,16 @@ def test_gdn_replayssm_output_and_accepted_state(
             ring_start=ring_start,
             num_committed=committed,
             query_start_loc=torch.tensor(
-                [0, query_len], dtype=torch.int32, device=device
+                [0, 1, 1] if width == 1 else [0, query_len],
+                dtype=torch.int32,
+                device=device,
             ),
-            state_indices=torch.tensor([1], dtype=torch.int32, device=device),
-            output_indices=torch.arange(query_len, dtype=torch.int32, device=device),
+            state_indices=torch.tensor(
+                [1, 0] if width == 1 else [1], dtype=torch.int32, device=device
+            ),
+            output_indices=torch.arange(
+                2 if width == 1 else query_len, dtype=torch.int32, device=device
+            ),
             executed_query_width=width,
             uniform_query_length=query_len,
             num_k_heads=1,
@@ -218,6 +263,30 @@ def test_gdn_replayssm_output_and_accepted_state(
             head_k_dim=128,
             head_v_dim=128,
         )
+        if width == 1:
+            if graph is None:
+                graph_inputs = inputs
+                saved_pages = pages.clone()
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    run_gdn_replayssm(**graph_inputs)
+                torch.cuda.current_stream().wait_stream(stream)
+                pages.copy_(saved_pages)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    graph_output = run_gdn_replayssm(**graph_inputs)
+                pages.copy_(saved_pages)
+            else:
+                for name in ("mixed_qkv", "a", "b"):
+                    graph_inputs[name].copy_(inputs[name])
+            graph.replay()
+            output = graph_output[:1]
+            assert graph_output[1].eq(0).all()
+            torch.testing.assert_close(pages[0], padding_page, rtol=0, atol=0)
+            a, b = a[:1], b[:1]
+        else:
+            output = run_gdn_replayssm(**inputs)
         expected_output, _ = _reference_gdn_step(
             accepted_state, q, k, v, a, b, A_log, dt_bias
         )
