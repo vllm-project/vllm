@@ -1432,6 +1432,7 @@ __all__ = [
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
     "Rdna3W4A8MxFp4LinearKernel",
+    "FlashInferB12xMxfp8LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "FlashInferTrtllmMxfp8LinearKernel",

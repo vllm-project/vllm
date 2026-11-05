@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.model_executor.kernels.linear import (
+    FlashInferB12xMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
@@ -101,6 +102,11 @@ def _patch_cuda_platform(capability: int):
             return_value=(True, None),
         ),
         patch.object(
+            FlashInferB12xMxfp8LinearKernel,
+            "is_supported",
+            return_value=(capability in (120, 121), None),
+        ),
+        patch.object(
             MarlinMxfp8LinearKernel, "is_supported", return_value=(True, None)
         ),
     ):
@@ -133,3 +139,67 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
     assert isinstance(kernel, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+
+
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [(100, False), (103, False), (120, True), (121, True)],
+)
+def test_b12x_mxfp8_supported_only_on_sm12x(capability, expected):
+    with (
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp8.flashinfer.current_platform"
+        ) as platform,
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp8.flashinfer.has_flashinfer",
+            return_value=True,
+        ),
+    ):
+        platform.is_cuda.return_value = True
+        platform.is_device_capability_family.side_effect = (
+            lambda cap, device_id=0: cap // 10 == capability // 10
+        )
+        supported, _ = FlashInferB12xMxfp8LinearKernel.is_supported()
+    assert supported == expected
+
+
+@pytest.mark.parametrize(
+    ("m", "expected"), [(1, "b12x"), (512, "b12x"), (513, "cutlass"), (4096, "cutlass")]
+)
+def test_b12x_mxfp8_keeps_cutlass_for_large_m(m, expected):
+    """b12x is faster for decode-size M but slower on prefill chunks."""
+    config = Mxfp8LinearLayerConfig(weight_shape=_SUPPORTED_SHAPE)
+    with _patch_cuda_platform(120):
+        b12x = FlashInferB12xMxfp8LinearKernel(config)
+        cutlass = FlashInferCutlassMxfp8LinearKernel(config)
+    assert b12x.select_mm_backend(m) == expected
+    assert cutlass.select_mm_backend(m) == "cutlass"
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "expected"), [((128, 128), True), ((130, 256), False)]
+)
+def test_b12x_mxfp8_shares_cutlass_shape_limits(weight_shape, expected):
+    config = Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+    with _patch_cuda_platform(120):
+        can_implement, _ = FlashInferB12xMxfp8LinearKernel.can_implement(config)
+    assert can_implement == expected
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "expected_kernel_cls"),
+    [
+        ("auto", FlashInferCutlassMxfp8LinearKernel),
+        ("flashinfer_b12x", FlashInferB12xMxfp8LinearKernel),
+    ],
+)
+def test_b12x_mxfp8_selected_only_when_requested(linear_backend, expected_kernel_cls):
+    with (
+        _patch_cuda_platform(120),
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
+    ):
+        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+    assert type(kernel) is expected_kernel_cls
