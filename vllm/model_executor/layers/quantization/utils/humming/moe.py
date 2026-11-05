@@ -151,7 +151,7 @@ def get_humming_moe_quant_config(
         and weight_schema.hadamard_block_size <= 1
         and input_schema.input_quant_mode in (None, "dynamic_group")
     ):
-        q_dtype = humming_schema._HUMMING_TO_QUANT_DTYPE.get(
+        q_dtype = humming_schema._humming_to_quant_dtype().get(
             input_schema.a_dtype, FP8_DTYPE
         )
         activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
