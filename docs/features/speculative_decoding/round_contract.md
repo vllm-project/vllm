@@ -2,8 +2,10 @@
 
 This page is for authors of [custom speculators](README.md#custom-speculators-experimental)
 on the V2 model runner. A speculator may choose the rows the target verifies, how
-many candidates the next round takes, and kernels that verify and commit trees.
-Every hook defaults to the standard behaviour; override only the ones you need.
+many candidates the next round takes, the accepted path through a tree, and the
+kernels that verify and commit trees. Every part has a default, and a speculator
+overrides only the parts it needs. vLLM describes and checks what each part is
+given and returns; the tree kernels themselves come from the speculator.
 
 !!! warning
     This is an experimental interface. It may change between releases.
@@ -13,12 +15,13 @@ Every hook defaults to the standard behaviour; override only the ones you need.
 | The speculator owns | vLLM owns |
 | --- | --- |
 | The rows the target verifies each step: chain or tree (`BaseSpeculator.plan`) | The target forward, its CUDA graphs and its parallelism |
-| The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Accepting a path through the plan's rows |
+| The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Sampling the target's token at every verify row, and the rejection sampler for chains |
+| The accepted path through a tree (`BaseSpeculator.tree_accept`) | Checking that path against the plan |
 | Its own drafting (`BaseSpeculator.propose`) | KV cache and recurrent-state memory, sized at startup |
+| The tree kernels: KV compaction, recurrent verify and commit (`SpeculatorConfig.spec_kernel_providers`) | A description of each KV cache group's layout for the KV commit |
+| A tree attention backend (`AttentionBackend.serves_trees`) | Each plan row's parent and position in the attention metadata |
 | | Scheduling, preemption and the order of the waiting queue |
-| | Committing the accepted path to the KV cache and recurrent state |
-| Optional verify and commit kernels (`SpeculatorConfig.spec_kernel_providers`) | Deciding what each layer of the target can verify |
-| | The in-tree kernels, used for every key a speculator does not provide |
+| | Deciding what each layer of the target can verify |
 
 ## Startup
 
@@ -46,9 +49,14 @@ layers and reports a `SpecCapabilities`: a `plan_kind` and one
 verifies the lowest plan kind of any layer on any rank.
 
 - **Attention layers.** Full attention (no sliding window, chunk or R-SWA window)
-  verifies trees when its backend sets `AttentionBackend.serves_trees`; such a
-  backend reads `CommonAttentionMetadata.tree_ancestors` and the plan
-  `positions`. No in-tree backend sets it, so in tree every model verifies chains.
+  verifies trees when its backend sets `AttentionBackend.serves_trees` and the
+  registry holds a `layout:paged_token/commit` kernel. Such a backend reads
+  `CommonAttentionMetadata.tree_parents` (each token's parent row within its
+  request, -1 for its first) and the plan `positions`, and builds the mask it
+  needs (a row sees its context, itself and its ancestors) in its own metadata
+  builder. No in-tree backend sets `serves_trees` and vLLM has no KV commit
+  kernel, so in tree every model verifies chains.
+- **The speculator** verifies chains unless it overrides `BaseSpeculator.tree_accept`.
 - **Recurrent layers** (`MambaBase` subclasses) verify chains unless the class
   itself (not a parent) sets `spec_layer_variant`, for example `"gdn"`, and the
   registry holds its kernels (see [Kernel registry](#kernel-registry)).
@@ -124,7 +132,7 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | `parent` | `[R, C]` int32. `parent[r, 0] == -1`. `parent[r, i]` is the row candidate `i` continues, in `[0, i)`. Rows are ordered parent first. A chain has `parent[r, i] == i - 1`. |
 | `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. None exactly for a chain, which verifies the drafted tokens. |
 | `rows` | Host `[R]` int32, or `None`. `rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`; the drafts past it leave the batch and count as rejected. `None` verifies every scheduled row. Entries past a request's rows are ignored. |
-| `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then skips ancestor sets and KV compaction. It never derives this flag from the tensors. |
+| `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then uses the rejection sampler and skips the commit kernels. It never derives this flag from the tensors. |
 
 Row 0 is the root, the request's last committed token. Plan buffers belong to the
 speculator and must stay valid until the commit returns. A plan that is not a chain
@@ -135,19 +143,34 @@ needs `max_branching > 1` and a batch that is not `chain_only`; a plan has at mo
 
 The runner builds the inputs from the plan and runs the target forward. Each row's
 position is `num_computed_tokens` plus its depth. With M-RoPE, the shift is the same
-on every section. Attention sees each row's ancestors. The forward replays the captured graph for the batch's shape.
+on every section. Attention gets each row's parent (`tree_parents`) and the tree
+backend masks each row to its ancestors. The forward replays the captured graph
+for the batch's shape.
 
-### 4. Accept
+### 4. Accept: `BaseSpeculator.tree_accept`
 
-Chains go through the rejection sampler. For a tree, every row gets the target's
-token (argmax, or a draw from the row's processed logits), and vLLM walks from the
-root to the child whose token matches, until none does. The result, `AcceptResult`:
+```python
+def tree_accept(self, plan: VerifyPlan, target: TargetTokens, width: int) -> AcceptResult
+```
+
+Chains go through the rejection sampler. For a tree, vLLM gives every row the
+target's token (argmax, or a draw from the row's processed logits) and calls
+`tree_accept` once per sampling chunk. `TargetTokens` is flat over the chunk's
+rows in plan order: `tokens` (int64, the target's token per row), `drafted`
+(int64, each row's token; -1 for a row that must not be accepted) and
+`row_start` (`[R + 1]` int32). A typical walk goes from the root to the child
+whose drafted token is the target's token at the current row, until none
+matches. The result, `AcceptResult`:
 
 - `path`: `path[r, :path_len[r]]` lists the accepted rows from the root down, so
   `path[r, j] >= j`.
 - `path_len`: the number of accepted rows per request.
-- `sampled`: `sampled[r, :path_len[r]]` holds the committed tokens; the last is the
-  bonus token.
+- `sampled`: `[R, width]`; `sampled[r, :path_len[r]]` holds the committed tokens;
+  the last is the bonus token.
+
+vLLM checks the result on device, without a host sync: `path[r, 0] == 0`, each
+accepted row's parent is the row before it on the path, and `1 <= path_len[r] <=
+rows[r]`. A failed check is a device assert.
 
 ### 5. Commit
 
@@ -172,15 +195,14 @@ written as `"<layer kind>/<op>"` in logs:
 | Op | Keys | What it does |
 | --- | --- | --- |
 | `verify` | `mamba:gdn@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. Providers only: without one, the layer runs its own chain kernels. |
-| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: attention KV (in tree), or the recurrent state and conv window (a provider's). |
+| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: the attention KV, or the recurrent state and conv window. |
 
 `@slots` is the recurrent-state mode.
 
-In tree, the registry holds only the attention KV commit. A speculator names
-provider factories in `SpeculatorConfig.spec_kernel_providers` (qualified names);
-each is constructed with `vllm_config`, has a `name`, and returns `{key:
-SpecKernel}` from `kernels()`. Providers overlay the in-tree kernels in order and a
-later one wins a key. A layer verifies the highest plan kind that every kernel in
+The registry holds no kernel in tree. A speculator names provider factories in
+`SpeculatorConfig.spec_kernel_providers` (qualified names); each is constructed
+with `vllm_config`, has a `name`, and returns `{key: SpecKernel}` from
+`kernels()`. Providers apply in order and a later one wins a key. A layer verifies the highest plan kind that every kernel in
 `KernelRegistry.required_keys(layer)` supports; a missing or declining kernel
 means chains.
 
@@ -196,7 +218,26 @@ A `SpecKernel` implements these methods:
   `rows.out` and keeps the in-tree state layout. Row `i` of request `b` stores its
   state at `state_indices[b, i]` and continues from row `parents[i]`.
 - `commit(step: CommitStep) -> None`, for `layout:*` keys, moves what the rows on
-  `step.result.path` wrote to where the next step reads it.
+  `step.result.path` wrote to where the next step reads it. For request `b`
+  with context `seq_lens[b] - rows[b]`, the KV of row `path[b, j]` moves to
+  position `context + j`, for `1 <= j < path_len[b]`.
+
+**KV layouts.** The `layout:paged_token` commit kernel is bound with
+`ctx.kv_layouts`, one `PagedKVLayout` per KV cache group of its layers; vLLM
+raises at bind for a cache it cannot describe.
+
+| `PagedKVLayout` field | Meaning |
+| --- | --- |
+| `caches` | The group's cache tensors, one per distinct storage: KV-sharing layers appear once. |
+| `shape` | `(num_blocks, block_size, num_planes, num_heads, head_dim)`. K and V are packed in one row (`num_planes == 1`); MLA has `num_heads == 1`. |
+| `strides` | Element strides in the order of `shape`; `strides[4] == 1`. |
+| `dtype` | The cache dtype. |
+| `block_table` | `[max_num_reqs, max_blocks]` int32, the group's block table. |
+| `table_block_size` | Tokens per `block_table` block; `block_size` (the backend's kernel block size) may divide it. |
+
+Token `t` of request `b` is kernel token `block_table[b, t // table_block_size]
+* table_block_size + t % table_block_size`, split by `block_size` into block and
+slot.
 
 **Capture rules.** `verify` runs inside captured graphs: no host syncs and no
 data-sized allocations. The runner runs each bound `commit` kernel once per capture
@@ -247,12 +288,19 @@ class MyTreeSpeculator(EagleSpeculator):
         n = len(inputs.req_ids)
         # Fill self.parent[:n] and self.tokens[:n] on device.
         return VerifyPlan(parent=self.parent[:n], tokens=self.tokens[:n])
+
+    def tree_accept(self, plan, target, width):
+        # Walk each request's tree with the target's tokens; return AcceptResult.
+        ...
 ```
+
+The config also names, in `spec_kernel_providers`, a provider of
+`layout:paged_token/commit`, and the model runs a tree attention backend. The
+test plugin `tests/plugins/vllm_add_test_speculators` has PyTorch references of
+all three (`reference.py`, `tree_attn.py`).
 
 ## Limits
 
-- A plan has at most 64 rows per request (`MAX_PLAN_ROWS` in `plan_kernels.py`): the
-  ancestor set of a row is one int64.
 - Pipeline parallelism (the tree path is not broadcast between stages), prefill and
   decode context parallelism, batch-sharded sampling and micro-batching run trees
   as chains.
