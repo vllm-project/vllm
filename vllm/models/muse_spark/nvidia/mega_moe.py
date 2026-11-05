@@ -51,11 +51,12 @@ def _get_deep_gemm():
         or not hasattr(module, "bf16_mega_moe")
         or "post_expert_norm_gamma"
         not in inspect.signature(module.bf16_mega_moe).parameters
+        or "weight_layout" not in inspect.signature(module.bf16_mega_moe).parameters
         or "weight_layout" not in inspect.signature(module.fp4_fp4_mega_moe).parameters
     ):
         raise RuntimeError(
             "Muse Spark MegaMoE requires the pinned DeepGEMM build "
-            "with BF16 post-expert normalization and TRT-LLM NVFP4 weight layout. "
+            "with BF16 post-expert normalization and TRT-LLM weight layouts. "
             "Install it with tools/install_deepgemm.sh or rebuild the vLLM wheel."
         )
     return module
@@ -122,9 +123,8 @@ class MuseSparkMegaMoEExperts(nn.Module):
         self.is_nvfp4 = is_nvfp4
         self.trtllm_token_threshold = get_trtllm_token_threshold(vllm_config)
         self.sp_min_tokens = self.trtllm_token_threshold + 1
-        self.weight_layout = (
-            "trtllm" if is_nvfp4 and self.trtllm_token_threshold else "native"
-        )
+        # With a TRT-LLM decode path, both kernels share its weight layout.
+        self.weight_layout = "trtllm" if self.trtllm_token_threshold else "native"
         if hidden_size % 256 != 0 or intermediate_size % 256 != 0:
             raise ValueError(
                 "MuseSpark1x MegaMoE requires hidden and intermediate "
@@ -236,7 +236,10 @@ class MuseSparkMegaMoEExperts(nn.Module):
         deep_gemm = _get_deep_gemm()
 
         if self.weight_layout == "trtllm":
-            self._prepare_trtllm_weights()
+            if self.is_nvfp4:
+                self._prepare_trtllm_weights()
+            else:
+                self._prepare_trtllm_bf16_weights()
         elif self.is_nvfp4:
 
             def sf_to_kernel_layout(sf: torch.Tensor) -> torch.Tensor:
@@ -304,6 +307,19 @@ class MuseSparkMegaMoEExperts(nn.Module):
             w2.view(torch.int8),
             sf2.view(torch.int32).view(e, h, i // 64),
         )
+
+    def _prepare_trtllm_bf16_weights(self) -> None:
+        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+            convert_moe_weights_to_flashinfer_trtllm_block_layout,
+        )
+
+        # In place: [E, K / 64, N, 64] views of the checkpoint storage.
+        w13, w2 = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+            {}, self.w13_weight.data, self.w2_weight.data
+        )
+        self.w13_weight.data = w13
+        self.w2_weight.data = w2
+        self._transformed_l1, self._transformed_l2 = w13, w2
 
     def _drop_retransformed_weights(self) -> None:
         """Release the checkpoint tensors the kernel no longer reads."""
@@ -434,6 +450,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
                 buffer,
                 post_expert_norm_gamma=self._norm_gamma,
                 post_expert_norm_eps=self.post_expert_norm.variance_epsilon,
+                weight_layout=self.weight_layout,
             )
             return y
         deep_gemm.fp4_fp4_mega_moe(
