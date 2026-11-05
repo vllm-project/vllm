@@ -102,9 +102,7 @@ def layer():
                 method = getattr(module, "quant_method", None)
                 if isinstance(method, QuantizeMethodBase):
                     method.process_weights_after_loading(module)
-            ffn = build_low_batch_ffn(moe)
-            assert ffn is not None
-            yield moe, config, ffn
+            yield moe, config, build_low_batch_ffn(moe)
     finally:
         torch.set_default_dtype(default_dtype)
         cleanup_dist_env_and_memory()
@@ -143,10 +141,12 @@ def _inputs(kind, rows, generator, moe):
     x = torch.randn(rows, HIDDEN, generator=generator, device=DEVICE) * 2
     saved = (moe.e_score_correction_bias.data.clone(), moe.gate.weight.data.clone())
     if kind == "one_expert_set":
-        # Every row on the same four experts: full 8-row tiles at 8 rows.
+        # Every row on the same four experts: full 8-row tiles at 8 rows,
+        # several tiles per expert above.
         moe.e_score_correction_bias.data[5:9] += 20
     elif kind == "distinct":
-        # Row r on experts 4r .. 4r + 3: four tiles per row.
+        # Row r on experts 4r .. 4r + 3: four tiles per row (all 128 experts
+        # at 32 rows).
         moe.e_score_correction_bias.data.zero_()
         x.mul_(0.01)
         x[:, :rows] = 0
@@ -253,16 +253,26 @@ def _check(out, moe, x):
             assert error < 0.02, f"row {row} {name}: relative error {error:.4f}"
 
 
+def test_low_batch_ffn_builds(layer):
+    """The kernels subclass and call the DeepSeek-V4.1 low-batch MoE's
+    (``deepseek_v41/nvidia/specialized_decode/moe/``) and compile for every
+    width when the layer is bound, so a change there that breaks them fails
+    here."""
+    _, _, ffn = layer
+    assert ffn is not None
+
+
 @pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
 @pytest.mark.parametrize("kind", ["random", "one_expert_set", "distinct"])
-@pytest.mark.parametrize("rows", [1, 3, 8])
+@pytest.mark.parametrize("rows", [1, 3, 8, 12, 16, 24, 32])
 def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
     """Eager calls and CUDA graph replays with new values in the captured
-    input."""
+    input, at each of the front's widths (8, 16, 32 rows)."""
     from vllm.config import set_current_vllm_config
     from vllm.forward_context import set_forward_context
 
     moe, config, ffn = layer
+    assert ffn is not None
     generator = torch.Generator(device=DEVICE).manual_seed(rows)
     x, (bias, gate) = _inputs(kind, rows, generator, moe)
     try:

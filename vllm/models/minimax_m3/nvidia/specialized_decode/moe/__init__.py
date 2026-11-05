@@ -44,9 +44,13 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 )
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (  # noqa: E501
+    WIDTHS as GEMM_WIDTHS,
+)
+from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (  # noqa: E501
     cta_words,
     max_ctas,
     route_words,
+    width,
 )
 from vllm.utils.torch_utils import aux_stream
 
@@ -96,6 +100,12 @@ SHARED_FC1_CTAS = 36
 SHARED_FC2_CTAS = 24
 # Table width of the shared FC2's one-tile routing record.
 SHARED_FC2_WORDS = 4
+# The CuTe shared expert takes one 8-row tile; larger calls run the stock
+# FlashInfer MXFP8 module on the aux stream.
+SHARED_ROWS = TILE
+# The front's builds: the routed-expert GEMMs' row counts up to MAX_ROWS.
+WIDTHS = tuple(w for w in GEMM_WIDTHS if w <= MAX_ROWS)
+assert WIDTHS[-1] == MAX_ROWS
 
 
 class LowBatchFfn:
@@ -115,6 +125,7 @@ class LowBatchFfn:
         self.shared_linears = (gate_up, down)
         self.gate_up, self.gate_up_scale = gate_up.weight, gate_up.weight_scale
         self.down, self.down_scale = down.weight, down.weight_scale
+        self.shared_experts = moe.shared_experts
         device = self.w13.device
         self.device_index = device.index
         # The shared expert's routing records: FC1's tile s is K split s; FC2
@@ -132,12 +143,14 @@ class LowBatchFfn:
                 + [0] * SHARED_FC2_WORDS
                 + [rows]
                 + [0] * (SHARED_FC2_WORDS - 1)
-                for rows in range(1, MAX_ROWS + 1)
+                for rows in range(1, SHARED_ROWS + 1)
             ],
             dtype=torch.int32,
             device=device,
         )
         # Compile the kernels now, not inside a CUDA graph capture.
+        for built in WIDTHS:
+            _front(self.device_index, built)
         for compile_kernel in _KERNELS:
             compile_kernel(self.device_index)
         self.aux = aux_stream()
@@ -145,7 +158,7 @@ class LowBatchFfn:
         self.shared_ready = torch.cuda.Event()
 
     def accepts(self, x: torch.Tensor) -> bool:
-        """1-8 contiguous BF16 rows of the hidden size, and the routed and
+        """1-32 contiguous BF16 rows of the hidden size, and the routed and
         shared expert weights still the tensors bound here (a weight reload
         replaces them)."""
         return (
@@ -171,7 +184,10 @@ class LowBatchFfn:
         self.input_ready.record(main)
         with torch.cuda.stream(self.aux):
             self.input_ready.wait(self.aux)
-            shared_output = self.shared(x)
+            if rows <= SHARED_ROWS:
+                shared_output = self.shared(x)
+            else:
+                shared_output = self.shared_experts(x)
             self.shared_ready.record(self.aux)
 
         logits, _ = self.gate(x)
@@ -193,7 +209,7 @@ class LowBatchFfn:
         output = torch.empty((h_rows, HIDDEN), dtype=torch.bfloat16, device=device)
         stream = current_cu_stream()
         ctas = Int32(ROUTED_CTAS or _sm_count(self.device_index))
-        _front(self.device_index)(
+        _front(self.device_index, width(rows))(
             _ptr(cutlass.Float32, logits),
             _ptr(cutlass.Float32, self.bias),
             Float32(self.scale),
@@ -211,6 +227,7 @@ class LowBatchFfn:
             _ptr(cutlass.Float4E2M1FN, self.w13, 32),
             _ptr(cutlass.Float8E4M3FN, self.w13_scale),
             _ptr(cutlass.Float4E2M1FN, x_quant, 32),
+            _ptr(cutlass.Uint8, x_quant),
             _ptr(cutlass.Uint32, x_scale),
             _ptr(cutlass.Float32, x_pt),
             _ptr(cutlass.Float32, self.alpha1),
@@ -331,10 +348,11 @@ def _fake(dtype: type[cutlass.Numeric], align: int = 16):
 
 
 @cache
-def _front(device_index: int):
+def _front(device_index: int, built: int):
+    """``LowBatchFront`` for calls of up to ``built`` rows."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            LowBatchFront(),
+            LowBatchFront(built),
             _fake(cutlass.Float32),
             _fake(cutlass.Float32),
             Float32(1.0),
@@ -374,6 +392,7 @@ def _fc1(device_index: int):
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float4E2M1FN, 32),
+            _fake(cutlass.Uint8),
             _fake(cutlass.Uint32),
             _fake(cutlass.Float32),
             _fake(cutlass.Float32),
@@ -471,7 +490,6 @@ def _shared_fc2(device_index: int):
 
 
 _KERNELS = (
-    _front,
     _fc1,
     _fc2_input,
     _fc2,

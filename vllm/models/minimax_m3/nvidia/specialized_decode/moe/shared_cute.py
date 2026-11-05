@@ -202,7 +202,10 @@ class SharedFc1(RoutedExpertGemm):
         )
         out = cute.make_tensor(out_ptr, cute.make_layout(SPLITS * TILE * m))
         route = cute.make_tensor(route_ptr, cute.make_layout(4 + 2 * cta_words))
-        self._launch(a, sfa, b, sfb, route, (out,), (), cta_words, ctas, stream)
+        # A static record: no ready words.
+        self._launch(
+            a, sfa, b, sfb, route, (out,), (), cta_words, Int32(0), ctas, stream
+        )
 
     @cute.jit
     def store(
@@ -336,7 +339,10 @@ class SharedFc2(RoutedExpertGemm):
             out_ptr, cute.make_ordered_layout((self.m, rows), order=(0, 1))
         )
         route = cute.make_tensor(route_ptr, cute.make_layout(4 + 2 * cta_words))
-        self._launch(a, sfa, b, sfb, route, (out,), (), cta_words, ctas, stream)
+        # A static record: no ready words.
+        self._launch(
+            a, sfa, b, sfb, route, (out,), (), cta_words, Int32(0), ctas, stream
+        )
 
     @cute.jit
     def store(

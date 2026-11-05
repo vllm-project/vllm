@@ -4,14 +4,14 @@
 
 :class:`LowBatchFront` replaces the routing kernel and the routed input's
 quantization of the stock chain with one launch (grid ``1 + rows``, 768
-threads):
+threads), built for calls of up to 8, 16 or 32 rows (the record's levels):
 
-* CTA 0, one warp per row: ``biased = sigmoid(logit) + bias`` in FP32 for the
-  128 experts, the four largest biased scores (lowest expert id on exact
-  ties), ``s_k = biased_k - bias_k`` (the recovered score, as the routing
-  policy computes it) and the weights ``scale * s_k / (sum(s) + 1e-20)`` in
-  BF16; then the whole CTA builds the routing record
-  (``routed_expert_route_cute.py``) from the selected ids;
+* CTA 0, warp ``w`` takes rows ``w`` and ``w + 24``: ``biased =
+  sigmoid(logit) + bias`` in FP32 for the 128 experts, the four largest biased
+  scores (lowest expert id on exact ties), ``s_k = biased_k - bias_k`` (the
+  recovered score, as the routing policy computes it) and the weights ``scale *
+  s_k / (sum(s) + 1e-20)`` in BF16; then the whole CTA builds the routing
+  record (``routed_expert_route_cute.py``) from the selected ids;
 * CTA ``1 + r``: row ``r`` of the BF16 input to per-token NVFP4, eight values
   per thread.
 
@@ -53,9 +53,11 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_front_
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_route_cute import (  # noqa: E501
     MAX_EXPERTS,
     TILE,
-    WORDS,
     build_record,
     clear_scratch,
+    levels_for,
+    mask_words_for,
+    present_words,
     record_words,
     zero_record,
 )
@@ -63,7 +65,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_route_
 from .. import EXPERTS, HIDDEN, TOP_K
 from .. import INTERMEDIATE_PER_RANK as INTERMEDIATE
 
-MAX_ROWS = 8
+MAX_ROWS = 32
 SF_VEC = 16
 THREADS = 768
 PER_LANE = EXPERTS // 32
@@ -301,7 +303,13 @@ def select_row(logit: cute.Tensor, bias: cute.Tensor, lane: Int32):
 
 
 class LowBatchFront:
-    """Routing, routing record and per-token NVFP4 input (module docstring)."""
+    """Routing, routing record and per-token NVFP4 input (module docstring),
+    for calls of up to ``max_rows`` rows."""
+
+    def __init__(self, max_rows: int) -> None:
+        assert max_rows <= MAX_ROWS
+        self.max_rows = max_rows
+        self.levels = levels_for(max_rows)
 
     @cute.jit
     def __call__(
@@ -323,7 +331,7 @@ class LowBatchFront:
         [rows, 6144] as words; outputs: ``weights`` BF16 bits [rows, 4] (as
         Uint16), ``x_quant`` [rows, 3072] packed E2M1 as words, ``x_scale``
         [rows, 384] E4M3, ``x_pt`` FP32 [rows], ``permuted`` int32 [rows, 4]
-        and the record. rows in [1, 8]."""
+        and the record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
         self.kernel(
             cute.make_tensor(logits_ptr, cute.make_layout(rows * EXPERTS)),
@@ -363,31 +371,36 @@ class LowBatchFront:
         thread, _, _ = cute.arch.thread_idx()
         cta, _, _ = cute.arch.block_idx()
 
+        levels = self.levels
+        bitmap_words = present_words(levels)
+        mask_size = MAX_EXPERTS * mask_words_for(levels)
+        selected = self.max_rows * TOP_K
+
         @cute.struct
         class Shared:
-            present: cute.struct.MemRange[Uint32, WORDS]
-            rows_of: cute.struct.MemRange[Uint32, MAX_EXPERTS]
-            ids: cute.struct.MemRange[Int32, MAX_ROWS * TOP_K]
+            present: cute.struct.MemRange[Uint32, bitmap_words]
+            rows_of: cute.struct.MemRange[Uint32, mask_size]
+            ids: cute.struct.MemRange[Int32, selected]
             warp_amax: cute.struct.MemRange[Float32, THREADS // 32]
 
         shared = cutlass.utils.SmemAllocator().allocate(Shared)
-        present = _view(shared.present, WORDS)
-        rows_of = _view(shared.rows_of, MAX_EXPERTS)
-        ids = _view(shared.ids, MAX_ROWS * TOP_K)
+        present = _view(shared.present, bitmap_words)
+        rows_of = _view(shared.rows_of, mask_size)
+        ids = _view(shared.ids, selected)
         warp_amax = _view(shared.warp_amax, THREADS // 32)
         if cta != 0:
             cute.arch.griddepcontrol_wait()
             quantize_row(x, cta - 1, thread, x_quant, x_scale, x_pt, warp_amax, HIDDEN)
         else:
-            clear_scratch(present, rows_of, thread, THREADS)
+            clear_scratch(present, rows_of, thread, THREADS, levels)
             row_bias = cute.make_rmem_tensor((PER_LANE,), Float32)
             if thread // 32 < rows:
                 for j in cutlass.range_constexpr(PER_LANE):
                     row_bias[j] = bias[thread % 32 + 32 * j]
             cute.arch.griddepcontrol_wait()
             zero_record(record, rows, TOP_K, EXPERTS, thread, THREADS)
-            if thread // 32 < rows:
-                route_row(logits, row_bias, scale, weights, ids, thread)
+            for row in cutlass.range(thread // 32, rows, THREADS // 32, unroll=1):
+                route_row(logits, row_bias, scale, weights, ids, row, thread % 32)
             cute.arch.sync_threads()
             build_record(
                 present,
@@ -399,6 +412,8 @@ class LowBatchFront:
                 Int32(TOP_K),
                 Int32(EXPERTS),
                 thread,
+                THREADS,
+                levels,
             )
 
 
@@ -413,12 +428,11 @@ def route_row(
     scale: Float32,
     weights: cute.Tensor,
     ids: cute.Tensor,
-    thread: Int32,
+    row: Int32,
+    lane: Int32,
 ):
-    """Warp ``w``: the top-4 and BF16 weights of row ``w``, the ids also to
+    """One warp: the top-4 and BF16 weights of ``row``, the ids also to
     shared memory for the routing record."""
-    row = thread // 32
-    lane = thread % 32
     logit = cute.make_rmem_tensor((PER_LANE,), Float32)
     for j in cutlass.range_constexpr(PER_LANE):
         logit[j] = logits[row * EXPERTS + lane + 32 * j]
