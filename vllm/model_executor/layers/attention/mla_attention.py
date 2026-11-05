@@ -1331,11 +1331,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             elif quant_key == kFp8DynamicTokenSym:
                 # Per-token FP8
                 assert output_block_scale is not None
-                from aiter.ops.quant import dynamic_per_token_scaled_quant
-
                 start_idx = num_mqa_tokens if fused_v_up_proj_quant else 0
                 if start_idx < quant_idx:
-                    dynamic_per_token_scaled_quant(
+                    rocm_aiter_ops.per_token_quant_inplace(
                         quant_output[start_idx:quant_idx],
                         output[start_idx:quant_idx],
                         output_block_scale[start_idx:quant_idx],
