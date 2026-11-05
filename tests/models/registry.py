@@ -1553,6 +1553,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,
     ),
+    "DFlash2RicursiveDraftModel": _HfExamplesInfo(
+        "ricursiveAI/Ripple-65B-Preview-NVFP4",
+        speculative_model="ricursiveAI/Ripple-65B-Preview-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     "DFlashLagunaForCausalLM": _HfExamplesInfo(
         "poolside/Laguna-XS-2.1-NVFP4",
         speculative_model="poolside/Laguna-XS-2.1-DFlash-NVFP4",

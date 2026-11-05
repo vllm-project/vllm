@@ -210,7 +210,6 @@ class DFlashQwen3Attention(nn.Module):
         sliding_window: int | None = None,
         causal: bool = False,
         is_neox_style: bool = True,
-        use_rope: bool = True,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -253,7 +252,6 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.use_rope = use_rope
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position,
@@ -322,8 +320,7 @@ class DFlashQwen3Attention(nn.Module):
             k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
         ).view(k_shape)
 
-        if self.use_rope:
-            q, k = self.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
 
         if self.v_scale is not None:
             v = v * self.v_scale
@@ -379,7 +376,6 @@ class DFlashQwen3DecoderLayer(nn.Module):
             sliding_window=sliding_window,
             causal=causal,
             is_neox_style=is_neox_style,
-            use_rope=layer_idx not in (getattr(config, "no_rope_layers", None) or ()),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -424,8 +420,6 @@ class DFlashQwen3DecoderLayer(nn.Module):
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
-    # Draft layers in ``no_rope_layers``; their context keys skip RoPE.
-    _nope_layers: tuple[int, ...] = ()
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
@@ -654,10 +648,6 @@ class DFlashQwen3Model(nn.Module):
                 and attn.rotary_emb.is_neox_style == self._rope_is_neox
             ), "All layers must have the same RoPE parameters for DFlash precomputation"
 
-        self._nope_layers = tuple(
-            i for i, attn in enumerate(layers_attn) if not attn.use_rope
-        )
-
         # Layer metadata
         self._num_attn_layers = len(layers_attn)
         self._kv_size = attn0.kv_size
@@ -737,6 +727,26 @@ class DFlashQwen3Model(nn.Module):
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         return all_k, all_v
 
+    def _apply_context_rope(
+        self, all_k: torch.Tensor, context_positions: torch.Tensor
+    ) -> None:
+        """Apply RoPE in place to the context K of every layer, one fused call."""
+        num_layers, num_ctx = all_k.shape[:2]
+        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
+        # In-place RoPE: pass K as the "query" arg with key=None.
+        all_k_flat = all_k.view(num_layers * num_ctx, -1)
+        cos_sin_cache = self._rope_cos_sin_cache
+        if cos_sin_cache.dtype != all_k_flat.dtype:
+            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        ops.rotary_embedding(
+            context_positions.repeat(num_layers),
+            all_k_flat,
+            None,
+            self._rope_head_size,
+            cos_sin_cache,
+            self._rope_is_neox,
+        )
+
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
@@ -777,32 +787,13 @@ class DFlashQwen3Model(nn.Module):
 
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
-        kv = self._kv_size
         hd = self._head_dim
         nkv = self._num_kv_heads
 
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
 
-        # --- Fused RoPE across all layers ---
-        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-        # In-place RoPE: pass K as the "query" arg with key=None.
-        all_k_flat = all_k_normed.view(L * num_ctx, kv)
-        nope_k = [all_k_normed[i].clone() for i in self._nope_layers]
-        positions_repeated = context_positions.repeat(L)
-        cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
-            positions_repeated,
-            all_k_flat,
-            None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
-        )
-        for i, k in zip(self._nope_layers, nope_k):
-            all_k_normed[i].copy_(k)
+        self._apply_context_rope(all_k_normed, context_positions)
 
         if context_slot_mapping is None:
             return
@@ -812,7 +803,7 @@ class DFlashQwen3Model(nn.Module):
             all_v.mul_(v_scale)
 
         # --- Per-layer cache insert ---
-        all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        all_k_final = all_k_normed.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
         for i in range(L):
             slot_mapping = (
