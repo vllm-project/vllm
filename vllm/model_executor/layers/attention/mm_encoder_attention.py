@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import functools
 import json
 import os
@@ -10,6 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import MultiModalConfig
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
 )
@@ -47,10 +49,11 @@ logger = init_logger(__name__)
 _, _FP8_MAX = get_fp8_min_max()
 _FP8_AMAX_HISTORY_LEN = 16
 
-# Module-level state for auto-saving dynamic scales. The save is a one-shot
-# triggered by the first layer whose amax buffer wraps. Path and margin are
-# captured during layer init (set_current_vllm_config context only lives
-# across model init, not forward passes).
+# Module-level state for auto-saving dynamic scales, armed on the global first
+# rank only. The save fires when the last layer's amax history wraps: once, or
+# at every wrap with mm_encoder_fp8_scale_save_every_wrap. Path, margin and
+# mode are captured during layer init (set_current_vllm_config context only
+# lives across model init, not forward passes).
 _fp8_scale_save_path: str | None = None
 _fp8_scale_save_margin: float = MultiModalConfig.mm_encoder_fp8_scale_save_margin
 _fp8_scale_save_every_wrap: bool = (
@@ -111,8 +114,9 @@ def _maybe_save_fp8_scales(
     v_scale: torch.Tensor,
     buffer_wrapped: bool,
 ) -> None:
-    """Accumulate a layer's scale tensors; on the first amax buffer wrap,
-    dump all accumulated scales to `mm_encoder_fp8_scale_save_path`.
+    """Accumulate a layer's scale tensors; when the last layer's amax buffer
+    first wraps, dump all accumulated scales to
+    `mm_encoder_fp8_scale_save_path`.
     With `mm_encoder_fp8_scale_save_every_wrap` the file is rewritten at
     every wrap, so it ends with the scales of the last amax window (e.g. the
     real images of an evaluation that runs after warm-up traffic).
@@ -130,12 +134,13 @@ def _maybe_save_fp8_scales(
     # Stash scale tensor refs (no GPU->CPU sync yet); wait until the amax
     # history has seen a full cycle before committing scales to disk.
     _fp8_saved_scale_refs[layer_name] = (q_scale, k_scale, v_scale)
-    if not buffer_wrapped:
+    # All layers record once per encoder forward, so they wrap in the same
+    # forward; save once, at the last layer, when every window is complete.
+    if not buffer_wrapped or layer_name != next(reversed(_fp8_saved_scale_refs)):
         return
 
-    # Buffer just wrapped for the first time: materialize scales (with
-    # safety margin) and dump to disk. Clearing _fp8_scale_save_path
-    # makes this a one-shot across all layers.
+    # Materialize scales (with safety margin) and dump to disk. Clearing
+    # _fp8_scale_save_path makes this a one-shot unless every-wrap is set.
     path, margin = _fp8_scale_save_path, _fp8_scale_save_margin
     scales = {
         name: {
@@ -148,12 +153,16 @@ def _maybe_save_fp8_scales(
     if not _fp8_scale_save_every_wrap:
         _fp8_scale_save_path = None
         _fp8_saved_scale_refs.clear()
-    # Write atomically: the ranks of a data-parallel vision encoder share the
-    # path, and a reader must never see a partly written file.
+    # Write a temporary file and rename it into place, so the path never
+    # holds a partly written file (e.g. after an interrupted run).
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(scales, f, indent=2)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(scales, f, indent=2)
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
     logger.info("Saved FP8 scales (%d layers) to %s", len(scales), path)
 
 
@@ -483,9 +492,14 @@ class MMEncoderAttention(CustomOp):
         # Capture auto-save config now: the VllmConfig context only lives
         # across model init, not forward passes, so ``_maybe_save_fp8_scales``
         # reads these globals instead of re-querying ``get_multimodal_config``.
+        # Only the global first rank writes: every rank shares the path but
+        # computes scales from its own share of the work (its images with
+        # mm_encoder_tp_mode="data", its heads otherwise), so several writers
+        # would leave whichever rank happened to write last.
         if (
             mm_cfg.mm_encoder_fp8_scale_save_path is not None
             and self._fp8_dynamic_scale
+            and is_global_first_rank()
         ):
             global _fp8_scale_save_path, _fp8_scale_save_margin
             global _fp8_scale_save_every_wrap
