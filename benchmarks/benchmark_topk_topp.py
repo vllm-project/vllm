@@ -4,7 +4,7 @@
 """Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
 All implementations return masked logits. Timings include a fresh-input copy.
-FlashInfer timings include softmax and mask reconstruction when its APIs require them.
+FlashInfer timings include candidate filtering and dense masked-logit reconstruction.
 L2 is flushed before each measured iteration, outside the timed region.
 
 Scenarios:
@@ -21,11 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import flashinfer
-import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
 from flashinfer.testing import bench_gpu_time_with_cupti
 
+from vllm.triton_utils import tl, triton
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
@@ -115,48 +115,139 @@ def create_logits(
     return logits
 
 
-def apply_top_k_top_p_flashinfer_mask(
-    logits: torch.Tensor, k: torch.Tensor | int | None, p: torch.Tensor | None
+def apply_top_k_top_p_flashinfer_fastpath(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    *,
+    top_k_min: int,
+    top_k_max: int,
 ) -> torch.Tensor:
-    """Filter compact candidates for scalar k<=128, otherwise use dense masking."""
-    if not isinstance(k, int) or not 0 < k <= 128 or k >= logits.shape[-1]:
-        return apply_top_k_top_p_flashinfer_dense(logits, k, p)
+    """Filter device tensors with required host bounds on per-row k.
+
+    Every entry of k must lie in [top_k_min, top_k_max].
+    """
+    if can_use_fi_topk_topp_fastpath(logits, k, top_k_min, top_k_max):
+        return apply_fi_topk_topp_fastpath(
+            logits, k, p, top_k_min=top_k_min, top_k_max=top_k_max
+        )
+    raise NotImplementedError()
+
+
+def can_use_fi_topk_topp_fastpath(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    top_k_min: int,
+    top_k_max: int,
+) -> bool:
+    # Match FlashInfer's top-k-first gate, with no indices mapping.
+    return (
+        k is not None
+        and k.shape == (logits.shape[0],)
+        and 0 < top_k_min <= top_k_max <= 256
+        and logits.shape[-1] >= 65536
+        and top_k_max < logits.shape[-1]
+    )
+
+
+def apply_fi_topk_topp_fastpath(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    *,
+    top_k_min: int,
+    top_k_max: int,
+) -> torch.Tensor:
+    assert k is not None
     values, indices = flashinfer.top_k(
         logits.contiguous(),
-        k,
-        sorted=True,
+        top_k_max,
+        sorted=p is not None or top_k_min != top_k_max,
         deterministic=True,
         tie_break=1,
         dsa_graph_safe=logits.shape[-1] % 4 != 0,
     )
-    values = values.flip(-1)
-    indices = indices.flip(-1)
-    if p is not None:
-        remove = values.softmax(-1).cumsum(-1) <= 1 - p.unsqueeze(-1)
-        remove[:, -1] = False
-        values = values.masked_fill(remove, -float("inf"))
     output = torch.full_like(logits, -float("inf"))
-    return output.scatter_(1, indices, values)
+    if p is None and top_k_min == top_k_max:
+        return output.scatter_(1, indices, values)
+    _fi_candidates_to_logits_kernel[(logits.shape[0],)](
+        values,
+        indices,
+        k,
+        p,
+        output,
+        values.stride(0),
+        values.stride(1),
+        indices.stride(0),
+        indices.stride(1),
+        output.stride(0),
+        output.stride(1),
+        k.stride(0),
+        p.stride(0) if p is not None else 0,
+        top_k_max,
+        p is not None,
+        top_k_min == top_k_max,
+        triton.next_power_of_2(top_k_max),
+        num_warps=4,
+    )
+    return output
 
 
-def apply_top_k_top_p_flashinfer_dense(
-    logits: torch.Tensor, k: torch.Tensor | int | None, p: torch.Tensor | None
-) -> torch.Tensor:
-    """Keep top-k in logits; adapt probability-based top-p back to logits."""
-    if k is not None:
-        logits = fi_sampling.top_k_mask_logits(logits, k)
-    if p is not None:
-        # Top-p renormalization requires softmax, even after logits-based top-k.
-        probs = logits.softmax(dim=-1)
-        probs = fi_sampling.top_p_renorm_probs(probs, p, is_deterministic=True)
-        # Return the selected original logits, not normalized probabilities.
-        logits = logits.masked_fill(probs == 0, -float("inf"))
-    return logits
+@triton.jit
+def _fi_candidates_to_logits_kernel(
+    values_ptr,
+    indices_ptr,
+    k_ptr,
+    p_ptr,
+    output_ptr,
+    value_row_stride,
+    value_col_stride,
+    index_row_stride,
+    index_col_stride,
+    output_row_stride,
+    output_col_stride,
+    k_stride,
+    p_stride,
+    TOP_K_MAX: tl.constexpr,
+    HAS_P: tl.constexpr,
+    UNIFORM_K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Filter [batch, top_k_max] FP32 candidates and scatter retained logits."""
+    row = tl.program_id(0)
+    offset = tl.arange(0, BLOCK)
+    rank = TOP_K_MAX - 1 - offset
+    valid = offset < TOP_K_MAX
+    value = tl.load(
+        values_ptr + row * value_row_stride + rank * value_col_stride,
+        mask=valid,
+        other=-float("inf"),
+    ).to(tl.float32)
+    index = tl.load(
+        indices_ptr + row * index_row_stride + rank * index_col_stride,
+        mask=valid,
+        other=0,
+    )
+    if not UNIFORM_K:
+        row_k = tl.load(k_ptr + row * k_stride)
+        value = tl.where(rank < row_k, value, -float("inf"))
+    keep = valid
+    if HAS_P:
+        weight = tl.exp(value - tl.max(value, 0))
+        probability = weight / tl.sum(weight, 0)
+        cumulative = tl.cumsum(probability, 0)
+        p = tl.load(p_ptr + row * p_stride)
+        keep = valid & (~(cumulative <= 1.0 - p) | (offset == TOP_K_MAX - 1))
+    tl.store(
+        output_ptr + row * output_row_stride + index * output_col_stride,
+        value,
+        mask=keep,
+    )
 
 
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
-    "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
+    "flashinfer-fastpath": apply_top_k_top_p_flashinfer_fastpath,
     "pytorch": apply_top_k_top_p_pytorch,
 }
 
@@ -352,12 +443,12 @@ def run_benchmark(
         timings = {}
         for name in implementations:
             func = IMPLEMENTATIONS[name]
-            k_arg = prepare_top_k(name, k)
+            kwargs = prepare_kwargs(name, k, p, config.vocab_size)
             reset_memory_stats()
             times = bench_gpu_time_with_cupti(
                 # note: measured runtime includes logits.clone()
-                lambda func=func, logits=logits, k=k_arg, p=p: func(
-                    logits.clone(), k, p
+                lambda func=func, logits=logits, k=k, p=p, kwargs=kwargs: func(
+                    logits.clone(), k, p, **kwargs
                 ),
                 dry_run_iters=warmup_iters,
                 repeat_iters=benchmark_iters,
@@ -380,14 +471,26 @@ def run_benchmark(
     return results
 
 
-def prepare_top_k(name: str, k: torch.Tensor | None) -> torch.Tensor | int | None:
-    """Resolve uniform k outside timing, avoiding GPU readback per invocation."""
-    if name != "flashinfer-mask" or k is None:
-        return k
-    values = k.tolist()
-    if values and all(value == values[0] for value in values):
-        return values[0]
-    return k
+def prepare_kwargs(
+    name: str, k: torch.Tensor | None, p: torch.Tensor | None, vocab_size: int
+) -> dict[str, bool | int]:
+    """Resolve host dispatch hints outside timing, preserving device k/p inputs."""
+    if name == "flashinfer-fastpath":
+        if k is None:
+            return {"top_k_min": 0, "top_k_max": 0}
+        values = k.tolist()
+        if not values or any(value <= 0 for value in values):
+            return {"top_k_min": 0, "top_k_max": 0}
+        return {"top_k_min": min(values), "top_k_max": max(values)}
+    if name != "triton":
+        return {}
+    has_topp_only_rows = False
+    if p is not None:
+        topp_only = p < 1
+        if k is not None:
+            topp_only &= k >= vocab_size
+        has_topp_only_rows = bool(topp_only.any().item())
+    return {"has_topp_only_rows": has_topp_only_rows}
 
 
 def check_implementations(
@@ -400,8 +503,8 @@ def check_implementations(
     reference = apply_top_k_top_p_pytorch(logits.clone(), k, p).softmax(dim=-1)
     checks = {}
     for name in implementations:
-        k_arg = prepare_top_k(name, k)
-        actual = IMPLEMENTATIONS[name](logits.clone(), k_arg, p).softmax(dim=-1)
+        kwargs = prepare_kwargs(name, k, p, config.vocab_size)
+        actual = IMPLEMENTATIONS[name](logits.clone(), k, p, **kwargs).softmax(dim=-1)
         total_variation = (actual - reference).abs().sum(-1).max().item() / 2
         checks[name] = {
             "close": torch.allclose(actual, reference, rtol=1e-5, atol=1e-6),
@@ -490,7 +593,7 @@ def main():
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=["triton", "flashinfer-mask"],
+        default=["triton", "flashinfer-fastpath"],
         help="Implementations to compare (PyTorch is an optional reference)",
     )
 

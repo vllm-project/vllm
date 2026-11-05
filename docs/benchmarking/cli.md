@@ -67,11 +67,20 @@ Compare Triton, FlashInfer and PyTorch masked-logit filtering from the repositor
 ```bash
 .venv/bin/python benchmarks/benchmark_topk_topp.py \
   --batch-sizes 4 9 192 280 --vocab-sizes 248320 \
-  --top-k 20 --top-p 0.8 --implementations triton flashinfer-mask pytorch \
+  --top-k 20 --top-p 0.8 --implementations triton flashinfer-fastpath pytorch \
+  --scenarios topk_whole topk_topp_whole \
   --check --output results/topk-topp.jsonl
 ```
 
-`--top-k` and `--top-p` override active sampling values while retaining disabled rows in mixed scenarios. Without these flags, the existing scenario defaults apply. `flashinfer-mask` uses deterministic compact selection for uniform scalar k<=128, applies top-p to the selected candidates and reconstructs dense masked logits. Other scenarios use dense FlashInfer masking. Uniform k is resolved outside timing. Timings include a fresh-input copy and use CUPTI with cold L2, without CUDA graphs. Use `--scenarios` to select cases and `--num-finite-logits` for sparse inputs. `--distribution` selects `zipf` (default), `normal`, or Gaussian values rounded to BF16 then converted back to FP32 (`bf16-rounded`).
+`--top-k` and `--top-p` override active sampling values while retaining disabled rows in mixed scenarios. Without these flags, the existing scenario defaults apply. Use `--num-finite-logits` for sparse inputs. `--distribution` selects `zipf` (default), `normal`, or Gaussian values rounded to BF16 then converted back to FP32 (`bf16-rounded`).
+
+All implementations receive device tensors for k and p. `flashinfer-fastpath` requires vocabulary >= 65536 and host bounds satisfying `1 <= top_k_min <= top_k_max <= 256`, with `top_k_max < vocab`. Both bounds are mandatory and must cover every row's k. Equal bounds imply uniform k. The benchmark prepares these bounds outside timing, production callers would need to supply them from request metadata.
+
+FlashInfer selects candidates with deterministic lower-index tie breaking. A fused Triton kernel applies per-row k masking, top-p filtering and scatter. Uniform top-k-only skips sorting and uses direct scatter.
+
+Unsupported cases raise `NotImplementedError`, with no fallback. Select `topk_whole` and `topk_topp_whole` with `--scenarios` for supported default configurations. Partial/mixed cases containing disabled top-k remain unsupported. Eligibility does not guarantee a speedup.
+
+Timings include a fresh-input copy and use CUPTI with cold L2, without CUDA graphs. Triton's `has_topp_only_rows` hint is resolved outside timing to match production dispatch. Mixed batches with top-p-only rows retain the split top-p pipeline.
 
 ## Dataset Overview
 
