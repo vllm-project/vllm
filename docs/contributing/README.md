@@ -90,6 +90,9 @@ pre-commit install
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
+For package archive hashes, compiled requirements, and GitHub Actions commit
+pins, see [Dependency Hash Pinning](ci/dependency_hashes.md).
+
 When running ShellCheck or markdownlint directly, or configuring an editor
 integration, use the configuration files in `tools/pre_commit/`:
 `--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
@@ -101,6 +104,13 @@ integration, use the configuration files in `tools/pre_commit/`:
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
+    ```
+
+    Hook revisions in `.pre-commit-config.yaml` are pinned to commit SHAs. To bump them, use:
+
+    ```bash
+    pre-commit autoupdate --freeze               # bumps all hooks
+    pre-commit autoupdate --freeze --repo <url>  # bumps one hook
     ```
 
 ### Documentation
