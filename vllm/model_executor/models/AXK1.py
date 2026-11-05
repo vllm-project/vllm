@@ -203,6 +203,7 @@ class AXK1MoE(nn.Module):
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
+            divide_shared_output_in_fp16=True,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
