@@ -141,6 +141,34 @@ def test_aux_output_logprobs_matches_cold_reference(logprobs: int, chunk_size: i
     del aux_llm
 
 
+def test_aux_output_logprobs_replays_a_cached_block_boundary_row():
+    aux_params = SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        logprobs=TOP_K,
+        extra_args={"aux_output_enabled": True},
+    )
+    aux_llm = _make_llm(chunk_size=32)
+    block_size = aux_llm.llm_engine.vllm_config.cache_config.block_size
+    prompt = TokensPrompt(prompt_token_ids=list(range(100, 100 + 2 * block_size)))
+
+    populated = aux_llm.generate([prompt], aux_params)[0]
+    replayed = aux_llm.generate([prompt], aux_params)[0]
+
+    assert replayed.num_cached_tokens == len(prompt["prompt_token_ids"])
+    check_logprobs_close(
+        outputs_0_lst=[_request_tuple(populated)],
+        outputs_1_lst=[_request_tuple(replayed)],
+        name_0="artifact_populate",
+        name_1="artifact_replay",
+        always_check_logprobs=True,
+    )
+    _assert_logprob_values_match(
+        _request_tuple(populated)[2], _request_tuple(replayed)[2]
+    )
+    del aux_llm
+
+
 def test_aux_output_logprobs_boundary_token_mismatch():
     """A changed token after a cached block must not cause an artifact miss."""
     aux_params = SamplingParams(

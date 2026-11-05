@@ -197,8 +197,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(self.model_runner_output.num_nans_in_logits)
 
-        if self.logprobs_tensors is not None:
-            self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         self.model_runner_output.prompt_token_id_logprobs_dict = (
             self.prompt_token_id_logprobs_dict
@@ -207,6 +205,14 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.aux_output_connector_output = (
                 self.pending_aux_output.process_output()
             )
+        if self.logprobs_tensors is not None:
+            aux_logprobs = (
+                self.pending_aux_output.aux_logprobs
+                if self.pending_aux_output is not None
+                else frozenset()
+            )
+            if not set(self.model_runner_output.req_ids) <= aux_logprobs:
+                self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

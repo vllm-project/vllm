@@ -734,6 +734,144 @@ def test_logprobs_only_mixed_batch_returns_opted_in_rows(
     )
 
 
+def test_worker_reuses_matching_logprob_artifact_before_sampler_rows(
+    real_logprob_worker,
+):
+    worker = real_logprob_worker
+    block_hash = bytes([7]) * 32
+
+    def metadata(request_id, boundary_token_id):
+        return AuxOutputConnectorMetadata(
+            generation=0,
+            requests={request_id: 1},
+            block_hashes={},
+            finished_requests=(),
+            logprobs={request_id: "fingerprint"},
+            prompt_lens={request_id: _BLOCK_SIZE},
+            logprob_block_hashes={
+                request_id: PackedBlockHashes(block_hash, len(block_hash))
+            },
+            logprob_boundary_token_ids={request_id: (boundary_token_id,)},
+            logprob_widths={request_id: 2},
+        )
+
+    def run_step(request_id, boundary_token_id, logprob_tensors):
+        worker.begin_step(metadata(request_id, boundary_token_id))
+        input_batch = InputBatch.make_dummy(
+            1, 1, InputBuffers(1, 1, torch.device("cpu")), is_padding=False
+        )
+        input_batch = replace(
+            input_batch,
+            req_ids=[request_id],
+            num_computed_tokens_np=np.array([_BLOCK_SIZE - 1], dtype=np.int32),
+        )
+        pending = worker.prepare_output(input_batch)
+        assert pending is not None
+        pending.enqueue_cpu_copy(
+            np.ones(1, dtype=np.int32),
+            np.zeros(1, dtype=np.int32),
+            logprobs=logprob_tensors,
+        )
+        return pending.process_output()[request_id].logprobs
+
+    written = run_step(
+        "source",
+        222,
+        LogprobsTensors(
+            torch.tensor([[222, 17]], dtype=torch.int32),
+            torch.tensor([[-0.25, -1.5]], dtype=torch.float32),
+            torch.tensor([0], dtype=torch.int32),
+        ),
+    )
+    assert written is not None
+
+    replayed = run_step(
+        "replay",
+        222,
+        LogprobsTensors(
+            torch.tensor([[222]], dtype=torch.int32),
+            torch.tensor([[-9.0]], dtype=torch.float32),
+            torch.tensor([99], dtype=torch.int32),
+        ),
+    )
+
+    assert replayed is not None
+    np.testing.assert_array_equal(replayed.logprob_token_ids, [[222, 17]])
+    np.testing.assert_array_equal(replayed.logprobs, [[-0.25, -1.5]])
+    np.testing.assert_array_equal(replayed.sampled_token_ranks, [0])
+
+    missed = run_step(
+        "miss",
+        223,
+        LogprobsTensors(
+            torch.tensor([[223, 18]], dtype=torch.int32),
+            torch.tensor([[-2.0, -3.0]], dtype=torch.float32),
+            torch.tensor([4], dtype=torch.int32),
+        ),
+    )
+    assert missed is not None
+    np.testing.assert_array_equal(missed.logprob_token_ids, [[223, 18]])
+    np.testing.assert_array_equal(missed.logprobs, [[-2.0, -3.0]])
+    np.testing.assert_array_equal(missed.sampled_token_ranks, [4])
+
+
+def test_async_output_uses_aux_logprobs_for_an_all_opted_in_batch(
+    monkeypatch, real_logprob_worker
+):
+    event = Mock()
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
+    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
+
+    worker = real_logprob_worker
+    worker.begin_step(
+        AuxOutputConnectorMetadata(
+            generation=0,
+            requests={"aux": 1},
+            block_hashes={},
+            finished_requests=(),
+            logprobs={"aux": "fingerprint"},
+            prompt_lens={"aux": 0},
+            logprob_widths={"aux": 1},
+        )
+    )
+    input_batch = InputBatch.make_dummy(
+        1, 1, InputBuffers(1, 1, torch.device("cpu")), is_padding=False
+    )
+    input_batch = replace(input_batch, req_ids=["aux"])
+    pending = worker.prepare_output(input_batch)
+    assert pending is not None
+
+    sampler_logprobs = LogprobsTensors(
+        torch.tensor([[7]], dtype=torch.int32),
+        torch.tensor([[-0.5]], dtype=torch.float32),
+        torch.tensor([0], dtype=torch.int32),
+    )
+    output = async_utils.AsyncOutput(
+        ModelRunnerOutput(["aux"], {"aux": 0}),
+        SamplerOutput(
+            torch.tensor([[7]]),
+            sampler_logprobs,
+            None,
+            torch.tensor([1]),
+            torch.tensor([0]),
+        ),
+        torch.tensor([1]),
+        Mock(),
+        Mock(),
+        check_ep_fault=False,
+        pending_aux_output=pending,
+    )
+
+    result = output.get_output()
+
+    assert result.logprobs is None
+    assert result.aux_output_connector_output is not None
+    aux_logprobs = result.aux_output_connector_output["aux"].logprobs
+    assert aux_logprobs is not None
+    np.testing.assert_array_equal(aux_logprobs.logprob_token_ids, [[7]])
+    np.testing.assert_array_equal(aux_logprobs.logprobs, [[-0.5]])
+
+
 @pytest.mark.parametrize(
     "sampler_widths", [(6, 1), (1, 6)], ids=["mixed-then-solo", "solo-then-mixed"]
 )

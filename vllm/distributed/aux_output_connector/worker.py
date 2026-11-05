@@ -91,6 +91,8 @@ class PendingAuxOutput:
     indexer: np.ndarray | None = None
     logprobs_tensors: LogprobsTensors | None = None
     logprobs: dict[str, Any] = field(default_factory=dict)
+    logprob_replays: set[str] = field(default_factory=set)
+    existing_logprob_artifacts: dict[str, bytes | None] = field(default_factory=dict)
     aux_logprobs: frozenset[str] = frozenset()
     logprob_widths: dict[str, int] = field(default_factory=dict)
 
@@ -394,27 +396,76 @@ class AuxOutputWorkerConnector:
         num_sampled = num_sampled[pending.batch_indices]
         num_rejected = num_rejected[pending.batch_indices]
 
-        if pending.logprobs_tensors is not None:
-            values = pending.logprobs_tensors.tolists()
-            cu = values.cu_num_generated_tokens
-            for index, request_id in enumerate(pending.request_ids):
-                count = int(num_sampled[index])
-                if not count or request_id not in pending.aux_logprobs:
-                    continue
-                # logprobs_tensors covers the whole sampler batch, while
-                # request_ids may be a filtered subset of it.
+        sampler_logprobs = pending.logprobs_tensors
+        sampler_cu = None
+        if sampler_logprobs is not None:
+            sampler_cu = sampler_logprobs.cu_num_generated_tokens
+            if (
+                sampler_cu is None
+                and sampler_logprobs.cu_num_generated_tokens_tensor is not None
+            ):
+                sampler_cu = sampler_logprobs.cu_num_generated_tokens_tensor.tolist()
+
+        for index, request_id in enumerate(pending.request_ids):
+            count = int(num_sampled[index])
+            if not count or request_id not in pending.aux_logprobs:
+                continue
+            state = self._requests[request_id]
+            sample_start = max(
+                state.prompt_len,
+                int(pending.token_starts[index]) + 1,
+            )
+            positions = np.arange(sample_start, sample_start + count, dtype=np.int64)
+            sampled_token_ids = None
+            if sampler_logprobs is not None:
                 batch_index = int(pending.batch_indices[index])
-                offset = cu[batch_index] if cu is not None else batch_index
-                width = pending.logprob_widths[request_id]
-                assert width <= values.logprob_token_ids.shape[1], (
-                    "sampler logprob width is smaller than the request width"
+                offset = (
+                    sampler_cu[batch_index] if sampler_cu is not None else batch_index
                 )
-                pending.logprobs[request_id] = type(values)(
-                    values.logprob_token_ids[offset : offset + count, :width],
-                    values.logprobs[offset : offset + count, :width],
-                    values.sampled_token_ranks[offset : offset + count],
-                    None,
+                sampled_token_ids = (
+                    sampler_logprobs.logprob_token_ids[offset : offset + count, 0]
+                    .numpy()
+                    .astype(np.int32, copy=False)
                 )
+                self._bind_pending_logprob_blocks(state, positions, sampled_token_ids)
+            cached = self._get_cached_logprob_rows(
+                state,
+                positions,
+                sampled_token_ids,
+                pending.logprob_widths[request_id],
+                pending.existing_logprob_artifacts,
+            )
+            if cached is not None:
+                pending.logprobs[request_id] = rows_to_lists(cached)
+                pending.logprob_replays.add(request_id)
+
+        sampler_values = None
+        for index, request_id in enumerate(pending.request_ids):
+            count = int(num_sampled[index])
+            if (
+                not count
+                or request_id not in pending.aux_logprobs
+                or request_id in pending.logprob_replays
+                or sampler_logprobs is None
+            ):
+                continue
+            if sampler_values is None:
+                sampler_values = sampler_logprobs.tolists()
+            # logprobs_tensors covers the whole sampler batch, while
+            # request_ids may be a filtered subset of it.
+            batch_index = int(pending.batch_indices[index])
+            cu = sampler_values.cu_num_generated_tokens
+            offset = cu[batch_index] if cu is not None else batch_index
+            width = pending.logprob_widths[request_id]
+            assert width <= sampler_values.logprob_token_ids.shape[1], (
+                "sampler logprob width is smaller than the request width"
+            )
+            pending.logprobs[request_id] = type(sampler_values)(
+                sampler_values.logprob_token_ids[offset : offset + count, :width],
+                sampler_values.logprobs[offset : offset + count, :width],
+                sampler_values.sampled_token_ranks[offset : offset + count],
+                None,
+            )
 
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
@@ -447,7 +498,10 @@ class AuxOutputWorkerConnector:
                 packed_rows[start : end - rejected] if packed_rows is not None else None
             )
 
-            if request_id in pending.logprobs:
+            if (
+                request_id in pending.logprobs
+                and request_id not in pending.logprob_replays
+            ):
                 proposed_start = max(state.prompt_len, int(token_start) + 1)
                 # The batch token position is authoritative across streaming
                 # prompt extensions and speculative stop rollbacks.
@@ -455,7 +509,6 @@ class AuxOutputWorkerConnector:
                 rows_logprobs = rows_from_lists(
                     pending.logprobs[request_id], sample_start
                 )
-                self._bind_pending_logprob_blocks(state, rows_logprobs)
                 state.logprob_rows[sample_start] = rows_logprobs
                 state.pending_publish_logprobs.update(
                     self._block_starts(
@@ -549,7 +602,9 @@ class AuxOutputWorkerConnector:
             if request_id in pending.logprobs:
                 outputs[request_id].logprobs = pending.logprobs[request_id]
             state.emit_cursor = token_end
-        self._publish_logprob_blocks(pending.request_ids)
+        self._publish_logprob_blocks(
+            pending.request_ids, pending.existing_logprob_artifacts
+        )
         for index, request_id in enumerate(pending.request_ids):
             state = self._requests[request_id]
             if request_id not in outputs and request_id in pending.aux_logprobs:
@@ -641,7 +696,11 @@ class AuxOutputWorkerConnector:
             (int(position) - 1) // block_size * block_size for position in positions
         }
 
-    def _publish_logprob_blocks(self, request_ids: Iterable[str]) -> None:
+    def _publish_logprob_blocks(
+        self,
+        request_ids: Iterable[str],
+        existing_payloads: dict[str, bytes | None] | None = None,
+    ) -> None:
         store = self._logprob_store
         if store is None:
             return
@@ -656,9 +715,14 @@ class AuxOutputWorkerConnector:
             if not starts:
                 continue
             # One queue barrier per step instead of one per artifact.
-            existing = store.get_optional_many(
-                [state.logprob_keys[start // block_size] for start in starts]
-            )
+            keys = [state.logprob_keys[start // block_size] for start in starts]
+            if existing_payloads is None:
+                existing = store.get_optional_many(keys)
+            else:
+                missing = [key for key in keys if key not in existing_payloads]
+                if missing:
+                    existing_payloads.update(store.get_optional_many(missing))
+                existing = {key: existing_payloads[key] for key in keys}
             completed = []
             for start in starts:
                 key = state.logprob_keys[start // block_size]
@@ -713,24 +777,81 @@ class AuxOutputWorkerConnector:
             rows_by_start[int(merged.positions[0])] = merged
 
     def _bind_pending_logprob_blocks(
-        self, state: _WorkerRequestState, rows: LogprobRows
+        self,
+        state: _WorkerRequestState,
+        positions: np.ndarray,
+        sampled_token_ids: np.ndarray,
     ) -> None:
         store = self._logprob_store
         if store is None or not state.pending_logprob_blocks:
             return
         retained = []
-        for position, token_ids in zip(rows.positions, rows.token_ids, strict=True):
+        for position, token_id in zip(positions, sampled_token_ids, strict=True):
             if (
                 int(position) % self._logprob_block_size
                 or not state.pending_logprob_blocks
             ):
                 continue
             block_hash, fingerprint = state.pending_logprob_blocks.pop(0)
-            key = self._logprob_key(block_hash, int(token_ids[0]), fingerprint)
+            key = self._logprob_key(block_hash, int(token_id), fingerprint)
             state.logprob_keys.append(key)
             retained.append(key)
         if retained:
             store.put([], retain_keys=retained)
+
+    def _get_cached_logprob_rows(
+        self,
+        state: _WorkerRequestState,
+        positions: np.ndarray,
+        sampled_token_ids: np.ndarray | None,
+        width: int,
+        existing_payloads: dict[str, bytes | None],
+    ) -> LogprobRows | None:
+        store = self._logprob_store
+        if store is None or sampled_token_ids is None:
+            return None
+        block_size = self._logprob_block_size
+        block_indices = [
+            max((int(position) - 1) // block_size, 0) for position in positions
+        ]
+        if any(index >= len(state.logprob_keys) for index in block_indices):
+            return None
+        keys = list(dict.fromkeys(state.logprob_keys[index] for index in block_indices))
+        missing = [key for key in keys if key not in existing_payloads]
+        if missing:
+            existing_payloads.update(store.get_optional_many(missing))
+        decoded = {
+            key: decode_rows(payload)
+            for key, payload in existing_payloads.items()
+            if key in keys
+            if payload is not None
+        }
+        chunks = []
+        for row_index, (position, block_index) in enumerate(
+            zip(positions, block_indices, strict=True)
+        ):
+            key = state.logprob_keys[block_index]
+            rows = decoded.get(key)
+            if rows is None or rows.token_ids.shape[1] != width:
+                return None
+            matches = np.flatnonzero(rows.positions == position)
+            if len(matches) != 1:
+                return None
+            match = int(matches[0])
+            if (
+                sampled_token_ids is not None
+                and rows.token_ids[match, 0] != sampled_token_ids[row_index]
+            ):
+                return None
+            chunks.append(
+                LogprobRows(
+                    rows.positions[match : match + 1],
+                    rows.token_ids[match : match + 1],
+                    rows.values[match : match + 1],
+                    rows.ranks[match : match + 1],
+                )
+            )
+        return concat_rows(chunks)
 
     def _logprob_key(
         self, block_hash: bytes, boundary_token_id: int, fingerprint: str
