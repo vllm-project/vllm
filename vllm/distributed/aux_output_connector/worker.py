@@ -68,7 +68,6 @@ class _WorkerRequestState:
     logprob_keys: list[str] = field(default_factory=list)
     pending_logprob_blocks: list[tuple[bytes, str]] = field(default_factory=list)
     logprob_rows: dict[int, LogprobRows] = field(default_factory=dict)
-    logprob_cursor: int | None = None
     pending_publish_logprobs: set[int] = field(default_factory=set)
     prompt_len: int = 0
 
@@ -458,7 +457,6 @@ class AuxOutputWorkerConnector:
                 )
                 self._bind_pending_logprob_blocks(state, rows_logprobs)
                 state.logprob_rows[sample_start] = rows_logprobs
-                state.logprob_cursor = sample_start + len(rows_logprobs.positions)
                 state.pending_publish_logprobs.update(
                     self._block_starts(
                         rows_logprobs.positions, self._logprob_block_size

@@ -380,6 +380,44 @@ def _input_batch(request_ids, token_starts, query_start_loc, num_scheduled_token
     )
 
 
+@pytest.fixture
+def real_logprob_worker(tmp_path, dist_init):
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        num_hidden_layers=1,
+        hidden_size=8,
+        intermediate_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="float32",
+            max_model_len=32,
+        ),
+        cache_config=CacheConfig(block_size=_BLOCK_SIZE),
+        device_config=DeviceConfig(device="cpu"),
+        scheduler_config=SchedulerConfig(
+            max_model_len=32,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=4,
+            max_num_seqs=2,
+            enable_chunked_prefill=True,
+            async_scheduling=False,
+        ),
+    )
+    config.aux_output_config.enable_return_logprobs = True
+    worker = AuxOutputWorkerConnector(vllm_config=config, model=torch.nn.Identity())
+    worker.initialize_output_storage(
+        KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    yield worker
+    worker.close()
+
+
 def test_non_output_rank_skips_capture_snapshot():
     worker = object.__new__(AuxOutputWorkerConnector)
     worker._indexer = None
@@ -645,10 +683,12 @@ def test_logprobs_only_request_start_does_not_advance_with_output():
 @pytest.mark.parametrize(
     "with_boundaries", [False, True], ids=["per-request", "cumulative"]
 )
-def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
+def test_logprobs_only_mixed_batch_returns_opted_in_rows(
+    with_boundaries, real_logprob_worker
+):
     """Logprobs tensors cover the whole sampler batch, so an opted-in request
     must not be served the rows of a batch member that precedes it."""
-    worker = _make_worker(2, logprobs_only=True)
+    worker = real_logprob_worker
     metadata = AuxOutputConnectorMetadata(
         generation=0,
         requests={"plain": 1, "aux": 1},
@@ -659,9 +699,15 @@ def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
         logprob_widths={"aux": 1},
     )
     worker.begin_step(metadata)
-    pending = worker.prepare_output(
-        _input_batch(["plain", "aux"], np.array([1, 1]), np.array([0, 1, 2]))
+    input_batch = InputBatch.make_dummy(
+        2, 2, InputBuffers(2, 2, torch.device("cpu")), is_padding=False
     )
+    input_batch = replace(
+        input_batch,
+        req_ids=["plain", "aux"],
+        num_computed_tokens_np=np.array([1, 1], dtype=np.int32),
+    )
+    pending = worker.prepare_output(input_batch)
     assert pending is not None
     assert pending.request_ids == ["aux"]
 
@@ -686,7 +732,6 @@ def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
     np.testing.assert_array_equal(
         logprobs.logprobs, np.array([[-0.9]], dtype=np.float32)
     )
-    worker.close()
 
 
 @pytest.mark.parametrize(
@@ -766,46 +811,14 @@ def test_logprob_publication_normalizes_per_request_width(sampler_widths):
     ids=["streaming-prompt-extension", "speculative-stop-trim"],
 )
 def test_logprob_rows_follow_absolute_sample_positions(
-    tmp_path,
-    dist_init,
+    real_logprob_worker,
     first_prompt_len,
     first_token_start,
     first_count,
     next_prompt_len,
     next_token_start,
 ):
-    LlamaConfig(
-        architectures=["LlamaForCausalLM"],
-        num_hidden_layers=1,
-        hidden_size=8,
-        intermediate_size=16,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        max_position_embeddings=32,
-    ).save_pretrained(tmp_path)
-    config = VllmConfig(
-        model_config=ModelConfig(
-            model=str(tmp_path),
-            skip_tokenizer_init=True,
-            dtype="float32",
-            max_model_len=32,
-        ),
-        cache_config=CacheConfig(block_size=_BLOCK_SIZE),
-        device_config=DeviceConfig(device="cpu"),
-        scheduler_config=SchedulerConfig(
-            max_model_len=32,
-            is_encoder_decoder=False,
-            max_num_batched_tokens=4,
-            max_num_seqs=1,
-            enable_chunked_prefill=True,
-            async_scheduling=False,
-        ),
-    )
-    config.aux_output_config.enable_return_logprobs = True
-    worker = AuxOutputWorkerConnector(vllm_config=config, model=torch.nn.Identity())
-    worker.initialize_output_storage(
-        KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
-    )
+    worker = real_logprob_worker
 
     block_hashes = [bytes([index]) * 32 for index in range(5)]
     boundaries = tuple(range(_BLOCK_SIZE, 6 * _BLOCK_SIZE, _BLOCK_SIZE))
@@ -871,7 +884,6 @@ def test_logprob_rows_follow_absolute_sample_positions(
     assert replay is not None
     np.testing.assert_array_equal(replay.logprob_token_ids, [[20]])
     np.testing.assert_array_equal(replay.logprobs, [[-0.5]])
-    worker.close()
 
 
 @pytest.mark.parametrize(
