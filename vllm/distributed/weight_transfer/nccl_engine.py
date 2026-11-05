@@ -210,9 +210,8 @@ class NCCLWeightTransferEngine(
 
         Args:
             init_info: NCCL initialization info containing master address, port,
-                      rank offset, world size, and the packed wire params;
-                      with `use_load_plan`, the trainer's metadata, which the
-                      first target update plans from
+                      rank offset, world size, the packed wire params and,
+                      with `use_load_plan`, the trainer's metadata
 
         Raises:
             ValueError: `use_load_plan` without metadata.
@@ -231,10 +230,8 @@ class NCCLWeightTransferEngine(
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
-        # After the group forms, so these errors reach the trainer instead of
-        # leaving it in the rendezvous; and before any `start_reload`, so a
-        # refused configuration leaves the model untouched. Planning itself
-        # happens at the first target update.
+        # After the group forms, so these errors reach the trainer; before any
+        # `start_reload`, so a refusal leaves the model untouched.
         if init_info.use_load_plan:
             if not init_info.metadata:
                 raise ValueError(
@@ -250,7 +247,8 @@ class NCCLWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Begin reloading the incoming checkpoint weights; with
-        `use_load_plan`, the first target update also builds the load plan."""
+        `use_load_plan`, the first target update also builds the load plan,
+        reused by every later one."""
         from vllm.model_executor.model_loader.reload import plan_loads, start_reload
 
         start_reload(self.model)
@@ -259,23 +257,12 @@ class NCCLWeightTransferEngine(
             and self._plan is None
             and self.model is self._default_model  # not a draft session
         ):
-            # The bake runs here on purpose, on a real direct-mode restore
-            # (after `start_reload` -> `begin_direct_reload` viewed every
-            # tensor back to its checkpoint layout): the plan then takes each
-            # tensor's layout, offsets and destinations from what direct mode
-            # applied, its single layout source. Do not move it back to init
-            # or before `start_reload`: re-deriving the layout there disagrees
-            # with `begin` (e.g. a storage moved by `set_` into a fused
-            # buffer) and the plan would write at the wrong offset.
-            # A failure raises from this call. On the trainer, rank 0 makes it
-            # before broadcasting and raises; other trainer ranks stay in their
-            # collectives until torn down, as with any failed start.
+            # The bake traces the real tensors `start_reload` just viewed back
+            # to their checkpoint layout, so every offset and destination is
+            # the one direct mode applied. Keep it after `start_reload`.
             try:
                 self._plan = plan_loads(self.model, self._plan_metadata)
             except Exception as e:
-                # No rollback: the model is mid-reload, as after any failed
-                # start. Later updates go through load_weights, which repairs
-                # it; planning again needs a new init.
                 self._plan_metadata = self._plan_manifest = None
                 e.add_note(
                     "NCCL weight transfer: load planning failed after "
@@ -302,11 +289,9 @@ class NCCLWeightTransferEngine(
         trainer's init info, so it is guaranteed to match how the trainer
         encoded.
 
-        With a load plan, a target update first checks each name, dtype and
-        shape against the metadata sent at init (the trainer engine checks the
-        same before sending; this catches trainers that drive the worker out
-        of band), then writes through `load_planned`. Draft updates use
-        `load_weights`.
+        With a load plan, a target update checks the update against the
+        metadata sent at init (`_check_manifest`) and writes through
+        `load_planned`; draft updates use `load_weights`.
 
         Args:
             update_info: Parameter names, dtypes, shapes and `src`; empty lists
@@ -335,7 +320,6 @@ class NCCLWeightTransferEngine(
         )
         from vllm.model_executor.model_loader.reload import load_planned
 
-        # A draft update session keeps load_weights: the plan is the target's.
         plan = self._plan if self.model is self._default_model else None
         if plan is not None:
             assert self._plan_manifest is not None

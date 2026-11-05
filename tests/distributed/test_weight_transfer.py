@@ -294,28 +294,9 @@ class TestNCCLEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
         assert update_info.src == 1
 
-    def test_use_load_plan_requires_metadata(self, monkeypatch):
-        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
-
-        # The group forms first, so the refusal reaches the trainer.
-        group = MagicMock()
-        monkeypatch.setattr(
-            nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
-        )
-        init_info = NCCLWeightTransferInitInfo(
-            master_address="127.0.0.1",
-            master_port=12345,
-            rank_offset=1,
-            world_size=2,
-            use_load_plan=True,
-        )
-        engine = self._make_engine()
-        with pytest.raises(ValueError, match="metadata"):
-            engine.init_transfer_engine(init_info)
-        assert engine.model_update_group is group
-
-    def test_use_load_plan_plans_at_the_first_target_update(self, monkeypatch):
-        """Not at init: after `start_reload`, once, and not for a draft."""
+    def _planning_engine(self, monkeypatch, plan_loads):
+        """An engine initialised with `use_load_plan`, and the log of its
+        `start_reload` and `plan_loads` calls."""
         import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
         import vllm.model_executor.model_loader.reload as reload_mod
 
@@ -323,16 +304,16 @@ class TestNCCLEngineParsing:
         monkeypatch.setattr(
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
         )
-        calls = []
+        calls: list[tuple] = []
         monkeypatch.setattr(
             reload_mod, "start_reload", lambda model: calls.append(("start", model))
         )
 
-        def plan_loads(model, metas):
+        def logged_plan_loads(model, metas):
             calls.append(("plan", model, list(metas)))
-            return "plan"
+            return plan_loads(model, metas)
 
-        monkeypatch.setattr(reload_mod, "plan_loads", plan_loads)
+        monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
         engine = self._make_engine()
         engine.init_transfer_engine(
             NCCLWeightTransferInitInfo(
@@ -344,6 +325,11 @@ class TestNCCLEngineParsing:
                 metadata=[("w", "float32", [4])],
             )
         )
+        return engine, calls
+
+    def test_use_load_plan_plans_at_the_first_target_update(self, monkeypatch):
+        """Not at init: after `start_reload`, once, and not for a draft."""
+        engine, calls = self._planning_engine(monkeypatch, lambda m, metas: "plan")
         assert calls == []
         target, draft = engine.model, MagicMock(spec=torch.nn.Module)
         engine.set_weight_update_target(draft, None)
@@ -358,6 +344,21 @@ class TestNCCLEngineParsing:
             ("start", target),
         ]
         assert engine._plan == "plan"
+
+    def test_use_load_plan_failure_falls_back_to_load_weights(self, monkeypatch):
+        """A plan failure at the first update raises with a note; later
+        updates skip planning (load_weights repairs the model)."""
+
+        def plan_loads(model, metas):
+            raise RuntimeError("load plan: lonely names")
+
+        engine, calls = self._planning_engine(monkeypatch, plan_loads)
+        with pytest.raises(RuntimeError, match="lonely names") as exc:
+            engine.start_weight_update()
+        assert any("mid-reload" in note for note in exc.value.__notes__)
+        engine.start_weight_update()  # plans no more
+        assert [c[0] for c in calls] == ["start", "plan", "start"]
+        assert engine._plan is None
 
     @pytest.mark.parametrize("refusal", ["layerwise", "eplb"])
     def test_use_load_plan_refusal_at_init_leaves_the_model(self, monkeypatch, refusal):
@@ -404,41 +405,6 @@ class TestNCCLEngineParsing:
         assert model.w.shape == (3, 2)  # not viewed back (direct)
         assert not hasattr(model, "_direct_reload_begun")
 
-    def test_use_load_plan_failure_falls_back_to_load_weights(self, monkeypatch):
-        """A plan failure at the first update raises with a note; later
-        updates skip planning (load_weights repairs the model)."""
-        import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
-        import vllm.model_executor.model_loader.reload as reload_mod
-
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-        monkeypatch.setattr(
-            nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
-        )
-        starts: list[torch.nn.Module] = []
-        monkeypatch.setattr(reload_mod, "start_reload", starts.append)
-
-        def plan_loads(model, metas):
-            raise RuntimeError("load plan: lonely names")
-
-        monkeypatch.setattr(reload_mod, "plan_loads", plan_loads)
-        engine = self._make_engine()
-        engine.init_transfer_engine(
-            NCCLWeightTransferInitInfo(
-                master_address="127.0.0.1",
-                master_port=12345,
-                rank_offset=1,
-                world_size=2,
-                use_load_plan=True,
-                metadata=[("w", "float32", [4])],
-            )
-        )
-        with pytest.raises(RuntimeError, match="lonely names") as exc:
-            engine.start_weight_update()
-        assert any("mid-reload" in note for note in exc.value.__notes__)
-        engine.start_weight_update()  # plans no more
-        assert starts == [engine.model, engine.model]
-        assert engine._plan is None
-
     @pytest.mark.parametrize("draft", [False, True])
     def test_use_load_plan_worker_backstop(self, monkeypatch, draft):
         """`receive_weights` checks a target update against the init
@@ -472,38 +438,23 @@ class TestNCCLEngineParsing:
             assert consumed == []
 
 
-def test_nccl_trainer_sends_metadata_with_use_load_plan(monkeypatch):
+@pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
+def test_use_load_plan_refused_after_the_group_forms(monkeypatch, backend):
+    """The dense backend without metadata, and the sparse backend, refuse
+    `use_load_plan` after the group forms, so the error reaches the trainer."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
-
-    monkeypatch.setattr(
-        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: object()
-    )
-    client = RecordingClient()
-    NCCLTrainerWeightTransferEngine.trainer_init(
-        NCCLTrainerInitInfo(
-            master_address="127.0.0.1",
-            master_port=29500,
-            world_size=2,
-            rank=0,
-            use_load_plan=True,
-        ),
-        client=client,
-        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
-    )
-    assert client.last_init_info is not None
-    init_info = NCCLWeightTransferInitInfo(**client.last_init_info)
-    assert init_info.use_load_plan
-    assert init_info.metadata == [("w", "float32", [4])]
-
-
-def test_sparse_nccl_refuses_use_load_plan(monkeypatch):
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
-    # after the group forms, so the refusal reaches the trainer
+    sparse = backend == "sparse_nccl"
     group = MagicMock()
-    monkeypatch.setattr(sparse_mod, "worker_init_process_group", lambda i, pc: group)
-    engine = SparseNCCLWeightTransferEngine(
-        WeightTransferConfig(backend="sparse_nccl"),
+    monkeypatch.setattr(
+        sparse_mod if sparse else nccl_engine_mod,
+        "worker_init_process_group",
+        lambda info, pc: group,
+    )
+    cls = SparseNCCLWeightTransferEngine if sparse else NCCLWeightTransferEngine
+    engine = cls(
+        WeightTransferConfig(backend=backend),
         create_mock_vllm_config(),
         torch.device("cuda"),
         MagicMock(spec=torch.nn.Module),
@@ -515,7 +466,8 @@ def test_sparse_nccl_refuses_use_load_plan(monkeypatch):
         world_size=2,
         use_load_plan=True,
     )
-    with pytest.raises(ValueError, match="dense NCCL backend"):
+    match = "dense NCCL backend" if sparse else "metadata"
+    with pytest.raises(ValueError, match=match):
         engine.init_transfer_engine(init_info)
     assert engine.model_update_group is group
 
@@ -2173,11 +2125,13 @@ def test_nccl_trainer_rendezvous_propagates_errors_after_worker_exits(failure_si
     assert worker_finished.is_set()
 
 
+@pytest.mark.parametrize("use_load_plan", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed, use_load_plan):
     """The sender's trainer_init drives the inference-side init handshake with
     the worker-shaped init info (rank_offset=1) while opening its own endpoint,
-    and propagates the must-agree wire params to the worker."""
+    and propagates the must-agree wire params (and, with `use_load_plan`, the
+    metadata) to the worker."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     # Bypass the real NCCL rendezvous.
@@ -2196,6 +2150,7 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
             packed=packed,
             packed_buffer_size_bytes=1024,
             packed_num_buffers=3,
+            use_load_plan=use_load_plan,
         ),
         client=client,
         source=ModuleSource(_module_with(("w", torch.zeros(4)))),
@@ -2214,7 +2169,8 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
         "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
-        "use_load_plan": False,
+        "use_load_plan": use_load_plan,
+        **({"metadata": [("w", "float32", [4])]} if use_load_plan else {}),
     }
 
 
