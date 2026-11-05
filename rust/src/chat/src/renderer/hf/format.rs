@@ -322,7 +322,10 @@ impl ContentCapabilities {
     }
 }
 
-fn probe_message(role: &'static str, content: TemplateContent) -> TemplateMessage<'static> {
+pub(super) fn probe_message(
+    role: &'static str,
+    content: TemplateContent,
+) -> TemplateMessage<'static> {
     TemplateMessage {
         role,
         content,
@@ -346,7 +349,7 @@ fn text_parts(texts: &[&str]) -> TemplateContent {
 }
 
 /// The tool a probe declares when it renders with tools.
-fn probe_tool() -> TemplateTool {
+pub(super) fn probe_tool() -> TemplateTool {
     TemplateTool {
         tool_type: "function",
         function: TemplateToolDefinition {
