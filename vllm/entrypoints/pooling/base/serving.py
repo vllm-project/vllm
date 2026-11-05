@@ -22,7 +22,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
-from vllm.utils.async_utils import make_async, merge_async_iterators
+from vllm.utils.async_utils import make_async_batched, merge_async_iterators
 
 from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
@@ -59,7 +59,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = self.renderer._executor
-        self._postprocessing_async = make_async(
+        self._postprocessing_async = make_async_batched(
             self._postprocessing, executor=self._executor
         )
 
@@ -87,9 +87,12 @@ class PoolingBaseServing(ABC, BaseServing):
         if len(requests) == 0:
             raise ValueError("You must pass at least one prompt")
 
-        ctx.engine_inputs = await asyncio.gather(
-            *[io_processor.render_async(request) for request in requests]
-        )
+        if len(requests) == 1:
+            ctx.engine_inputs = [await io_processor.render_async(requests[0])]
+        else:
+            ctx.engine_inputs = await asyncio.gather(
+                *[io_processor.render_async(request) for request in requests]
+            )
 
     @torch.inference_mode()
     def _postprocessing(

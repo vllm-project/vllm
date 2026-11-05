@@ -17,7 +17,7 @@ from vllm.renderers.chat_utils import (
     ChatTemplateConfig,
 )
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.utils.async_utils import make_async
+from vllm.utils.async_utils import make_async_batched
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..typing import (
@@ -69,7 +69,7 @@ class PoolingIOProcessor:
 
         # Shared thread pool executor for preprocessing
         self._executor: Executor = self.renderer._executor
-        self.render_async = make_async(self.render, executor=self._executor)
+        self.render_async = make_async_batched(self.render, executor=self._executor)
 
     #######################################
     # online APIs
