@@ -3,8 +3,12 @@
 """What speculative decoding holds, shared by the scheduler, the engine core and
 the workers."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 PlanKind = Literal["chain", "tree"]
 """The plans a model verifies, in increasing order: ``"chain"`` (each row
@@ -77,3 +81,27 @@ class BudgetView:
     max_num_seqs: int
     block_size: int
     """Tokens per block of the unified pool (the scheduler's block size)."""
+
+
+def adapt_spec_resources(
+    vllm_config: "VllmConfig", collective_rpc: Callable[..., list[Any]]
+) -> SpecResources | None:
+    """Lower a branching speculator's declared resources to what every rank's
+    layers verify and run every worker with them, before capture. Returns the
+    resources for the scheduler, or None to run as declared (a chain, which each
+    worker checks against its own layers)."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return None
+    speculator_config = speculative_config.speculator_config
+    declared = speculator_config.resources(vllm_config.scheduler_config.max_num_seqs)
+    if declared.max_branching == 1:
+        return None
+    capabilities = [c for c in collective_rpc("get_spec_capabilities") if c is not None]
+    if not capabilities:
+        return None
+    from vllm.v1.worker.gpu.spec_decode.capabilities import resolve_spec_resources
+
+    effective = resolve_spec_resources(speculator_config, declared, capabilities)
+    collective_rpc("set_spec_resources", args=(effective,))
+    return effective

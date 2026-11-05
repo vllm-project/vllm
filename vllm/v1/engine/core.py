@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
+from typing import Any, TypeVar, cast, get_args
 
 import msgspec
 import pydantic
@@ -108,12 +108,10 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.spec_decode.resources import SpecResources, adapt_spec_resources
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
-
-if TYPE_CHECKING:
-    from vllm.v1.spec_decode.resources import SpecResources
 
 logger = init_logger(__name__)
 
@@ -131,7 +129,7 @@ class EngineCore:
     _checkpoint_state = CheckpointState.RUNNING
     _checkpoint_error: str | None = None
     # What speculation runs with, adapted to the model's layers at startup.
-    spec_resources: "SpecResources | None" = None
+    spec_resources: SpecResources | None = None
 
     def __init__(
         self,
@@ -265,36 +263,6 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
-    def _set_spec_resources(self, vllm_config: VllmConfig) -> None:
-        """Lower a branching speculator's declared resources to what every rank's
-        layers verify and run every worker with them, before capture."""
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is None:
-            return
-        speculator_config = speculative_config.speculator_config
-        declared = speculator_config.resources(
-            vllm_config.scheduler_config.max_num_seqs
-        )
-        if declared.max_branching == 1:
-            return
-        capabilities = [
-            caps
-            for caps in self.model_executor.collective_rpc("get_spec_capabilities")
-            if caps is not None
-        ]
-        if not capabilities:
-            return
-        from vllm.v1.worker.gpu.spec_decode.capabilities import (
-            resolve_spec_resources,
-        )
-
-        self.spec_resources = resolve_spec_resources(
-            speculator_config, declared, capabilities
-        )
-        self.model_executor.collective_rpc(
-            "set_spec_resources", args=(self.spec_resources,)
-        )
-
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
@@ -418,7 +386,9 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
-        self._set_spec_resources(vllm_config)
+        self.spec_resources = adapt_spec_resources(
+            vllm_config, self.model_executor.collective_rpc
+        )
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None

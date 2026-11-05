@@ -44,7 +44,7 @@ from vllm.v1.kv_cache_interface import (
     RSWASpec,
     SlidingWindowSpec,
 )
-from vllm.v1.spec_decode.resources import SpecResources
+from vllm.v1.spec_decode.resources import SpecResources, adapt_spec_resources
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
@@ -416,32 +416,29 @@ def test_resolve_spec_resources(config, caps, want, logged, caplog):
 
 
 @pytest.mark.parametrize("tree", [False, True], ids=["chain", "tree"])
-def test_engine_core_adapts_only_branching_resources(tree):
+def test_adapts_only_branching_resources(tree):
     """A chain runs as declared with no handshake (each worker checks it
     against its layers); a branching speculator's resources are adapted to the
     workers' layers, sent to them, and kept for the scheduler."""
-    from vllm.v1.engine.core import EngineCore
-
     config = _TreeConfig() if tree else _speculative_config().speculator_config
-    core = object.__new__(EngineCore)
     calls = []
 
     def collective_rpc(method, args=()):
         calls.append(method)
         return [_CHAIN] if method == "get_spec_capabilities" else None
 
-    core.model_executor = SimpleNamespace(collective_rpc=collective_rpc)
-    core._set_spec_resources(
+    effective = adapt_spec_resources(
         SimpleNamespace(
             speculative_config=SimpleNamespace(speculator_config=config),
             scheduler_config=SimpleNamespace(max_num_seqs=8),
-        )
+        ),
+        collective_rpc,
     )
     if not tree:
-        assert calls == [] and core.spec_resources is None
+        assert calls == [] and effective is None
         return
     assert calls == ["get_spec_capabilities", "set_spec_resources"]
-    assert core.spec_resources == replace(config.resources(8), max_branching=1)
+    assert effective == replace(config.resources(8), max_branching=1)
 
 
 def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
