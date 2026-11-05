@@ -95,11 +95,11 @@ That is ≈7.4% of each 807 s interval (MLP only; attention adds more). Frontier
 
 ## 8. Constraints on the design
 
-- R3 and top-k are the same order of magnitude (2–4 GB in flight per node, 7–28 GB pools) and can share one delivery protocol. Top-k needs no cache segment.
-- A cache segment in a KV layer is affordable for R3, but not for an uncompressed indexer.
-- The indexer needs its own treatment: compression, a subset of layers or positions, or an SSD tier.
-- Deduplication is mandatory at frontier scale, and release must be per trajectory: trajectories span many weight versions, so deleting by generation is not possible.
-- With BI on, row differences between computations come only from weight-version changes, except for the cases in the [experiments](experiments.md). Rows must stay tied to the KV that produced them.
+- **R3 and top-k share one protocol.** Both are 2–4 GB in flight per node with 7–28 GB pools. Top-k needs no cache segment.
+- **The indexer needs compression or a tier.** Uncompressed it is 5–100× R3; compressed (20-bit + zstd) it is 5–7× R3 and fits the same pool. A cache segment for it in host memory is unaffordable, which favors using the delivery pool as the session's cache.
+- **Deduplication is mandatory and must be scoped to the session.** Rewriting the full context every turn would write ~25× more R3. Sharing across sessions would need reference counting for little gain.
+- **Release is per session, not per generation.** A trajectory lives ~2,660 s and spans ~3 weight updates (and up to ~107 versions of staleness), so prefix hits on blocks computed by an older version are normal. Rows must therefore carry their weight version, and a computation at another version is never interchangeable with the stored one.
+- **Weight updates happen with requests in flight.** Recomputing in-flight work at every update costs ~7% of each interval (section 7), so the engine pauses, resets its prefix cache and resumes. The delivery path must survive that reset without losing or replacing rows.
 
 ## 9. Scenario coverage vs. existing systems
 
