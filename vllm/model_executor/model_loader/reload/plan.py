@@ -11,7 +11,9 @@ checkpoint tensor and a strided region of the target's storage
 one incoming byte; anything else is a fallback, which the engine sends in full
 through ``load_weights``. The plan is reused for every later update.
 
-Engines call only ``LoadPlan.get_boxes`` and ``LoadPlan.get_dest``.
+Engines that receive full tensors call ``load_planned``. ``get_boxes`` and
+``get_dest`` are for engines that send or read only the slices a rank needs
+(sharded RDT, NCCL M2N follow-ups); the NCCL engine uses ``load_planned``.
 """
 
 import heapq
@@ -65,7 +67,11 @@ class LoadPlan:
     dests: dict[str, Dest]  # live tensors built at plan_loads; not data
 
     def get_boxes(self, name: str) -> tuple[Box, ...] | None:
-        """Parts of the checkpoint tensor this rank needs; ``None``: nothing."""
+        """Parts of the checkpoint tensor this rank needs; ``None``: nothing.
+
+        For engines that send or read only those slices (sharded RDT, NCCL
+        M2N follow-ups); an engine that receives full tensors calls
+        ``load_planned`` instead."""
         return self.entries[name].boxes
 
     def get_dest(self, name: str) -> list[tuple[Box, torch.Tensor]] | None:
