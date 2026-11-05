@@ -51,7 +51,6 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 _SPEC_3D_MAX_Q = 16
 _SPEC_3D_BLOCK_M = 128
 _SPEC_3D_NUM_WARPS = 8
-_SPEC_3D_TILE = 16
 
 
 @triton.jit
@@ -479,7 +478,6 @@ def unified_attention_diffkv(
         or is_batch_invariant
     )
 
-    spec_tile: int | None = None
     if use_3d and spec_3d and _SPEC_3D_BLOCK_M > BLOCK_M:
         spec_bm = min(
             _SPEC_3D_BLOCK_M,
@@ -488,19 +486,14 @@ def unified_attention_diffkv(
         if spec_bm > BLOCK_M and spec_bm % num_queries_per_kv == 0:
             BLOCK_M = spec_bm
             launch_kw["num_warps"] = _SPEC_3D_NUM_WARPS if BLOCK_M >= 128 else 4
-            spec_tile = _SPEC_3D_TILE
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
     # smaller tiles to expose more parallelism along the KV dim.
+    # Triton needs K >= 32 for FP8 tl.dot; P @ V reduces over the KV tile.
     tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
-    if spec_tile is not None:
-        tile_size = spec_tile
-    if q.element_size() < 2:
-        # Triton needs K >= 32 for FP8 tl.dot; P @ V reduces over the KV tile.
-        tile_size = max(tile_size, 32)
 
     grid: tuple[Any, ...]
     if use_3d:
