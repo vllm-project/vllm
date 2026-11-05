@@ -1,0 +1,680 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+
+meta:
+  title: "ERNIE-5.5-Flash"
+  slug: "ernie-5.5-flash"
+  provider: "Ernie (Baidu)"
+  description: "Deploy ERNIE-5.5-Flash with vLLM: Baidu's 280B-total / 14B-active Mixture-of-Experts model with hybrid HCA + MLA-DSA attention, ECHO (MTP) speculative decoding and up to 1M context, served through the vLLM-ERNIE plugin. FP8 and BF16 recipes for B300, GB300, B200, GB200 and H100, with KV cache offload and PD disaggregation."
+  performance_headline: "280B / 14B-active MoE with hybrid HCA + MLA-DSA attention, up to 1M context, and ECHO (MTP) speculative decoding"
+  date_added: 2026-11-05
+  date_updated: 2026-11-05
+  tasks:
+    - text
+  related_recipes:
+    - baidu/ERNIE-4.5-21B-A3B-PT
+  hardware:
+    gb200: verified
+    h100: verified
+    # The plugin has NVIDIA kernels only.
+    mi300x: unsupported
+    mi325x: unsupported
+    mi350x: unsupported
+    mi355x: unsupported
+  default_hardware: gb200
+
+model:
+  # One page for ERNIE 5.5 Flash: the post-trained model owns the
+  # URL, and the default variant serves the Base checkpoint released first
+  # (same pattern as DeepSeek-V4-Flash -> -0731).
+  model_id: "baidu/ERNIE-5.5-Flash"
+  min_vllm_version: "0.32.0"
+  install:
+    pip:
+      # vLLM itself plus the vLLM-ERNIE plugin, which registers ERNIE 5.5
+      # through the vllm.general_plugins entry point.
+      command: |
+        uv venv --python 3.12
+        source .venv/bin/activate
+        uv pip install vllm==0.32.0
+        uv pip install git+https://github.com/baidu/vLLM-ERNIE.git
+      note: "ERNIE 5.5 runs through the vLLM-ERNIE plugin, which is pinned to vLLM 0.32.0"
+    docker: false
+  architecture: moe
+  parameter_count: "280B"   # model card; excludes the 0.36B ECHO (MTP) layer
+  active_parameters: "14B"  # model card
+  context_length: 1048576
+  base_args:
+    # Every tested configuration stores the KV cache in FP8.
+    - "--kv-cache-dtype"
+    - "fp8"
+    # The 128K training length, as in the SGLang cookbook. The checkpoint
+    # allows 1M, which needs a smaller --max-num-seqs and does not fit 80 GB
+    # GPUs at all.
+    - "--max-model-len"
+    - "131072"
+  base_env:
+    VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+
+features:
+  spec_decoding:
+    description: "Speculative decoding: the checkpoint's built-in ECHO layer through vLLM's MTP path (2 draft steps by default; 1 or 3 also work), or the bundled DSpark draft of ERNIE-5.5-Flash (coming soon)."
+    default_mode: mtp2
+    modes:
+      mtp:
+        label: "MTP, 1 step"
+        description: "Built-in ECHO (MTP) layer, 1 draft step; mean accept length 1.98 tokens per step (GSM8K, batch size 1)."
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":1}'
+      mtp2:
+        label: "MTP, 2 steps"
+        description: "The ECHO (MTP) layer runs twice per step, drafting 2 tokens; mean accept length 2.39 tokens per step (GSM8K, batch size 1)."
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":2}'
+      mtp3:
+        label: "MTP, 3 steps"
+        description: "The ECHO (MTP) layer runs three times per step, drafting 3 tokens; mean accept length 2.49 tokens per step (GSM8K, batch size 1)."
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":3}'
+      dspark:
+        label: "DSpark"
+        description: "DSpark draft bundled with ERNIE-5.5-Flash (coming soon); the draft length comes from the checkpoint's block size. The Base checkpoints carry no DSpark draft."
+        variants: [flash]
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","draft_sample_method":"probabilistic"}'
+  reasoning:
+    description: "Split thinking into reasoning_content. For ERNIE-5.5-Flash (coming soon); the Base model has no chat training."
+    args:
+      - "--reasoning-parser"
+      - "ernie5"
+  tool_calling:
+    description: "Parse the model's tool-call blocks into message.tool_calls. For ERNIE-5.5-Flash (coming soon); the Base model has no chat training."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "ernie5"
+
+opt_in_features:
+  - spec_decoding
+  - reasoning
+  - tool_calling
+
+variants:
+  default:
+    model_id: "baidu/ERNIE-5.5-Flash-Base"
+    label: "Base · FP8"
+    precision: fp8
+    vram_minimum_gb: 347      # 288 GB checkpoint x 1.2
+    description: "ERNIE-5.5-Flash-Base, 128x128 block FP8 with UE8M0 scales; ~280 GB of weights."
+    supported_hardware: [b300, gb300, b200, gb200, h100]
+    hardware_overrides:
+      # MoE kernel that supports SiTU with FP8 weights (Blackwell); Hopper
+      # keeps vLLM's default MoE kernel.
+      blackwell: { extra_args: ["--moe-backend", "humming"] }
+      # 80 GB H100: the weights take ~49 GiB per GPU; 0.93 leaves 301,900 KV
+      # tokens per rank (measured), room for 2 requests at 128K or 1 at 256K.
+      h100: { extra_args: ["--gpu-memory-utilization", "0.93"] }
+  bf16:
+    model_id: "baidu/ERNIE-5.5-Flash-Base-BF16"
+    label: "Base · BF16"
+    precision: bf16
+    vram_minimum_gb: 688      # 573 GB checkpoint x 1.2
+    description: "ERNIE-5.5-Flash-Base in BF16; ~560 GB of weights."
+    supported_hardware: [b300, gb300, b200, gb200, h100]
+    hardware_overrides:
+      # Same as SGLang: two GB200 trays (DP8 + EP8). One 768 GB tray holds the
+      # 573 GB of weights but leaves too little room for the KV cache, so the
+      # fit check is raised above one tray and the builder picks two.
+      gb200: { vram_minimum_gb: 800 }
+      # Same 80 GB GPUs as FP8.
+      h100: { extra_args: ["--gpu-memory-utilization", "0.93"] }
+  flash:
+    # model_id: the recipe's own baidu/ERNIE-5.5-Flash
+    label: "Flash (coming soon)"
+    precision: fp8
+    vram_minimum_gb: 347
+    description: "Coming soon: the post-trained ERNIE-5.5-Flash with reasoning, tool calling and a bundled DSpark draft, in BF16, FP8 and FP4. The FP8 command is a preview until the checkpoint is published."
+    supported_hardware: [b300, gb300, b200, gb200, h100]
+    default_modes:
+      spec_decoding: dspark
+    hardware_overrides:
+      blackwell: { extra_args: ["--moe-backend", "humming"] }
+      # 80 GB H100: the weights take ~49 GiB per GPU; 0.93 leaves 301,900 KV
+      # tokens per rank (measured), room for 2 requests at 128K or 1 at 256K.
+      h100: { extra_args: ["--gpu-memory-utilization", "0.93"] }
+
+# Attention TP (single_node_tep) must divide 8, the number of output groups.
+# multi_node_dep (BF16 on H100 and GB200) is enabled per GPU in strategy_hardware.
+compatible_strategies:
+  - single_node_dep
+  - single_node_tep
+  - pd_cluster
+default_strategy: single_node_dep
+
+hardware_overrides: {}
+
+strategy_overrides:
+  pd_cluster:
+    env:
+      # Give up on a KV transfer after 10 minutes instead of hanging the request.
+      VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: "600"
+      # Keep idle router connections open; with the 5 s default a router can
+      # reuse a connection the server just closed and lose the prefill request.
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "1800"
+    prefill:
+      nodes: 1
+      parallelism: dep
+      vllm_args:
+        - "--gpu-memory-utilization"
+        - "0.85"
+        - "--max-num-seqs"
+        - "128"
+      env: {}
+    decode:
+      nodes: 1
+      parallelism: dep
+      vllm_args:
+        - "--gpu-memory-utilization"
+        - "0.85"
+        - "--max-num-seqs"
+        - "128"
+      env: {}
+
+# Low-Latency (speculative decoding) and High-Throughput (no draft) on the
+# recommended GPU count: the smallest that holds the weights with room for
+# the KV cache. Presets carry the GPU count because a variant cannot set it.
+presets:
+  gb200_low_latency:
+    label: "Low-Latency"
+    hardware: gb200
+    strategy: single_node_dep
+    variants: [default, flash]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+  gb200_high_throughput:
+    label: "High-Throughput"
+    hardware: gb200
+    strategy: single_node_dep
+    variants: [default, flash]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+  gb200_bf16_low_latency:
+    label: "Low-Latency"
+    hardware: gb200
+    strategy: multi_node_dep
+    variants: [bf16]
+    default: true
+    description: "BF16 on two GB200 trays (DP8 + EP8), speculative decoding on."
+    select: { nodes: 2, features: { spec_decoding: true } }
+  gb200_bf16_high_throughput:
+    label: "High-Throughput"
+    hardware: gb200
+    strategy: multi_node_dep
+    variants: [bf16]
+    description: "BF16 on two GB200 trays (DP8 + EP8), no draft."
+    select: { nodes: 2, features: { spec_decoding: false } }
+  b200_low_latency:
+    label: "Low-Latency"
+    hardware: b200
+    strategy: single_node_dep
+    variants: [default, flash]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+    args: ["--data-parallel-size", "4"]
+  b200_high_throughput:
+    label: "High-Throughput"
+    hardware: b200
+    strategy: single_node_dep
+    variants: [default, flash]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+    args: ["--data-parallel-size", "4"]
+  b200_bf16_low_latency:
+    label: "Low-Latency"
+    hardware: b200
+    strategy: single_node_dep
+    variants: [bf16]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+  b200_bf16_high_throughput:
+    label: "High-Throughput"
+    hardware: b200
+    strategy: single_node_dep
+    variants: [bf16]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+  gb300_low_latency:
+    label: "Low-Latency"
+    hardware: gb300
+    strategy: single_node_dep
+    variants: [default, flash]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+    args: ["--data-parallel-size", "2"]
+  gb300_high_throughput:
+    label: "High-Throughput"
+    hardware: gb300
+    strategy: single_node_dep
+    variants: [default, flash]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+    args: ["--data-parallel-size", "2"]
+  gb300_bf16_low_latency:
+    label: "Low-Latency"
+    hardware: gb300
+    strategy: single_node_dep
+    variants: [bf16]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+  gb300_bf16_high_throughput:
+    label: "High-Throughput"
+    hardware: gb300
+    strategy: single_node_dep
+    variants: [bf16]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+  b300_low_latency:
+    label: "Low-Latency"
+    hardware: b300
+    strategy: single_node_dep
+    variants: [default, flash]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+    args: ["--data-parallel-size", "2"]
+  b300_high_throughput:
+    label: "High-Throughput"
+    hardware: b300
+    strategy: single_node_dep
+    variants: [default, flash]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+    args: ["--data-parallel-size", "2"]
+  b300_bf16_low_latency:
+    label: "Low-Latency"
+    hardware: b300
+    strategy: single_node_dep
+    variants: [bf16]
+    default: true
+    description: "Speculative decoding on (MTP, 2 draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single user or light load."
+    select: { features: { spec_decoding: true } }
+    args: ["--data-parallel-size", "4"]
+  b300_bf16_high_throughput:
+    label: "High-Throughput"
+    hardware: b300
+    strategy: single_node_dep
+    variants: [bf16]
+    description: "No draft. Most tokens per second across many concurrent requests."
+    select: { features: { spec_decoding: false } }
+    args: ["--data-parallel-size", "4"]
+  h100_low_latency:
+    label: "Low-Latency"
+    hardware: h100
+    strategy: single_node_dep
+    variants: [default, flash]
+    default: true
+    description: "FP8 on one 8-GPU node (DP8 + EP8), speculative decoding on."
+    select: { features: { spec_decoding: true } }
+  h100_high_throughput:
+    label: "High-Throughput"
+    hardware: h100
+    strategy: single_node_dep
+    variants: [default, flash]
+    description: "FP8 on one 8-GPU node (DP8 + EP8), no draft."
+    select: { features: { spec_decoding: false } }
+    runbook: |
+      Measured on one 8 x H100 80 GB node, DP8 + EP8, FP8 Base,
+      `--gpu-memory-utilization 0.93`: 301,900 KV cache tokens per rank (2.3
+      concurrent 128K requests, or 1.15 at `--max-model-len 262144`).
+      GSM8K 5-shot (full set) 94.9-96.1, and needle retrieval finds every
+      needle up to 258K tokens. At 64 concurrent requests: about 3.3k output
+      tokens/s, p50 latency about 5.0 s, TTFT about 0.4 s. On Hopper the
+      `humming` MoE kernel gives the same accuracy as vLLM's default, so the
+      recipe keeps the default.
+  h100_bf16_low_latency:
+    label: "Low-Latency"
+    hardware: h100
+    strategy: multi_node_dep
+    variants: [bf16]
+    default: true
+    description: "BF16 on two 8-GPU nodes (DP16 + EP16), speculative decoding on."
+    select: { nodes: 2, features: { spec_decoding: true } }
+  h100_bf16_high_throughput:
+    label: "High-Throughput"
+    hardware: h100
+    strategy: multi_node_dep
+    variants: [bf16]
+    description: "BF16 on two 8-GPU nodes (DP16 + EP16), no draft."
+    select: { nodes: 2, features: { spec_decoding: false } }
+  gb200_pd_mooncake:
+    label: "1P1D Mooncake"
+    hardware: gb200
+    strategy: pd_cluster
+    default: true
+    description: "One prefill and one decode GB200 tray (4 GPUs each), KV over Mooncake RDMA."
+    select:
+      pd_connector: mooncake
+    # Mooncake's RDMA devices: list the InfiniBand HCAs only (ibdev2netdev);
+    # with the empty default, Ethernet ports are picked too and transfers fail.
+    json_args:
+      "--kv-transfer-config":
+        kv_connector_extra_config: { device_name: "mlx5_0,mlx5_1,mlx5_4,mlx5_5" }
+    roles:
+      prefill: { nodes: 1, parallelism: dep }
+      decode:
+        nodes: 1
+        parallelism: dep
+        # Tested with the default CUDA graph mode; FULL_DECODE_ONLY is not.
+        remove_args: ["--compilation-config"]
+    runbook: |
+      Tested as one prefill and one decode GB200 tray, each DP4 + EP4, KV
+      over `MooncakeConnector` on InfiniBand. The router was vllm-router
+      0.1.16 (`uv pip install vllm-router==0.1.16`). With speculative
+      decoding on, both roles get the same `--speculative-config`. Replace
+      `device_name` in `--kv-transfer-config` with this node's InfiniBand
+      HCAs (`ibdev2netdev` lists them).
+
+# KV Offload row, checked on 4 x GB200:
+# a 32K-token prefix evicted from the GPU is reloaded with the same output.
+# - Simple: works at 128 GiB per rank (the 220 GiB default exceeds host RAM;
+#   a preset json_args edit can't fix it: it errors when Simple is off).
+# - CPU + Filesystem: works as emitted (root_dir on local disk).
+# - Mooncake distributed: works with mooncake-transfer-engine-cuda13 and
+#   MOONCAKE_DEVICE_NAME set to the InfiniBand HCAs only.
+# - CPU only: starts, never hits (CPU tier smaller than the GPU prefix cache).
+# - Mooncake centralized: the emitted store config misses local_hostname, and
+#   one resend differed after a reload; left off until rechecked.
+# - LMCache 0.5.1: register_kv_caches rejects the non-contiguous KV layout.
+kv_offload_support:
+  offloading_fs: verified
+  lmcache: unsupported
+kv_cache_strategy_hardware:
+  kv_store_centralized_mooncake: { gb200: unsupported, b200: unsupported, gb300: unsupported, b300: unsupported }
+
+# NVIDIA only: the plugin ships CUDA kernels for Hopper and Blackwell.
+strategy_hardware:
+  single_node_dep: { amd: unsupported }
+  pd_cluster: { amd: unsupported }
+  # BF16 needs two nodes on H100 (DP16 + EP16) and two trays on GB200 (DP8 + EP8).
+  multi_node_dep: { h100: supported, gb200: supported }
+
+notes:
+  - title: "ERNIE-5.5-Flash is coming soon"
+    when: { variants: [flash] }
+    body: |
+      The post-trained checkpoint is not published yet. These commands show
+      the planned setup: the bundled DSpark draft, `--reasoning-parser ernie5`
+      and `--tool-call-parser ernie5`.
+  - title: "Parsers need the chat checkpoint"
+    when: { features: [reasoning, tool_calling], variants: [default, bf16] }
+    body: |
+      The Base checkpoints have no chat, reasoning or tool-call training, so
+      the parsers have nothing to parse. Use them with ERNIE-5.5-Flash.
+  - title: "Speculative decoding on both PD roles"
+    when: { strategies: [pd_cluster], features: [spec_decoding] }
+    body: |
+      Prefill and decode must run the same `--speculative-config`; the
+      builder adds it to both commands.
+  - title: "Longer context on H100"
+    when: { hardware: [h100] }
+    body: |
+      The commands use the 128K training length. On 80 GB GPUs
+      `--max-model-len 262144` was measured to work (301,900 KV tokens per
+      rank at `--gpu-memory-utilization 0.93`). The checkpoint's 1,048,576 does
+      not fit: one 1M-token request needs 16.2 GiB of KV cache per GPU, and
+      vLLM refuses to start.
+  - title: "1M context"
+    when: { hardware: [b300, gb300, b200, gb200] }
+    body: |
+      The commands use the 128K training length (`--max-model-len 131072`).
+      For the full 1M, pass `--max-model-len 1048576`: each rank's KV cache
+      must hold whole 1M-token requests, so lower `--max-num-seqs` to fit, and
+      a 1M-token prefill needs extra temporary memory: add
+      `--gpu-memory-utilization 0.85`.
+
+troubleshooting:
+  - title: "Architecture Ernie5_5_MoeForCausalLM is not supported"
+    body: |
+      The vLLM-ERNIE plugin is not installed, or `VLLM_PLUGINS` excludes it.
+      Install it into the same environment as vLLM 0.32.0 and leave
+      `VLLM_PLUGINS` unset (or include `ernie`).
+  - title: "Timed out waiting for engine core processes to start"
+    body: |
+      Loading the weights and warming up the kernels takes longer than the
+      default timeout. Set `VLLM_ENGINE_READY_TIMEOUT_S=3600`.
+  - title: "Out of memory during a 1M-token prefill"
+    body: |
+      Lower `--gpu-memory-utilization` to 0.85 to leave room for the
+      temporary prefill buffers, and lower `--max-num-seqs`, or lower
+      `--max-model-len`.
+
+guide: |
+  ## Deployment
+
+  Pick your hardware, checkpoint and strategy in the builder above to
+  generate the launch command. Every recipe runs on the recommended
+  (smallest) GPU count with vLLM's defaults and the 128K training context
+  (`--max-model-len 131072`); size `--max-num-seqs` and `--max-model-len` to
+  your own workload.
+
+  - **Low-Latency.** ECHO speculative decoding through vLLM's MTP path (2
+    draft steps; DSpark for ERNIE-5.5-Flash). Fastest replies for a single
+    user or light load.
+  - **High-Throughput.** Attention DP without a draft. Most tokens per
+    second across many concurrent requests.
+  - **PD Cluster.** One prefill and one decode GB200 tray, KV over Mooncake
+    RDMA.
+
+  | GPU | FP8 (~280 GB weights) | BF16 (~560 GB weights) |
+  | :-- | :-- | :-- |
+  | B300 / GB300 (288 GB) | 2 GPUs | 4 GPUs |
+  | B200 (192 GB) | 4 GPUs | 8 GPUs |
+  | GB200 (192 GB) | 4 GPUs | 2 trays × 4 GPUs |
+  | H100 (80 GB) | 8 GPUs | 2 nodes × 8 GPUs |
+
+  All recipes run attention data parallel
+  and the MoE expert parallel (`--data-parallel-size N --enable-expert-parallel`).
+
+  ## 1. Model introduction
+
+  **ERNIE-5.5-Flash** is an efficient sparse Mixture-of-Experts language
+  model with **280B total and 14B
+  activated parameters per token**, pre-trained from scratch on 33.5T tokens
+  with a training context of up to 128K. It comes as two models:
+  **ERNIE-5.5-Flash-Base** (FP8 and BF16), taken at the end of pre-training
+  before any mid- or post-training, a starting point for domain adaptation,
+  instruction tuning and reinforcement-learning research, served through the
+  completions endpoint; and **ERNIE-5.5-Flash** (FP8 / FP4 / BF16, coming
+  soon), with reasoning, tool calling and a bundled DSpark draft.
+
+  Its 43 layers are 1 dense FFN layer plus 42 Multi-Router Latent MoE layers.
+  Attention is hybrid: 37 layers use Heavily Compressed Attention (HCA, one
+  cached entry per 128 tokens plus a 128-token sliding window, 512-dim heads)
+  and one in seven, 6 layers, keep full-context access through MLA with DSA
+  sparse attention (256-dim heads). Every attention layer adds a low-rank
+  output gate, Virtual Head Attention (a low-rank post-mix across heads) and
+  QK-norm. Each MoE layer has 512 routed experts (top-10) plus 1 shared expert
+  in a 2048-d latent space, selected by several sigmoid routers.
+  Manifold-constrained hyper-connections (expansion rate 4) replace the
+  residual stream, a MultiMax head produces the logits, and ECHO reuses the
+  final layer as a one-step speculative draft, which vLLM runs through its
+  MTP path.
+
+  | Model | Weights | Use |
+  | :-- | :-- | :-- |
+  | **ERNIE-5.5-Flash-Base** | [FP8](https://huggingface.co/baidu/ERNIE-5.5-Flash-Base) / [BF16](https://huggingface.co/baidu/ERNIE-5.5-Flash-Base-BF16) | Base model, completions. Released |
+  | **ERNIE-5.5-Flash** | FP8 / FP4 / BF16 | Chat, reasoning, tool calling, DSpark. Coming soon |
+
+  All checkpoints share the architecture above: 280B total / 14B activated
+  parameters.
+
+  Total parameters include the input embedding and the output head; activated
+  parameters count the output head but not the embedding lookup. Both exclude
+  the 0.36B ECHO parameters. The model was trained with a context of up to
+  128K tokens (131,072); fine-tuning and inference support up to 1M
+  (1,048,576); pass `--max-model-len 1048576` to use it (80 GB GPUs such as
+  H100 reach 262,144).
+
+  The FP8 checkpoint uses 128x128 blocks with UE8M0 scales. It keeps the
+  embedding, the output head, the MoE routers, the HCA compressor, the
+  indexer, the VHA post-mix in BF16, and the mHC parameters in FP32; every other linear layer and the
+  routed experts are FP8.
+
+  **Sampling Defaults.** `temperature=1.0`, `top_p=0.95` (from the
+  checkpoint's `generation_config.json`), with `do_sample=false` for
+  ERNIE-5.5-Flash-Base and `do_sample=true` for ERNIE-5.5-Flash. vLLM reads
+  `temperature` and `top_p` from it but not `do_sample`, so both models
+  sample at `temperature=1.0` by default; pass `temperature=0` for greedy
+  decoding.
+
+  **License.** ERNIE 5.5 Flash Base Model License Agreement v1.0 (the
+  `LICENSE` file in the checkpoint).
+
+  vLLM serves the model through the out-of-tree
+  [vLLM-ERNIE](https://github.com/baidu/vLLM-ERNIE) plugin on the released
+  vLLM 0.32.0 wheel, without modifying vLLM. Set `VLLM_USE_MODELSCOPE=True`
+  to download from ModelScope; the repo names are the same on both hubs.
+
+  ## 2. Configuration tips
+
+  - **Parallelism.** Data + Expert Parallel holds the most KV cache and gives
+    the highest throughput. Tensor + Expert Parallel (TP 2, 4 or 8) lowers
+    latency at low concurrency but holds less KV cache, since the single KV
+    head is replicated on every TP rank.
+  - **MoE Kernel.** The FP8 recipes on Blackwell pass `--moe-backend humming`,
+    which supports SiTU with FP8 weights; on Hopper they keep vLLM's default.
+  - **Long Context.** Every recipe passes `--max-model-len 131072`, the
+    128K training length. The checkpoint allows 1,048,576: on Blackwell pass
+    `--max-model-len 1048576`, lower `--max-num-seqs` so each rank's KV
+    cache holds whole 1M-token requests, and pass
+    `--gpu-memory-utilization 0.85`, since a 1M-token prefill needs tens of
+    GB of temporary memory on top. On 80 GB GPUs 1M does not fit and vLLM
+    fails at startup; H100 reaches 262,144 at `--gpu-memory-utilization 0.93`.
+  - **KV Cache.** Every recipe passes `--kv-cache-dtype fp8`, which stores
+    the KV cache in FP8 and is what was tested; `auto` keeps it in BF16.
+
+  ## 3. Advanced usage
+
+  ### 3.1 Completions (Base)
+
+  As a base model, ERNIE-5.5-Flash-Base continues text: send prompts to
+  `/v1/completions`. It has no chat, reasoning or tool-call training, so chat
+  requests, `--reasoning-parser` and `--tool-call-parser` do not apply. For
+  few-shot use, put the examples in the prompt and stop at the end of one
+  answer.
+
+  ```bash
+  curl http://localhost:8000/v1/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "baidu/ERNIE-5.5-Flash-Base",
+      "prompt": "Question: What is 15% of 240?\nAnswer:",
+      "max_tokens": 64,
+      "temperature": 0,
+      "stop": ["\n"]
+    }'
+  ```
+
+  The completion text in the response is ` 36`.
+
+  ### 3.2 Reasoning (ERNIE-5.5-Flash, coming soon)
+
+  ERNIE-5.5-Flash thinks before it answers. Start the server with
+  `--reasoning-parser ernie5` (the **Reasoning** toggle above); thinking then
+  lands in `reasoning_content` and the answer in `content`. Thinking is on by
+  default; to turn it off for a request, pass `enable_thinking: false`
+  through `chat_template_kwargs` (the chat template reads `enable_thinking`,
+  not `thinking`).
+
+  ```bash
+  # Thinking is on by default.
+  curl http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "baidu/ERNIE-5.5-Flash",
+      "messages": [{"role": "user", "content": "What is 15% of 240?"}]
+    }'
+
+  # Turn it off for one request.
+  curl http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "baidu/ERNIE-5.5-Flash",
+      "messages": [{"role": "user", "content": "What is 15% of 240?"}],
+      "chat_template_kwargs": {"enable_thinking": false}
+    }'
+  ```
+
+  ### 3.3 Tool calling (ERNIE-5.5-Flash, coming soon)
+
+  Start the server with `--enable-auto-tool-choice --tool-call-parser ernie5`
+  (the **Tool Calling** toggle above), together with
+  `--reasoning-parser ernie5`. Tool calls are returned in
+  `message.tool_calls`.
+
+  ### 3.4 KV cache offload
+
+  Long shared prefixes (system prompts, agent histories) can stay outside
+  GPU memory after they leave the GPU cache and be loaded back instead of
+  recomputed. Pick one on the **KV Offload** row:
+
+  - **Simple.** Host memory per DP rank (`SimpleCPUOffloadConnector`).
+    `cpu_bytes_to_use_per_rank` is pinned per rank, so the rank count times
+    this value must stay below the node's RAM. On a GB200 tray (4 ranks) the
+    default 220 GiB per rank is too much; set it to 128 GiB
+    (`"cpu_bytes_to_use_per_rank": 137438953472`).
+  - **CPU + Filesystem.** A small CPU staging tier in front of files under
+    `root_dir`. Point it at fast local NVMe with plenty of space: ERNIE 5.5's
+    KV blocks took about 280 KB per token on disk in our runs.
+  - **Mooncake (Distributed).** Each GPU contributes host memory to a
+    Mooncake pool. Install `mooncake-transfer-engine-cuda13` (vLLM 0.32.0
+    ships CUDA 13), and set `MOONCAKE_DEVICE_NAME` to the InfiniBand HCAs only,
+    for example `mlx5_0,mlx5_1,mlx5_4,mlx5_5` (`ibdev2netdev` lists them);
+    with the empty default, Ethernet ports are picked too and transfers fail.
+
+  ### 3.5 Speculative decoding
+
+  **ECHO (MTP).** The checkpoint carries one ECHO layer after the main stack:
+  the backbone's own final layer, trained to predict future tokens, doubles
+  as the draft. vLLM runs it through its MTP path: pick **MTP, 1 / 2 / 3
+  steps** under the **Spec Decoding** toggle, which sets
+  `--speculative-config '{"method":"mtp","num_speculative_tokens":N}'`. The
+  layer was trained for one future token and can draft several steps by
+  running again; the Low-Latency preset uses 2 steps. Measured on GSM8K at
+  batch size 1 with greedy decoding, the mean accept length is
+  1.98 / 2.39 / 2.49 tokens per step for 1 / 2 / 3 draft steps, with
+  unchanged accuracy; 2 steps take most of the gain.
+
+  **DSpark (ERNIE-5.5-Flash, Coming Soon).** The ERNIE-5.5-Flash checkpoint
+  bundles a DSpark draft. Pick the **Flash** checkpoint above and the
+  **DSpark** mode:
+  `--speculative-config '{"method":"dspark","draft_sample_method":"probabilistic"}'`.
+  The draft length comes from the checkpoint's block size, so the config
+  leaves out `num_speculative_tokens`. Our runs use
+  `draft_sample_method: probabilistic`; vLLM's default is `greedy`. The Base
+  checkpoints carry no DSpark draft.
+
+  ### 3.6 Prefill / decode disaggregation
+
+  Pick **PD Cluster** as the strategy. The tested setup is one prefill and one
+  decode GB200 tray with `MooncakeConnector` over RDMA, each DP4 + EP4.
+  Install `mooncake-transfer-engine-cuda13` on both trays, and set
+  `device_name` in `--kv-transfer-config` to the InfiniBand HCAs only. Start
+  prefill, then decode, then the router (tested with `vllm-router==0.1.16`),
+  and send requests to the router. With speculative decoding, pass the same
+  `--speculative-config` to the prefill and decode servers.
+
+  ## References
+
+  - [vLLM-ERNIE plugin](https://github.com/baidu/vLLM-ERNIE)
+  - [Hugging Face](https://huggingface.co/baidu/ERNIE-5.5-Flash-Base)
+  - [ModelScope](https://modelscope.cn/models/baidu/ERNIE-5.5-Flash-Base)
+  - [Technical report](https://ernie.baidu.com/release/ernie-5-5-flash-base/)
