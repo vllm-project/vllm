@@ -218,6 +218,10 @@ pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError
 pub enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
+    /// A refusal the model gave earlier. Valid only in assistant messages,
+    /// where it is replayed as text.
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
     #[serde(rename = "image_url")]
     ImageUrl {
         image_url: ImageUrl,
@@ -637,13 +641,17 @@ pub enum MessageContent {
 
 /// Mirrors the Python vLLM `UsageInfo` class.
 ///
-/// Do not skip serializing `None` fields here: non-streaming response types
-/// should serialize `None` as explicit `null`.
+/// Do not skip serializing `None` fields here, except where Python omits them
+/// (`prompt_tokens_details`): non-streaming response types should serialize
+/// `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
+    /// Omitted rather than `null` when not reported, like Python: the OpenAI
+    /// spec types it as an object, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
     /// Reasoning-token breakdown. `None` when the frontend cannot count
     /// reasoning tokens: on chat without a reasoning parser, and always on
@@ -686,6 +694,24 @@ impl Usage {
                 .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
         }
     }
+
+    /// Fold in the usage of another choice of the same request. Like Python
+    /// for `n > 1`, the prompt counts once, while completion and reasoning
+    /// tokens add up over the choices.
+    pub(crate) fn add_choice(&mut self, other: &Usage) {
+        if let (Some(completion_tokens), Some(other)) =
+            (&mut self.completion_tokens, other.completion_tokens)
+        {
+            *completion_tokens += other;
+        }
+        if let (Some(details), Some(other)) = (
+            &mut self.completion_tokens_details,
+            &other.completion_tokens_details,
+        ) {
+            details.reasoning_tokens += other.reasoning_tokens;
+        }
+        self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
+    }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
@@ -725,7 +751,8 @@ mod usage_tests {
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, Some(2));
-        assert!(usage.prompt_tokens_details.is_none());
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert!(json.get("prompt_tokens_details").is_none(), "{json}");
     }
 
     #[test]
@@ -867,33 +894,16 @@ pub struct ListModelsResponse {
 // Shared validation helpers
 // ============================================================================
 
-/// Validates a messages array is non-empty and has valid user-message content.
+/// Validates a messages array is non-empty.
 ///
 /// Used by both `POST /v1/chat/completions` and `POST /tokenize` (chat form)
-/// so validation behaviour stays in lockstep.
+/// so validation behaviour stays in lockstep. Message content may be empty,
+/// like in the Python frontend, which renders it as an empty turn.
 pub(crate) fn validate_messages(
     messages: &[ChatMessage],
 ) -> Result<(), validator::ValidationError> {
     if messages.is_empty() {
         return Err(validator::ValidationError::new("messages cannot be empty"));
-    }
-
-    for msg in messages {
-        if let ChatMessage::User { content, .. } = msg {
-            match content {
-                MessageContent::Text(text) if text.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content cannot be empty",
-                    ));
-                }
-                MessageContent::Parts(parts) if parts.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content parts cannot be empty",
-                    ));
-                }
-                _ => {}
-            }
-        }
     }
     Ok(())
 }
