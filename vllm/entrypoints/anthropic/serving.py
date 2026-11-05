@@ -10,12 +10,12 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from dataclasses import replace
 from typing import Any, Literal, get_args
 
 import jinja2
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
@@ -62,7 +62,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_dec_only_prompt,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.renderers.params import ChatParams
+from vllm.renderers.params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -75,6 +75,18 @@ class _StreamError(Exception):
     def __init__(self, error_info: ErrorInfo) -> None:
         super().__init__(error_info.message)
         self.error_info = error_info
+
+
+class _CountTokensChatRequest(ChatCompletionRequest):
+    """Chat request rendered by count_tokens, which counts prompts longer than
+    max_model_len instead of rejecting them, like /tokenize."""
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+            add_special_tokens=self.add_special_tokens,
+        )
 
 
 def _build_anthropic_usage(
@@ -692,7 +704,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> ChatCompletionRequest:
         """Build base ChatCompletionRequest."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return ChatCompletionRequest(
+            return _CountTokensChatRequest(
                 model=anthropic_request.model,
                 messages=openai_messages,
                 chat_template_kwargs=anthropic_request.chat_template_kwargs,
@@ -1322,14 +1334,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
-        # Count prompts longer than max_model_len instead of rejecting them,
-        # as /tokenize does.
-        result = await self.render_chat_request(
-            chat_req,
-            tok_params=replace(
-                chat_req.build_tok_params(self.model_config), max_total_tokens=None
-            ),
-        )
+        result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
             return result
 

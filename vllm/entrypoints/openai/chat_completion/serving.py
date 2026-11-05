@@ -67,7 +67,6 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.renderers.params import TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
@@ -266,8 +265,6 @@ class OpenAIServingChat(GenerateBaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-        *,
-        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
@@ -286,7 +283,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self._preflight(request.n or 1)
 
-        return await self.online_renderer.render_chat(request, tok_params=tok_params)
+        return await self.online_renderer.render_chat(request)
 
     async def create_chat_completion(
         self,

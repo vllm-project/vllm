@@ -237,7 +237,6 @@ class OnlineRenderer:
         request: ChatCompletionRequest,
         *,
         skip_mm_cache: bool = False,
-        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -318,7 +317,6 @@ class OnlineRenderer:
                 tool_dicts=tool_dicts,
                 parser=self.parser,
                 skip_mm_cache=skip_mm_cache,
-                tok_params=tok_params,
             )
         else:
             # For GPT-OSS.
@@ -789,7 +787,6 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
-        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -811,8 +808,7 @@ class OnlineRenderer:
             ),
         )
 
-        if tok_params is None:
-            tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(self.model_config)
         build_kwargs: dict[str, Any] = {}
         if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
             build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
