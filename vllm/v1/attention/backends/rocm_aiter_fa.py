@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
+import os
 from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
@@ -42,6 +43,12 @@ from vllm.v1.kv_cache_interface import (
 )
 
 _PARTITION_SIZE_ROCM = 256
+# Multi-token (spec-decode verify) decodes on aiter's paged kernel: "1" every
+# layer, "full" only layers without a sliding window, "0" off (triton unified).
+# Off by default: this aiter build's pa_v1 launcher sizes the exp_sums /
+# max_logits / tmp_out regions without the mtp factor the kernels index with,
+# so mtp > 1 overlaps them (wrong outputs, NaN in serving).
+_PAGED_MTP_MODE = os.environ.get("VLLM_ROCM_AITER_FA_PAGED_MTP", "0").strip().lower()
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
@@ -330,6 +337,9 @@ logger = init_logger(__name__)
 @dataclass
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
+    # Every decode has max_query_len query tokens (spec-decode verify batches):
+    # the paged kernel takes them as one mtp launch.
+    uniform_query_len: bool = True
     # Sliding-window decode: window-trimmed block table and rebased seq lens.
     swa_block_table: torch.Tensor | None = None
     swa_seq_lens: torch.Tensor | None = None
@@ -512,8 +522,15 @@ class AiterFlashAttentionMetadataBuilder(
         self._swa_block_table: torch.Tensor | None = None
         self._swa_seq_lens: torch.Tensor | None = None
         self._swa_block_offsets: torch.Tensor | None = None
+        # The paged multi-token decode is compiled per query length and only
+        # for even lengths at GQA 8, so it serves exactly the verify batches.
+        spec = vllm_config.speculative_config
+        self._verify_query_len = (
+            spec.num_speculative_tokens + 1 if spec is not None else 1
+        )
         if self.aot_sliding_window is not None:
-            window = self.aot_sliding_window[0] + 1
+            query_span = self._verify_query_len - 1
+            window = self.aot_sliding_window[0] + 1 + query_span
             num_window_blocks = cdiv(window, self.block_size) + 1
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self._swa_block_table = torch.zeros(
@@ -551,6 +568,7 @@ class AiterFlashAttentionMetadataBuilder(
         seq_lens: torch.Tensor,
         num_decodes: int,
         max_seq_len: int,
+        query_len: int = 1,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
         """Trim the decode block table to the sliding window.
 
@@ -564,7 +582,8 @@ class AiterFlashAttentionMetadataBuilder(
         ):
             return None, None, 0
         assert self._swa_seq_lens is not None and self._swa_block_offsets is not None
-        window = self.aot_sliding_window[0] + 1
+        # The first of query_len query tokens needs the window before it.
+        window = self.aot_sliding_window[0] + query_len
         lens = seq_lens[:num_decodes]
         first_block = torch.clamp(lens - window, min=0) // self.block_size
         index = (first_block.to(torch.int64)[:, None] + self._swa_block_offsets).clamp_(
@@ -672,19 +691,25 @@ class AiterFlashAttentionMetadataBuilder(
 
         decode_metadata = None
         if num_decodes > 0:
-            decode_max_query_len = query_lens_cpu[:num_decodes].max().item()
+            decode_query_lens = query_lens_cpu[:num_decodes]
+            decode_max_query_len = decode_query_lens.max().item()
+            uniform_query_len = decode_max_query_len == self._verify_query_len and bool(
+                (decode_query_lens == decode_max_query_len).all()
+            )
             swa_block_table, swa_seq_lens, swa_max_seq_len = None, None, 0
-            if decode_max_query_len == 1:
+            if uniform_query_len:
                 swa_block_table, swa_seq_lens, swa_max_seq_len = (
                     self._build_swa_decode_tables(
                         common_attn_metadata.block_table_tensor,
                         common_attn_metadata.seq_lens,
                         num_decodes,
                         common_attn_metadata.max_seq_len,
+                        decode_max_query_len,
                     )
                 )
             decode_metadata = AiterFlashAttentionDecodeMetadata(
                 max_query_len=decode_max_query_len,
+                uniform_query_len=uniform_query_len,
                 swa_block_table=swa_block_table,
                 swa_seq_lens=swa_seq_lens,
                 swa_max_seq_len=swa_max_seq_len,
@@ -842,6 +867,7 @@ class AiterFlashAttentionMetadataBuilder(
             kv_sharing_metadata=kv_sharing_metadata,
         )
         return attn_metadata
+
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
@@ -1376,9 +1402,23 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # Single-token SWA decode on the trimmed block table is ~2x
             # faster on the paged kernel than unified_attention.
             decode_md = attn_metadata.decode_metadata
+            # paged_attention_v1 takes uniform multi-token decodes (spec-decode
+            # verify batches) as one mtp launch: at 150K context it is ~10x the
+            # triton unified kernel on fp8 caches.
+            paged_mtp = (
+                decode_max_query_len > 1
+                and _PAGED_MTP_MODE in ("1", "full")
+                and (_PAGED_MTP_MODE == "1" or self.sliding_window[0] == -1)
+                and decode_md.uniform_query_len
+                and attn_metadata.causal
+                and self.sinks is None
+                and self.alibi_slopes is None
+                and self.head_size >= 64
+                and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            )
             use_swa_paged = (
                 self.sliding_window[0] != -1
-                and decode_max_query_len == 1
+                and (decode_max_query_len == 1 or paged_mtp)
                 and self.sinks is None
                 and self.alibi_slopes is None
                 and decode_md.swa_block_table is not None
@@ -1387,7 +1427,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
             if (
                 (self.sliding_window[0] != -1 and not use_swa_paged)
-                or decode_max_query_len > 1
+                or (decode_max_query_len > 1 and not paged_mtp)
                 or self.sinks is not None
             ):
                 k_descale, v_descale = self._get_kv_cache_descales(layer, num_decodes)
@@ -1575,10 +1615,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     decode_max_seq_len + _PARTITION_SIZE_ROCM - 1
                 ) // _PARTITION_SIZE_ROCM
 
+                mtp = decode_max_query_len
                 workspace_buffer = torch.empty(
-                    (num_seqs * num_heads * max_num_partitions * head_size)
-                    * nbytes_per_qo_elem
-                    + 2 * (num_seqs * num_heads * max_num_partitions) * 4,
+                    (
+                        (num_seqs * num_heads * max_num_partitions * head_size)
+                        * nbytes_per_qo_elem
+                        + 2 * (num_seqs * num_heads * max_num_partitions) * 4
+                    )
+                    * mtp,
                     dtype=torch.uint8,
                     device=output.device,
                 )
@@ -1595,7 +1639,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     value_cache,
                     self.scale,
                     decode_block_table,
-                    attn_metadata.query_start_loc[:num_decodes],
+                    # mtp > 1: the kernel reads num_decodes + 1 query offsets
+                    attn_metadata.query_start_loc[: num_decodes + min(mtp - 1, 1)],
                     decode_seq_lens,
                     decode_max_seq_len,
                     self.alibi_slopes,
@@ -1606,7 +1651,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                     None,
                     _PARTITION_SIZE_ROCM,
-                    1,
+                    mtp,
                     self.sliding_window[0] + 1,
                 )
 
