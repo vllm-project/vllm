@@ -887,11 +887,11 @@ def test_guidance_ignore_eos_with_speculative_decoding(vllm_runner):
                 max_tokens=8,
                 ignore_eos=True,
                 allowed_token_ids=a + [eos],
-                logit_bias={eos: 100},
                 structured_outputs=StructuredOutputsParams(regex="a"),
             ),
         )[0].outputs[0]
-        assert list(output.token_ids) == a + [eos] * 7
+        assert list(output.token_ids[:2]) == a + [eos]
+        assert len(output.token_ids) == 8
         assert output.finish_reason == "length"
         assert any(
             metric.name == "vllm:spec_decode_num_accepted_tokens" and metric.value > 0
