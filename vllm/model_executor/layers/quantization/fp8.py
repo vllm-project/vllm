@@ -646,8 +646,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant
             else {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        set_weight_attrs(w13_weight_scale, {**extra_weight_attrs, "padding_value": 1})
-        set_weight_attrs(w2_weight_scale, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":

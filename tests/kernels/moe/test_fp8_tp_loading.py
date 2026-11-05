@@ -314,7 +314,7 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
 
 @pytest.mark.parametrize("static", [False, True])
 def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
-    """After a dummy start, begin resets padding: 0 weights, 1 block scales."""
+    """After a dummy start, begin zeroes the padding of a padded layer."""
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         record_checkpoint_layout,
@@ -358,9 +358,8 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
             layer.moe_config.intermediate_size_per_partition_unpadded = 384
             begin_direct_reload(model)
         else:
-            for name, p in layer.named_parameters():
-                if "scale" not in name:
-                    p.data.zero_()  # torch.empty
+            for p in layer.parameters():
+                p.data.zero_()
         for name, tensors in checkpoint.items():
             prefix = "w2" if name == "w2" else "w13"
             for suffix, tensor in zip(suffixes, tensors):

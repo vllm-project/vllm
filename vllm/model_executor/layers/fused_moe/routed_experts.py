@@ -246,8 +246,8 @@ class RoutedExperts(PluggableLayer):
 
         self.lora_base_layer_prefix = ""
 
-    def padding_fill_params(self) -> list[tuple[str, float]]:
-        """(name, value) a direct reload refills; read at cold start, before PWAL."""
+    def padding_fill_params(self) -> list[str]:
+        """Params a direct reload zero-fills; read at cold start, before PWAL."""
         c = self.moe_config
         inter = c.intermediate_size_per_partition
         padded = (
@@ -258,9 +258,7 @@ class RoutedExperts(PluggableLayer):
         if not padded:
             return []
         return [
-            (n, getattr(self._parameters[n], "padding_value", 0))
-            for n in self._padding_fill_names
-            if self._parameters.get(n) is not None
+            n for n in self._padding_fill_names if self._parameters.get(n) is not None
         ]
 
     # TODO(bnell): Temporary hack. Get rid of this.
