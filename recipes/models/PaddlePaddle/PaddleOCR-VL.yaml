@@ -126,7 +126,7 @@ guide: |
       messages=[{
           "role": "user",
           "content": [
-              {"type": "image_url", "image_url": {"url": "https://.../receipt.png"}},
+              {"type": "image_url", "image_url": {"url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png"}},
               {"type": "text", "text": TASKS["ocr"]},
           ],
       }],
