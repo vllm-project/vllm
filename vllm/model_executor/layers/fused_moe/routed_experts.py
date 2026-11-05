@@ -253,6 +253,7 @@ class RoutedExperts(PluggableLayer):
         padded = (
             c.hidden_dim > (c.hidden_dim_unpadded or c.hidden_dim)
             or inter > (c.intermediate_size_per_partition_unpadded or inter)
+            # The loader refills this padding too, but a load plan skips loader fills.
             or c.tp_shard_with_padding
         )
         if not padded:
