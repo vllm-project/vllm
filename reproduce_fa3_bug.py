@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reproduce FA3 split-KV wrong logits bug #62626.
 
 Trigger A: Exactly 2 new tokens on a prefix-cache hit with FULL cudagraph mode.

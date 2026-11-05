@@ -13,10 +13,7 @@ from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA required for FA3 tests"
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for FA3 tests")
 def test_fa3_split_kv_full_cudagraph_trigger_a():
     """Test FA3 split-KV with FULL cudagraph, trigger A: 2-token cache hit.
 
@@ -59,18 +56,19 @@ def test_fa3_split_kv_full_cudagraph_trigger_a():
     llm_baseline.generate(
         [TokensPrompt(prompt_token_ids=prompt_ids[:128])],
         SamplingParams(max_tokens=1),
-        use_tqdm=False
+        use_tqdm=False,
     )
     baseline_output = llm_baseline.generate(
-        [TokensPrompt(prompt_token_ids=prompt_ids[:128 + q])],
+        [TokensPrompt(prompt_token_ids=prompt_ids[: 128 + q])],
         SamplingParams(
             max_tokens=1,
             temperature=0,
             logprobs=20,
         ),
-        use_tqdm=False
+        use_tqdm=False,
     )[0]
     baseline_token = baseline_output.outputs[0].token_ids[0]
+    assert baseline_output.outputs[0].logprobs is not None
     baseline_logprob = baseline_output.outputs[0].logprobs[0][baseline_token].logprob
 
     # FULL mode: same setup
@@ -78,18 +76,19 @@ def test_fa3_split_kv_full_cudagraph_trigger_a():
     llm_full.generate(
         [TokensPrompt(prompt_token_ids=prompt_ids[:128])],
         SamplingParams(max_tokens=1),
-        use_tqdm=False
+        use_tqdm=False,
     )
     full_output = llm_full.generate(
-        [TokensPrompt(prompt_token_ids=prompt_ids[:128 + q])],
+        [TokensPrompt(prompt_token_ids=prompt_ids[: 128 + q])],
         SamplingParams(
             max_tokens=1,
             temperature=0,
             logprobs=20,
         ),
-        use_tqdm=False
+        use_tqdm=False,
     )[0]
     full_token = full_output.outputs[0].token_ids[0]
+    assert full_output.outputs[0].logprobs is not None
     full_logprob = full_output.outputs[0].logprobs[0][full_token].logprob
 
     # Verify tokens match (strict correctness)
@@ -106,10 +105,7 @@ def test_fa3_split_kv_full_cudagraph_trigger_a():
     )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA required for FA3 tests"
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for FA3 tests")
 def test_fa3_split_kv_full_cudagraph_trigger_b():
     """Test FA3 split-KV with FULL cudagraph, trigger B: small max_num_seqs.
 
@@ -149,9 +145,10 @@ def test_fa3_split_kv_full_cudagraph_trigger_b():
             temperature=0,
             logprobs=20,
         ),
-        use_tqdm=False
+        use_tqdm=False,
     )[0]
     baseline_token = baseline_output.outputs[0].token_ids[0]
+    assert baseline_output.outputs[0].logprobs is not None
     baseline_logprob = baseline_output.outputs[0].logprobs[0][baseline_token].logprob
 
     # FULL mode
@@ -162,9 +159,10 @@ def test_fa3_split_kv_full_cudagraph_trigger_b():
             temperature=0,
             logprobs=20,
         ),
-        use_tqdm=False
+        use_tqdm=False,
     )[0]
     full_token = full_output.outputs[0].token_ids[0]
+    assert full_output.outputs[0].logprobs is not None
     full_logprob = full_output.outputs[0].logprobs[0][full_token].logprob
 
     # Verify tokens match
@@ -176,8 +174,7 @@ def test_fa3_split_kv_full_cudagraph_trigger_b():
     # Verify logprobs match within tolerance
     logprob_diff = abs(baseline_logprob - full_logprob)
     assert logprob_diff < 0.01, (
-        f"Logprob mismatch: diff={logprob_diff:.6f} nats. "
-        f"Expected < 0.01 (BF16 noise)."
+        f"Logprob mismatch: diff={logprob_diff:.6f} nats. Expected < 0.01 (BF16 noise)."
     )
 
 
