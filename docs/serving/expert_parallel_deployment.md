@@ -138,14 +138,14 @@ EPv2 limitations:
 
 ### FlashInfer MegaMoE on SM107
 
-`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 expert checkpoints. ModelOpt NVFP4 is the validated format; compressed-tensors NVFP4 checkpoints have not yet been tested on SM107. It is never selected automatically.
+`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 and MXFP4 expert checkpoints. MXFP4 weights are used as stored and run with MXFP8 activations, whatever activation scheme the checkpoint declares. ModelOpt NVFP4 and the MXFP4 experts of DeepSeek-V4.1 are validated; other checkpoints, for example compressed-tensors, have not yet been tested on SM107. It is never selected automatically.
 
 Requirements:
 
 - `flashinfer-python>=0.7.3`, followed by `vllm download-kernels`. With an older FlashInfer, startup fails with an error that names the installed version. This is newer than the FlashInfer version vLLM pins; with it installed, the `flashinfer_nvlink_one_sided` and `flashinfer_nvlink_two_sided` all2all backends fail at startup.
 - The `nvshmem4py-cu13` package.
 - `CUTE_DSL_ARCH=sm_107a` exported before vLLM starts.
-- `NVSHMEM_SYMMETRIC_SIZE`: `(2 * top_k + 1) * hidden_size * max_num_batched_tokens` bytes is enough; set it only if that exceeds NVSHMEM's default heap size.
+- `NVSHMEM_SYMMETRIC_SIZE`: the backend needs about `(2 * top_k + 2) * hidden_size * max_num_batched_tokens` bytes for each distinct MoE layer shape and weight format, summed. With speculative decoding the draft model's MoE layers count separately. Set it only if the sum exceeds NVSHMEM's default heap size.
 
 To install them:
 
@@ -158,9 +158,10 @@ pip or uv may warn about a dependency conflict, because vLLM pins an older `flas
 
 Behavior:
 
-- The checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load.
+- For NVFP4 experts, the checkpoint's activation input scales (the layer maximum over the EP group) set the activation and FC1-output quantization. A non-finite scale, or a layer whose scales are all zero, fails at load. MXFP4 experts have no such scales.
 - vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set. This disables all of FlashInfer's SM107 route checks (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them; a failed check stops the worker.
-- Not supported on SM107 with this backend: MXFP4 expert layers, including MXFP4 draft or MTP experts under speculative decoding; EPLB; and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
+- Draft and MTP expert layers use the target's `--moe-backend` unless `--speculative-config` sets `moe_backend` and the speculative method applies it; DSpark does not, so its drafts always use the target's. For example, with DeepSeek-V4.1-Flash-NVFP4 and `--speculative-config '{"method": "dspark", ...}'`, both the target's NVFP4 experts and the draft's MXFP4 experts run on this backend.
+- Not supported on SM107 with this backend: EPLB, and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
 
 ## Multi-Node Deployment
 

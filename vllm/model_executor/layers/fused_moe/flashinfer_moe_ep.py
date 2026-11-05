@@ -47,13 +47,17 @@ _BLACKWELL_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 _SM107_CAPABILITY = (10, 7)
 _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int]]] = {
     "nvfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY},
-    "mxfp4": _BLACKWELL_CAPABILITIES,
+    "mxfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY},
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
 
-_SM107_NVFP4_CONFIG = "Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig"
+_SM107_CONFIGS: dict[FlashInferMoeEpWeightFormat, str] = {
+    "nvfp4": "Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig",
+    # MXFP4 weights with MXFP8 activations.
+    "mxfp4": "Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig",
+}
 # FlashInfer 0.7.3 renamed apply_topk_in_fc1 to this field; its presence marks 0.7.3,
-# which also brings fused staging and switchable route checks to the SM107 config.
+# which also brings fused staging and switchable route checks to the SM107 configs.
 _ROUTING_WEIGHTS_FIELD = "apply_routing_weights_before_fc2"
 _SM107_ROUTE_CHECK_ENV = "FLASHINFER_SM107_MEGA_CHECK_ROUTES"
 
@@ -74,15 +78,15 @@ def is_sm107_device() -> bool:
 
 
 @functools.cache
-def flashinfer_sm107_nvfp4_gap() -> str | None:
-    """Why the installed FlashInfer cannot run the SM107 NVFP4 MegaMoE of
-    FlashInfer 0.7.3 or newer, or None if it can."""
+def flashinfer_sm107_gap(weight_format: FlashInferMoeEpWeightFormat) -> str | None:
+    """Why the installed FlashInfer cannot run the SM107 MegaMoE of FlashInfer
+    0.7.3 or newer for these expert weights, or None if it can."""
     try:
         import flashinfer
         from flashinfer import moe_ep
     except (ImportError, RuntimeError) as err:
         return f"SM107 without a usable flashinfer.moe_ep ({type(err).__name__}: {err})"
-    config_cls = getattr(moe_ep, _SM107_NVFP4_CONFIG, None)
+    config_cls = getattr(moe_ep, _SM107_CONFIGS[weight_format], None)
     if (
         config_cls is not None
         and _ROUTING_WEIGHTS_FIELD in inspect.signature(config_cls).parameters
@@ -183,9 +187,13 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append(f"weight scheme {weight_key}")
     elif weight_format not in spec.weight_formats:
         unsupported.append(f"{weight_format.upper()} weights")
-    elif _current_capability() not in _FORMAT_CAPABILITIES[weight_format]:
+    elif _current_capability() not in _FORMAT_CAPABILITIES[weight_format] or (
+        # The DeepGEMM megakernel runs on SM100/SM103 only.
+        spec.kernel == "deep_gemm"
+        and _current_capability() not in _BLACKWELL_CAPABILITIES
+    ):
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
-    elif is_sm107_device() and (gap := flashinfer_sm107_nvfp4_gap()):
+    elif is_sm107_device() and (gap := flashinfer_sm107_gap(weight_format)):
         unsupported.append(gap)
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
@@ -284,7 +292,7 @@ def mxfp4_moe_ep_weights(
     w2_scale: torch.Tensor,
 ) -> FlashInferMoeEpWeights:
     spec = flashinfer_moe_ep_backend_spec(moe_backend)
-    if spec.kernel == "deep_gemm":
+    if spec.kernel == "deep_gemm" or is_sm107_device():
         return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
     return FlashInferMoeEpWeights(
         w13=_dequant_mxfp4_experts(w13, w13_scale),
@@ -322,7 +330,10 @@ class _FlashInferMoeEpApi:
         self.MoEWeightPack = MoEWeightPack
         self.Nvfp4CutedslMegaMoeConfig = Nvfp4CutedslMegaMoeConfig
         self.version: str = getattr(flashinfer, "__version__", "unknown")
-        self.Sm107Nvfp4MegaMoeConfig: Any = getattr(moe_ep, _SM107_NVFP4_CONFIG, None)
+        self.sm107_configs: dict[FlashInferMoeEpWeightFormat, Any] = {
+            weight_format: getattr(moe_ep, name, None)
+            for weight_format, name in _SM107_CONFIGS.items()
+        }
 
 
 def _load_flashinfer_moe_ep_api() -> _FlashInferMoeEpApi:
@@ -346,6 +357,7 @@ class FlashInferMoeEp:
         epilogue: FlashInferMoeEpEpilogue | None = None,
         *,
         apply_topk_in_fc1: bool,
+        weight_format: FlashInferMoeEpWeightFormat | None = None,
     ) -> None:
         spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
         if spec.kernel == "deep_gemm":
@@ -365,23 +377,36 @@ class FlashInferMoeEp:
             max_tokens_per_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
+        on_sm107 = spec.kernel == "cutedsl" and is_sm107_device()
+        w13_scale, w2_scale = weights.w13_scale, weights.w2_scale
+        if on_sm107 and weight_format == "mxfp4":
+            # FlashInfer takes the MXFP4 block-scale bytes typed as E8M0.
+            assert w13_scale is not None and w2_scale is not None
+            w13_scale = w13_scale.view(torch.float8_e8m0fnu)
+            w2_scale = w2_scale.view(torch.float8_e8m0fnu)
         weight_pack = api.MoEWeightPack(
             w13=weights.w13,
             w2=weights.w2,
-            w13_scale=weights.w13_scale,
-            w2_scale=weights.w2_scale,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
         )
-        on_sm107 = spec.kernel == "cutedsl" and is_sm107_device()
         if on_sm107:
-            config_cls = api.Sm107Nvfp4MegaMoeConfig
+            assert weight_format is not None, "SM107 needs the expert weight format"
+            config_cls = api.sm107_configs[weight_format]
             if config_cls is None:
                 raise RuntimeError(
                     f"{moe.moe_backend} on SM107 requires flashinfer.moe_ep."
-                    f"{_SM107_NVFP4_CONFIG} (flashinfer-python>=0.7.3)"
+                    f"{_SM107_CONFIGS[weight_format]} (flashinfer-python>=0.7.3)"
                 )
             # FlashInfer 0.7.3 asserts on an invalid SM107 route, killing the worker;
             # default the checks off unless set.
             route_checks = os.environ.setdefault(_SM107_ROUTE_CHECK_ENV, "0")
+            # MXFP4 experts run with MXFP8 activations, which have no global scale.
+            nvfp4_kwargs = (
+                {"input_norm_const": epilogue.input_norm_const}
+                if weight_format == "nvfp4"
+                else {}
+            )
             megakernel = config_cls(
                 intermediate_size=moe.intermediate_size,
                 top_k=moe.experts_per_token,
@@ -389,8 +414,8 @@ class FlashInferMoeEp:
                 fast_math=True,
                 apply_topk_in_fc1=apply_topk_in_fc1,
                 combine_dtype="bf16",
-                input_norm_const=epilogue.input_norm_const,
                 knobs=None,
+                **nvfp4_kwargs,
             )
         elif spec.kernel == "cutedsl":
             # In-kernel fc2 reduce keeps its default (off); FlashInfer 0.7.1rc1

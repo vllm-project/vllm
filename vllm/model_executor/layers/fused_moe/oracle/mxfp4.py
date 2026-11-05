@@ -2056,7 +2056,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_moe_ep_weights,
         )
 
-        # DeepGEMM consumes MXFP4 directly; CuTeDSL gets bf16 and requantizes.
+        # DeepGEMM and the SM107 CuTeDSL kernel consume MXFP4 as stored;
+        # CuTeDSL on SM100/SM103 gets bf16 and requantizes.
         weights = mxfp4_moe_ep_weights(
             FLASHINFER_MOE_EP_CUTEDSL
             if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL

@@ -42,9 +42,11 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     Mxfp4MoeBackend,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_quant_config,
     map_mxfp4_backend,
     mxfp4_round_up_hidden_size_and_intermediate_size,
+    select_deepseek_v4_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     backend_to_kernel_cls as mxfp4_backend_to_kernel_cls,
@@ -238,32 +240,44 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
     assert reason.endswith("EPLB")
 
 
-def test_sm107_admits_only_nvfp4_cutedsl(monkeypatch, megakernel_host):
-    """SM107 runs the CuTeDSL megakernel for NVFP4 checkpoints only."""
+def test_sm107_admits_cutedsl_and_refuses_deep_gemm(monkeypatch, megakernel_host):
+    """SM107 runs the CuTeDSL megakernel for NVFP4 and MXFP4 checkpoints, and
+    MXFP4 layers select it; the DeepGEMM megakernel stays on SM100/SM103."""
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
-    monkeypatch.setattr(fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: None)
+    monkeypatch.setattr(fi_ep, "flashinfer_sm107_gap", lambda weight_format: None)
 
     cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
     assert _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic) == (True, "")
-    for backend in (FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM):
-        supported, reason = _is_supported(_megakernel_moe(backend), kMxfp4Static, None)
-        assert not supported and "MXFP4 weights on this GPU" in reason
+    assert select_deepseek_v4_mxfp4_moe_backend(cutedsl) == (
+        Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
+        FlashInferMoeEpExperts,
+    )
+    deep_gemm = _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM)
+    supported, reason = _is_supported(deep_gemm, kMxfp4Static, None)
+    assert not supported and "MXFP4 weights on this GPU" in reason
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(deep_gemm, kMxfp4Static, None) == (True, "")
 
 
 def test_sm107_appends_flashinfer_gap_verbatim(monkeypatch, megakernel_host):
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
     monkeypatch.setattr(
-        fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: "SM107 with FlashInfer X"
+        fi_ep,
+        "flashinfer_sm107_gap",
+        lambda weight_format: f"SM107 {weight_format} with FlashInfer X",
     )
     moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
     supported, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
-    assert not supported and reason.endswith("SM107 with FlashInfer X")
+    assert not supported and reason.endswith("SM107 nvfp4 with FlashInfer X")
+    supported, reason = _is_supported(moe, kMxfp4Static, None)
+    assert not supported and reason.endswith("SM107 mxfp4 with FlashInfer X")
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
     monkeypatch.setattr(
         fi_ep,
-        "flashinfer_sm107_nvfp4_gap",
-        lambda: pytest.fail("SM100 must not probe FlashInfer for SM107"),
+        "flashinfer_sm107_gap",
+        lambda weight_format: pytest.fail("SM100 must not probe FlashInfer for SM107"),
     )
     assert _is_supported(moe, kNvfp4Static, kNvfp4Dynamic) == (True, "")
     assert _is_supported(moe, kMxfp4Static, None) == (True, "")
@@ -312,11 +326,11 @@ def test_sm107_flashinfer_probe(monkeypatch, flashinfer, expected, unexpected):
     monkeypatch.setitem(
         sys.modules, "flashinfer.moe_ep", getattr(flashinfer, "moe_ep", None)
     )
-    fi_ep.flashinfer_sm107_nvfp4_gap.cache_clear()
+    fi_ep.flashinfer_sm107_gap.cache_clear()
     try:
-        gap = fi_ep.flashinfer_sm107_nvfp4_gap()
+        gap = fi_ep.flashinfer_sm107_gap("nvfp4")
     finally:
-        fi_ep.flashinfer_sm107_nvfp4_gap.cache_clear()
+        fi_ep.flashinfer_sm107_gap.cache_clear()
     if expected is None:
         assert gap is None
     else:
@@ -325,13 +339,51 @@ def test_sm107_flashinfer_probe(monkeypatch, flashinfer, expected, unexpected):
         assert unexpected is None or unexpected not in gap
 
 
+@pytest.mark.parametrize(
+    "configs, admitted, refused",
+    [
+        (
+            {
+                "Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig": _Sm107ConfigV073,
+                "Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig": _Sm107ConfigV072,
+            },
+            "nvfp4",
+            "mxfp4",
+        ),
+        (
+            {"Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig": _Sm107ConfigV073},
+            "mxfp4",
+            "nvfp4",
+        ),
+    ],
+    ids=["mxfp4-old-field", "nvfp4-missing"],
+)
+def test_sm107_flashinfer_probe_checks_the_config_of_each_format(
+    monkeypatch, configs, admitted, refused
+):
+    """Each weight format needs the 0.7.3 field on its own SM107 config."""
+    moe_ep = SimpleNamespace(**configs)
+    monkeypatch.setitem(
+        sys.modules, "flashinfer", SimpleNamespace(__version__="0.7.3", moe_ep=moe_ep)
+    )
+    monkeypatch.setitem(sys.modules, "flashinfer.moe_ep", moe_ep)
+    fi_ep.flashinfer_sm107_gap.cache_clear()
+    try:
+        assert fi_ep.flashinfer_sm107_gap(admitted) is None
+        assert fi_ep.flashinfer_sm107_gap(refused) is not None
+    finally:
+        fi_ep.flashinfer_sm107_gap.cache_clear()
+
+
 def test_sm107_refuses_eplb(monkeypatch, megakernel_host):
     megakernel_host.parallel_config.enable_eplb = True
-    monkeypatch.setattr(fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: None)
+    monkeypatch.setattr(fi_ep, "flashinfer_sm107_gap", lambda weight_format: None)
     moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
     _, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
+    assert reason.endswith("EPLB on SM107")
+    _, reason = _is_supported(moe, kMxfp4Static, None)
     assert reason.endswith("EPLB on SM107")
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
@@ -513,6 +565,34 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
         is_act_and_mul=True,
     )
     assert all(out is src for out, src in zip(converted, tensors))
+
+
+def test_mxfp4_kernel_format_passes_megakernel_weights_through_on_sm107(monkeypatch):
+    """SM107 takes MXFP4 experts as stored; SM100/SM103 still get bf16."""
+    w13 = torch.zeros(2, 64, 32, dtype=torch.uint8)
+    w2 = torch.zeros(2, 64, 16, dtype=torch.uint8)
+    w13_scale = torch.full((2, 64, 2), 127, dtype=torch.uint8)
+    w2_scale = torch.full((2, 64, 1), 127, dtype=torch.uint8)
+    # E2M1 1.0 in the low nibble of the first byte, at block scale 2**1.
+    w13[0, 0, 0] = 0x02
+    w13_scale[0, 0, 0] = 128
+    tensors = (w13, w2, w13_scale, w2_scale)
+
+    def convert():
+        return convert_weight_to_mxfp4_moe_kernel_format(
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, torch.nn.Module(), *tensors
+        )
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    assert all(out is src for out, src in zip(convert(), tensors))
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    w13_out, w2_out, w13_scale_out, w2_scale_out, _, _ = convert()
+    expected_w13 = torch.zeros(2, 64, 64, dtype=torch.bfloat16)
+    expected_w13[0, 0, 0] = 2.0
+    assert torch.equal(w13_out, expected_w13)
+    assert torch.equal(w2_out, torch.zeros(2, 64, 32, dtype=torch.bfloat16))
+    assert w13_scale_out is None and w2_scale_out is None
 
 
 def test_passthrough_all2all_backend_selects_the_pass_through_stages():
