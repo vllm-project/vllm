@@ -44,6 +44,19 @@ int moe_align_block_size(
     int num_threads) {
 #define T_INDEX(tt) total_cnts + (tt) * num_experts
 
+  // `topk_ids` values index the per-expert rows of `total_cnts`, `cumsums`
+  // and `offsets` below, and come from router kernels such as
+  // `hash_topk_cpu`, whose `tid2eid` table is loaded verbatim from the
+  // checkpoint (DeepSeek-V4 hash-MoE `gate.tid2eid`). Enforce the
+  // [0, num_experts) invariant once, up front: an out-of-range id would
+  // otherwise increment and scatter through out-of-bounds workspace
+  // offsets.
+  for (int i = 0; i < numel; ++i) {
+    TORCH_CHECK(topk_ids[i] >= 0 && topk_ids[i] < num_experts,
+                "moe_align_block_size: topk_ids[", i, "] = ", topk_ids[i],
+                " is outside [0, ", num_experts, ")");
+  }
+
   // accumulate count of expert ids locally
   at::parallel_for(0, numel, 0, [&](int begin, int end) {
     int tid = at::get_thread_num();
