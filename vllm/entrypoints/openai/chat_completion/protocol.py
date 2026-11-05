@@ -979,6 +979,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
+        if isinstance(data.get("tool_choice"), ChatCompletionNamedToolChoiceParam):
+            data["tool_choice"] = data["tool_choice"].model_dump()
+        if isinstance(data.get("tools"), list):
+            data["tools"] = [
+                t.model_dump() if isinstance(t, ChatCompletionToolsParam) else t
+                for t in data["tools"]
+            ]
+
         # OpenAI treats an empty tools array like an omitted one: "auto" and
         # "required" have nothing to call and fall back to "none". A named
         # tool keeps the empty list so the lookup below reports the mismatch.
