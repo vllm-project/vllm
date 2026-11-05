@@ -782,6 +782,60 @@ def test_max_load_tokens_rounds_down_without_partial_tail():
     assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
 
 
+@pytest.mark.parametrize(
+    ("cap_chunks", "expected_tokens"),
+    [
+        pytest.param(1, 16, id="one-chunk-cap"),
+        pytest.param(2, 32, id="two-chunk-cap"),
+        pytest.param(None, 64, id="uncapped-preserves-prompt-end-rule"),
+    ],
+)
+def test_max_load_tokens_preserves_aligned_sliding_window_chunk(
+    request_runner, cap_chunks, expected_tokens
+):
+    """A whole-chunk cap with sliding window groups loads exactly that many
+    chunks."""
+    block_size = 4
+    blocks_per_chunk = 4
+    tokens_per_chunk = block_size * blocks_per_chunk
+    spec_kwargs: dict[str, Any] = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(["full"], FullAttentionSpec(**spec_kwargs)),
+        KVCacheGroupSpec(
+            ["sliding"],
+            SlidingWindowSpec(
+                **spec_kwargs,
+                sliding_window=2 * tokens_per_chunk,
+            ),
+        ),
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        blocks_per_chunk=blocks_per_chunk,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=kv_cache_groups,
+    )
+    kv_transfer_params = (
+        None
+        if cap_chunks is None
+        else {"max_load_tokens": cap_chunks * tokens_per_chunk}
+    )
+    runner.new_request(
+        token_ids=[0] * (4 * tokens_per_chunk + 1),
+        kv_transfer_params=kv_transfer_params,
+    )
+    request = runner.scheduler.requests[str(runner.req_id)]
+    runner.manager.lookup.return_value = LookupResult.HIT
+
+    assert runner.connector_scheduler.get_num_new_matched_tokens(request, 0) == (
+        expected_tokens,
+        True,
+    )
+
+
 @pytest.mark.parametrize("value", ["8", 8.5, -1, True])
 def test_invalid_max_load_tokens_is_ignored(value):
     scheduler = _make_partial_tail_scheduler()
