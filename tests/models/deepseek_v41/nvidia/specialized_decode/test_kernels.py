@@ -577,6 +577,7 @@ class _Mxfp8Linear(nn.Module):
 
     def __init__(self, n: int, k: int):
         super().__init__()
+        self.params_dtype = torch.bfloat16
         w = torch.randn(n, k, device=DEVICE) / k**0.5
         w_q, w_s = mxfp8_e4m3_quantize(
             w.to(torch.bfloat16), is_sf_swizzled_layout=False

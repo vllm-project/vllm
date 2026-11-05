@@ -511,7 +511,7 @@ def _stub_marlin_ops(monkeypatch):
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
-        lambda w, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+        lambda w, size_k, size_n, num_bits: torch.zeros(
             size_k // 16, size_n * 2, dtype=torch.int32
         ),
     )
@@ -598,7 +598,7 @@ def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
-        lambda b_q_weight, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+        lambda b_q_weight, size_k, size_n, num_bits: torch.zeros(
             size_k // 16, size_n * 2, dtype=torch.int32
         ),
     )

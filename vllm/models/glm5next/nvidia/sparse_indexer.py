@@ -461,6 +461,8 @@ def sparse_attn_indexer_kpool(
                 dcp_world_size,
                 pool_cp_interleave,
                 row_starts=None,
+                logits_dtype=logits_dtype,
+                num_positions=max_pool_len,
             )
 
             if index_kpool > 1:
@@ -708,6 +710,8 @@ def sparse_attn_indexer_kpool(
             dcp_rank,
             dcp_world_size,
             pool_cp_interleave,
+            logits_dtype=logits_dtype,
+            num_positions=max_pool_len,
         )
 
         # Resolve to token-level indices in the output buffer.
