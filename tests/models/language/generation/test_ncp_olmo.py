@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gzip
+import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
-import torch
 
+from tests.models.ncp_olmo.hf_reference import generate_reference, write_json
 from vllm import SamplingParams
+from vllm.transformers_utils.repo_utils import hf_api
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
@@ -33,6 +37,17 @@ PRESSURE_PROMPTS = [
 def ncp_runner_environment(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+
+@pytest.fixture(scope="module")
+def ncp_model_path():
+    if Path(MODEL).is_dir():
+        return str(Path(MODEL).resolve())
+    return hf_api().snapshot_download(
+        MODEL, revision=os.environ.get("NCP_OLMO_TEST_REVISION")
+    )
 
 
 def _check_exact_vllm_outputs(
@@ -58,102 +73,84 @@ def _check_exact_vllm_outputs(
     )
 
 
-def _generate_hf_greedy_logprobs(
-    hf_model: Any,
-    prompts: list[str],
-    max_tokens: int,
-    num_logprobs: int,
-) -> list[tuple[list[int], str, list[dict[int, float]]]]:
-    """Collect HF generation logprobs without relying on hidden states.
-
-    NCP-OLMo's pure-HF generation path returns per-step scores but intentionally
-    does not materialize generation hidden states. Consuming ``scores`` also
-    compares the logits after the same generation-time processors that selected
-    each greedy token.
-    """
-    outputs = []
-    for inputs in hf_model.get_inputs(prompts):
-        generated = hf_model.model.generate(
-            **hf_model.wrap_device(inputs),
-            tokenizer=hf_model.tokenizer,
-            use_cache=True,
-            do_sample=False,
-            max_new_tokens=max_tokens,
-            output_scores=True,
-            return_dict_in_generate=True,
-        )
-
-        scores = generated.scores
-        output_ids = generated.sequences[0, -len(scores) :].tolist() if scores else []
-        output_logprobs = []
-        for score in scores:
-            logprobs = torch.log_softmax(score[0].float(), dim=-1)
-            topk = logprobs.topk(num_logprobs)
-            output_logprobs.append(
-                dict(
-                    zip(
-                        topk.indices.tolist(),
-                        topk.values.tolist(),
-                        strict=True,
-                    )
-                )
+def _check_all_token_logprobs(reference, candidate):
+    assert all(output[0] for output in reference)
+    assert [output[0] for output in reference] == [output[0] for output in candidate]
+    check_logprobs_close(
+        outputs_0_lst=reference,
+        outputs_1_lst=candidate,
+        name_0="reference",
+        name_1="vllm",
+        always_check_logprobs=True,
+    )
+    # The shared helper can stop after its first checked offset.
+    for expected, actual in zip(reference, candidate, strict=True):
+        assert len(expected[0]) == len(expected[2]) == len(actual[2])
+        for index, token in enumerate(expected[0]):
+            check_logprobs_close(
+                outputs_0_lst=[([token], "", [expected[2][index]])],
+                outputs_1_lst=[([actual[0][index]], "", [actual[2][index]])],
+                name_0="reference",
+                name_1="vllm",
+                always_check_logprobs=True,
             )
-
-        outputs.append(
-            (
-                output_ids,
-                hf_model.tokenizer.decode(output_ids),
-                output_logprobs,
-            )
-        )
-
-    return outputs
 
 
 @pytest.mark.parametrize("max_tokens", [16])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_greedy_logprobs(
-    hf_runner,
     vllm_runner,
+    ncp_model_path,
+    tmp_path,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with hf_runner(
-        MODEL,
-        dtype="bfloat16",
-        model_kwargs={"attn_implementation": "eager"},
-    ) as hf_model:
-        hf_outputs = _generate_hf_greedy_logprobs(
-            hf_model,
-            PROMPTS,
-            max_tokens,
-            num_logprobs,
-        )
+    hf_outputs, hf_input_ids = generate_reference(
+        ncp_model_path, PROMPTS, max_tokens, num_logprobs, tmp_path
+    )
 
     with vllm_runner(
-        MODEL,
+        ncp_model_path,
         dtype="bfloat16",
         max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
     ) as vllm_model:
+        input_ids = [vllm_model.llm.get_tokenizer().encode(p) for p in PROMPTS]
+        assert input_ids == hf_input_ids
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             PROMPTS,
             max_tokens,
             num_logprobs,
         )
 
-    assert all(output[0] for output in hf_outputs)
-    assert [output[0] for output in hf_outputs] == [
-        output[0] for output in vllm_outputs
-    ]
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-        always_check_logprobs=True,
+    write_json(
+        tmp_path / "vllm.json",
+        {
+            "input_ids": input_ids,
+            "outputs": [
+                (
+                    ids,
+                    text,
+                    [
+                        [[key, value.logprob] for key, value in step.items()]
+                        for step in steps
+                    ],
+                )
+                for ids, text, steps in vllm_outputs
+            ],
+        },
+    )
+    _check_all_token_logprobs(hf_outputs, vllm_outputs)
+    write_json(
+        tmp_path / "parity.json",
+        {
+            "status": "NCP_DUAL_GREEDY_TOP5_OK",
+            "checked_tokens": sum(len(output[0]) for output in hf_outputs),
+            "exact_token_equality": True,
+            "upstream_topk_checks_all_offsets": True,
+        },
     )
 
 
@@ -161,11 +158,12 @@ def test_greedy_logprobs(
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_batched_matches_sequential(
     vllm_runner,
+    ncp_model_path,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
     with vllm_runner(
-        MODEL,
+        ncp_model_path,
         dtype="bfloat16",
         max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=True,
@@ -198,6 +196,7 @@ def test_batched_matches_sequential(
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_chunked_prefill_preemption_and_refill_match_sequential(
     vllm_runner,
+    ncp_model_path,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
@@ -210,7 +209,7 @@ def test_chunked_prefill_preemption_and_refill_match_sequential(
     )
 
     with vllm_runner(
-        MODEL,
+        ncp_model_path,
         dtype="bfloat16",
         max_model_len=512,
         max_num_batched_tokens=48,
@@ -260,3 +259,101 @@ def test_chunked_prefill_preemption_and_refill_match_sequential(
         0,
     )
     assert preemptions_after > preemptions_before
+
+
+def _worker_backends(worker):
+    runner = worker.model_runner
+    return {
+        "attention": [
+            (type(group.kv_cache_spec).__name__, group.backend.get_name())
+            for groups in runner.attn_groups
+            for group in groups
+        ],
+        "flashinfer_sampler": runner.sampler.use_flashinfer,
+    }
+
+
+@pytest.mark.parametrize("mode", ["flashinfer-sampler", "mixed-attention"])
+def test_flashinfer_matches_flash_attention(
+    vllm_runner, ncp_model_path, monkeypatch, tmp_path, mode
+):
+    """Exercise real FlashInfer kernels, not a greedy sampler fallback."""
+    kwargs = dict(
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=True,
+        attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 3},
+    )
+    with vllm_runner(ncp_model_path, **kwargs) as baseline:
+        reference = baseline.generate_greedy_logprobs(PROMPTS, 16, 5)
+
+    if mode == "mixed-attention":
+        # Native FlashInfer attention does not implement batch invariance.
+        # This mixed-backend comparison still requires exact greedy tokens.
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+        kwargs["attention_config"] = {
+            "backend": "FLASH_ATTN",
+            "flash_attn_version": 3,
+            "use_trtllm_attention": False,
+            "backend_per_kind": {
+                "full_attention": "FLASHINFER",
+                "sliding_window": "FLASH_ATTN",
+            },
+        }
+    else:
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    kwargs["profiler_config"] = {
+        "profiler": "torch",
+        "torch_profiler_dir": str(tmp_path),
+        "torch_profiler_with_stack": False,
+        "torch_profiler_record_shapes": False,
+    }
+    with vllm_runner(ncp_model_path, **kwargs) as candidate:
+        backends = candidate.llm.collective_rpc(_worker_backends)
+        assert len(backends) == 1
+        selected = backends[0]
+        if mode == "mixed-attention":
+            assert ("FullAttentionSpec", "FLASHINFER") in selected["attention"]
+            assert ("SlidingWindowSpec", "FLASH_ATTN") in selected["attention"]
+        else:
+            assert selected["flashinfer_sampler"]
+        candidate.llm.start_profile()
+        if mode == "flashinfer-sampler":
+            # top_k=1 is deterministic, but temperature>0 and no per-request
+            # seed make MRV2 execute its fused sampling path.
+            outputs = candidate.generate_w_logprobs(
+                PROMPTS,
+                SamplingParams(temperature=1.0, top_k=1, max_tokens=16, logprobs=5),
+            )
+        else:
+            outputs = candidate.generate_greedy_logprobs(PROMPTS, 16, 5)
+        candidate.llm.stop_profile()
+    traces = list(tmp_path.rglob("*.pt.trace.json.gz"))
+    assert traces, "The worker must emit its GPU trace"
+    kernel_names = {
+        event["name"]
+        for path in traces
+        for event in json.loads(gzip.decompress(path.read_bytes()))["traceEvents"]
+        if event.get("cat") == "kernel"
+    }
+    flashinfer_kernels = [name for name in kernel_names if "flashinfer" in name.lower()]
+    assert flashinfer_kernels
+    if mode == "flashinfer-sampler":
+        assert any("sampling" in name.lower() for name in flashinfer_kernels)
+    else:
+        assert any(
+            phase in name.lower()
+            for name in flashinfer_kernels
+            for phase in ("attention", "decode", "prefill")
+        )
+    write_json(
+        tmp_path / "backend-evidence.json",
+        {
+            "mode": mode,
+            "backends": selected,
+            "flashinfer_kernels": flashinfer_kernels,
+        },
+    )
+    _check_all_token_logprobs(reference, outputs)

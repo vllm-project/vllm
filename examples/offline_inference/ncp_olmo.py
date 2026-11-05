@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--flashinfer-sampler",
         action="store_true",
-        help="Use FlashInfer top-k/top-p sampling kernels.",
+        help="Exercise FlashInfer sampling with deterministic top-k 1 (not argmax).",
     )
     return parser.parse_args()
 
@@ -68,9 +68,10 @@ def main() -> None:
     output = llm.generate(
         [args.prompt],
         SamplingParams(
-            temperature=0.0,
+            temperature=1.0 if args.flashinfer_sampler else 0.0,
+            top_k=1 if args.flashinfer_sampler else -1,
             max_tokens=args.max_tokens,
-            seed=args.seed,
+            seed=None if args.flashinfer_sampler else args.seed,
         ),
         use_tqdm=False,
     )[0]

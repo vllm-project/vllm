@@ -68,7 +68,10 @@ attention_config = {
 ```
 
 Disabling TRTLLM attention in this configuration selects native FlashInfer and
-avoids a remote cubin lookup in air-gapped deployments. Do not force every
+avoids a TRTLLM cubin lookup in air-gapped deployments. Native FlashInfer still
+requires its matching kernels or a working JIT toolchain. This mixed mode
+requires `VLLM_BATCH_INVARIANT=0`: native FlashInfer attention does not implement
+batch invariance. Do not force every
 attention group to FlashInfer on SM90 until the upstream sliding-window issue
 is resolved.
 
@@ -102,6 +105,11 @@ To use FlashInfer sampling while keeping vLLM's default attention selection:
   --flashinfer-sampler
 ```
 
+This option uses deterministic top-k 1 with temperature 1 and no per-request
+seed. Ordinary greedy requests bypass FlashInfer's fused sampler even when
+the environment flag is enabled. Without the option, the example uses greedy
+generation; `--seed` continues to configure the engine in both modes.
+
 To test the mixed FlashAttention/FlashInfer attention configuration:
 
 ```bash
@@ -118,17 +126,63 @@ explicit graph-safe contract.
 
 ## Validation before upstream review
 
-The NCP-OLMo correctness CI step runs the real-layer unit tests and the
-generation suite on one H200 GPU. The generation suite defaults to the public
-Stage 2 v1 model; `NCP_OLMO_TEST_MODEL` can select another compatible checkpoint.
-It enables `VLLM_BATCH_INVARIANT=1` for exact sequential/batched comparisons.
+Two NCP-OLMo correctness CI steps run the real-layer unit tests, registry
+initialization and generation suite on one H200 GPU each, using the public
+Stage 1 and Stage 2 v1 models. `NCP_OLMO_TEST_MODEL` can also select a compatible
+local checkpoint. The vLLM environment retains the upstream CUDA test
+dependencies. Only the NCP HF reference runs in a separate, HF-only environment
+with Transformers 5.16.1 and huggingface-hub 1.33.0: the public checkpoint's
+cached-generation implementation requires the earlier attention-mask API.
+Neither the public checkpoint nor the global vLLM dependency pins are patched.
+
+Run the same entry point as CI from a CUDA test environment with `uv` available:
 
 ```bash
 NCP_OLMO_TEST_MODEL=ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage1 \
-  .venv/bin/python -m pytest -v \
-  tests/models/ncp_olmo \
-  tests/models/language/generation/test_ncp_olmo.py
+NCP_OLMO_TEST_REVISION=d642693c0efaca7329e544076397105238bda3bf \
+NCP_TEST_PYTHON="$PWD/.venv/bin/python" \
+  bash .buildkite/scripts/run-ncp-olmo.sh
 ```
+
+For the Stage 2 v1 CI case, use
+`NCP_OLMO_TEST_MODEL=ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1`
+and `NCP_OLMO_TEST_REVISION=715aead3f9fd5af3787205b0329c2cc19b92fd5e`.
+The revision applies to Hub IDs; local directories are used as supplied.
+
+The script installs the hash-locked `requirements/test/ncp_hf.txt` into
+`.ncp-hf` (override with `NCP_OLMO_HF_ENV_DIR`). Regenerate that lock using
+`.venv/bin/python tools/pre_commit/compile_ncp_hf.py`; shared dependencies are constrained
+by `requirements/test/cuda.txt`, excluding only Transformers and Hub. A
+preflight checks matching Torch, torchvision, NumPy, tokenizers and safetensors
+versions and rejects a reference environment containing vLLM. `--setup-only`
+performs this setup without starting model validation. To invoke individual
+tests afterwards, export `NCP_OLMO_HF_PYTHON="$PWD/.ncp-hf/bin/python"`.
+
+The HF parity test generates a fresh reference in an isolated subprocess using
+the real public model, tokenizer and processor: BF16, eager attention, cached
+greedy generation, 16 new tokens and top-5 scores. Request hashes, a fresh
+nonce, Git commit, test/helper source hashes, checkpoint code/config hashes,
+runtime versions and input IDs bind the reference to the current run. Greedy
+tokens must match exactly, and the original shared logprob checker is also
+applied separately at every offset. Historical golden outputs are not used.
+The other comparisons generate fresh vLLM baselines: sequential execution for
+batching/preemption and FlashAttention 3 for sampler/mixed-backend parity.
+
+MRV2 and `VLLM_GPU_SYNC_CHECK=error` are required throughout. The main parity,
+batching, preemption and FlashInfer-sampler tests use
+`VLLM_BATCH_INVARIANT=1`. Only the mixed-attention candidate disables batch
+invariance, retaining the same exact-token and per-offset top-5 assertions.
+The sampler comparison uses temperature 1 and top-k 1 without a request seed,
+which remains deterministic while exercising MRV2's real FlashInfer sampling
+path. Backend inspection and GPU profiler traces must confirm FlashInfer
+kernels actually ran; selecting an environment flag alone is insufficient.
+
+The CI entry point rejects skipped tests, journals failures immediately, bounds
+each complete test (including cleanup) to 15 minutes, and bounds the whole
+invocation to 60 minutes with a 30-second termination grace. JUnit, environment
+versions, reference/parity JSON and GPU traces are retained under
+`tests/artifacts/ncp-olmo/` (override with `NCP_OLMO_CI_RESULT_DIR`).
+In Buildkite, the step uploads these artifacts on both success and failure.
 
 The registry test uses the public Stage 2 v1 checkpoint with small dummy-weight
 overrides. Before opening a pull request, run:

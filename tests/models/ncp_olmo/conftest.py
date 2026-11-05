@@ -21,6 +21,7 @@ def ncp_config(monkeypatch):
             "NCP_OLMO_TEST_MODEL",
             "ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1",
         ),
+        revision=os.environ.get("NCP_OLMO_TEST_REVISION"),
         trust_remote_code=True,
         skip_tokenizer_init=True,
         enforce_eager=True,

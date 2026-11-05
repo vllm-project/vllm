@@ -2,23 +2,44 @@ group: Models - Language
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) NCP-OLMo Correctness"
-  key: language-models-ncp-olmo
+- &ncp-olmo
+  label: ":nvidia: (H200) NCP-OLMo Stage 1 Correctness"
+  key: language-models-ncp-olmo-stage1
   device: h200
   num_devices: 1
-  timeout_in_minutes: 45
+  timeout_in_minutes: 65
+  mount_buildkite_agent: true
+  env:
+    NCP_OLMO_TEST_MODEL: ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage1
+    NCP_OLMO_TEST_REVISION: d642693c0efaca7329e544076397105238bda3bf
   source_file_dependencies:
   - vllm/model_executor/models/ncp_olmo/
   - vllm/model_executor/models/registry.py
   - vllm/v1/worker/gpu/
   - vllm/v1/core/sched/
+  - vllm/model_executor/layers/
+  - vllm/v1/attention/
+  - vllm/v1/sample/
+  - tests/conftest.py
+  - tests/models/utils.py
+  - tests/models/registry.py
+  - tests/models/test_initialization.py
   - tests/models/ncp_olmo/
   - tests/models/language/generation/test_ncp_olmo.py
+  - examples/offline_inference/ncp_olmo.py
+  - requirements/test/ncp_hf.in
+  - requirements/test/ncp_hf.txt
+  - requirements/test/cuda.txt
+  - .buildkite/scripts/run-ncp-olmo.sh
   commands:
-    - >-
-      pytest -v -s
-      models/ncp_olmo
-      models/language/generation/test_ncp_olmo.py
+  - bash /vllm-workspace/.buildkite/scripts/run-ncp-olmo.sh
+
+- <<: *ncp-olmo
+  label: ":nvidia: (H200) NCP-OLMo Stage 2 Correctness"
+  key: language-models-ncp-olmo-stage2
+  env:
+    NCP_OLMO_TEST_MODEL: ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1
+    NCP_OLMO_TEST_REVISION: 715aead3f9fd5af3787205b0329c2cc19b92fd5e
 
 - label: ":nvidia: (H200 MIG 18GB) Language Models (Standard)"
   key: language-models-tests-standard
