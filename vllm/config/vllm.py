@@ -1166,6 +1166,24 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+    def _validate_extract_hidden_states_decode_drafts(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.extract_hidden_states_decode_drafts
+        ):
+            return
+
+        if not self.use_v2_model_runner:
+            raise ValueError(
+                "extract_hidden_states_decode_drafts=False requires Model Runner V2."
+            )
+        if self.parallel_config.data_parallel_size > 1:
+            raise ValueError(
+                "extract_hidden_states_decode_drafts=False is not supported with "
+                "data parallelism, because it relies on dynamic speculative decoding."
+            )
+
     def _maybe_disable_dynamic_sd_for_v1(self) -> None:
         speculative_config = self.speculative_config
         # V2 truncates drafts centrally. V1 requires proposer support.
@@ -2002,6 +2020,7 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        self._validate_extract_hidden_states_decode_drafts()
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_disable_dynamic_sd_for_v1()
         self._maybe_override_dynamic_sd_cudagraph_mode()

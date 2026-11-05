@@ -582,6 +582,15 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    extract_hidden_states_decode_drafts: bool = True
+    """Whether ``method="extract_hidden_states"`` schedules a draft on decode steps.
+
+    These drafts are not needed to save hidden states, including with
+    ``include_output_tokens``, and are rarely accepted. ``False`` schedules none by
+    setting ``num_speculative_tokens_per_batch_size`` to K=0 for all batch sizes.
+    ``False`` requires Model Runner V2 and does not support data parallelism.
+    """
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -1700,6 +1709,20 @@ class SpeculativeConfig:
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
             )
+
+        if not self.extract_hidden_states_decode_drafts:
+            if not self.uses_extract_hidden_states():
+                raise ValueError(
+                    "extract_hidden_states_decode_drafts=False requires "
+                    "method='extract_hidden_states'."
+                )
+            if self.num_speculative_tokens_per_batch_size not in (None, [(1, 1, 0)]):
+                raise ValueError(
+                    "extract_hidden_states_decode_drafts=False sets "
+                    "num_speculative_tokens_per_batch_size, so the two cannot be "
+                    "combined."
+                )
+            self.num_speculative_tokens_per_batch_size = [(1, 1, 0)]
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()

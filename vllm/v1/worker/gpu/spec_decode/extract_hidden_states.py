@@ -18,7 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
-    """Cache target hidden states while returning always-accepted draft tokens."""
+    """Cache target hidden states and return the last sampled tokens as drafts."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         assert vllm_config.speculative_config is not None
