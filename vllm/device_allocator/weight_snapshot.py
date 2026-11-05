@@ -188,14 +188,9 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
     try:
         header, offset = _read_header(fd)
-        saved, now = header.get("tensors", []), _describe(tensors)
-        if header.get("magic") != _MAGIC or saved != now:
-            diff = [(a, b) for a, b in zip(saved, now) if a != b][:4]
-            raise RuntimeError(
-                f"weight snapshot {path} does not match the model "
-                f"({len(saved)} saved vs {len(now)} tensors, first differences "
-                f"{diff}); delete it to rebuild"
-            )
+        if header.get("magic") != _MAGIC:
+            raise RuntimeError(f"weight snapshot {path} has an old format; delete it")
+        plan = _plan(roots, header.get("tensors", []), tensors, offset, path)
         # Two pinned buffers: the disk read of one overlaps the H2D copy of the other.
         bufs = [_pinned(), _pinned()]
         views = [memoryview(b.numpy()) for b in bufs]
@@ -203,7 +198,7 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
         torch.accelerator.synchronize()
         t0 = time.perf_counter()
         i = 0
-        for _, t in tensors:
+        for t, offset in plan:
             dst = t.detach()
             if dst.is_contiguous():
                 target = dst.reshape(-1).view(torch.uint8)
@@ -218,7 +213,6 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
                 i ^= 1
             if not dst.is_contiguous():
                 dst.copy_(target.view(t.dtype).view(t.shape))
-            offset += _round_up(t.nbytes)
         torch.accelerator.synchronize()
     finally:
         os.close(fd)
@@ -234,6 +228,43 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
         total / elapsed / 1e9,
         path,
     )
+
+
+def _plan(roots, saved: list[dict], tensors, offset: int, path) -> list:
+    """Match saved entries to live tensors by key; return (tensor, file offset).
+
+    Attributes the real load created but the dummy build did not (e.g. fused
+    drafter weights) are allocated here."""
+    now = {k: t for k, t in tensors}
+    plan, problems = [], []
+    for e in saved:
+        t = now.pop(e["key"], None)
+        if t is None:
+            t = _create(roots, e)
+        if t is None or str(t.dtype) != e["dtype"] or list(t.shape) != e["shape"]:
+            problems.append(e["key"])
+        else:
+            plan.append((t, offset))
+        offset += _round_up(e["nbytes"])
+    problems += [f"{k} (not in snapshot)" for k in now]
+    if problems:
+        raise RuntimeError(
+            f"weight snapshot {path} does not match the model: {problems[:6]} "
+            f"({len(problems)} total); delete it to rebuild"
+        )
+    return plan
+
+
+def _create(roots, e: dict):
+    root_name, mod_name, attr = e["key"].split("/", 2)
+    if not attr.isidentifier():
+        return None
+    module = roots[root_name].get_submodule(mod_name)
+    device = next(module.parameters(), torch.empty(0, device="cuda")).device
+    dtype = getattr(torch, e["dtype"].removeprefix("torch."))
+    t = torch.empty(e["shape"], dtype=dtype, device=device)
+    setattr(module, attr, t)
+    return t
 
 
 def _audit(roots, tensors) -> None:
