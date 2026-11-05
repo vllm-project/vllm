@@ -3,9 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Select the AITER nightly wheel for a vLLM ROCm image.
 
-aiter-nightly-overlay.sh runs this inside the stock ci_base, so it reads that
-image's ROCm, torch and Python. It prints the wheel's URL, then the Buildkite
-annotation naming it.
+docker/Dockerfile.rocm runs this in the test image's AITER nightly step, so it
+reads that image's ROCm, torch and Python. It prints the wheel's URL, then the
+Buildkite annotation naming it.
 """
 
 import argparse
@@ -21,17 +21,21 @@ from urllib.parse import unquote, urldefrag, urljoin
 
 import regex as re
 
-INDEX_URL = "https://rocm.frameworks-nightlies.amd.com/whl-multi-arch/amd-aiter/"
+INDEX_URL = (
+    "https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/amd-aiter/"
+)
 AITER_COMMIT_URL = "https://github.com/ROCm/aiter/commit/"
 STALE_AFTER = datetime.timedelta(days=1)
 
 # Example:
-#   amd_aiter-0.1.25+rocm7.2.3.torch2.12.ae984f5.d20261008-cp312-cp312-linux_x86_64.whl
-# is AITER main at commit ae984f5, built 2026-10-08, for ROCm 7.2.3, torch 2.12
-# and Python 3.12. 0.1.25 is a guess at the next release, not a real one.
+#   amd_aiter-0.1.28+rocm10.0.0.torch2.13.f684e21.d20261029
+#     -cp312-cp312-manylinux_2_28_x86_64.whl
+# is AITER main at commit f684e21, built 2026-10-29, for ROCm 10.0.0, torch 2.13
+# and Python 3.12, and runs on glibc 2.28 or newer. 0.1.28 is a guess at the
+# next release, not a real one.
 WHEEL_NAME = re.compile(
     r"^amd_aiter-(?P<base_version>[^+-]+)\+(?P<local>[^-]+)"
-    r"-(?P<python>cp\d+)-(?P=python)-linux_x86_64\.whl$"
+    r"-(?P<python>cp\d+)-(?P=python)-(?:manylinux_\d+_\d+|linux)_x86_64\.whl$"
 )
 ROCM_FIELD = re.compile(r"(?:^|\.)rocm(\d+(?:\.\d+)*)(?:a\d+)?(?=\.|$)")
 TORCH_FIELD = re.compile(r"(?:^|\.)torch(\d+\.\d+)(?=\.|$)")
@@ -235,7 +239,9 @@ def _today() -> datetime.date:
     return datetime.datetime.now(datetime.UTC).date()
 
 
-# Not 1 or 2, which Buildkite retries; see aiter-nightly-overlay.sh.
+# Its own status for "no wheel for this image". Dockerfile.rocm fails the image
+# build on any failure here; bake reports that as exit 1, which the image-build
+# step retries once.
 EXIT_NO_WHEEL = 10
 
 

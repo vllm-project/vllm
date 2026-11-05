@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
+from vllm.utils.gc_utils import untracked_list
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -122,8 +123,12 @@ class SingleTypeKVCacheManager(ABC):
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
-        # is finished.
-        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
+        # is finished. Blocks hold no strong reference back to these lists or
+        # their owner, so the lists cannot be part of a cycle and are hidden from
+        # the cyclic GC, which would otherwise visit every block of every request.
+        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(
+            untracked_list
+        )
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -2279,6 +2284,12 @@ class HiSparseSourceManager(FullAttentionManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
+        assert self.coordinator is not None
+        available = self.block_pool.get_num_free_blocks()
+        if apply_admission_cap and total_computed_tokens > num_local_computed_tokens:
+            num_tokens += self.coordinator.import_step_tokens
+            available -= self.coordinator.reserved_import_pages
+            self.coordinator.size_import(request_id, cdiv(num_tokens, self.block_size))
         required = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -2289,8 +2300,7 @@ class HiSparseSourceManager(FullAttentionManager):
         )
         # Host blocks come from a private pool, so they never count against
         # the GPU pool. Use the same admission sentinel as Mamba instead.
-        if required > self.block_pool.get_num_free_blocks():
-            assert self.coordinator is not None
+        if required > available:
             assert self.coordinator.gpu_pool is not None
             return self.coordinator.gpu_pool.num_gpu_blocks + 1
         return 0
@@ -2316,6 +2326,22 @@ class HiSparseSourceManager(FullAttentionManager):
             num_external_computed_tokens,
             record_for_zeroing,
         )
+        self.coordinator.update_import_reservation(
+            request_id, len(self.req_to_blocks[request_id])
+        )
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        new_blocks = super().allocate_new_blocks(
+            request_id, num_tokens, num_tokens_main_model
+        )
+        if new_blocks:
+            assert self.coordinator is not None
+            self.coordinator.update_import_reservation(
+                request_id, len(self.req_to_blocks[request_id])
+            )
+        return new_blocks
 
     def cache_blocks(
         self,
