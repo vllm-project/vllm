@@ -148,25 +148,6 @@ class _PlanSink(TraceSink):
             reason = f"applies {func.__name__} to it"
         for t in traces:
             self.mark(t._name, reason)
-        first = traces[0]
-
-        def trace(o: torch.Tensor) -> TraceTensor:
-            return TraceTensor(first._name, o.shape, o.dtype, self, None, reason)
-
-        return self.on_meta(func, args, kwargs, first._name, trace)
-
-    def on_meta(
-        self,
-        func: Any,
-        args: tuple,
-        kwargs: dict,
-        name: str,
-        wrap: Callable[[torch.Tensor], torch.Tensor] = lambda o: o,
-    ) -> Any:
-        """Run ``func`` on meta copies of its tensor arguments, so it writes
-        no real tensor. An in-place result is the original argument; other
-        tensor results go through ``wrap``. If ``func`` fails on meta, ``name``
-        stops the bake."""
 
         def to_meta(a: Any) -> Any:
             if isinstance(a, TraceTensor):
@@ -175,6 +156,7 @@ class _PlanSink(TraceSink):
                 )
             return a.to(_META) if isinstance(a, torch.Tensor) else a
 
+        first = traces[0]
         flat, spec = pytree.tree_flatten((args, kwargs))
         meta_flat = [to_meta(a) for a in flat]
         meta_args, meta_kwargs = pytree.tree_unflatten(meta_flat, spec)
@@ -182,17 +164,19 @@ class _PlanSink(TraceSink):
             out = func(*meta_args, **meta_kwargs)
         except Exception as e:  # no meta kernel, a shape error, ...
             # the error stays out of the reason, which groups the report
-            logger.debug("load plan: %s on %s fails on meta: %r", func, name, e)
-            self.stops.setdefault(name, f"{func.__name__} fails on meta")
+            logger.debug("load plan: %s on %s fails on meta: %r", func, first._name, e)
+            self.stops.setdefault(first._name, f"{func.__name__} fails on meta")
             raise _BakeStopped from e
         originals = {id(m): a for m, a in zip(meta_flat, flat)}
 
-        def back(o: Any) -> Any:
+        def wrap(o: Any) -> Any:
             if not isinstance(o, torch.Tensor):
                 return o
-            return originals[id(o)] if id(o) in originals else wrap(o)
+            if id(o) in originals:  # in place: return the original argument
+                return originals[id(o)]
+            return TraceTensor(first._name, o.shape, o.dtype, self, None, reason)
 
-        return pytree.tree_map(back, out)
+        return pytree.tree_map(wrap, out)
 
 
 def _writes_a_real_tensor(func: Any, args: tuple, kwargs: dict) -> bool:
@@ -242,12 +226,7 @@ class _TargetGuard(TorchDispatchMode):
     ``param.copy_(fn(param))``, a check such as ``torch.equal(param, x)``, or
     a mirror copied from ``param``. Reads that bypass the dispatcher
     (``tolist()`` or ``numpy()`` of a CPU tensor, a raw kernel launch) go
-    unseen.
-
-    An op mixing a meta temporary (one a loader made on the incoming
-    tensor's device) with a real tensor runs on meta instead and makes the
-    name that last wrote the temporary (or the name being loaded) a
-    fallback."""
+    unseen."""
 
     def __init__(self, sink: _PlanSink):
         super().__init__()
@@ -263,14 +242,6 @@ class _TargetGuard(TorchDispatchMode):
         ]
         if any(isinstance(a, TraceTensor) for a in leaves):
             return func(*args, **kwargs)  # the trace's own handler
-        meta = [a for a in leaves if a.is_meta]
-        if meta and len(meta) < len(leaves):
-            sink = self.sink
-            key = meta[0].untyped_storage()._cdata
-            name = sink.last_writer.get(key) or sink.current
-            if name is not None:
-                sink.mark(name, f"mixes a meta temporary with a real tensor ({packet})")
-                return sink.on_meta(func, args, kwargs, name)
         if not func.is_view and packet not in _METADATA_OPS:
             # copy_(target, x) and friends write the target but read only x
             read = args[1:] if packet in _CONSTANT_WRITES else args

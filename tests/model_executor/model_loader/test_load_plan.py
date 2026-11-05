@@ -400,14 +400,6 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     return make, {"layer.weight": (shape, dtype)}
 
 
-def _meta_temporary(param, loaded):
-    """A temporary on the incoming tensor's device, which is meta while
-    planning: copying it into the parameter must not abort the plan."""
-    tmp = torch.zeros(loaded.shape, dtype=loaded.dtype, device=loaded.device)
-    tmp.copy_(loaded)
-    param.copy_(tmp)
-
-
 @pytest.mark.parametrize(
     "loader,reason",
     [
@@ -419,7 +411,6 @@ def _meta_temporary(param, loaded):
         (lambda p, w: p.copy_(w.expand(2, 4)[0]), "applies"),
         (lambda p, w: torch.add(w, 0, out=p), "without Tensor.copy_ (add.out)"),
         (lambda p, w: (w.to("cpu").float().numpy(), p.copy_(w)), "reads tensor values"),
-        (_meta_temporary, "mixes a meta temporary with a real tensor"),
     ],
     ids=[
         "arith",
@@ -430,7 +421,6 @@ def _meta_temporary(param, loaded):
         "expand",
         "out",
         "numpy",
-        "meta-temporary",
     ],
 )
 def test_fallbacks(loader, reason):
