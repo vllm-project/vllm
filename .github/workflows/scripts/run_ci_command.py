@@ -548,8 +548,10 @@ def authorize(
     if actor.casefold() != pr["user"]["login"].casefold():
         return (
             False,
-            "Only reviewers with write access can use CI commands before CI is "
-            "delegated to the PR author.",
+            (
+                "Only reviewers with write access can use CI commands before CI is "
+                "delegated to the PR author."
+            ),
         )
     if pr["draft"]:
         return False, "PR authors cannot run CI while the PR is a draft."
@@ -559,8 +561,10 @@ def authorize(
         return True, "approval from a trusted reviewer"
     return (
         False,
-        f"A reviewer with write access must run `{run_command}`, approve the PR, "
-        "or add the `ready` label first.",
+        (
+            f"A reviewer with write access must run `{run_command}`, approve the PR, "
+            "or add the `ready` label first."
+        ),
     )
 
 

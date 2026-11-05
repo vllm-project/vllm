@@ -531,7 +531,7 @@ def causal_conv1d_fn(
 
             tot = nums.sum().item()
             mlist = np.repeat(np.arange(len(nums)), nums)
-            for idx, num in enumerate(nums):
+            for num in nums:
                 offsetlist.extend(
                     range(num)
                 )  # chunk-idx if a sequence is split into multiple chunks

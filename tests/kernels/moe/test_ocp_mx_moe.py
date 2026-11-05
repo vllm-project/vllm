@@ -118,10 +118,10 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):
-        #     from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+        #     from vllm.model_executor.layers.quantization.quark.quark import (
         #         QuarkLinearMethod)
         #     from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import QuarkOCP_MX  # noqa: E501
-        #     from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+        #     from vllm.model_executor.layers.quantization.quark.quark_moe import (
         #         QuarkOCP_MX_MoEMethod)
 
         #     layer = model.model.layers[0]

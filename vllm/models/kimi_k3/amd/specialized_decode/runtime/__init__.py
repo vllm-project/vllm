@@ -210,8 +210,10 @@ def unsupported(vllm_config) -> list[str]:
         (
             MambaStateDtypeCalculator.kda_state_dtype(mc.dtype, cc.mamba_cache_dtype)
             != (torch.bfloat16, torch.float32),
-            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-            "state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+                "state (mamba cache dtype)"
+            ),
         ),
         (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
         # the model state hooks build the executor and bind it to each KV cache
@@ -261,8 +263,10 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     seqs = vllm_config.scheduler_config.max_num_seqs
     if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
         return [
-            f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
-            f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            (
+                f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
+                f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            )
         ]
     if vllm_config.parallel_config.decode_context_parallel_size != 1:
         return []
@@ -271,8 +275,10 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
         return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
     if check_m1c and not m1c_serves(k + 1, seqs):
         return [
-            f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
-            "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+            (
+                f"DCP1 at {k} speculative tokens, max_num_seqs {seqs} (DCP1 runs M1c "
+                "only: 3 or 7 speculative tokens, max_num_seqs 1 or 2; use DCP8)"
+            )
         ]
     return []
 

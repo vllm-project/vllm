@@ -353,7 +353,7 @@ def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
     remainder = ',"unit":"celsius"}'
     prompt_ids: list[int] | None = []
     results: list[DeltaMessage | None] = []
-    for i, tid in enumerate(token_ids):
+    for tid in token_ids:
         prev = results[-1] if results else None
         prev_had_args = (
             prev

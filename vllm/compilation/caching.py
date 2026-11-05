@@ -267,7 +267,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
+        for _, submod in state["graph_module"].named_children():
             if hasattr(submod, "graph"):
                 for node in submod.graph.nodes:
                     node.meta.pop("source_fn_stack", None)

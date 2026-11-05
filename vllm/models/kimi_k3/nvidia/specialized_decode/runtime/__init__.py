@@ -114,8 +114,10 @@ def unsupported(vllm_config) -> str | None:
         # maintains neither other cache dtypes nor ReplaySSM / RecoverSSM records.
         (
             kda_dtypes(vllm_config) != (torch.bfloat16, torch.float32),
-            "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
-            "state (mamba cache dtype)",
+            (
+                "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
+                "state (mamba cache dtype)"
+            ),
         ),
         (
             vllm_config.cache_config.use_replayssm

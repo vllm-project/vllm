@@ -924,7 +924,7 @@ def get_config(
         except Exception as e:
             error_message = (
                 "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
+                f" '{model}'.\nPlease verify the following requirements:\n"
                 "1. Provide a valid Hugging Face repository ID.\n"
                 "2. Specify a local directory that contains a recognized "
                 "configuration file.\n"
@@ -932,7 +932,7 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-            ).format(model=model)
+            )
 
             raise ValueError(error_message) from e
 

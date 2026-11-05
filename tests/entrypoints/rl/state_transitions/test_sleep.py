@@ -291,7 +291,7 @@ def _get_sleep_metrics_from_api(response: requests.Response):
         if family.name == "vllm:engine_sleep_state":
             for sample in family.samples:
                 if sample.name == "vllm:engine_sleep_state":
-                    for label_name, label_value in sample.labels.items():
+                    for label_value in sample.labels.values():
                         if label_value == "awake":
                             awake = sample.value
                         elif label_value == "weights_offloaded":
