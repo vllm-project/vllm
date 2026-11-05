@@ -145,7 +145,7 @@ def test_flashinfer_replayssm_validates_config(
             architecture="NemotronHForCausalLM",
             dtype=input_dtype,
         ),
-        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
         ),
@@ -332,17 +332,17 @@ def test_mamba_ssu_algorithm_uses_decode_override():
 
 
 @pytest.mark.parametrize(
-    ("shared_backend", "decode_backend", "v2", "buffer_len", "error"),
+    ("shared_backend", "decode_backend", "num_spec", "buffer_len", "error"),
     [
-        ("flashinfer", "triton", False, 32, None),
-        ("triton", "flashinfer", True, 32, "buffer-len <= 16"),
-        ("flashinfer", "triton", True, 16, "--mamba-decode-backend flashinfer"),
-        ("triton", None, True, 16, "--mamba-decode-backend flashinfer"),
-        ("triton", "cpu", False, 16, "--mamba-decode-backend triton or flashinfer"),
+        ("flashinfer", "triton", 0, 32, None),
+        ("triton", "flashinfer", 0, 32, "buffer-len <= 16"),
+        ("flashinfer", "triton", 3, 16, "--mamba-decode-backend flashinfer"),
+        ("triton", None, 3, 16, "--mamba-decode-backend flashinfer"),
+        ("triton", "cpu", 0, 16, "--mamba-decode-backend triton or flashinfer"),
     ],
 )
 def test_replayssm_validation_uses_decode_backend(
-    shared_backend, decode_backend, v2, buffer_len, error
+    shared_backend, decode_backend, num_spec, buffer_len, error
 ):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -350,13 +350,12 @@ def test_replayssm_validation_uses_decode_backend(
             mamba_cache_mode="none",
             replayssm_buffer_len=buffer_len,
         ),
-        num_speculative_tokens=0,
+        num_speculative_tokens=num_spec,
         model_config=SimpleNamespace(
             supports_replayssm=True, architecture="NemotronHForCausalLM"
         ),
         mamba_config=MambaConfig(backend=shared_backend, decode_backend=decode_backend),
         kv_transfer_config=None,
-        use_v2_model_runner=v2,
     )
 
     if error is None:

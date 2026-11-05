@@ -10,7 +10,10 @@ from einops import rearrange, repeat
 
 from tests.kernels.mamba.utils import selective_state_update_ref
 from vllm.config.mamba import MambaConfig
-from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
     _chunk_scan_fwd,
     _chunk_scan_fwd_kernel,
@@ -772,6 +775,7 @@ def test_mamba_ssd_dispatch_preserves_outputs_cache_and_checkpoint_resume(
     )
     mixer.conv_weights, mixer.conv1d = torch.empty(0), SimpleNamespace(bias=None)
     mixer.activation, mixer.conv_kernel_size = "silu", 4
+    mixer._checkpoint_exporter = MambaPrefillCheckpointExporter(state_len=3)
     mixer.A, mixer.D, mixer.dt_bias = A, D, bias
     vllm_config = SimpleNamespace(
         mamba_config=MambaConfig(prefill_backend=provider),
