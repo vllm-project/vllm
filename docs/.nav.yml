@@ -53,8 +53,6 @@ nav:
       - benchmarking/README.md
       - benchmarking/cli.md
       - benchmarking/sweeps.md
-      - benchmarking/quantized_backends.md
-      - benchmarking/quantized_backends_reproduce.md
       - benchmarking/dashboard.md
   - API Reference:
     - api/README.md

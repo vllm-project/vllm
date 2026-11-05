@@ -109,6 +109,39 @@ Both options are also supported by `vllm bench sweep serve_workload`.
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
 
+### Compare quantized linear backends
+
+Use a quantized checkpoint that both backends support on your GPU. To compare
+Marlin and Humming, save this as `linear_backends.json` and pass it to
+`--serve-params`. Use the same model in `--serve-cmd` and `--bench-cmd`.
+
+```json
+[
+    {"linear_backend": "marlin"},
+    {"linear_backend": "humming"}
+]
+```
+
+Keep the GPU, checkpoint revision, tokenizer, software versions, quantization
+method, dtype, tensor parallel size, batch limits, attention backend, CUDA
+Graph mode, and prefix-cache settings the same. Set the same
+`--kv-cache-memory-bytes` for both servers so workspace size does not also
+change KV cache capacity.
+
+Pass `--show-stdout` to the sweep and check the server logs for the expected
+kernels before you compare results.
+vLLM can fall back to another kernel, and [per-format backend overrides](../features/quantization/README.md#selecting-linear-backends-per-quantization)
+take precedence over `--linear-backend`.
+
+Use the same workload, seed, concurrency, and warmup settings for both backends.
+Check failed requests and input/output lengths before you compare throughput and
+latency. Repeat the sweep with the backend order reversed to help spot effects
+from GPU clocks or temperature.
+
+Evaluate accuracy separately with the same prompts and generation settings;
+see the [GSM8K evaluator](../../tests/evals/gsm8k/README.md) for an example.
+Compare [startup time](#startup-benchmark) separately with matched cache states.
+
 ### Workload Explorer
 
 `vllm bench sweep serve_workload` is a variant of `vllm bench sweep serve` that explores different workload levels in order to find the tradeoff between latency and throughput. The results can also be [visualized](#visualization) to determine the feasible SLAs.
