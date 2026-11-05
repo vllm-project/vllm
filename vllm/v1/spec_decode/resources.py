@@ -5,22 +5,14 @@ the workers."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 PlanKind = Literal["chain", "tree"]
-"""The plans a model verifies, in increasing order: ``"chain"`` (each row
-follows the one before it), ``"tree"`` (each row names its parent row and sees
-its ancestors)."""
-
-PLAN_KINDS: tuple[PlanKind, ...] = get_args(PlanKind)
-
-
-def plan_kind_rank(kind: PlanKind) -> int:
-    """The position of ``kind`` in :data:`PLAN_KINDS`."""
-    return PLAN_KINDS.index(kind)
+"""The plans a model verifies: ``"chain"`` (each row follows the one before
+it) or ``"tree"`` (each row names its parent row and sees its ancestors)."""
 
 
 @dataclass(frozen=True)

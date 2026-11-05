@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from vllm.logger import init_logger
-from vllm.v1.spec_decode.resources import PLAN_KINDS, PlanKind, plan_kind_rank
+from vllm.v1.spec_decode.resources import PlanKind
 
 if TYPE_CHECKING:
     from vllm.v1.spec_decode.resources import SpecResources
@@ -18,11 +18,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
-
-
-def min_plan_kind(kinds: Iterable[PlanKind]) -> PlanKind:
-    """The lowest of ``kinds``; the highest plan kind when there are none."""
-    return min(kinds, key=plan_kind_rank, default=PLAN_KINDS[-1])
 
 
 @dataclass(frozen=True)
@@ -56,17 +51,14 @@ class SpecCapabilities:
     """What a worker's layers verify; reduced over ranks by the engine core."""
 
     plan_kind: PlanKind
-    """The lowest plan kind any layer or setting allows."""
+    """``"chain"`` when any layer or setting caps it, else ``"tree"``."""
     limits: tuple[SpecLimit, ...] = ()
-    """Every cap below the highest plan kind, for the startup log."""
+    """Every cap to chains, for the startup log."""
 
     @classmethod
     def from_limits(cls, limits: Iterable[SpecLimit]) -> "SpecCapabilities":
         limits = tuple(dict.fromkeys(limits))
-        return cls(
-            plan_kind=min_plan_kind(limit.plan_kind for limit in limits),
-            limits=limits,
-        )
+        return cls(plan_kind="chain" if limits else "tree", limits=limits)
 
 
 def spec_layers(
@@ -153,7 +145,7 @@ def layer_spec_limits(
     return [
         SpecLimit(plan_kind, f"{what}, {n} layer{'s' * (n != 1)}: {why}")
         for (plan_kind, what, why), n in num_layers.items()
-        if plan_kind != PLAN_KINDS[-1]
+        if plan_kind == "chain"
     ]
 
 
@@ -196,11 +188,7 @@ def resolve_spec_resources(
     caps = SpecCapabilities.from_limits(
         limit for rank in capabilities for limit in rank.limits
     )
-    lowering = [
-        limit
-        for limit in caps.limits
-        if plan_kind_rank(limit.plan_kind) < plan_kind_rank(declared.plan_kind)
-    ]
+    lowering = caps.limits if declared.plan_kind == "tree" else ()
     for limit in lowering:
         logger.info(
             "spec decode: %s -> %s (%s)",
@@ -224,8 +212,9 @@ def validate_effective_resources(
 ) -> None:
     """Check that ``effective`` takes no more than ``declared`` and ``caps``."""
     problems = []
-    if plan_kind_rank(effective.plan_kind) > plan_kind_rank(
-        min_plan_kind((declared.plan_kind, caps.plan_kind))
+    if effective.plan_kind == "tree" and "chain" in (
+        declared.plan_kind,
+        caps.plan_kind,
     ):
         problems.append(
             f"plan_kind {effective.plan_kind!r} is above the declared "
