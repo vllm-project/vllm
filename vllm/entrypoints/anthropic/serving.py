@@ -900,6 +900,33 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
+        if request.max_tokens == 0:
+            # The engine requires at least one sampled token, but Anthropic
+            # uses zero-token messages to populate the prompt cache. Keep the
+            # rendered prompt and cache salt unchanged while using the
+            # smallest engine-supported completion internally.
+            chat_req = chat_req.model_copy(
+                update={
+                    "max_tokens": 1,
+                    "max_completion_tokens": 1,
+                    "min_tokens": 0,
+                    "stream": False,
+                }
+            )
+            generator = await self.create_chat_completion(chat_req, raw_request)
+            if isinstance(generator, ErrorResponse):
+                return generator
+            if not isinstance(generator, ChatCompletionResponse):
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        code=500,
+                        message="zero-token prewarm did not return a completion",
+                    )
+                )
+            response = self._zero_token_response(generator)
+            if request.stream:
+                return self._zero_token_stream(response)
+            return response
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
         generator = await self.create_chat_completion(chat_req, raw_request)
@@ -911,6 +938,51 @@ class AnthropicServingMessages(OpenAIServingChat):
             return self.messages_full_converter(generator)
 
         return generator
+
+    @staticmethod
+    def _zero_token_response(
+        generator: ChatCompletionResponse,
+    ) -> AnthropicMessagesResponse:
+        """Build the response for an Anthropic cache-prewarming request."""
+        usage = _build_anthropic_usage(generator.usage).model_copy(
+            update={"output_tokens": 0}
+        )
+        return AnthropicMessagesResponse(
+            id=generator.id,
+            content=[],
+            model=generator.model,
+            stop_reason="max_tokens",
+            usage=usage,
+        )
+
+    @staticmethod
+    async def _zero_token_stream(
+        response: AnthropicMessagesResponse,
+    ) -> AsyncGenerator[str, None]:
+        """Emit the Anthropic stream for a zero-token cache prewarm."""
+        start = AnthropicStreamEvent(
+            type="message_start",
+            message=response.model_copy(
+                update={"stop_reason": None, "usage": response.usage}
+            ),
+        )
+        yield wrap_data_with_event(
+            start.model_dump_json(exclude_unset=True), "message_start"
+        )
+        delta = AnthropicStreamEvent(
+            type="message_delta",
+            delta=AnthropicDelta(stop_reason="max_tokens", stop_sequence=None),
+            usage=response.usage,
+        )
+        yield wrap_data_with_event(
+            delta.model_dump_json(exclude_unset=True), "message_delta"
+        )
+        yield wrap_data_with_event(
+            AnthropicStreamEvent(type="message_stop").model_dump_json(
+                exclude_unset=True, exclude_none=True
+            ),
+            "message_stop",
+        )
 
     def chat_completion_stream_generator(
         self, *args: Any, **kwargs: Any

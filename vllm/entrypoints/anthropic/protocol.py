@@ -357,8 +357,8 @@ class AnthropicMessagesRequest(BaseModel):
     @field_validator("max_tokens")
     @classmethod
     def validate_max_tokens(cls, v):
-        if v <= 0:
-            raise ValueError("max_tokens must be positive")
+        if v < 0:
+            raise ValueError("max_tokens must be non-negative")
         return v
 
     @field_validator("system")
