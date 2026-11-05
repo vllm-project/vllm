@@ -59,11 +59,8 @@ class PlanInputs:
     scheduled_rows: np.ndarray
     """``[num_reqs]`` int32: rows the scheduler reserved per request, 1 + its drafts."""
     chain_only: bool
-    """The runner can only verify chains this step: a prefill is in the batch, a
-    logits processor reads each row's prefix (penalties, bad words, a thinking
-    budget, a custom processor), structured output, or a parallelism mode that does
-    not lay out other plans (pipeline, context parallel). The plan must then
-    be a chain; it may still verify fewer rows."""
+    """The plan must be a chain this step (``round_contract.md``, step 2); it may
+    still verify fewer rows."""
 
 
 @dataclass

@@ -41,18 +41,13 @@ class SpecLayerSpec:
     module: Any
     """The layer itself: its per-rank shapes, dtypes and ``kv_cache``."""
     layout: str = ""
-    """What committing the layer's accepted path moves (``SpecLayerKind`` of
-    family ``layout``): ``"paged_token"``, ``"paged_split_scale"`` or
-    ``"mamba_state"``; ``""`` for a cache not paged by slot, whose model keeps
-    its own commit."""
+    """The ``layout`` variant its commit moves; ``""`` keeps the model's own."""
     block_table: torch.Tensor | None = None
-    """At bind: the block table of the layer's KV cache group, as the forward
-    reads it."""
+    """At bind: the block table of the layer's KV cache group."""
     block_size: int = 0
-    """At bind: tokens per block of that group (a hybrid group's blocks can be
-    larger than the layer's own spec says)."""
+    """At bind: tokens per block of that group."""
     num_blocks: int = 0
-    """At bind: blocks of the backend's kernel block size in the layer's cache."""
+    """At bind: kernel-size blocks in the layer's cache."""
 
 
 PAGED_KV_COMMIT: KernelKey = ("layout:paged_token", "commit")
@@ -61,44 +56,27 @@ PAGED_KV_COMMIT: KernelKey = ("layout:paged_token", "commit")
 @dataclass(frozen=True)
 class PagedKVLayout:
     """Where the KV caches of one KV cache group keep each token, for a
-    ``layout:paged_token`` commit kernel. Element ``(block, slot, plane, head,
-    dim)`` of a cache sits ``sum(index * stride)`` elements past the cache's
-    first element; ``dim`` is contiguous. The caches vLLM binds keep K and V
-    packed in one row (``[K | V]`` content, or MLA's latent), so ``num_planes``
-    is 1 and ``head_dim`` spans the packed row.
-
-    Token ``t`` of a request (by its position) lives in kernel block
-    ``block_table[b, t // table_block_size] * table_block_size + t %
-    table_block_size``, split by ``block_size`` into block and slot.
-    """
+    ``layout:paged_token`` commit kernel (fields and indexing:
+    ``round_contract.md``, Kernel registry)."""
 
     caches: tuple[torch.Tensor, ...]
-    """One per distinct cache: layers sharing a cache (KV sharing) appear once."""
     shape: tuple[int, int, int, int, int]
-    """``(num_blocks, block_size, num_planes, num_heads, head_dim)``, per cache."""
     strides: tuple[int, int, int, int, int]
-    """In elements, in the order of ``shape``; ``strides[4] == 1``."""
     dtype: torch.dtype
     block_table: torch.Tensor
-    """``[max_num_reqs, max_blocks]`` int32: the group's block table, as the
-    forward reads it."""
     table_block_size: int
-    """Tokens per block of ``block_table`` (the group's block size)."""
 
     @property
     def block_size(self) -> int:
-        """Tokens per block of the caches: the backend's kernel block size,
-        which may divide ``table_block_size``."""
         return self.shape[1]
 
 
 def paged_kv_layout_of(
     cache: torch.Tensor, num_blocks: int
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """``(shape, strides)`` of a layer's KV cache view in
-    :class:`PagedKVLayout` order. Reads ``[blocks, heads, block_size, content]``
-    (attention, K and V packed in ``content``) and ``[blocks, block_size,
-    content]`` (MLA) views; raises ``ValueError`` for anything else."""
+    """``(shape, strides)`` in :class:`PagedKVLayout` order of an attention
+    ``[blocks, heads, block_size, content]`` or MLA ``[blocks, block_size,
+    content]`` cache view."""
     shape, stride = tuple(cache.shape), cache.stride()
     if cache.dim() == 4 and shape[0] == num_blocks:
         blocks, heads, slots, dim = shape
@@ -114,8 +92,7 @@ def paged_kv_layout_of(
 
 
 def paged_kv_layouts(layers: Sequence[SpecLayerSpec]) -> tuple[PagedKVLayout, ...]:
-    """The :class:`PagedKVLayout` of each KV cache group of ``layers``. Raises
-    ``ValueError`` at bind for a cache it cannot describe."""
+    """The :class:`PagedKVLayout` of each KV cache group of ``layers``."""
     # (block table, table block size, shape, strides, dtype) -> caches by data_ptr
     groups: dict[tuple, dict[int, torch.Tensor]] = {}
     tables: dict[int, torch.Tensor] = {}
@@ -157,8 +134,7 @@ class KernelContext:
     capture_rows: tuple[int, ...]
     """Rows per request of each decode CUDA graph."""
     kv_layouts: tuple[PagedKVLayout, ...] = ()
-    """For the ``layout:paged_token`` commit kernel: the layouts of the layers
-    it commits. Empty for every other kernel."""
+    """``layout:paged_token`` commit kernels only."""
 
 
 @dataclass(frozen=True)
@@ -215,9 +191,7 @@ class KernelRegistry:
 
     @staticmethod
     def required_keys(layer: SpecLayerSpec) -> list[KernelKey]:
-        """The kernels ``layer`` needs to verify more than a chain: a recurrent
-        layer its ``verify`` and its state's ``commit``, an attention layer its
-        KV ``commit`` (none for a cache not paged by slot)."""
+        """The kernels ``layer`` needs to verify trees."""
         kind = layer.kind
         if kind.family == "mamba":
             state = SpecLayerKind("layout", "mamba_state", kind.state_mode)
@@ -227,8 +201,7 @@ class KernelRegistry:
         return []
 
     def kernel_for(self, key: KernelKey, layer: SpecLayerSpec) -> SpecKernel | None:
-        """The kernel that runs ``key`` on ``layer``; None when nothing
-        provides the key or its kernel declines the layer."""
+        """The kernel that runs ``key`` on ``layer``, or None."""
         kernel = self._kernels.get(key)
         if kernel is None or not kernel.supports(layer):
             return None
@@ -246,10 +219,8 @@ class KernelRegistry:
         return "tree", ""
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
-        """Bind each kernel once, to every layer it runs on. A recurrent layer
-        gets its verify kernel as ``spec_verify_kernel`` (None for its own
-        kernels), which it runs on chains too. Commit kernels are bound only
-        for plans above a chain: a chain commits nothing."""
+        """Bind each kernel once, to every layer it runs on; set each recurrent
+        layer's ``spec_verify_kernel``. A chain binds no commit kernel."""
         commits = ctx.plan_kind != "chain"
         # One kernel may serve several keys: bind it once to its unique layers
         # and commit with it if any of its ops is a commit.

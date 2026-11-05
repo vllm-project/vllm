@@ -42,10 +42,7 @@ if TYPE_CHECKING:
 
 
 class SpecRound:
-    """What the GPU model runner holds for speculative decoding besides the
-    speculator: the chain plan, the plan layout when the speculator branches,
-    the resources and capabilities it runs with, and the spec kernels. Built
-    only with speculative decoding."""
+    """The runner's speculative round state besides the speculator."""
 
     def __init__(
         self,
@@ -62,31 +59,24 @@ class SpecRound:
         self.max_num_tokens = max_num_tokens
         self.max_rows = num_speculative_steps + 1
         self.device = device
-        # The plan of a step that verifies drafts without a speculator plan:
-        # a chain, with its tokens in the runner's draft buffer.
+        # The plan of a step without a speculator plan.
         self.chain_plan = VerifyPlan(
             parent=arange_table(max_num_reqs, self.max_rows, device, start=-1),
             is_chain=True,
         )
-        # The accepted path of every chain round, path[r, j] == j. Only with a
-        # speculator ``plan``: without one every round is the scheduled chain,
-        # which commits nothing here and needs no result.
+        # The accepted path of a chain round, path[r, j] == j; only with a
+        # speculator plan.
         self.chain_path = (
             arange_table(max_num_reqs, self.max_rows, device) if plans else None
         )
         self.layout: PlanLayout | None = None
-        # What speculation holds (rows, decode graphs, branching), declared by
-        # the speculator's config. Memory is sized for it; set_resources lowers
-        # it to what the model's layers verify before capture.
+        # Declared; set_resources lowers it before capture.
         self.resources = resources
         self.capabilities: SpecCapabilities | None = None
-        # With max_branching > 1 every verify batch (chains and capture batches
-        # too) is laid out, so one graph serves every plan. The rows each
-        # request verifies, from its query length, for the layout and the commit.
+        # With max_branching > 1: the rows each request verifies.
         self.rows: torch.Tensor | None = None
         if resources.max_branching > 1:
             self.rows = torch.ones(max_num_reqs, dtype=torch.int32, device=device)
-        # The spec verify and commit kernels (registry), bound by set_resources.
         self.kernels: KernelRegistry | None = None
 
     def registry(self) -> KernelRegistry:
@@ -96,10 +86,7 @@ class SpecRound:
         return self.kernels
 
     def resolve_capabilities(self, runner: "GPUModelRunner") -> SpecCapabilities:
-        """What this rank's layers verify, after the attention backends are
-        built: the lowest plan kind of any target layer (draft layers do not
-        count), lowered to ``"chain"`` by each runner setting that keeps rows in
-        chain order."""
+        """What this rank's target layers and runner settings verify."""
         if runner.adaptive_verification is not None and runner.speculator_plans:
             raise ValueError(
                 "Adaptive verification sets each request's verified drafts, so it "
@@ -136,9 +123,8 @@ class SpecRound:
         input_buffers: "InputBuffers",
         layers: list[SpecLayerSpec],
     ) -> None:
-        """Run speculation with ``resources``, the engine core's adaptation of
-        the declared ones to what every rank verifies, and bind the spec kernels
-        to ``layers``. The memory stays sized for the declared resources."""
+        """Run with the engine core's ``resources`` and bind the spec kernels
+        to ``layers``."""
         self.resources = resources
         if resources.max_branching == 1:
             # Chains (perhaps lowered to): batches keep the chain layout.
@@ -168,10 +154,9 @@ class SpecRound:
         num_draft_tokens: np.ndarray,
         has_prefill: bool,
     ) -> tuple[torch.Tensor, VerifyPlan | None, tuple[np.ndarray, np.ndarray] | None]:
-        """Ask the speculator for the batch's plan. Returns the device copy of
-        ``idx_mapping_np`` it planned with, the plan (None: verify the scheduled
-        drafts as a chain), and the per-request token and draft counts when the
-        plan verifies fewer drafts than were scheduled (else None)."""
+        """Ask the speculator for the batch's plan. Returns the device
+        ``idx_mapping``, the plan (None: the scheduled chain), and the trimmed
+        token and draft counts when the plan verifies fewer rows (else None)."""
         idx_mapping = async_tensor_h2d(
             idx_mapping_np, device=self.device, dtype=torch.int64
         )
@@ -208,10 +193,7 @@ class SpecRound:
         idx_mapping_np: np.ndarray,
         has_prefill: bool,
     ) -> bool:
-        """Whether this step can only verify chains: a prefill shares the batch
-        (a branching plan must be its request's whole query), structured output
-        (the grammar bitmask of row ``i`` assumes the rows before it as its
-        prefix), or logits processing that reads each row's prefix."""
+        """``PlanInputs.chain_only`` for this step."""
         if self.resources.max_branching == 1:
             return True
         if has_prefill or scheduler_output.has_structured_output_requests:
@@ -231,20 +213,13 @@ class SpecRound:
         )
 
     def lay_out(self, input_batch: "InputBatch") -> None:
-        """Lay out the batch's plan: move its rows' positions to
-        ``num_computed_tokens + depth``, write its candidate tokens and fill the
-        tree metadata the attention backends read.
-
-        A speculator that never branches verifies chains, which are laid out
-        already, so nothing runs for it. With ``max_branching > 1`` every batch is
-        laid out (a chain, or a batch without drafts, as the chain of its query
-        rows), so the tree metadata is current whenever a captured graph that
-        reads it replays: one graph serves every plan."""
+        """Lay out the batch's plan: positions at depth, candidate tokens and
+        tree metadata. With ``max_branching > 1`` every batch is laid out, so
+        one captured graph serves every plan."""
         if self.layout is None:
             return
         num_reqs = input_batch.num_reqs
-        # Each request verifies its query rows (the plan's rows, trimmed by
-        # plan_batch); a prefill's are clamped and laid out as a chain.
+        # A prefill's rows are clamped and laid out as a chain.
         assert self.rows is not None
         rows = self.rows[:num_reqs]
         torch.diff(input_batch.query_start_loc[: num_reqs + 1], out=rows)
@@ -272,9 +247,7 @@ class SpecRound:
     def accept_result(
         self, sampler_output: "SamplerOutput", input_batch: "InputBatch"
     ) -> AcceptResult | None:
-        """The accepted path: the tree sampler chose it, or the chain
-        sampler's arange (a view of a constant buffer). None without drafts or
-        without a speculator ``plan``."""
+        """The accepted path; None without drafts or a speculator plan."""
         if self.chain_path is None or input_batch.verify_plan is None:
             return None
         return accept_result_of(sampler_output, self.chain_path)
@@ -282,12 +255,9 @@ class SpecRound:
     def commit(
         self, input_batch: "InputBatch", result: AcceptResult | None
     ) -> torch.Tensor | None:
-        """Commit the accepted path with the bound commit kernels (move its KV
-        to the chain slots, gather its conv inputs into the window the next step
-        reads) and return the verify row each request's recurrent state resumes
-        from. A chain's accepted rows already sit where the next step reads them
-        and its state rows follow from ``num_sampled``, so a chain commits
-        nothing here and returns None."""
+        """Run the bound commit kernels on the accepted path and return the
+        verify row each request's recurrent state resumes from; None for a
+        chain, which commits nothing."""
         plan = input_batch.verify_plan
         if result is None or is_chain(plan):
             return None
@@ -301,13 +271,9 @@ class SpecRound:
 
 
 def spec_kernel_layers(runner: "GPUModelRunner") -> list[SpecLayerSpec]:
-    """The target layers (``spec_layers``) the spec kernels may run on, with
-    their KV cache group's block table and block size.
-
-    Block sizes come from the KV cache group, as the cache was allocated and
-    the block table is kept: a hybrid model's group blocks are larger than its
-    layers' own specs say (attention pages grow to the recurrent state's).
-    """
+    """The target layers the spec kernels may run on, with their KV cache
+    group's block table and block size (a hybrid group's blocks can be larger
+    than a layer's own spec says)."""
     from vllm.model_executor.layers.mamba.abstract import MambaBase
 
     forward_context = runner.compilation_config.static_forward_context
@@ -343,10 +309,8 @@ def trim_draft_tokens(
     num_draft_tokens: np.ndarray,
     num_verified_drafts: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Keep each request's first ``num_verified_drafts`` scheduled drafts.
-
-    Returns the per-request token and draft counts of the trimmed batch.
-    """
+    """The token and draft counts that keep each request's first
+    ``num_verified_drafts`` drafts."""
     num_verified_drafts = np.asarray(num_verified_drafts, dtype=num_draft_tokens.dtype)
     in_range = num_verified_drafts.shape == num_draft_tokens.shape and bool(
         ((num_verified_drafts >= 0) & (num_verified_drafts <= num_draft_tokens)).all()

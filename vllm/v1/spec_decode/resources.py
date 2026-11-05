@@ -17,18 +17,8 @@ it) or ``"tree"`` (each row names its parent row and sees its ancestors)."""
 
 @dataclass(frozen=True)
 class SpecResources:
-    """What speculation holds.
-
-    The runner captures a decode CUDA graph for each entry of ``capture_rows``,
-    and no request verifies more rows than the largest (``max_rows``): an
-    ``adapt_resources`` that drops the largest entry verifies fewer drafts.
-
-    The speculator's config declares them (``SpeculatorConfig.resources``), and the
-    KV and recurrent-state pools are sized for ``num_speculative_tokens``. The engine
-    core then lowers them, never raises them, to what the model's layers verify
-    (``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
-    to every worker.
-    """
+    """What speculation holds, declared by ``SpeculatorConfig.resources`` and
+    lowered at startup (``round_contract.md``, Startup)."""
 
     capture_rows: tuple[int, ...]
     """Rows per request, the root included, of each decode graph (1 = plain
