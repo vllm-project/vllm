@@ -248,13 +248,13 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Two-sided manager lifecycle (init, cleanup, reinit, ensure_init)
+# Test 1: Two-sided manager lifecycle (create, reuse, per-top_k, grow, cleanup)
 # ---------------------------------------------------------------------------
 #
-# Tests FlashInferNVLinkTwoSidedManager which wraps FlashInfer's MnnvlMoe.
-# initialize() allocates MNNVL shared workspaces via MnnvlMoe.get_moe_workspaces,
-# which uses pidfd_getfd() to share memory file descriptors across processes —
-# hence the SYS_PTRACE requirement.
+# Tests FlashInferNVLinkTwoSidedManager, which keeps one FlashInfer
+# NVLinkTwoSidedAlltoAll per (top_k, num_experts). Creating one maps MNNVL
+# shared workspaces, which uses pidfd_getfd() to share memory file descriptors
+# across processes — hence the SYS_PTRACE requirement.
 #
 # Uses EP group (get_ep_group) because the two-sided manager is constructed
 # with an EP-scoped communicator in production. With tp=world_size the EP
@@ -267,44 +267,53 @@ def _two_sided_lifecycle_worker(rank, world_size):
         FlashInferNVLinkTwoSidedManager,
     )
 
-    cpu_group = get_ep_group().cpu_group
-    num_gpus = torch.accelerator.device_count()
-    manager = FlashInferNVLinkTwoSidedManager(cpu_group)
-
-    # Not initialized yet
-    assert not manager.initialized
+    manager = FlashInferNVLinkTwoSidedManager(get_ep_group().cpu_group)
     assert manager.rank == rank
     assert manager.world_size == world_size
+    assert manager.communications == {}
 
-    # Initialize
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=num_gpus)
-    assert manager.initialized
-    assert manager.workspace_tensor is not None
-    assert manager.prepare_workspace_tensor is not None
-    assert manager.mapping is not None
+    num_experts = world_size * 8
+    target = manager.get_communication(
+        max_num_tokens=32, top_k=6, num_experts=num_experts, hidden_size=128
+    )
+    assert target.params.top_k == 6
+    # The same or a smaller request reuses the communication.
+    assert (
+        manager.get_communication(
+            max_num_tokens=32, top_k=6, num_experts=num_experts, hidden_size=128
+        )
+        is target
+    )
+    assert (
+        manager.get_communication(
+            max_num_tokens=16, top_k=6, num_experts=num_experts, hidden_size=64
+        )
+        is target
+    )
+
+    # A speculative draft's MoE routing fewer experts gets its own.
+    draft = manager.get_communication(
+        max_num_tokens=32, top_k=3, num_experts=num_experts, hidden_size=128
+    )
+    assert draft is not target
+    assert draft.params.top_k == 3
+    assert set(manager.communications) == {(6, num_experts), (3, num_experts)}
 
     torch.distributed.barrier()
 
-    # Cleanup
+    # A larger token capacity replaces that top_k's communication.
+    grown = manager.get_communication(
+        max_num_tokens=64, top_k=6, num_experts=num_experts, hidden_size=128
+    )
+    assert grown is not target
+    assert grown.params.max_tokens_per_rank == 64
+    assert manager.communications[(6, num_experts)] is grown
+    assert manager.communications[(3, num_experts)] is draft
+
+    torch.distributed.barrier()
+
     manager.cleanup()
-    assert not manager.initialized
-    assert manager.workspace_tensor is None
-    assert manager.prepare_workspace_tensor is None
-
-    torch.distributed.barrier()
-
-    # Reinitialize
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=num_gpus)
-    assert manager.initialized
-
-    torch.distributed.barrier()
-
-    # ensure_alltoall_workspace_initialized is idempotent when already init'd
-    assert manager.ensure_alltoall_workspace_initialized()
-    assert manager.initialized
-
-    manager.cleanup()
-    assert not manager.initialized
+    assert manager.communications == {}
 
 
 @requires_multi_gpu
@@ -925,12 +934,14 @@ def test_args_dispatch_combine(world_size):
 # Test 4: FlashInfer two-sided dispatch/combine data communication
 # ---------------------------------------------------------------------------
 #
-# Tests actual data flow through the FlashInfer NVLink two-sided backend
-# by calling flashinfer_alltoall_dispatch (with defer_input_quant=True to
-# skip quantization) and flashinfer_alltoall_combine, then verifying exact
-# round-trip values. Dispatch sends each token once per distinct expert
-# rank, and combine performs an unweighted sum, so:
+# Tests actual data flow through vLLM's two-sided prepare/finalize on the
+# FlashInfer NVLinkTwoSidedAlltoAll wrapper (defer_input_quant=True skips
+# quantization), then verifies exact round-trip values. Dispatch sends each
+# token once per distinct expert rank, and combine performs an unweighted sum,
+# so:
 #   dispatch(hidden) → identity → combine = hidden * num_distinct_ranks(i)
+# A second layer with a smaller top_k (a speculative draft's MoE) shares the
+# manager and must round-trip the same way.
 # ---------------------------------------------------------------------------
 
 
@@ -938,57 +949,25 @@ def _two_sided_data_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkTwoSidedManager,
     )
-    from vllm.distributed.parallel_state import get_dp_group
     from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
         FusedMoEQuantDesc,
     )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
-        flashinfer_alltoall_combine,
-        flashinfer_alltoall_dispatch,
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
     )
 
-    # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
-    # internally and requires dp_size == ep_size.
-    cpu_group = get_dp_group().cpu_group
     device = torch.device(f"{DEVICE}:{rank}")
-    num_gpus = torch.accelerator.device_count()
-
     hidden_size = 128
     tokens_per_rank = 32
-    experts_per_token = 2
     num_experts = world_size * 4
 
-    # Initialize the FlashInfer two-sided manager
-    manager = FlashInferNVLinkTwoSidedManager(cpu_group)
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=num_gpus)
-    assert manager.initialized
-
-    torch.distributed.barrier()
-
-    # Create deterministic per-rank test data
-    torch.manual_seed(rank + 42)
-    hidden = torch.randn(
-        tokens_per_rank,
-        hidden_size,
-        device=device,
-        dtype=torch.bfloat16,
-    )
-    # Assign each token to experts spread across ranks so tokens move between GPUs
-    topk_ids = torch.randint(
-        0,
-        num_experts,
-        (tokens_per_rank, experts_per_token),
-        device=device,
-        dtype=torch.int32,
-    )
-    topk_weights = torch.rand(
-        tokens_per_rank,
-        experts_per_token,
-        device=device,
-        dtype=torch.float32,
-    )
+    # The prepare/finalize finds its manager on the EP group's communicator.
+    manager = FlashInferNVLinkTwoSidedManager(get_ep_group().cpu_group)
+    device_communicator = get_ep_group().device_communicator
+    assert device_communicator is not None
+    device_communicator.all2all_manager = manager
 
     # Unquantized config: quant_dtype=None means moe_kernel_quantize_input is a no-op
     no_quant = FusedMoEQuantDesc()
@@ -1000,73 +979,113 @@ def _two_sided_data_worker(rank, world_size):
     )
     assert quant_config.quant_dtype is None  # sanity: no quantization
 
-    with _make_forward_context(rank, world_size, tokens_per_rank):
-        dp_metadata = get_forward_context().dp_metadata
+    for experts_per_token in (2, 1):
+        prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
+            max_num_tokens=tokens_per_rank,
+            top_k=experts_per_token,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            num_dispatchers=world_size,
+        )
+        torch.distributed.barrier()
 
-        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
-            local_sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        # Create deterministic per-rank test data
+        torch.manual_seed(rank + 42 + experts_per_token)
+        hidden = torch.randn(
+            tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16
+        )
+        # Assign each token to experts spread across ranks so tokens move
+        # between GPUs
+        topk_ids = torch.randint(
+            0,
+            num_experts,
+            (tokens_per_rank, experts_per_token),
+            device=device,
+            dtype=torch.int32,
+        )
+        topk_weights = torch.rand(
+            tokens_per_rank, experts_per_token, device=device, dtype=torch.float32
+        )
 
-            # --- FlashInfer two-sided dispatch ---
-            alltoall_info, fi_topk_ids, fi_topk_weights, fi_hidden, fi_scale = (
-                flashinfer_alltoall_dispatch(
-                    manager,
-                    local_sizes,
-                    hidden.clone(),
-                    None,  # no global scale
-                    topk_ids.clone(),
-                    topk_weights.clone(),
+        with _make_forward_context(rank, world_size, tokens_per_rank):
+            dp_metadata = get_forward_context().dp_metadata
+
+            with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+                # --- FlashInfer two-sided dispatch ---
+                recv_hidden, recv_scale, _, recv_ids, recv_weights = (
+                    prepare_finalize.prepare(
+                        hidden.clone(),
+                        topk_weights.clone(),
+                        topk_ids.clone(),
+                        num_experts,
+                        None,
+                        False,
+                        quant_config,
+                        defer_input_quant=True,
+                    )
+                )
+                assert recv_scale is None  # deferred quant: no scale produced
+                assert recv_hidden.shape == (world_size * tokens_per_rank, hidden_size)
+                assert recv_ids.shape == (
+                    world_size * tokens_per_rank,
                     experts_per_token,
+                )
+                assert recv_weights.dtype == topk_weights.dtype
+                # Padding rows keep the MnnvlMoe path's invalid id, num_experts.
+                assert bool(((recv_ids >= 0) & (recv_ids <= num_experts)).all())
+
+                # --- Round-trip exact verification ---
+                # The all-to-all sends each token once per *distinct* expert
+                # rank. Combine performs an unweighted sum of the per-rank
+                # contributions. With identity expert (feeding dispatched
+                # hidden straight back):
+                #   result[i] = hidden[i] * num_distinct_expert_ranks(i)
+                experts_per_rank = num_experts // world_size
+                expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
+                num_distinct = torch.tensor(
+                    [len(set(row.tolist())) for row in expert_ranks],
+                    device=device,
+                    dtype=torch.float32,
+                ).unsqueeze(1)  # (tokens, 1)
+
+                combined = torch.empty_like(hidden)
+                prepare_finalize.finalize(
+                    combined, recv_hidden, recv_weights, recv_ids, False, None
+                )
+                expected = (hidden.float() * num_distinct).to(hidden.dtype)
+                torch.testing.assert_close(combined, expected)
+
+                # --- Linearity check with scaled expert output ---
+                # Scaling the expert output by a constant should scale the
+                # combined result by the same constant.
+                scale = 3.0
+                prepare_finalize.prepare(
+                    hidden.clone(),
+                    topk_weights.clone(),
+                    topk_ids.clone(),
                     num_experts,
+                    None,
+                    False,
                     quant_config,
                     defer_input_quant=True,
                 )
-            )
-            assert fi_scale is None  # deferred quant: no scale produced
-            assert fi_hidden is not None
-            assert fi_hidden.shape[1] == hidden_size
-            assert fi_hidden.numel() > 0
+                combined_scaled = torch.empty_like(hidden)
+                prepare_finalize.finalize(
+                    combined_scaled,
+                    recv_hidden * scale,
+                    recv_weights,
+                    recv_ids,
+                    False,
+                    None,
+                )
+                expected_scaled = (hidden.float() * num_distinct * scale).to(
+                    hidden.dtype
+                )
+                torch.testing.assert_close(combined_scaled, expected_scaled)
 
-            # --- Round-trip exact verification ---
-            # The all-to-all sends each token once per *distinct* expert
-            # rank. Combine performs an unweighted sum of the per-rank
-            # contributions. With identity expert (feeding dispatched
-            # hidden straight back):
-            #   result[i] = hidden[i] * num_distinct_expert_ranks(i)
-            combined = flashinfer_alltoall_combine(
-                manager,
-                fi_hidden,
-                top_k=experts_per_token,
-                token_count=tokens_per_rank,
-                alltoall_info=alltoall_info,
-            )
-            assert combined.shape == (tokens_per_rank, hidden_size)
+                torch.distributed.barrier()
 
-            experts_per_rank = num_experts // world_size
-            expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
-            num_distinct = torch.tensor(
-                [len(set(row.tolist())) for row in expert_ranks],
-                device=device,
-                dtype=torch.float32,
-            ).unsqueeze(1)  # (tokens, 1)
-            expected = (hidden.float() * num_distinct).to(hidden.dtype)
-            torch.testing.assert_close(combined, expected)
-
-            # --- Linearity check with scaled expert output ---
-            # Scaling the expert output by a constant should scale the
-            # combined result by the same constant.
-            scale = 3.0
-            combined_scaled = flashinfer_alltoall_combine(
-                manager,
-                fi_hidden * scale,
-                top_k=experts_per_token,
-                token_count=tokens_per_rank,
-                alltoall_info=alltoall_info,
-            )
-            expected_scaled = (hidden.float() * num_distinct * scale).to(hidden.dtype)
-            torch.testing.assert_close(combined_scaled, expected_scaled)
-
-            torch.distributed.barrier()
-
+    assert set(manager.communications) == {(2, num_experts), (1, num_experts)}
     manager.cleanup()
 
 
