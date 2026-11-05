@@ -1,9 +1,10 @@
 # Online Quantization
 
 Online quantization lets you take a BF16/FP16 model and quantize its Linear
-and MoE weights to lower precision (such as FP8) at load time, without needing
-a pre-quantized checkpoint or calibration data. Weights are converted during
-model loading and activations are dynamically scaled during each forward pass.
+and MoE weights, and optionally its lm_head, to lower precision (such as FP8)
+at load time, without needing a pre-quantized checkpoint or calibration data.
+Weights are converted during model loading and activations are dynamically
+scaled during each forward pass.
 
 ## Quick Start
 
@@ -241,7 +242,7 @@ llm = LLM(
 
 ### Fine-Grained Per-Layer Quantization Schemes
 
-Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`) or a `{weight, activation}` spec, which allows overriding the activation quantization of a single layer.
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `fp8_per_channel_weight_only`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`) or a `{weight, activation}` spec, which allows overriding the activation quantization of a single layer.
 
 Example:
 
@@ -280,10 +281,15 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
-    - The lm_head (`ParallelLMHead`) is quantized only when a `targets` pattern
-      contains its module name (e.g. `"re:.*lm_head$": "fp8_per_channel"`;
-      `"re:.*"` does not select it), only with `fp8_per_channel`, and not when
-      it is tied to the input embeddings. It is quantized weight-only (fp8
-      weights, full-precision activations).
+    - The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer. It is
+      quantized only when a `targets` pattern contains its module name (`"re:.*"`
+      does not select it), for example weight-only FP8:
+      `"re:.*lm_head$": "fp8_per_channel_weight_only"`, which is the shorthand for
+      `{"weight": "fp8_per_channel_static", "activation": None}`.
+      Only per-channel FP8 weights are supported, since vocab padding rows are
+      never loaded. A tied lm_head, or one the checkpoint already quantizes,
+      raises an error. This quantizes the target model's own head; it is
+      unrelated to `draft_lm_head_quantization`, which gives a speculative-decoding
+      drafter a private quantized copy of the head and leaves the target unchanged.
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.

@@ -282,6 +282,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kFp8StaticChannelSym),
         moe=QuantSpec(weight=kFp8StaticChannelSym),
     ),
+    # Per-output-channel FP8 weights with unquantized activations (W8A16) on
+    # linear layers and the lm_head; MoE stays unquantized (no `moe` field).
+    "fp8_per_channel_weight_only": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kFp8StaticChannelSym, activation=None),
+    ),
     "mxfp8": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp8Static),
         moe=QuantSpec(weight=kMxfp8Static),

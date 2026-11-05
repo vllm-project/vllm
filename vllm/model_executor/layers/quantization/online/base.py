@@ -38,7 +38,6 @@ from vllm.model_executor.layers.quantization.input_hadamard import (
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
-    Fp8PerChannelWeightOnlyOnlineLinearMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
@@ -104,12 +103,11 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
 # Online linear methods validated with `QuantSpec.hadamard_size`.
 _ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
 
-# The lm_head is quantized weight-only: the logits GEMM keeps full-precision
-# activations. Only per-output-channel scales: vocab padding rows are never
-# loaded and must not affect the scale of real rows.
-_ONLINE_LM_HEAD_METHODS: dict[QuantKey, type] = {
-    kFp8StaticChannelSym: Fp8PerChannelWeightOnlyOnlineLinearMethod,
-}
+# Online linear methods valid for the lm_head. Vocab padding rows are never
+# loaded, so a scale shared across rows (per-tensor, per-block) would absorb
+# their uninitialized values. Per-output-channel scales keep them out of the
+# scales of real rows.
+_ONLINE_LM_HEAD_METHODS: frozenset[type] = frozenset({Fp8PtpcOnlineLinearMethod})
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
@@ -308,6 +306,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
+        if issubclass(layer_cls, ParallelLMHead) and cls not in _ONLINE_LM_HEAD_METHODS:
+            raise NotImplementedError(
+                f"online quantization of the lm_head with weight={spec.weight} "
+                "is not supported: only per-output-channel scales are, because "
+                "vocab padding rows are never loaded"
+            )
         # TODO: InputHadamardLinearMethod is format-agnostic; allow the
         # remaining linear methods and MoE once validated.
         if (
@@ -447,9 +451,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         else:
             quant_spec = target
             quant_key_str = str(quant_spec)
-        if issubclass(layer_cls, ParallelLMHead):
-            table = _ONLINE_LM_HEAD_METHODS
-        elif issubclass(layer_cls, LinearBase):
+        if issubclass(layer_cls, (LinearBase, ParallelLMHead)):
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
             table = _ONLINE_MOE_METHODS

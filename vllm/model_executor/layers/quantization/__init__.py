@@ -42,6 +42,7 @@ QuantizationMethods = Literal[
     "fp8_per_tensor",
     "fp8_per_block",
     "fp8_per_channel",
+    "fp8_per_channel_weight_only",
     "int8_per_channel_weight_only",
     "nvfp4_per_token",
     "mxfp8",

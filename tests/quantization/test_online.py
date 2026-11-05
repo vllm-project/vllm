@@ -81,7 +81,6 @@ from vllm.model_executor.layers.quantization.online.base import (
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
-    Fp8PerChannelWeightOnlyOnlineLinearMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
@@ -234,7 +233,6 @@ def test_online_linear_methods_resolve_activation_quant_key(
     [
         ("linear", _TestLinear, kFp8StaticTensorSym, True),
         ("linear", _TestLinear, kFp8Static128BlockSym, True),
-        ("linear", _TestLinear, kFp8StaticChannelSym, True),
         ("linear", _TestLinear, kMxfp8Static, True),
         ("linear", _TestLinear, kMxfp4Static, False),
         ("moe", _TestRoutedExperts, kFp8StaticTensorSym, True),
@@ -2542,9 +2540,20 @@ def test_online_quantization_targets_ignore_collision() -> None:
     ("args", "expected"),
     [
         (
-            QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel"}),
+            QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel_weight_only"}),
             "weight_only",
         ),
+        (
+            QuantizationConfigArgs(
+                targets={
+                    "lm_head": QuantSpec(
+                        weight="fp8_per_channel_static", activation=None
+                    )
+                }
+            ),
+            "weight_only",
+        ),
+        (QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel"}), "w8a8"),
         (QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"}), "error"),
         (quant_config_args(linear="fp8_per_channel"), None),
         (QuantizationConfigArgs(targets={"re:.*": "fp8_per_tensor"}), None),
@@ -2556,6 +2565,8 @@ def test_online_quantization_targets_ignore_collision() -> None:
         ),
     ],
     ids=[
+        "targets_weight_only_shorthand",
+        "targets_weight_only_spec",
         "targets_per_channel",
         "targets_per_tensor",
         "linear_spec",
@@ -2566,19 +2577,41 @@ def test_online_quantization_targets_ignore_collision() -> None:
 def test_online_quantization_lm_head_needs_explicit_per_channel_target(
     args: QuantizationConfigArgs, expected: str | None
 ) -> None:
-    """The lm_head is quantized online only when a target names it, only with
-    per-channel scales (vocab padding rows are never loaded), and weight-only."""
+    """The lm_head is quantized online only when a target names it and only
+    with per-channel scales (vocab padding rows are never loaded)."""
     config = OnlineQuantizationConfig(args)
     if expected == "error":
-        with pytest.raises(ValueError, match="is not supported"):
+        with pytest.raises(NotImplementedError, match="lm_head"):
             config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
         return
     resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
     if expected is None:
         assert resolved is None
-    else:
-        assert resolved is not None
-        assert resolved[-1] is Fp8PerChannelWeightOnlyOnlineLinearMethod
+        return
+    assert resolved is not None
+    assert resolved[-1] is Fp8PtpcOnlineLinearMethod
+    expected_activation = None if expected == "weight_only" else kFp8DynamicTokenSym
+    assert resolved[3].activation == expected_activation
+
+
+def test_online_ptpc_activation_override(default_vllm_config) -> None:
+    """PTPC accepts `activation: null` (weight-only) and nothing but per-token."""
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    assert Fp8PtpcOnlineLinearMethod().activation_quant_key == kFp8DynamicTokenSym
+    assert Fp8PtpcOnlineLinearMethod(None).activation_quant_key is None
+    for activation in (None, kFp8DynamicTokenSym):
+        args = QuantizationConfigArgs(
+            linear=QuantSpec(weight=kFp8StaticChannelSym, activation=activation)
+        )
+        resolved = OnlineQuantizationConfig(args).resolve_quant_method_cls(
+            _TestLinear, "linear"
+        )
+        assert resolved is not None and resolved[3].activation == activation
+    args = QuantizationConfigArgs(
+        linear=QuantSpec(weight=kFp8StaticChannelSym, activation=kFp8DynamicTensorSym)
+    )
+    with pytest.raises(NotImplementedError, match="activation override"):
+        OnlineQuantizationConfig(args).resolve_quant_method_cls(_TestLinear, "linear")
 
 
 def test_online_quantization_targets_reject_unsupported_layer() -> None:
