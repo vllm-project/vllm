@@ -69,6 +69,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -105,6 +106,7 @@ from vllm.models.minimax_m3.amd.indexer_msa import (
     msa_indexer_cp_enabled,
     select_msa_indexer_impl_cls,
 )
+from vllm.models.minimax_m3.amd.indexer_mxfp4 import MiniMaxM3IndexerRocmMxfp4Impl
 from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
     MiniMaxM3IndexerRocmNvfp4Impl,
     init_rocm_nvfp4_indexer_decode_cp,
@@ -116,6 +118,7 @@ from vllm.models.minimax_m3.amd.ops import (
     gemma_rmsnorm,
     swiglu_oai_split,
 )
+from vllm.models.minimax_m3.amd.ops.mxfp4_pages import PAGE_BYTES
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
     ASM_PAGE_SIZE,
     minimax_m3_alloc_sparse_block_table,
@@ -157,6 +160,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -165,6 +169,16 @@ if TYPE_CHECKING:
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
+
+
+def use_gfx942_mxfp4_indexer(kv_cache_dtype: str, indexer_kv_dtype: str) -> bool:
+    """gfx942 MXFP4 index cache alongside an fp8 main K/V cache."""
+    return (
+        on_gfx942()
+        and get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.FP8_PER_TENSOR
+        and indexer_kv_dtype == "mxfp4"
+    )
+
 
 # The fused QK-norm/RoPE/KV-insert HIP op segfaults on gfx942.
 _USE_GFX942_NATIVE_QKNORM_ROPE = on_gfx942()
@@ -790,6 +804,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # One fused kernel inserts both caches, so NVFP4 K/V needs an NVFP4
         # index cache.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
+        self.use_mxfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_mxfp4
         # Indexer and main attention are separate impls. This indexer is
         # ROCm-only, so the model selects it rather than the neutral
         # MiniMaxM3Indexer, which knows nothing about it and would pick its own.
@@ -800,7 +815,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         #
         # The attend gate further down needs this too: an emitted table is what
         # lets it serve more than one KV head per rank.
-        self.indexer_emits_table = msa_indexer_impl_cls is not None
+        gfx942_mxfp4_index = use_gfx942_mxfp4_indexer(
+            self.kv_cache_dtype, self.indexer_kv_dtype
+        )
+        self.indexer_emits_table = (
+            msa_indexer_impl_cls is not None or gfx942_mxfp4_index
+        )
         # The backend names the metadata builder, which for the MSA path is
         # the one that rebases the block table the indexer's top-k resolves
         # through, so both have to come from the same selection.
@@ -820,7 +840,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
-        self.use_aiter_sparse_pa = not self.use_nvfp4_kv and (
+        self.use_aiter_sparse_pa = not (self.use_nvfp4_kv or self.use_mxfp4_kv) and (
             minimax_m3_use_aiter_sparse_pa(
                 self.num_kv_heads, emits_sparse_block_table=self.indexer_emits_table
             )
@@ -853,6 +873,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if self.use_nvfp4_kv:
             self.indexer = MiniMaxM3MSAIndexer(
                 impl_cls=MiniMaxM3IndexerRocmNvfp4Impl, **indexer_kwargs
+            )
+        elif self.use_mxfp4_kv or gfx942_mxfp4_index:
+            self.indexer = MiniMaxM3MSAIndexer(
+                impl_cls=MiniMaxM3IndexerRocmMxfp4Impl,
+                sparse_bt_buffer=sparse_bt_buffer,
+                sparse_ctx_buffer=sparse_ctx_buffer,
+                **indexer_kwargs,
             )
         elif msa_indexer_impl_cls is None:
             # Self-contained nn.Module: owns its side cache, selects its impl.
@@ -922,12 +949,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         num_blocks, _, block_size, _ = kv_cache.shape
         pages_in_side = block_size // 16
-        if key_cache.is_contiguous() and value_cache.is_contiguous():
-            k_src, v_src = key_cache, value_cache
-            block_pages, v_page_offset = pages_in_side, 0
-        elif kv_cache.is_contiguous():
+        # Interleaved first: with a single block (cudagraph memory profiling)
+        # each side is also contiguous, and both readings are the same bytes.
+        if kv_cache.is_contiguous():
             k_src = v_src = kv_cache
             block_pages, v_page_offset = 2 * pages_in_side, pages_in_side
+        elif key_cache.is_contiguous() and value_cache.is_contiguous():
+            k_src, v_src = key_cache, value_cache
+            block_pages, v_page_offset = pages_in_side, 0
         else:
             raise RuntimeError(
                 "MiniMax-M3 AITER sparse PA needs each K/V head slot stored as "
@@ -1056,10 +1085,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         if self.kv_cache.numel() != 0:
-            # [block, head, token, 2 * dim] -> [block, token, head, dim].
-            key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
-                self.head_dim, dim=-1
-            )
+            if self.use_aiter_sparse_pa:
+                cache = self.kv_cache
+                if is_quantized_kv_cache(self.kv_cache_dtype):
+                    cache = cache.view(self.impl.kv_cache_fp8_dtype)
+                key_cache, value_cache = cache.unbind(1)
+            else:
+                key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
+                    self.head_dim, dim=-1
+                )
             triton_reshape_and_cache_flash(
                 k,
                 v.view(num_tokens, self.num_kv_heads, self.head_dim),
@@ -1074,26 +1108,50 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if self.skip_index_topk:
             return q, None
 
-        index_q = self.index_q_norm(
-            index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
-        )
-        index_k = self.index_k_norm(index_k_raw.view(num_tokens, self.idx_head_dim))
-        index_q, index_k = self.index_rotary_emb.forward_native(
-            positions, index_q, index_k
-        )
-        assert index_k is not None
+        rope = self.index_rotary_emb
+        mxfp4_index = self.indexer_kv_dtype == "mxfp4"
+        if (
+            mxfp4_index
+            and rope.is_neox_style
+            and type(rope).forward_native is RotaryEmbedding.forward_native
+        ):
+            from vllm.models.minimax_m3.amd.ops.index_norm_rope_gfx942 import (
+                index_norm_rope_gfx942,
+            )
+
+            index_q, index_k = index_norm_rope_gfx942(
+                qkv,
+                positions,
+                self.index_q_norm.weight,
+                self.index_k_norm.weight,
+                rope.cos_sin_cache,
+                q_start=self.q_size + 2 * self.kv_size,
+                num_heads=self.num_idx_heads,
+                head_dim=self.idx_head_dim,
+                rotary_dim=rope.rotary_dim,
+                eps=self.index_q_norm.variance_epsilon,
+            )
+        else:
+            index_q = self.index_q_norm(
+                index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
+            )
+            index_k = self.index_k_norm(index_k_raw.view(num_tokens, self.idx_head_dim))
+            index_q, index_k = rope.forward_native(positions, index_q, index_k)
+            assert index_k is not None
         index_q = index_q.reshape(num_tokens, self.index_q_size).to(
-            self.indexer.index_cache.dtype
+            self.indexer.index_cache.query_dtype
         )
+        index_k = index_k.reshape(num_tokens, self.idx_head_dim)
 
         index_cache = self.indexer.index_cache.kv_cache
         if index_cache.numel() != 0:
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
-            minimax_m3_insert_index_cache(
-                index_k.reshape(num_tokens, self.idx_head_dim),
-                index_cache,
-                index_slot_mapping,
-            )
+            if mxfp4_index:
+                from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import store_k_gfx942
+
+                store_k_gfx942(index_k, index_cache, index_slot_mapping)
+            else:
+                minimax_m3_insert_index_cache(index_k, index_cache, index_slot_mapping)
         return q, index_q
 
     def _norm_rope_nvfp4_insert(
@@ -1134,6 +1192,55 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=self.num_kv_heads,
             num_index_heads=self.num_idx_heads,
             eps=self.q_norm.variance_epsilon,
+        )
+        return q, index_q
+
+    def _norm_rope_mxfp4_insert(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        index_slot_mapping: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Fused norm + RoPE + MXFP4 K/V and index-K insert (AITER).
+
+        Returns the e4m3 q and the bf16 index-q, None on a layer that reuses
+        another layer's top-k.
+        """
+        num_tokens = qkv.shape[0]
+        q = qkv.new_empty((num_tokens, self.q_size), dtype=torch.float8_e4m3fn)
+        index_q = None
+        index_cache = None
+        if not self.skip_index_topk:
+            index_q = qkv.new_empty(
+                (num_tokens, self.index_q_size),
+                dtype=self.indexer.index_cache.query_dtype,
+            )
+            index_cache = self.indexer.index_cache.kv_cache
+            index_cache = index_cache.view(index_cache.shape[0], PAGE_BYTES)
+        # [pages, 2 * Hkv, 128, 68] -> K heads then V heads, one 8704 B page each.
+        pages = self.kv_cache.view(self.kv_cache.shape[0], 2 * self.num_kv_heads, -1)
+        rocm_aiter_ops.fused_qknorm_idxrqknorm_mxfp4(
+            qkv,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.num_heads,
+            self.num_kv_heads,
+            self.rotary_emb.rotary_dim,
+            self.q_norm.variance_epsilon,
+            slot_mapping,
+            pages[:, : self.num_kv_heads],
+            pages[:, self.num_kv_heads :],
+            q_out=q,
+            index_q_norm_weight=self.index_q_norm.weight,
+            index_k_norm_weight=self.index_k_norm.weight,
+            num_index_heads=self.num_idx_heads,
+            index_cache=index_cache,
+            index_q_out=index_q,
+            index_slot_mapping=None if self.skip_index_topk else index_slot_mapping,
+            skip_index_branch=self.skip_index_topk,
         )
         return q, index_q
 
@@ -1187,6 +1294,17 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             attn_output = self._run_attention(
                 q, None if self.skip_index_topk else index_q, output
             )
+            output, _ = self.o_proj(attn_output)
+            return output
+        if self.use_mxfp4_kv:
+            q, index_q = self._norm_rope_mxfp4_insert(
+                qkv,
+                positions,
+                main_slot_mapping,
+                fwd_slot_mapping[self.indexer.index_cache.prefix],
+            )
+            output = torch.empty(q.shape, dtype=qkv.dtype, device=qkv.device)
+            attn_output = self._run_attention(q, index_q, output)
             output, _ = self.o_proj(attn_output)
             return output
         q = qkv.new_empty((num_tokens, self.q_size))
@@ -1645,9 +1763,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
                 "bf16"
             )
-            use_nvfp4_kv = get_kv_quant_mode(
-                vllm_config.cache_config.cache_dtype
-            ).is_nvfp4
+            kv_quant_mode = get_kv_quant_mode(vllm_config.cache_config.cache_dtype)
+            use_nvfp4_kv = kv_quant_mode.is_nvfp4
             # The only MSA indexer probe. It has to live here rather than in
             # the layer because the buffers it gates are one allocation shared
             # by all of them, so the answer is needed before any layer exists,
@@ -1657,11 +1774,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # this indexer and there is no such choice until it exists; the
             # probe owes nothing to CP in return, since what it checks is the
             # platform and the kernels' shape contract, neither of which a
-            # head count enters. NVFP4 K/V runs its own indexer, which emits
-            # no page table.
+            # head count enters. NVFP4 and MXFP4 K/V run their own indexers,
+            # which emit no page table.
             impl_cls = (
                 None
-                if use_nvfp4_kv
+                if use_nvfp4_kv or kv_quant_mode.is_mxfp4
                 else select_msa_indexer_impl_cls(
                     topk_blocks=sparse_cfg["sparse_topk_blocks"],
                     sparse_block_size=sparse_cfg["sparse_block_size"],
@@ -1670,7 +1787,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     score_type=sparse_cfg.get("sparse_score_type", "max"),
                 )
             )
-            if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(
+            gfx942_mxfp4_index = use_gfx942_mxfp4_indexer(
+                vllm_config.cache_config.cache_dtype, indexer_kv_dtype
+            )
+            emits_table = impl_cls is not None or gfx942_mxfp4_index
+            if emits_table and minimax_m3_use_aiter_sparse_pa(
                 num_kv_heads, emits_sparse_block_table=True
             ):
                 # One row per (token, kv head): the table addresses the attend's

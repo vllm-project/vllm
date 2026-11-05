@@ -62,6 +62,7 @@ from vllm.sequence import IntermediateTensors
 from .model import (
     MiniMAXGemmaRMSNorm,
     MiniMaxM3DecoderLayer,
+    use_gfx942_mxfp4_indexer,
 )
 
 
@@ -103,10 +104,13 @@ def _build_sparse_indexer_context(
         indexer_kv_dtype=indexer_kv_dtype,
         score_type=sparse_cfg.get("sparse_score_type", "max"),
     )
+    gfx942_mxfp4 = use_gfx942_mxfp4_indexer(
+        vllm_config.cache_config.cache_dtype, indexer_kv_dtype
+    )
     msa_indexer_impl_cls = None
     sparse_bt_buffer = None
     sparse_ctx_buffer = None
-    if impl_cls is not None and minimax_m3_use_aiter_sparse_pa(
+    if (impl_cls is not None or gfx942_mxfp4) and minimax_m3_use_aiter_sparse_pa(
         num_kv_heads, emits_sparse_block_table=True
     ):
         # One row per (token, kv head): the table addresses the attend's cache,
