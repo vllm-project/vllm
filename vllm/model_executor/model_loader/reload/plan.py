@@ -125,16 +125,7 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
 
     t0 = time.perf_counter()
     targets = Targets(model)
-    cuda = next((t.real.device for t in targets.by_storage.values()), None)
-    start = 0
-    if cuda is not None and cuda.type == "cuda":
-        torch.accelerator.reset_peak_memory_stats(cuda)
-        start = torch.accelerator.memory_allocated(cuda)
-    else:
-        cuda = None
     traced = trace_loads(model, metas, targets)
-    # loaders' temporaries are real allocations
-    peak = torch.accelerator.max_memory_allocated(cuda) - start if cuda else None
     if traced.lonely:
         lonely = list(dict.fromkeys(traced.lonely))
         raise RuntimeError(
@@ -151,7 +142,7 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
         if e.writes is not None
     }
     plan = LoadPlan(entries=entries, dests=dests)
-    _report(plan, time.perf_counter() - t0, traced.rebakes, peak)
+    _report(plan, time.perf_counter() - t0, traced.rebakes)
     return plan
 
 
@@ -294,7 +285,7 @@ def _nbytes(entry: Entry) -> int:
     return sum(prod(b - a for a, b in box) for box in boxes) * entry.dtype.itemsize
 
 
-def _report(plan: LoadPlan, seconds: float, rebakes: int, peak: int | None) -> None:
+def _report(plan: LoadPlan, seconds: float, rebakes: int) -> None:
     """Every name at debug; fallbacks grouped by reason and a summary at info."""
     counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # kind: [n, bytes]
     fallbacks: dict[str, list[str]] = defaultdict(list)
@@ -314,7 +305,7 @@ def _report(plan: LoadPlan, seconds: float, rebakes: int, peak: int | None) -> N
     logger.info(
         "load plan: %d names: %d direct (%.1f MiB), %d fallback (%.1f MiB), "
         "%d not needed on this rank; traced in %.2f s (%d re-bakes after names "
-        "that stopped the bake)%s",
+        "that stopped the bake)",
         len(plan.entries),
         counts["direct"][0],
         counts["direct"][1] / (1 << 20),
@@ -323,5 +314,4 @@ def _report(plan: LoadPlan, seconds: float, rebakes: int, peak: int | None) -> N
         counts["unneeded"][0],
         seconds,
         rebakes,
-        "" if peak is None else f"; bake peak +{peak / (1 << 20):.1f} MiB allocated",
     )
