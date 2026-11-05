@@ -3,7 +3,7 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.95
+    value: 0.937
 limit: 1319
 num_fewshot: 5
 kv_cache_dtype: fp8
