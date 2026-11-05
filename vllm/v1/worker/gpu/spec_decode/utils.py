@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from vllm.config import LoadConfig, replace
 import vllm.distributed.parallel_state as parallel_state
+from vllm.config import LoadConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
