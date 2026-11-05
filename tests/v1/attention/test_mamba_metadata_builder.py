@@ -25,6 +25,7 @@ def _make_vllm_config(
         else None
     )
     return SimpleNamespace(
+        use_flashinfer_replayssm=False,
         cache_config=SimpleNamespace(
             block_size=block_size,
             mamba_cache_mode="none",

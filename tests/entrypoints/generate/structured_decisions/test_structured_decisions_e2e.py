@@ -44,6 +44,22 @@ COPY = {
 }
 
 
+def test_request_template_is_rejected_by_default(server):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": "Team: billing.",
+            "questions": {"team": choice("Which team?", "billing")},
+            "chat_template_kwargs": {
+                "chat_template": "{{ 'MARKER-' ~ (6 * 7) ~ '-EVAL' }}"
+            },
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "--trust-request-chat-template" in response.json()["error"]["message"]
+
+
 def test_choice_decision(server):
     response = post(
         server,
