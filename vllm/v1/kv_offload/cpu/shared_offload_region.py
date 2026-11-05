@@ -293,18 +293,20 @@ class SharedOffloadRegion:
         base = ctypes.addressof(ctypes.c_char.from_buffer(self.mmap_obj))
         for path, offset, length in self._segments:
             fd = self.fd if offset == 0 else os.open(path, os.O_RDWR)
-            address = _libc_mmap()(
-                base + offset,
-                length,
-                mmap.PROT_READ | mmap.PROT_WRITE,
-                mmap.MAP_SHARED | _MAP_FIXED,
-                fd,
-                0,
-            )
-            if fd != self.fd:
-                os.close(fd)
-            if address != base + offset:
-                raise OSError(ctypes.get_errno(), f"Failed to map {path}")
+            try:
+                address = _libc_mmap()(
+                    base + offset,
+                    length,
+                    mmap.PROT_READ | mmap.PROT_WRITE,
+                    mmap.MAP_SHARED | _MAP_FIXED,
+                    fd,
+                    0,
+                )
+                if address != base + offset:
+                    raise OSError(ctypes.get_errno(), f"Failed to map {path}")
+            finally:
+                if fd != self.fd:
+                    os.close(fd)
 
     def _unlink(self) -> bool:
         """Unlink only segment paths that still name this generation."""
