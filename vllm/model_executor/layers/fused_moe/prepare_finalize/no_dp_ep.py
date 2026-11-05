@@ -39,6 +39,10 @@ def _quantize_input(
 
 
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
+    def supports_dbo(self) -> bool:
+        # No all2all: the DBO hand-offs are the TP all-reduces.
+        return True
+
     def supports_deferred_moe_finalize(self) -> bool:
         # finalize() here is the top-k weight-and-reduce and nothing else,
         # which is exactly the work a deferring consumer takes over.
