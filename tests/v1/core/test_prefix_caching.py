@@ -5060,6 +5060,12 @@ def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_window(
     token_ids = list(range(num_shared_tokens))
     token_ids += [100 + i for i in range(44 - num_shared_tokens)]
     req1 = make_request("1", token_ids, block_size, sha256)
+    # A tighter lookup bound keeps the request end: block 6 is null, yet a hit
+    # at 32 still needs nothing below token 37.
+    _, num_bounded_tokens, _ = manager.get_computed_blocks(
+        req1, max_cache_hit_length=32
+    )
+    assert num_bounded_tokens == 32
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == num_shared_tokens
     _, draft_hit_ids = computed_blocks.get_block_ids()
