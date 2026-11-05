@@ -413,6 +413,63 @@ class TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model(
             norm.weight.requires_grad_(False)
 
 
+class TestAiterAllReduceFusedAddRMSNormPerTokenQuantFP8Model(torch.nn.Module):
+    """Exercises the ROCm AITER AR+RMS+per-token-FP8-quant pattern.
+
+    Two ``rms_norm`` sites, each
+    ``all_reduce -> fused_add_rms_norm -> per_token_fp8_quant``
+    -> ``AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern``.
+
+    Each site starts from the same bf16 activation and is returned separately.
+    This avoids compounding two quantize/dequantize errors.
+    """
+
+    def __init__(
+        self,
+        hidden_size=256,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.dtype = dtype
+        self.norm = [RMSNorm(hidden_size, eps) for _ in range(2)]
+        self.w = [torch.rand(hidden_size, hidden_size, dtype=dtype) for _ in range(2)]
+
+    def _per_token_quant(self, rms: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_per_token_quant.default(
+            rms, current_platform.fp8_dtype()
+        )
+
+    def _dequantize_to_bf16(self, q: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        # The per-token scale broadcasts across the hidden dim.
+        return q.to(self.dtype) * s.to(self.dtype)
+
+    def forward(self, hidden_states):
+        z = torch.relu(hidden_states)
+        x0 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[0]))
+        rms0, resid0 = self.norm[0](x0, z.clone())
+        q0, s0 = self._per_token_quant(rms0)
+        y0 = self._dequantize_to_bf16(q0, s0)
+
+        x1 = tensor_model_parallel_all_reduce(torch.mm(z, self.w[1]))
+        rms1, resid1 = self.norm[1](x1, z.clone())
+        q1, s1 = self._per_token_quant(rms1)
+        y1 = self._dequantize_to_bf16(q1, s1)
+        return y0, y1, resid0, resid1
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+            torch.ops.vllm.rocm_aiter_per_token_quant.default,
+        ]
+
+    def ops_in_model_after(self):
+        return [rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_token_op()]
+
+
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def __init__(
         self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
@@ -895,4 +952,164 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         fused_quant_op, fused_indexer_op = model.ops_in_model_after()
         assert backend.op_count(fused_quant_op) == 2
         assert backend.op_count(fused_indexer_op) == 2
+        del all_reduce_fusion_pass
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [8])
+@pytest.mark.parametrize("hidden_size", [256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize(
+    "test_model_cls",
+    [TestAiterAllReduceFusedAddRMSNormPerTokenQuantFP8Model],
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm AITER AR+RMS+per-token-FP8-quant fusion is ROCm-only",
+)
+@pytest.mark.skipif(not IS_AITER_FOUND, reason="aiter is not found")
+def test_rocm_aiter_all_reduce_rmsnorm_per_token_quant_fp8_fusion_pass_replace(
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    enable_rms_norm_custom_op: bool,
+    test_model_cls: type[torch.nn.Module],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Sibling of ``test_all_reduce_fusion_pass_replace`` for the
+    ROCm AITER AR+RMS+per-token-FP8-quant fusion pattern.
+
+    Validates ``AiterAllreduceFusedAddRMSNormPerTokenQuantFP8Pattern``
+    (with-residual) added to ``RocmAiterAllReduceFusionPass``.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+    num_processes = 2
+
+    def run_torch_spawn(fn, nprocs):
+        master_port = get_open_port()
+        torch.multiprocessing.spawn(
+            fn,
+            args=(
+                num_processes,
+                master_port,
+                test_model_cls,
+                batch_size,
+                seq_len,
+                hidden_size,
+                dtype,
+                enable_rms_norm_custom_op,
+                monkeypatch,
+            ),
+            nprocs=nprocs,
+        )
+
+    run_torch_spawn(rocm_aiter_per_token_quant_fusion_pass_on_test_model, num_processes)
+
+
+def rocm_aiter_per_token_quant_fusion_pass_on_test_model(
+    local_rank: int,
+    world_size: int,
+    master_port: int,
+    test_model_cls: torch.nn.Module,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    enable_rms_norm_custom_op: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    set_random_seed(0)
+
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
+        }
+    )
+    rocm_aiter_ops.refresh_env_variables()
+
+    init_distributed_environment()
+
+    custom_ops = []
+    if enable_rms_norm_custom_op:
+        custom_ops.append("+rms_norm")
+    # We always enable +quant_fp8 so the matcher's example
+    # trace finds the same form the test model uses.
+    custom_ops.append("+quant_fp8")
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=custom_ops
+        )
+    )
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_allreduce_rms=True, eliminate_noops=True
+    )
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
+    vllm_config.parallel_config.rank = local_rank
+
+    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+    vllm_config.model_config = ModelConfig(
+        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
+    )
+    with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        all_reduce_fusion_pass = RocmAiterAllReduceFusionPass(vllm_config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        func_pass = FixFunctionalizationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(
+            noop_pass, all_reduce_fusion_pass, func_pass, cleanup_pass
+        )
+
+        token_num = batch_size * seq_len
+        model = test_model_cls(hidden_size, token_num, dtype=dtype)
+
+        hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
+
+        compiled_model = torch.compile(model, backend=backend)
+        compiled_model(hidden_states)
+
+        results_unfused = model(hidden_states)
+        results_fused = compiled_model(hidden_states)
+        # AITER's kernel-level oracle permits up to 5% isolated FP8 values to
+        # fall outside a 5% allclose envelope after collective reordering.
+        for site, (reference, actual) in enumerate(
+            zip(results_unfused[:2], results_fused[:2])
+        ):
+            close = torch.isclose(reference, actual, atol=5e-2, rtol=5e-2)
+            mismatch_ratio = float((~close).float().mean().item())
+            assert mismatch_ratio <= 0.05, (
+                f"FP8 site {site} mismatch ratio {mismatch_ratio:.2%} exceeds 5%"
+            )
+
+        # Residual outputs do not incur FP8 quantization noise.
+        torch.testing.assert_close(
+            results_unfused[2:], results_fused[2:], atol=1e-2, rtol=1e-2
+        )
+
+        # Two pattern firings: norm[0..1] (add quant).
+        assert all_reduce_fusion_pass.matched_count == 2, (
+            f"{all_reduce_fusion_pass.matched_count=}"
+        )
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
+        (fused_quant_op,) = model.ops_in_model_after()
+        assert backend.op_count(fused_quant_op) == 2
         del all_reduce_fusion_pass
