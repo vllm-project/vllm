@@ -71,7 +71,9 @@ def resolve_hisparse_specs(
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in sparse_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = get_hisparse_kv_cache_groups(
+        vllm_config, {name: kv_cache_spec[name] for name in sparse_specs}
+    )
     assert groups is not None
     return kv_cache_spec | {
         layer_name: group.kv_cache_spec

@@ -33,8 +33,69 @@ requires_qsa_kernels = pytest.mark.skipif(
 _HISPARSE_KV_TRANSFER_CONFIG = {
     "kv_connector": "HiSparseConnector",
     "kv_role": "kv_both",
-    "kv_connector_extra_config": {"host_pool_gib": 1},
+    "kv_connector_extra_config": {"host_pool_gib": 1 / 64},
 }
+
+
+@requires_qsa_kernels
+def test_qsa_hisparse_starts_with_automatic_cache_layout(
+    tmp_path, vllm_runner, monkeypatch
+):
+    from transformers import Qwen4ExpConfig
+
+    from vllm import SamplingParams
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config={
+            "vocab_size": 128,
+            "hidden_size": 256,
+            "num_hidden_layers": 2,
+            "layer_types": ["linear_attention", "indexed_attention"],
+            "num_attention_heads": 24,
+            "num_key_value_heads": 2,
+            "head_dim": 64,
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "output_gate_type": "sigmoid",
+            "num_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 64,
+            "shared_expert_intermediate_size": 64,
+            "hc_lowrank": 28,
+            "indexer_n_heads": 8,
+            "indexer_kv_heads": 1,
+            "indexer_head_dim": 128,
+            "indexer_compress_ratio": 4,
+            "indexer_budget": 2048,
+            "mtp_num_hidden_layers": 0,
+        },
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        language_model_only=True,
+        skip_tokenizer_init=True,
+        load_format="dummy",
+        dtype="bfloat16",
+        kv_cache_dtype="fp8_e4m3",
+        attention_config={"hisparse_config": {}, "indexer_kv_dtype": "bf16"},
+        kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=128 * 1024**2,
+    ) as runner:
+        (result,) = runner.llm.generate(
+            {"prompt_token_ids": [1, 2, 3, 4]},
+            SamplingParams(
+                temperature=0, max_tokens=2, ignore_eos=True, detokenize=False
+            ),
+        )
+        assert len(result.outputs[0].token_ids) == 2
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(

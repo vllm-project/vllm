@@ -2046,9 +2046,11 @@ class VllmConfig:
                     "HiSparse requires --scheduler-reserve-full-isl; remove "
                     "--no-scheduler-reserve-full-isl."
                 )
-            if self.model_config is not None and not any(
-                hasattr(self.model_config.hf_config, attr)
-                for attr in ("index_topk", "indexer_budget")
+            if (
+                self.model_config is not None
+                and not hasattr(self.model_config.hf_config, "index_topk")
+                and getattr(self.model_config.hf_text_config, "indexer_budget", None)
+                is None
             ):
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk "
