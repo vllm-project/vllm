@@ -2141,31 +2141,28 @@ class TestThinkingConfig:
         assert result.reasoning_effort == "low"
         assert result.thinking_token_budget is None
 
-    def test_between_tools_matches_adaptive(self):
-        """`between_tools` cannot be scoped to between-tool steps, so vLLM maps
-        it to the same no-op as `adaptive`: no pinned budget, effort ceiling
-        preserved."""
+    def test_between_tools_disables_upfront_thinking(self):
+        """`between_tools` disables upfront thinking even with an effort cap."""
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
             output_config={"effort": "low"},
             thinking={"type": "between_tools"},
         )
 
-        result = _convert(request)
-        assert result.reasoning_effort == "low"
+        result = _convert(request, disabled_thinking_effort="none")
+        assert result.reasoning_effort == "none"
         assert result.thinking_token_budget is None
         assert result.include_reasoning is True
 
-    def test_between_tools_leaves_reasoning_untouched_without_effort(self):
-        """No effort ceiling and no budget: the config adds no reasoning
-        controls, so a thinking-off model stays off."""
+    def test_between_tools_uses_disabled_effort_fallback(self):
+        """Models that cannot honor `none` use the configured fallback effort."""
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
             thinking={"type": "between_tools"},
         )
 
-        result = _convert(request)
-        assert result.reasoning_effort is None
+        result = _convert(request, disabled_thinking_effort="low")
+        assert result.reasoning_effort == "low"
         assert result.thinking_token_budget is None
 
     def test_disabled_uses_configured_effort(self):
@@ -2237,7 +2234,7 @@ class TestThinkingConfig:
 
     def test_between_tools_tool_round_trip_keeps_history_and_settings(self):
         """Echoed thinking + tool_use and the tool_result must survive conversion
-        while between_tools pins no reasoning control."""
+        while between_tools disables upfront thinking."""
         request = _make_request(
             [
                 {"role": "user", "content": "What is the weather in Paris?"},
@@ -2284,7 +2281,7 @@ class TestThinkingConfig:
 
         result = _convert(request)
 
-        assert result.reasoning_effort == "low"
+        assert result.reasoning_effort == "none"
         assert result.thinking_token_budget is None
         asst = [m for m in result.messages if m.get("role") == "assistant"]
         assert len(asst) == 1
@@ -2296,8 +2293,7 @@ class TestThinkingConfig:
         assert tool_msgs and "18C and cloudy" in tool_msgs[0]["content"]
 
     def test_between_tools_streaming_matches_non_streaming_settings(self):
-        """Streaming only toggles stream options; the between_tools mapping is
-        identical to the JSON path."""
+        """Streaming preserves the disabled-thinking mapping."""
         messages = [{"role": "user", "content": "Hello"}]
         streaming = _convert(
             _make_request(
@@ -2316,7 +2312,7 @@ class TestThinkingConfig:
         )
 
         assert streaming.stream is True
-        assert streaming.reasoning_effort == non_streaming.reasoning_effort == "high"
+        assert streaming.reasoning_effort == non_streaming.reasoning_effort == "none"
         assert streaming.thinking_token_budget is None
         assert non_streaming.thinking_token_budget is None
 
@@ -2337,7 +2333,13 @@ class TestBetweenToolsEntryPoint:
 
     def test_messages_accepts_between_tools(self):
         handler = MagicMock(spec=AnthropicServingMessages)
-        handler.create_messages.return_value = self._response()
+
+        async def create_messages(request, raw_request):
+            converted = _convert(request)
+            assert converted.reasoning_effort == "none"
+            return self._response()
+
+        handler.create_messages.side_effect = create_messages
 
         app = TestClientErrorResponses._make_api_app(handler)
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -2347,6 +2349,7 @@ class TestBetweenToolsEntryPoint:
                     "model": "test-model",
                     "max_tokens": 256,
                     "messages": [{"role": "user", "content": "Reply with ok."}],
+                    "output_config": {"effort": "high"},
                     "thinking": {"type": "between_tools"},
                 },
             )
@@ -2421,6 +2424,25 @@ class TestProbeDisabledThinkingEffort:
             assert await resolver.resolve_for(request) == expected_effort
             calls.append(renderer.render_chat.await_count)
         assert calls[0] == calls[1] > 0
+
+    @pytest.mark.asyncio
+    async def test_between_tools_uses_disabled_effort_resolution(self):
+        renderer = MagicMock()
+
+        def render(request):
+            if request.reasoning_effort == "none":
+                raise ValueError("unsupported none")
+            return [], [{"prompt_token_ids": [1]}]
+
+        renderer.render_chat = AsyncMock(side_effect=render)
+        resolver = DisabledThinkingEffortResolver(renderer)
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "between_tools"},
+        )
+
+        assert await resolver.resolve_for(request) == "low"
+        renderer.render_chat.assert_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])

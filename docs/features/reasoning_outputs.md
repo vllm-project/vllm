@@ -445,17 +445,15 @@ onto its own controls:
 | `"disabled"` | Sets `reasoning_effort` to `"none"`, which clears `enable_thinking` for templates that honor it. Models that cannot turn thinking off are served with a low effort instead. |
 | `"enabled"` | Sets `thinking_token_budget` to `budget_tokens` (must be at least 1024 and less than `max_tokens`). |
 | `"adaptive"` | Pins nothing: the model chooses depth beneath the `output_config.effort` ceiling. |
-| `"between_tools"` | Same as `"adaptive"`. |
+| `"between_tools"` | Maps to disabled upfront thinking; models may still emit thinking blocks between tool calls. |
 
 ### `thinking.type=between_tools`
 
-vLLM has no request-level control over *when* a model thinks, only whether
-thinking is on and its budget, so it cannot restrict reasoning to between-tool
-steps. The type is accepted and mapped to the same behavior as `"adaptive"`: no
-budget is pinned and the model decides depth beneath the `output_config.effort`
-ceiling. On a model served with a reasoning parser this means thinking may also
-run before the first response. Whether thinking happens at all depends on the
-model and its chat template; on a non-reasoning model the setting has no effect.
+The type is accepted and mapped to disabled upfront thinking, using the same
+model/template compatibility fallback as `thinking.type="disabled"`. vLLM
+cannot force a model to emit progress notes between tool calls; whether it does
+so depends on the model and chat template. Any reasoning emitted by the model
+is returned as thinking blocks.
 
 ## Limitations
 
