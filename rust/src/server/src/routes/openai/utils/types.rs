@@ -218,6 +218,10 @@ pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError
 pub enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
+    /// A refusal the model gave earlier. Valid only in assistant messages,
+    /// where it is replayed as text.
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
     #[serde(rename = "image_url")]
     ImageUrl {
         image_url: ImageUrl,
