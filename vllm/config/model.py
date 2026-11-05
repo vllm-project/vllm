@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_SPEECH_SEQ_2_SEQ_MAPPING_NAMES,
+)
 
 import vllm.envs as envs
 from vllm.config.model_arch import (
@@ -1143,10 +1146,6 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        from transformers.models.auto.modeling_auto import (
-            MODEL_FOR_SPEECH_SEQ_2_SEQ_MAPPING_NAMES,
-        )
-
         cls = "Transformers"
         # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
