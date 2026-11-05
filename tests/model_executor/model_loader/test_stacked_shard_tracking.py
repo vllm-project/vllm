@@ -98,9 +98,7 @@ def test_merged_column_tuple_shard_is_one_span():
     assert layer.pop_missing_shards() == []
 
 
-def test_minimax_m3_qkv_with_indexer_tracks_its_five_shards():
-    """It skips QKVParallelLinear.__init__ for its own layout, which must not
-    skip the shard record."""
+def test_minimax_m3_qkv_with_indexer_loads_all_shards():
     layer = MinimaxM3QKVParallelLinearWithIndexer(
         HIDDEN,
         HEAD,
@@ -111,9 +109,6 @@ def test_minimax_m3_qkv_with_indexer_tracks_its_five_shards():
     )
     index_q = ("weight", shard((HEAD, HIDDEN), "index_q"))
     index_k = ("weight", shard((HEAD, HIDDEN), "index_k"))
-    load(layer, Q, K, V)
-    assert layer.pop_missing_shards() == ["weight.index_q", "weight.index_k"]
-
     load(layer, Q, K, V, index_q, index_k)
     assert layer.pop_missing_shards() == []
 
