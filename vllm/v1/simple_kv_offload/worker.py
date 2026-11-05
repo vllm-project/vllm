@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
@@ -38,6 +39,7 @@ class SimpleCPUOffloadWorker:
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
+        max_load_slots: int = 8,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -47,7 +49,9 @@ class SimpleCPUOffloadWorker:
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
-        self.disk_mode = kv_offload_backend == "disk"
+        self.hybrid_mode = kv_offload_backend == "hybrid"
+        self.disk_mode = kv_offload_backend in ("disk", "hybrid")
+        self.max_load_slots = max_load_slots
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -205,6 +209,18 @@ class SimpleCPUOffloadWorker:
         )
 
         assert self.disk_path is not None
+        num_hot_slots = 0
+        if self.hybrid_mode:
+            if not current_platform.is_cuda() or any(
+                t.stride(0) % 4096 for t in unique_gpu_caches.values()
+            ):
+                raise ValueError("Hybrid requires CUDA and 4096-aligned KV pages")
+            alignment_bytes = 3 * 4096 * len(unique_gpu_caches)
+            num_hot_slots = (
+                self.cpu_capacity_bytes - alignment_bytes
+            ) // total_bytes_per_block - 2 * self.disk_buffer_slots
+            if num_hot_slots < 0:
+                raise ValueError("Hybrid host budget cannot fit default staging pools")
         rank_path = f"{self.disk_path}.rank_{device.index or 0}"
         self._backend = DiskBackend()
         self._backend.init(
@@ -217,6 +233,8 @@ class SimpleCPUOffloadWorker:
             total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
+            num_hot_slots=num_hot_slots,
+            max_load_slots=self.max_load_slots if self.hybrid_mode else None,
         )
 
     def _init_cpu_mode(
@@ -308,6 +326,11 @@ class SimpleCPUOffloadWorker:
                 event_idx=metadata.store_event,
                 events_list=self._store_events,
                 wait_event=self._store_compute_done,
+                **(
+                    {"hot_blocks": metadata.store_hot_blocks}
+                    if self.hybrid_mode
+                    else {}
+                ),
             )
 
     def get_finished(
@@ -364,6 +387,8 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
+        if isinstance(self._backend, DiskBackend):
+            self._backend.synchronize()
         for event_idx, event in self._load_events:
             event.synchronize()
             self._load_hwm = event_idx
@@ -376,6 +401,8 @@ class SimpleCPUOffloadWorker:
 
     def _poll_stream_events(self, is_store: bool) -> int:
         """Non-blocking poll for completed events and return the high-water mark."""
+        if isinstance(self._backend, DiskBackend):
+            self._backend.check_error()
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
@@ -389,3 +416,7 @@ class SimpleCPUOffloadWorker:
         else:
             self._load_hwm = hwm
         return hwm
+
+    def shutdown(self) -> None:
+        if self._backend is not None:
+            self._backend.shutdown()

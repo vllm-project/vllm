@@ -155,9 +155,12 @@ class SimpleCPUOffloadScheduler:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         aligned_num_cpu_blocks: int | None = None,
+        hot_cache_tokens_per_request: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        self.hot_cache_tokens_per_request = hot_cache_tokens_per_request
+        self._hot_store_gpu_blocks: set[int] = set()
         # When disk mode is active, the offload pool size is disk-based.
         offload_capacity = (
             disk_capacity_bytes if disk_capacity_bytes > 0 else cpu_capacity_bytes
@@ -623,8 +626,14 @@ class SimpleCPUOffloadScheduler:
             store_event=store_event,
             store_gpu_blocks=store_gpu,
             store_cpu_blocks=store_cpu,
+            store_hot_blocks=[
+                cpu
+                for gpu, cpu in zip(store_gpu, store_cpu)
+                if gpu in self._hot_store_gpu_blocks
+            ],
             need_flush=bool(scheduler_output.preempted_req_ids),
         )
+        self._hot_store_gpu_blocks.clear()
         return result
 
     def prepare_store_specs(
@@ -943,6 +952,8 @@ class SimpleCPUOffloadScheduler:
                 primary_block_hash = gpu_block.block_hash
                 assert primary_block_hash is not None
                 gpu_block_ids.append(gpu_block_id)
+                if (i + 1) * group_size <= self.hot_cache_tokens_per_request:
+                    self._hot_store_gpu_blocks.add(gpu_block_id)
                 advanced_per_group[g] += 1
                 if block_meta is not None:
                     token_start = i * group_size
@@ -1492,6 +1503,7 @@ class SimpleCPUOffloadScheduler:
         self._pending_finished_stores.clear()
 
         self._store_event_to_blocks.clear()
+        self._hot_store_gpu_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()
 
         # Loads that have not been sent to the worker cannot have running DMA.
