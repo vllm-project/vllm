@@ -522,7 +522,9 @@ class NcclCheckpointPublisher:
             master_port=get_open_port(),
             world_size=inference_world_size + 1,
             rank=0,
-            packed=True,
+            # VERIFIER_UNPACKED=1: one broadcast per tensor (the packed
+            # consumer cannot view tensors at unaligned offsets)
+            packed=os.environ.get("VERIFIER_UNPACKED") != "1",
         )
         self.client = _TargetWeightSyncClient(
             self.base_url,
@@ -661,12 +663,20 @@ class NcclCheckpointPublisher:
                     if future.done():
                         future.result()
                     send_started = time.perf_counter()
-                    packed_nccl_broadcast_producer(
-                        iterator=iter(named_tensors),
-                        group=group,
-                        src=0,
-                        post_iter_func=lambda item: item[1],
-                    )
+                    if os.environ.get("VERIFIER_UNPACKED") == "1":
+                        for _, tensor in named_tensors:
+                            group.broadcast(
+                                tensor.contiguous(),
+                                src=0,
+                                stream=torch.cuda.current_stream(),
+                            )
+                    else:
+                        packed_nccl_broadcast_producer(
+                            iterator=iter(named_tensors),
+                            group=group,
+                            src=0,
+                            post_iter_func=lambda item: item[1],
+                        )
                     # The RPC below only returns once the server has received
                     # this bucket, so waiting for the send here costs nothing.
                     torch.accelerator.synchronize(self.device)
