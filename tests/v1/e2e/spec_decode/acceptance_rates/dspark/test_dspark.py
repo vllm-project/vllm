@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Literal
 
 import pytest
+import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from vllm.config import CompilationConfig
@@ -33,6 +35,8 @@ class DSparkCorrectnessConfig:
     enforce_eager: bool = False
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
+    dspark_draft_topk: int | None = None
+    draft_sample_method: Literal["greedy", "probabilistic"] = "probabilistic"
 
 
 # References from 12 full GSM8K runs at temperature 1.0: accuracy 0.782-0.814,
@@ -84,6 +88,18 @@ QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
     "config",
     [
         pytest.param(QWEN3_DSPARK_DEEPSPEC, id="qwen3-deepspec"),
+        pytest.param(
+            replace(QWEN3_DSPARK_DEEPSPEC, dspark_draft_topk=32),
+            id="qwen3-deepspec-topk",
+        ),
+        pytest.param(
+            replace(
+                QWEN3_DSPARK_DEEPSPEC,
+                dspark_draft_topk=32,
+                draft_sample_method="greedy",
+            ),
+            id="qwen3-deepspec-topk-greedy",
+        ),
         pytest.param(GEMMA4_DSPARK_DEEPSPEC, id="gemma4-deepspec"),
         pytest.param(QWEN3_6_DSPARK_SPECULATORS, id="qwen3.6-speculators"),
     ],
@@ -96,13 +112,60 @@ def test_dspark_correctness_and_acceptance_rate(
     """Guard GSM8K accuracy and acceptance metrics for DSpark models."""
     if config.disable_flashinfer_sampler:
         monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    if config.dspark_draft_topk is not None:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+    reference = (
+        config.reference_accuracy,
+        config.reference_acceptance_rate,
+        config.reference_acceptance_len,
+    )
+    if config.draft_sample_method == "greedy":
+        reference = _evaluate_dspark(
+            replace(config, dspark_draft_topk=None), vllm_runner
+        )
+    actual = _evaluate_dspark(config, vllm_runner)
+    for metric, value, baseline in zip(
+        ("accuracy", "acceptance_rate", "acceptance_len"), actual, reference
+    ):
+        assert value >= baseline * REGRESSION_TOLERANCE, (
+            f"{metric}: {value:.3f}, reference={baseline:.3f}; {config}"
+        )
+
+
+@torch.inference_mode()
+def _check_topk_path(worker) -> bool:
+    from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import can_fuse_markov_walk
+
+    spec = worker.model_runner.speculator
+    k = spec.speculative_config.dspark_draft_topk
+    assert spec._draft_topk == k
+    assert spec._markov_candidate_ids.shape == (spec.vocab_size, k)
+    assert spec._markov_candidate_biases.shape == (spec.vocab_size, k)
+    if spec.speculative_config.draft_sample_method == "greedy":
+        assert spec.draft_logits is None
+        assert spec.acceptance_estimator is None and not spec.use_confidence_head
+        if current_platform.is_cuda():
+            hidden = torch.zeros(
+                1, spec.hidden_size, dtype=spec.dtype, device=spec.device
+            )
+            logits = spec.model.compute_draft_logits(hidden)
+            assert can_fuse_markov_walk(spec.model.model.markov_head, logits, k)
+    return True
+
+
+def _evaluate_dspark(
+    config: DSparkCorrectnessConfig, vllm_runner
+) -> tuple[float, float, float]:
     speculative_config = {
         "method": "dspark",
         "model": config.draft_model,
         "num_speculative_tokens": config.num_speculative_tokens,
-        "draft_sample_method": "probabilistic",
+        "draft_sample_method": config.draft_sample_method,
     }
+    if config.dspark_draft_topk is not None:
+        speculative_config["dspark_draft_topk"] = config.dspark_draft_topk
     if config.attention_backend is not None and current_platform.is_cuda():
         speculative_config["attention_backend"] = config.attention_backend
 
@@ -125,6 +188,8 @@ def test_dspark_correctness_and_acceptance_rate(
 
     with vllm_runner(config.model, **runner_config) as spec_runner:
         spec_llm = spec_runner.llm
+        if config.dspark_draft_topk is not None:
+            assert all(spec_llm.collective_rpc(_check_topk_path))
         results = evaluate_gsm8k_offline(
             spec_llm,
             num_questions=config.num_questions,
@@ -137,7 +202,10 @@ def test_dspark_correctness_and_acceptance_rate(
         metrics = spec_llm.get_metrics()
         acceptance_rate = compute_acceptance_rate(metrics)
         acceptance_len = compute_acceptance_len(metrics)
-        context = f"DSpark target={config.model}, draft={config.draft_model}"
+        context = (
+            f"DSpark target={config.model}, draft={config.draft_model}, "
+            f"topk={config.dspark_draft_topk}, method={config.draft_sample_method}"
+        )
         metrics_summary = (
             f"gsm8k_accuracy={accuracy:.3f}, "
             f"acceptance_rate={acceptance_rate:.3f}, "
@@ -145,12 +213,5 @@ def test_dspark_correctness_and_acceptance_rate(
         )
         print(f"{context}: {metrics_summary}")
 
-        assert accuracy >= config.reference_accuracy * REGRESSION_TOLERANCE, (
-            f"{context}: {metrics_summary}"
-        )
-        assert (
-            acceptance_rate >= config.reference_acceptance_rate * REGRESSION_TOLERANCE
-        ), f"{context}: {metrics_summary}"
-        assert (
-            acceptance_len >= config.reference_acceptance_len * REGRESSION_TOLERANCE
-        ), f"{context}: {metrics_summary}"
+        assert acceptance_rate > 0 and acceptance_len > 1, metrics_summary
+        return accuracy, acceptance_rate, acceptance_len

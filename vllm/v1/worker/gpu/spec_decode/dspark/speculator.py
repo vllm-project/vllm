@@ -30,14 +30,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-)
-from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import markov_walk_topk
+from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import (
+    can_fuse_markov_walk,
+    markov_walk_topk,
+)
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -215,15 +213,14 @@ class DSparkSpeculator(DFlashSpeculator):
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
-        if self._draft_topk is not None:
-            self._sample_sequential_topk(num_reqs, head_hidden)
-            return
         # A draft model can run the Markov steps below with its own kernels.
         # It returns False, having done nothing, for a step that the loop
         # below must run.
         sample_sequential = getattr(self.model, "sample_sequential", None)
-        if sample_sequential is not None and sample_sequential(
-            self, num_reqs, head_hidden
+        if (
+            self._draft_topk is None
+            and sample_sequential is not None
+            and sample_sequential(self, num_reqs, head_hidden)
         ):
             return
 
@@ -236,83 +233,26 @@ class DSparkSpeculator(DFlashSpeculator):
         base_logits = self.model.compute_draft_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
-
-        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
-        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
-        confidence_markov_embeds = []
-
-        # Anchor (bonus) token per request = the input id at query offset 0,
-        # read via the precomputed persistent index (fixed buffer for capture).
-        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
-
-        for i in range(n_spec):
-            # Sequential stage: Markov bias from the previously sampled token.
-            markov_embed = self.model.markov_embed(prev)
-            if self.use_confidence_head:
-                confidence_markov_embeds.append(markov_embed)
-            bias = self.model.markov_bias(markov_embed)
-            logits_i = base_logits[:, i] + bias
-            if hasattr(self.model, "apply_output_logit_transform"):
-                logits_i = self.model.apply_output_logit_transform(logits_i)
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
+        candidates = None
+        candidate_argmax = False
+        if self._draft_topk is not None:
+            assert self._markov_candidate_ids is not None
+            assert self._markov_candidate_biases is not None
+            base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
+            candidates = (
+                base_values,
+                draft_indices,
+                self._markov_candidate_ids,
+                self._markov_candidate_biases,
             )
-            self.draft_tokens[:num_reqs, i] = draft_sampled_i
-            prev = draft_sampled_i
-
-        if self.use_confidence_head:
-            confidence = self.model.compute_confidence(
-                sample_hidden,
-                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            candidate_argmax = (
+                self.draft_logits is None and self.acceptance_estimator is None
             )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
-                num_reqs, n_spec
-            )
-
-    def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
-        """Apply the Markov head to base-logit and Markov-bias top-k candidates.
-
-        Base candidates are selected once for all draft positions; Markov
-        candidates depend on the previous token at each step. Greedy selection
-        scans only the corrected candidates. Paths requiring dense logits mask
-        every other entry to ``-inf``.
-        """
-        assert self._draft_topk is not None
-        assert self._markov_candidate_ids is not None
-        assert self._markov_candidate_biases is not None
-        n_spec = self.num_speculative_steps
-        num_sample = num_reqs * n_spec
-        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-        base_logits = self.model.compute_draft_logits(sample_hidden)
-        base_logits = base_logits.view(num_reqs, n_spec, -1)
-        base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
-        candidate_argmax = (
-            self.draft_logits is None and self.acceptance_estimator is None
-        )
-        if (
-            candidate_argmax
-            and not self.use_confidence_head
-            and current_platform.is_cuda()
-            and base_logits.is_cuda
-        ):
             head = self.model.model.markov_head
-            w1 = head.markov_w1.weight
-            w2 = getattr(head.markov_w2, "weight", None)
             if (
-                isinstance(
-                    head.markov_w2.quant_method,
-                    (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
-                )
-                and w2 is not None
-                and w1.is_cuda
-                and w1.device == w2.device == base_logits.device
-                and w1.dtype == w2.dtype == base_logits.dtype
-                and w1.dtype in (torch.float16, torch.bfloat16, torch.float32)
-                and w1.ndim == w2.ndim == 2
-                and w1.stride(1) == w2.stride(1) == 1
-                and w1.shape[1] == w2.shape[1] <= 1024
-                and head.markov_w2.tp_size == 1
-                and self._draft_topk <= 128
+                candidate_argmax
+                and not self.use_confidence_head
+                and can_fuse_markov_walk(head, base_logits, self._draft_topk)
             ):
                 markov_walk_topk(
                     base_logits=base_logits,
@@ -320,8 +260,8 @@ class DSparkSpeculator(DFlashSpeculator):
                     base_ids=draft_indices,
                     markov_ids=self._markov_candidate_ids,
                     markov_biases=self._markov_candidate_biases,
-                    w1=w1,
-                    w2=w2,
+                    w1=head.markov_w1.weight,
+                    w2=head.markov_w2.weight,
                     input_ids=self.input_buffers.input_ids,
                     anchor_indices=self._anchor_idx[:num_reqs],
                     draft_tokens=self.draft_tokens,
@@ -332,26 +272,29 @@ class DSparkSpeculator(DFlashSpeculator):
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
+        # Fixed-address anchor indices are safe under CUDA graph capture.
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
             if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
-            bias_indices = self._markov_candidate_ids[prev]
-            logits_i = base_logits[:, i]
-            bias_values = logits_i.gather(1, bias_indices)
-            if not candidate_argmax:
-                logits_i.fill_(float("-inf"))
-            logits_i = self.model.apply_markov_bias_gathered(
-                markov_embed,
-                logits_i,
-                base_values[:, i],
-                draft_indices[:, i],
-            )
-            # Cached biases already include the logits processor's scale.
-            logits_i.scatter_(
-                1, bias_indices, bias_values + self._markov_candidate_biases[prev]
-            )
+            if candidates is None:
+                bias = self.model.markov_bias(markov_embed)
+                logits_i = base_logits[:, i] + bias
+                if hasattr(self.model, "apply_output_logit_transform"):
+                    logits_i = self.model.apply_output_logit_transform(logits_i)
+            else:
+                base_values, draft_indices, markov_ids, markov_biases = candidates
+                bias_indices = markov_ids[prev]
+                logits_i = base_logits[:, i]
+                bias_values = logits_i.gather(1, bias_indices)
+                if not candidate_argmax:
+                    logits_i.fill_(float("-inf"))
+                logits_i = self.model.apply_markov_bias_gathered(
+                    markov_embed, logits_i, base_values[:, i], draft_indices[:, i]
+                )
+                # Cached biases already include the logits processor's scale.
+                logits_i.scatter_(1, bias_indices, bias_values + markov_biases[prev])
             if candidate_argmax:
                 candidate_ids = torch.cat((draft_indices[:, i], bias_indices), dim=-1)
                 draft_ids = _argmax_candidates(logits_i, candidate_ids)

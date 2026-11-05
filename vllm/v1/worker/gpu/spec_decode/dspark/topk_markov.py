@@ -2,9 +2,45 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Greedy candidate-pruned Markov sampling, fused across draft positions."""
 
+from typing import TYPE_CHECKING
+
 import torch
 
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+
+
+def can_fuse_markov_walk(
+    head: "DSparkMarkovHead", logits: torch.Tensor, topk: int
+) -> bool:
+    """Whether the greedy kernel supports this Markov head and logits."""
+    if not current_platform.is_cuda() or not logits.is_cuda:
+        return False
+    w1 = head.markov_w1.weight
+    w2 = getattr(head.markov_w2, "weight", None)
+    return (
+        isinstance(
+            head.markov_w2.quant_method,
+            (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
+        )
+        and w2 is not None
+        and w1.is_cuda
+        and w1.device == w2.device == logits.device
+        and w1.dtype == w2.dtype == logits.dtype
+        and w1.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and w1.ndim == w2.ndim == 2
+        and w1.stride(1) == w2.stride(1) == 1
+        and w1.shape[1] == w2.shape[1] <= 1024
+        and head.markov_w2.tp_size == 1
+        and topk <= 128
+    )
 
 
 @triton.jit

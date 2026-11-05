@@ -120,8 +120,10 @@ Greedy drafting selects directly from the candidates, avoiding a full-vocabulary
 scan at each Markov step. On CUDA, unquantized Markov heads with rank up to 1024
 and top-k up to 128 fuse all draft positions into one kernel when neither online
 acceptance estimation nor a confidence head is active. Other configurations use
-the per-step path; probabilistic drafting and online acceptance estimation still
-use dense logits. The base LM-head projection still covers the draft vocabulary.
+the per-step path. Probabilistic drafting and online acceptance estimation use
+full-size logits buffers with non-candidates masked to `-inf`; rejection sampling
+uses the same truncated proposal. The base LM-head projection still covers the
+draft vocabulary.
 
 At each model load, vLLM computes the Markov candidates in chunks and caches
 their IDs and bias values on the GPU. It does not retain the full transition
