@@ -574,7 +574,7 @@ def _kernel_context():
 def _reference_kernels():
     """The test plugin's reference kernels: vLLM keeps no KV compaction."""
     reference = pytest.importorskip("vllm_add_test_speculators.reference")
-    return KernelRegistry([reference.ReferenceKernels()])
+    return KernelRegistry(reference.reference_kernels())
 
 
 @pytest.mark.parametrize("kind", list(_CACHES))

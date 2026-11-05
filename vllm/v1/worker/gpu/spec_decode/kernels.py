@@ -3,25 +3,22 @@
 """The kernels speculative decoding adds to verify and commit, by key, and the
 registry that binds them (see ``docs/features/speculative_decoding/round_contract.md``).
 
-A provider named in ``SpeculatorConfig.spec_kernel_providers`` may supply any subset
-of keys; a later provider wins a key, and a layer missing a kernel verifies chains.
+``SpeculatorConfig.spec_kernels`` names the speculator's kernels; a layer missing a
+kernel verifies chains.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.v1.spec_decode.resources import PlanKind
 from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.spec_decode.round import AcceptResult
-
-logger = init_logger(__name__)
 
 Op = Literal["verify", "commit"]
 KernelKey = tuple[str, Op]
@@ -237,54 +234,25 @@ class SpecKernel:
         """Called once per worker before capture; allocate and raise here."""
 
 
-class SpecKernelProvider(Protocol):
-    """Kernels a speculator brings. ``SpeculatorConfig.spec_kernel_providers``
-    names it by the fully qualified name of a ``(vllm_config) ->
-    SpecKernelProvider`` factory (a class works)."""
-
-    name: str
-
-    def kernels(self) -> Mapping[KernelKey, SpecKernel]:
-        """Any subset of keys; called once per worker."""
-        ...
-
-
 class KernelRegistry:
-    """The kernels of ``providers``, in order: a later provider wins a key,
-    and each override is logged once. Built once per worker and bound once,
+    """The speculator's kernels, by key. Built once per worker and bound once,
     before capture."""
 
-    def __init__(self, providers: Iterable[SpecKernelProvider] = ()):
-        # Nothing in tree: a layer verifies trees only with a provider's kernels.
-        self._kernels: dict[KernelKey, SpecKernel] = {}
-        for provider in providers:
-            for key, kernel in provider.kernels().items():
-                if key[1] not in get_args(Op):
-                    raise ValueError(
-                        f"{provider.name} provides {key_name(key)}: the op must "
-                        f"be one of {get_args(Op)}"
-                    )
-                logger.info_once(
-                    "Speculative decoding: %s %s %s",
-                    provider.name,
-                    "overrides" if key in self._kernels else "provides",
-                    key_name(key),
-                )
-                self._kernels[key] = kernel
+    def __init__(self, kernels: Mapping[KernelKey, SpecKernel] | None = None):
+        # Nothing in tree: a layer verifies trees only with the speculator's kernels.
+        self._kernels = dict(kernels or {})
         self._commits: list[SpecKernel] = []
 
     @classmethod
     def from_config(cls, vllm_config: "VllmConfig") -> "KernelRegistry":
-        """The registry of the speculator's ``spec_kernel_providers``."""
+        """The registry of the speculator's ``spec_kernels``."""
         from vllm.utils.import_utils import resolve_obj_by_qualname
 
         speculative_config = vllm_config.speculative_config
-        names = (
-            speculative_config.speculator_config.spec_kernel_providers
-            if speculative_config is not None
-            else ()
-        )
-        return cls(resolve_obj_by_qualname(name)(vllm_config) for name in names)
+        if speculative_config is None:
+            return cls()
+        name = speculative_config.speculator_config.spec_kernels
+        return cls(resolve_obj_by_qualname(name)(vllm_config) if name else None)
 
     def get(self, key: KernelKey) -> SpecKernel | None:
         """The kernel that won ``key``, None when nothing provides it."""

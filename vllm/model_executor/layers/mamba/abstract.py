@@ -36,7 +36,7 @@ class MambaBase(AttentionLayerBase):
     # its own body runs kernels of its own, so it verifies chains only, whatever
     # its parent declares.
     spec_layer_variant: ClassVar[str | None] = None
-    # The provider kernel that verifies the layer's spec-decode rows, bound by
+    # The plugin kernel that verifies the layer's spec-decode rows, bound by
     # the spec kernel registry before capture; None runs the layer's own
     # kernels. Only layers with a ``spec_layer_variant`` read it.
     spec_verify_kernel: "SpecKernel | None" = None

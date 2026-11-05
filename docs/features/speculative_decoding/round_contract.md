@@ -18,7 +18,7 @@ given and returns; the tree kernels themselves come from the speculator.
 | The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Sampling the target's token at every verify row, and the rejection sampler for chains |
 | The accepted path through a tree (`BaseSpeculator.tree_accept`) | Checking that path against the plan |
 | Its own drafting (`BaseSpeculator.propose`) | KV cache and recurrent-state memory, sized at startup |
-| The tree kernels: KV compaction, recurrent verify and commit (`SpeculatorConfig.spec_kernel_providers`) | A description of each KV cache group's layout for the KV commit |
+| The tree kernels: KV compaction, recurrent verify and commit (`SpeculatorConfig.spec_kernels`) | A description of each KV cache group's layout for the KV commit |
 | A tree attention backend (`AttentionBackend.serves_trees`) | Each plan row's parent and position in the attention metadata |
 | | Scheduling, preemption and the order of the waiting queue |
 | | Deciding what each layer of the target can verify |
@@ -194,16 +194,14 @@ written as `"<layer kind>/<op>"` in logs:
 
 | Op | Keys | What it does |
 | --- | --- | --- |
-| `verify` | `mamba:gdn@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. Providers only: without one, the layer runs its own chain kernels. |
+| `verify` | `mamba:gdn@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. Plugins only: without one, the layer runs its own chain kernels. |
 | `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: the attention KV, or the recurrent state and conv window. |
 
 `@slots` is the recurrent-state mode.
 
-The registry holds no kernel in tree. A speculator names provider factories in
-`SpeculatorConfig.spec_kernel_providers` (qualified names); each is constructed
-with `vllm_config`, has a `name`, and returns `{key: SpecKernel}` from
-`kernels()`. Providers apply in order and a later one wins a key. A layer verifies
-trees when every kernel in `KernelRegistry.required_keys(layer)` supports it; a
+The registry holds no kernel in tree. A speculator names, in
+`SpeculatorConfig.spec_kernels`, the qualified name of a factory that takes
+`vllm_config` and returns `{key: SpecKernel}`. A layer verifies trees when every kernel in `KernelRegistry.required_keys(layer)` supports it; a
 missing or declining kernel means chains.
 
 A `SpecKernel` implements these methods:
@@ -294,8 +292,8 @@ class MyTreeSpeculator(EagleSpeculator):
         ...
 ```
 
-The config also names, in `spec_kernel_providers`, a provider of
-`layout:paged_token/commit`, and the model runs a tree attention backend. The
+The config also names, in `spec_kernels`, a factory of a
+`layout:paged_token/commit` kernel, and the model runs a tree attention backend. The
 test plugin `tests/plugins/vllm_add_test_speculators` has PyTorch references of
 all three (`reference.py`, `tree_attn.py`).
 

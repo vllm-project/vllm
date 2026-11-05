@@ -3,7 +3,6 @@
 """The startup rule and the spec kernel registry, on real layer classes (CPU)."""
 
 import logging
-import uuid
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -122,33 +121,16 @@ class ToyKernel(SpecKernel):
         self.steps.append(step)
 
 
-class Provider:
-    def __init__(self, kernels, name=None):
-        self.name = name or f"toy-{uuid.uuid4().hex[:8]}"
-        self._kernels = kernels
-
-    def kernels(self):
-        return self._kernels
-
-
 def _kv_provided() -> KernelRegistry:
     """A plugin's KV compaction: what every attention layer needs for trees."""
-    return KernelRegistry([Provider({KV_COMMIT: ToyKernel()})])
+    return KernelRegistry({KV_COMMIT: ToyKernel()})
 
 
 def _provided() -> KernelRegistry:
     """A plugin's KV compaction and recurrent tree verify: verify and state
     commit kernels."""
     return KernelRegistry(
-        [
-            Provider(
-                {
-                    GDN_VERIFY: ToyKernel(),
-                    STATE_COMMIT: ToyKernel(),
-                    KV_COMMIT: ToyKernel(),
-                }
-            )
-        ]
+        {GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel(), KV_COMMIT: ToyKernel()}
     )
 
 
@@ -166,7 +148,7 @@ def _gdn_reason(mode):
     return f"mamba:gdn@{mode}, 3 layers: no mamba:gdn@{mode}/verify kernel"
 
 
-# case: (model, state mode, with a provider, plan kind, reasons)
+# case: (model, state mode, with plugin kernels, plan kind, reasons)
 _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
     "llama": (lambda: _model(*_LLAMA), "slots", False, "tree", []),
     "llama-in-tree-backend": (
@@ -202,8 +184,8 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
         ["attn:full_attention, 2 layers: not full attention"],
     ),
     "qwen-gdn": (QwenGatedDeltaNetAttention, "slots", False, "chain", None),
-    "qwen-gdn-provider": (QwenGatedDeltaNetAttention, "slots", True, "tree", []),
-    "qwen-gdn-provider-in-tree-backend": (
+    "qwen-gdn-kernels": (QwenGatedDeltaNetAttention, "slots", True, "tree", []),
+    "qwen-gdn-kernels-in-tree-backend": (
         lambda: _hybrid(QwenGatedDeltaNetAttention, FlashAttentionBackend),
         "slots",
         True,
@@ -213,7 +195,7 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
     "qwen-gdn-replay": (QwenGatedDeltaNetAttention, "replay", True, "chain", None),
 }
 # A layer subclassing a tree-capable one (olmo) runs its own kernels: chains
-# only, with or without a provider.
+# only, with or without plugin kernels.
 for _name, _layer_cls in {
     "nemotron-h": MambaMixer2,
     "olmo-hybrid": OlmoHybridGatedDeltaNetAttention,
@@ -248,7 +230,7 @@ def test_plan_kind_rules(case):
 
 
 def test_no_kv_commit_verifies_chains():
-    """Without a provider of the KV commit, attention layers verify chains:
+    """Without a KV commit kernel, attention layers verify chains:
     vLLM keeps no compaction kernel, so a tree speculator lowers at startup."""
     attn_groups, layers = _model(*_LLAMA)
     caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers, "slots"))
@@ -485,40 +467,13 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
     )
 
 
-def test_registry_lookup(caplog):
-    """Nothing is in tree; providers give kernels key by key, a later provider
-    wins a key, each is logged once, and an unknown op is refused."""
-    registry = KernelRegistry()
-    for key in (GDN_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT, KV_COMMIT):
-        assert registry.get(key) is None
-
-    first, second = ToyKernel(), ToyKernel()
-    provider = Provider({GDN_VERIFY: first, SHORT_CONV_VERIFY: ToyKernel()})
-    with caplog.at_level(logging.INFO, logger="vllm"):
-        partial = KernelRegistry([provider])
-        KernelRegistry([provider])
-    assert partial.get(GDN_VERIFY) is first
-    assert partial.get(KV_COMMIT) is None
-    lines = [r.getMessage() for r in caplog.records if provider.name in r.getMessage()]
-    assert len(lines) == 2
-    assert "mamba:gdn@slots/verify" in lines[0]
-    assert "mamba:short_conv@slots/verify" in lines[1]
-    later = KernelRegistry(
-        [Provider({GDN_VERIFY: first}), Provider({GDN_VERIFY: second})]
-    )
-    assert later.get(GDN_VERIFY) is second
-
-    with pytest.raises(ValueError, match="the op must be one of"):
-        KernelRegistry([Provider({("mamba:gdn@slots", "prefill"): ToyKernel()})])
-
-
 @pytest.mark.parametrize(
-    "providers, layer, plan_kind, why",
+    "kernels, layer, plan_kind, why",
     [
         pytest.param(
             {}, _mamba_layer("m"), "chain", "no mamba:gdn@slots/verify", id="gdn"
         ),
-        # No provider of the KV commit: the layer verifies chains.
+        # No KV commit kernel: the layer verifies chains.
         pytest.param(
             {}, _attn_layer("a"), "chain", "no layout:paged_token/commit", id="attn"
         ),
@@ -558,9 +513,9 @@ def test_registry_lookup(caplog):
         ),
     ],
 )
-def test_registry_plan_kind(providers, layer, plan_kind, why):
+def test_registry_plan_kind(kernels, layer, plan_kind, why):
     """A layer verifies what every kernel it needs supports."""
-    registry = KernelRegistry([Provider(providers)] if providers else [])
+    registry = KernelRegistry(kernels)
     kind, reason = registry.plan_kind(layer)
     assert kind == plan_kind
     if why is not None:
@@ -572,9 +527,7 @@ def test_bind_and_commit():
     kernels only, no spec decode unbinds them, and a layer without one runs its
     own); commit runs every bound commit kernel."""
     verify, state, kv = ToyKernel(), ToyKernel(), ToyKernel()
-    registry = KernelRegistry(
-        [Provider({GDN_VERIFY: verify, STATE_COMMIT: state, KV_COMMIT: kv})]
-    )
+    registry = KernelRegistry({GDN_VERIFY: verify, STATE_COMMIT: state, KV_COMMIT: kv})
     layers = [
         _mamba_layer("m.0"),
         _mamba_layer("m.1"),
@@ -597,13 +550,13 @@ def test_bind_and_commit():
 
     stale = _mamba_layer("m.0")
     stale.module.spec_verify_kernel = "stale"
-    KernelRegistry([Provider({STATE_COMMIT: ToyKernel()})]).bind(_ctx(), [stale])
+    KernelRegistry({STATE_COMMIT: ToyKernel()}).bind(_ctx(), [stale])
     assert stale.module.spec_verify_kernel is None
 
 
 def _kv_layouts(*layers):
     kernel = ToyKernel()
-    KernelRegistry([Provider({KV_COMMIT: kernel})]).bind(_ctx(), list(layers))
+    KernelRegistry({KV_COMMIT: kernel}).bind(_ctx(), list(layers))
     return kernel.ctxs[0].kv_layouts
 
 
@@ -683,10 +636,10 @@ def test_paged_kv_layout_refuses_at_bind(layer, match):
 
 @pytest.mark.parametrize("plan_kind", ["chain", "tree"])
 def test_bind_one_kernel_for_verify_and_commit(plan_kind):
-    """A kernel a provider gives for both a recurrent layer's verify and its
+    """A kernel given for both a recurrent layer's verify and its
     state commit is bound once to each layer, and commits above a chain."""
     kernel = ToyKernel()
-    registry = KernelRegistry([Provider({GDN_VERIFY: kernel, STATE_COMMIT: kernel})])
+    registry = KernelRegistry({GDN_VERIFY: kernel, STATE_COMMIT: kernel})
     layers = [_mamba_layer("m.0"), _mamba_layer("m.1")]
     registry.bind(_ctx(plan_kind), layers)
     assert kernel.binds == [["m.0", "m.1"]]

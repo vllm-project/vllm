@@ -59,7 +59,7 @@ class NgramTreeConfig(NgramGPUSpeculatorConfig):
     """A 2-way branching speculator built on the n-gram drafts."""
 
     speculator_class = f"{_SPECULATORS}.NgramTreeSpeculator"
-    spec_kernel_providers = (f"{__package__}.reference.ReferenceKernels",)
+    spec_kernels = f"{__package__}.reference.reference_kernels"
 
     def resources(self, max_num_seqs: int) -> SpecResources:
         return replace(super().resources(max_num_seqs), max_branching=2)

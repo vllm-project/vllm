@@ -4,7 +4,7 @@
 in PyTorch, for correctness only: the tree walk (``tree_accept``), the KV
 compaction (``layout:paged_token`` commit) and the tree attention mask."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import torch
 
@@ -125,15 +125,6 @@ class ReferenceKVCompactor(SpecKernel):
                 view[dst_at] = view[src_at]
 
 
-class ReferenceKernels:
-    """``spec_kernel_providers`` factory for the reference kernels."""
-
-    name = "reference"
-
-    def __init__(self, vllm_config: object = None) -> None:
-        self._kernels: dict[KernelKey, SpecKernel] = {
-            PAGED_KV_COMMIT: ReferenceKVCompactor()
-        }
-
-    def kernels(self) -> Mapping[KernelKey, SpecKernel]:
-        return self._kernels
+def reference_kernels(vllm_config: object = None) -> dict[KernelKey, SpecKernel]:
+    """``spec_kernels`` factory: the reference kernels."""
+    return {PAGED_KV_COMMIT: ReferenceKVCompactor()}
