@@ -31,6 +31,11 @@ class ExternalWeightCharges:
     fallback_bytes: int = field(default=0, init=False)
     _charges: dict[tuple[str, bool], int] = field(default_factory=dict, init=False)
 
+    @property
+    def current_bytes(self) -> int:
+        """External bytes held right now: charges minus fallback removals."""
+        return sum(self._charges.values())
+
     @contextmanager
     def track(self) -> Generator[None, None, None]:
         token = _active_external_weight_charges.set(self)

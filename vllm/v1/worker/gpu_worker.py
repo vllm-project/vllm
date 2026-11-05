@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+import copy
 import gc
 import os
 import time
@@ -588,14 +589,14 @@ class Worker(WorkerBase):
 
             # Weights from external model loader process
             with self._external_weight_charges.track():
-                self.external_weight_memory = get_model_loader(
+                external_weight_memory = get_model_loader(
                     self.load_config
                 ).get_external_weight_memory(self.vllm_config)
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, self.external_weight_memory
+                init_snapshot, self.cache_config, external_weight_memory
             )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -1051,10 +1052,18 @@ class Worker(WorkerBase):
         self.requested_memory = self._resolve_requested_memory()
 
     def _resolve_requested_memory(self) -> int:
+        fallback_bytes = self._external_weight_charges.fallback_bytes
+        snapshot = self.init_snapshot
+        if fallback_bytes:
+            # init_snapshot was taken while the daemon still held the
+            # fallen-back weights; a removed charge means that memory is
+            # free again, so count it as available for the validation.
+            snapshot = copy.copy(snapshot)
+            snapshot.free_memory += fallback_bytes
         return request_memory(
-            self.init_snapshot,
+            snapshot,
             self.cache_config,
-            self.external_weight_memory - self._external_weight_charges.fallback_bytes,
+            self._external_weight_charges.current_bytes,
         )
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":

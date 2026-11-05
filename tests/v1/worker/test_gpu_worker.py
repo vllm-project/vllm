@@ -33,8 +33,13 @@ def test_v2_gpu_worker_requires_triton(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("fallback,requested", [(False, 72), (True, 92)])
-def test_disabling_extensible_cache_keeps_fallback_budget(fallback, requested):
+@pytest.mark.parametrize(
+    "fallback,free_memory,requested",
+    [(False, 100, 72), (True, 100, 92), (True, 80, 92)],
+)
+def test_disabling_extensible_cache_keeps_fallback_budget(
+    fallback, free_memory, requested
+):
     """Re-sizing after a disk fallback must not re-charge the daemon's weights."""
     from vllm.config import VllmConfig
     from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -48,9 +53,8 @@ def test_disabling_extensible_cache_keeps_fallback_budget(fallback, requested):
     )
     worker.cache_config.enable_extensible_kv_cache = True
     worker.init_snapshot = MemorySnapshot(
-        total_memory=100, free_memory=100, device="cpu", auto_measure=False
+        total_memory=100, free_memory=free_memory, device="cpu", auto_measure=False
     )
-    worker.external_weight_memory = 20
     with worker._external_weight_charges.track():
         record_external_weight_charge("weights.sock", False, 20)
         if fallback:
