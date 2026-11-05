@@ -808,7 +808,10 @@ class RoutedExperts(PluggableLayer):
             shard_dim += 1
 
         expert_data = param.data if full_load else param.data[expert_id]
-        experts = range(self.local_num_experts) if full_load else (expert_id,)
+        if full_load:
+            experts: Iterable[int] = range(self.local_num_experts)
+        else:  # global input scales are indexed by the global id
+            experts = (global_expert_id if use_global_sf else expert_id,)
         mark_experts_loaded(param, experts, shard_id)
 
         if "bias" in weight_name:

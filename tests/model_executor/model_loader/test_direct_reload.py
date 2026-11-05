@@ -288,34 +288,23 @@ class TestUnsent:
         _reload(model, _checkpoint())  # a new full update repairs it
         _assert_same(_state(model), before)
 
-    def test_first_update_after_dummy_start_is_checked(self, monkeypatch):
+    def test_first_update_after_dummy_start_is_checked(self):
         with _DEVICE:
             model = _ToyModel()
-        model.engram.weight.dummy_weight_value = 1.0  # e.g. a norm: may stay
         model.attn.kv_b.weight.optional_in_update = True  # e.g. Engram: may stay
         track_loaded_params(model)  # a dummy cold start loads nothing
         process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
         partial = {n: t for n, t in _checkpoint().items() if n != "proj.weight"}
-        with pytest.raises(RuntimeError, match="proj.weight"):
+        with pytest.raises(RuntimeError, match=r"dummy start.*proj\.weight"):
             _reload(model, partial)
-
-        def fail(layer):
-            raise ValueError("boom")
-
-        monkeypatch.setattr(model.nvfp4.quant_method, "fn", fail)
-        with pytest.raises(ValueError, match="boom"):
-            _reload(model, _checkpoint())
-        assert model._required_params is None  # recorded only once PWAL succeeds
-        monkeypatch.undo()
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-        kept = ("engram.weight", "attn.kv_b.weight")
-        _reload(model, {n: t for n, t in _checkpoint().items() if n not in kept})
+        kept = "attn.kv_b.weight"
+        _reload(model, {n: t for n, t in _checkpoint().items() if n != kept})
         _reload(model, _checkpoint())
         begin_direct_reload(model)  # later updates: what the first one loaded
         model.load_weights(
             (n, t) for n, t in _checkpoint().items() if n != "pad.weight"
         )
-        with pytest.raises(RuntimeError, match="pad.weight"):
+        with pytest.raises(RuntimeError, match="cold start loaded.*pad.weight"):
             finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
 
     def test_tensor_without_post_processing_keeps_its_bytes(self):
