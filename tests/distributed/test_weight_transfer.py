@@ -402,6 +402,10 @@ def test_nccl_receive_weights_without_init_raises():
         engine.receive_weights(update_info)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Off CUDA/ROCm the unique-id rendezvous is rejected before PyNccl.",
+)
 def test_nccl_disabled_communicator_raises(monkeypatch):
     """A disabled PyNccl communicator would turn every broadcast into a no-op."""
     monkeypatch.setenv("VLLM_DISABLE_PYNCCL", "1")

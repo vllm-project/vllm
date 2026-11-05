@@ -17,7 +17,9 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.weight_transfer.nccl_common import (
+        WeightTransferCommunicator,
+    )
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -132,7 +134,7 @@ class SparseNCCLWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: WeightTransferCommunicator | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize the NCCL process group with the trainer."""
@@ -234,7 +236,7 @@ class SparseNCCLTrainerWeightTransferEngine(
                 "round's patches to send_weights(patches) instead."
             )
         super().__init__(client=client, source=source, is_sender=is_sender)
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: WeightTransferCommunicator | None = None
 
     @classmethod
     def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:

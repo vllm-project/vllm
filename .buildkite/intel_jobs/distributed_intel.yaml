@@ -32,3 +32,6 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests && pytest -v -s v1/shutdown
       --deselect="tests/v1/shutdown/test_forward_error.py::test_llm_model_error[hmellor/tiny-random-LlamaForCausalLM-2-True]"'
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests && pytest -v -s distributed/test_weight_transfer_torch_dist.py'
