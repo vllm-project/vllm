@@ -5,13 +5,18 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import Qwen3MoeConfig
 
 import vllm.model_executor.layers.fused_moe.layer as moe_layer
 import vllm.model_executor.layers.fused_moe.router.router_factory as router_factory
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    SubstitutedRoutedExperts,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
@@ -34,6 +39,10 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.models.gpt_oss import GptOssRoutedExperts
 from vllm.model_executor.models.llama4 import Llama4MoE
+from vllm.model_executor.models.transformers.moe import (
+    TransformersMoERunner,
+    TransformersMoEState,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 
@@ -136,17 +145,12 @@ def test_platform_router_constructor_rejects_non_router() -> None:
         create_fused_moe_router(top_k=2, global_num_experts=8)
 
 
-@pytest.mark.parametrize("enable_eplb", [False, True])
-def test_platform_adapts_selected_fused_moe_components(monkeypatch, enable_eplb):
-    """Factory adaptation preserves model loading and the router's EPLB state."""
-
-    class PlatformRoutedExperts(GptOssRoutedExperts):
+@pytest.fixture
+def platform_moe_components(monkeypatch):
+    class PlatformRoutedExperts(RoutedExperts):
         pass
 
-    class ModelRunner(MoERunner):
-        pass
-
-    class PlatformRunner(ModelRunner):
+    class PlatformRunner(MoERunner):
         pass
 
     class PlatformRouter(CPURouter):
@@ -157,25 +161,27 @@ def test_platform_adapts_selected_fused_moe_components(monkeypatch, enable_eplb)
 
         @classmethod
         def get_fused_moe_router_constructor(cls, selected_cls):
-            if selected_cls in (CPURouter, FusedTopKRouter):
-                return PlatformRouter
-            return selected_cls
+            return PlatformRouter
 
         @classmethod
         def get_fused_moe_routed_experts_cls(cls, selected_cls):
-            return (
-                PlatformRoutedExperts
-                if selected_cls is GptOssRoutedExperts
-                else selected_cls
-            )
+            return PlatformRoutedExperts
 
         @classmethod
         def get_fused_moe_runner_cls(cls, selected_cls):
-            return PlatformRunner if selected_cls is ModelRunner else selected_cls
+            return PlatformRunner
 
     platform = TestPlatform()
     monkeypatch.setattr(moe_layer, "current_platform", platform, raising=False)
     monkeypatch.setattr(router_factory, "current_platform", platform)
+    return PlatformRoutedExperts, PlatformRunner, PlatformRouter
+
+
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_platform_provides_default_fused_moe_components(
+    platform_moe_components, enable_eplb
+):
+    experts_cls, runner_cls, router_cls = platform_moe_components
     with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
         runner = moe_layer.FusedMoEFactory(
             num_experts=4,
@@ -186,15 +192,45 @@ def test_platform_adapts_selected_fused_moe_components(monkeypatch, enable_eplb)
             tp_size=1,
             dp_size=1,
             pcp_size=1,
+            enable_eplb=enable_eplb,
+            prefix="platform_defaults",
+        )
+    assert isinstance(runner, runner_cls)
+    assert isinstance(runner.router, router_cls)
+    assert isinstance(runner.routed_experts, experts_cls)
+    assert (runner.eplb_state is not None) == enable_eplb
+
+
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_platform_preserves_model_fused_moe_components(
+    platform_moe_components, enable_eplb
+):
+    """Explicit components retain model loading, runner arguments and routing."""
+    moe_state = TransformersMoEState()
+    eplb_state = EplbLayerState() if enable_eplb else None
+    with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
+        router = CPURouter(top_k=2, global_num_experts=4, eplb_state=eplb_state)
+        runner = moe_layer.FusedMoEFactory(
+            num_experts=4,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=128,
+            params_dtype=torch.bfloat16,
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
             routed_experts_cls=GptOssRoutedExperts,
-            runner_cls=ModelRunner,
+            runner_cls=TransformersMoERunner,
+            runner_args={"moe_state": moe_state},
+            router=router,
             enable_eplb=enable_eplb,
             prefix="platform_components",
         )
-    assert isinstance(runner, PlatformRunner)
-    assert isinstance(runner.router, PlatformRouter)
-    assert isinstance(runner.routed_experts, PlatformRoutedExperts)
-    assert (runner.eplb_state is not None) == enable_eplb
+    assert isinstance(runner, TransformersMoERunner)
+    assert runner.router is router
+    assert isinstance(runner.routed_experts, GptOssRoutedExperts)
+    assert runner.eplb_state is eplb_state
+    assert runner._moe_state is moe_state
 
     experts = runner.routed_experts
     weight = experts.w13_weight
@@ -205,6 +241,53 @@ def test_platform_adapts_selected_fused_moe_components(monkeypatch, enable_eplb)
         weight, checkpoint_weight, "w13_weight", "gpt_oss_w13", 0, return_success=False
     )
     torch.testing.assert_close(weight[0], checkpoint_weight.t(), rtol=0, atol=0)
+
+
+def test_platform_preserves_expert_substitution(platform_moe_components, tmp_path):
+    hf_config = Qwen3MoeConfig(
+        hidden_size=128,
+        intermediate_size=128,
+        moe_intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        vocab_size=128,
+        max_position_embeddings=128,
+        approximate_experts={"0": [1]},
+    )
+    hf_config.architectures = ["Qwen3MoeForCausalLM"]
+    hf_config.save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            enforce_eager=True,
+        )
+    )
+    with set_current_vllm_config(config), torch.device(DEVICE):
+        runner = moe_layer.FusedMoEFactory(
+            num_experts=4,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=128,
+            params_dtype=torch.bfloat16,
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
+            prefix="model.layers.0.mlp.experts",
+        )
+    experts = runner.routed_experts
+    assert isinstance(experts, SubstitutedRoutedExperts)
+    assert experts.w13_weight.shape[0] == 3
+    substitution = experts.expert_substitution
+    assert substitution.substituted_expert_ids == (1,)
+    assert substitution.physical_expert_id(2) == 1
+    value = torch.arange(128, dtype=torch.bfloat16, device=DEVICE)
+    substitution.weight_loader(substitution.values, value, 1)
+    torch.testing.assert_close(substitution.values[0], value, rtol=0, atol=0)
 
 
 def test_platform_simulator_preserves_selected_routing_method(monkeypatch):
