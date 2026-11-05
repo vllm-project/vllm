@@ -454,6 +454,9 @@ class BuildkiteClient:
         return response
 
     def create_build(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        # Bot builds are explicit commands. Pipeline branch settings gate
+        # webhooks and would otherwise reject them, e.g. amd-ci on main.
+        body = {**body, "ignore_pipeline_branch_filters": True}
         return self._request(body=body, method="POST")
 
     def retry_failed_jobs(
@@ -696,7 +699,6 @@ def create_build_payload(
         "pull_request_base_branch": pr["base"]["ref"],
         "pull_request_repository": pr["head"]["repo"]["clone_url"],
         "pull_request_labels": [label["name"] for label in pr["labels"]],
-        "ignore_pipeline_branch_filters": True,
         "env": env,
         "meta_data": {
             "github-comment-id": str(comment_id),
@@ -1262,7 +1264,6 @@ def handle_rocm_cache(
             "commit": "HEAD",
             "branch": "main",
             "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
-            "ignore_pipeline_branch_filters": True,
             "env": {
                 "ROCM_PROMOTE_PR": str(pr["number"]),
                 "ROCM_PROMOTE_SHA": sha,

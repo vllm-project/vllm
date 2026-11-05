@@ -566,7 +566,6 @@ class RunCiCommandTest(unittest.TestCase):
                 "pull_request_base_branch": "main",
                 "pull_request_repository": ("https://github.com/contributor/vllm.git"),
                 "pull_request_labels": ["ready", "v1"],
-                "ignore_pipeline_branch_filters": True,
                 "env": {
                     "VLLM_CI_GITHUB_COMMENT_ID": "99",
                     "VLLM_CI_TRIGGERED_BY": "reviewer",
@@ -1559,6 +1558,28 @@ class RunCiCommandTest(unittest.TestCase):
         )
         self.assertIn("cancellation of 2 AMD CI builds", github.comments[0])
 
+    def test_buildkite_create_build_ignores_pipeline_branch_filters(self) -> None:
+        transport = FakeTransport({"number": 123})
+        client = BuildkiteClient(
+            "secret",
+            "vllm",
+            "amd-ci",
+            transport=transport,
+        )
+
+        client.create_build({"branch": "main", "commit": "HEAD"})
+
+        call = transport.calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertEqual(
+            call["body"],
+            {
+                "branch": "main",
+                "commit": "HEAD",
+                "ignore_pipeline_branch_filters": True,
+            },
+        )
+
     def test_buildkite_cancel_uses_cancel_build_endpoint(self) -> None:
         transport = FakeTransport({"number": 123, "state": "canceling"})
         client = BuildkiteClient(
@@ -1678,9 +1699,6 @@ class RocmCacheTest(unittest.TestCase):
 
         (build,) = amd.created_builds
         self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
-        # Without it, AMD CI rejects the main build with 422: "Branches have
-        # been disabled for this pipeline".
-        self.assertIs(build["ignore_pipeline_branch_filters"], True)
         self.assertEqual(
             build["env"],
             {
