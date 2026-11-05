@@ -188,6 +188,30 @@ def test_internal_checkpoint_split(
     )
 
 
+def test_valid_internal_checkpoint_still_stops_a_mid_block_resume() -> None:
+    """A hash-aligned resume inside a Mamba block must not run to the prompt end.
+
+    The internal checkpoint is valid on a long enough chunk, which used to
+    drop the next-block stop. cache_blocks then keyed the copy-on-write block
+    at that boundary even though no chunk ended there (#65264).
+    """
+    resume_at = MAMBA_BLOCK_SIZE + ATTN_BLOCK_SIZE
+    prompt_len = resume_at + 3 * MAMBA_BLOCK_SIZE
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = resume_at
+
+    scheduled = _split(
+        request,
+        prompt_len - resume_at,
+        use_eagle=False,
+        partial_hit=True,
+        num_prefill_checkpoint_blocks=1,
+    )
+
+    assert resume_at % MAMBA_BLOCK_SIZE != 0
+    assert scheduled == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
+
+
 def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
     prompt_len = 3602
     resume_at = 1984
