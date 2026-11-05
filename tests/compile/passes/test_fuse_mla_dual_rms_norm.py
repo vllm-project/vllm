@@ -416,3 +416,134 @@ def test_fuse_mla_dual_rms_norm_fp8_group(
         )
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
+
+
+class MLAQkvAProjFp8PerTokenTestModel(MLADualRMSNormFp8PerTokenTestModel):
+    """Minimal model reproducing the FP8 MLA attention path with *per-token* quant
+    and the preshuffled FP8 ``fused_qkv_a_proj`` GEMM:
+
+    _rocm_aiter_preshuffled_per_token_w8a8_gemm -> split([q_dim, kv_dim])
+        +-- q_c (getitem 0) -> rocm_aiter_rmsnorm_fused_dynamic_quant
+        +-- kv_lora (getitem 1) -> split([kv_c_dim, k_pe_dim])
+                +-- kv_c (getitem 0) -> rms_norm (bf16)
+                +-- k_pe
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__(hidden_size)
+        self.q_weight.data.uniform_(0.5, 1.5)
+        self.kv_norm.weight.data.uniform_(0.5, 1.5)
+        w = torch.randn(self.q_dim + self.kv_dim, hidden_size) / hidden_size**0.5
+        self.w_scale = w.abs().amax(dim=-1, keepdim=True).float() / 448.0
+        self.w_fp8 = rocm_aiter_ops.shuffle_weight(
+            (w / self.w_scale).to(FP8_DTYPE), layout=(16, 16)
+        )
+
+    def forward(self, x: torch.Tensor):
+        x = torch.relu(x)
+        x_scale = x.abs().amax(dim=-1, keepdim=True).float() / 448.0 + 1e-6
+        x_fp8 = (x / x_scale).to(FP8_DTYPE)
+        projected = torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
+            x_fp8, self.w_fp8, x_scale, self.w_scale, None, torch.bfloat16
+        )
+
+        q_c, kv_lora = projected.split([self.q_dim, self.kv_dim], dim=-1)
+        kv_c, k_pe = kv_lora.split([self.kv_c_dim, self.k_pe_dim], dim=-1)
+
+        q_fp8, q_scale = torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant(
+            q_c, self.q_weight, self.eps, FP8_DTYPE
+        )
+        kv_normed = self.kv_norm(kv_c)
+
+        return q_fp8, q_scale, kv_normed, k_pe
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm.default,
+            *super().ops_in_model_before(),
+        ]
+
+    def ops_in_model_after(self):
+        return [
+            torch.ops.vllm.fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant.default
+        ]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [7168])
+@pytest.mark.parametrize("num_tokens", [4, 64, 768, 2048])
+@pytest.mark.skipif(
+    not (
+        is_aiter_found_and_supported()
+        and rocm_aiter_ops.triton_preshuffle_gemm_supports_skip_reduce()
+        and rocm_aiter_ops.is_triton_preshuffle_gemm_a8w8_tuned(
+            Q_DIM + KV_C_DIM + K_PE_DIM, 7168
+        )
+    ),
+    reason="Only test on ROCm with an AITER Triton preshuffle GEMM that supports "
+    "skip_reduce and is tuned",
+)
+def test_fuse_mla_qkv_a_proj_fp8_per_token(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch._dynamo.reset()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm"],
+            pass_config=PassConfig(
+                fuse_mla_dual_rms_norm=True,
+                eliminate_noops=True,
+            ),
+        ),
+    )
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            MLADualRMSNormFusionPass,
+        )
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(42)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        fusion_pass = MLADualRMSNormFusionPass(vllm_config)
+        passes = [
+            NoOpEliminationPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        ]
+        backend = TestBackend(*passes)
+        model = MLAQkvAProjFp8PerTokenTestModel(hidden_size)
+
+        x = torch.randn(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+
+        with torch.inference_mode():
+            outputs_unfused = model(x)
+            model_fused = torch.compile(model, backend=backend)
+            outputs_fused = model_fused(x)
+
+        q_fp8_u, q_scale_u, kv_normed_u, k_pe_u = outputs_unfused
+        q_fp8_f, q_scale_f, kv_normed_f, k_pe_f = outputs_fused
+
+        torch.testing.assert_close(k_pe_u, k_pe_f, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(kv_normed_u, kv_normed_f, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(q_scale_u, q_scale_f, atol=0, rtol=1e-2)
+
+        E4M3_STEP = 0.125
+        q_u, q_f = q_fp8_u.float(), q_fp8_f.float()
+        exact_frac = (q_u == q_f).float().mean().item()
+        assert exact_frac > 0.95, f"q: only {exact_frac:.4f} of elements bit-exact"
+        torch.testing.assert_close(q_u, q_f, atol=1e-2, rtol=E4M3_STEP)
+
+        assert fusion_pass.matched_count == 1, (
+            f"Expected 1 fused pair, got {fusion_pass.matched_count}"
+        )
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_after_ops(model.ops_in_model_after())
