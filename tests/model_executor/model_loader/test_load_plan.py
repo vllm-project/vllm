@@ -3,7 +3,8 @@
 """Load plan on tiny CPU models.
 
 Invariant: planning (after ``start_reload``, as the NCCL engine does at the
-first update) leaves the model unchanged, and a direct reload that copies each
+first update) changes no registration, attribute, address or layout, and no
+bytes outside checkpoint tensors, and a direct reload that copies each
 name's boxes into its ``get_dest`` tensors (and sends fallbacks in full through
 ``load_weights``) leaves every tensor byte for byte as a cold start on the same
 weights, at the same addresses, on the first update and on later ones that
@@ -106,7 +107,7 @@ def _planned_reload(model, plan: LoadPlan, weights) -> None:
 
 def _state(model):
     return {
-        name: (t.dtype, tuple(t.shape), t.detach().clone(), t.data_ptr())
+        name: (t.dtype, tuple(t.shape), t.stride(), t.detach().clone(), t.data_ptr())
         for name, t in [*model.named_parameters(), *model.named_buffers()]
     }
 
@@ -123,26 +124,36 @@ def _registrations(model):
     }
 
 
-def _plan(model, shapes) -> LoadPlan:
+def _plan(model, shapes, mirrors=()) -> LoadPlan:
     """``plan_loads`` (after ``start_reload``), checking that planning changed
-    no tensor, address, registration or module attribute."""
+    no registration, module attribute, address or layout, and no bytes but
+    those of checkpoint tensors (the bake runs loaders' constant writes and
+    reads of their destination for real) and of ``mirrors``: other tensors a
+    fallback's loader writes from its destination."""
     state, registrations = _state(model), _registrations(model)
     plan = plan_loads(model, _metadata(shapes))
     assert _registrations(model) == registrations
-    for name, (dtype, shape, data, ptr) in _state(model).items():
-        assert (dtype, shape, ptr) == (*state[name][:2], state[name][3]), name
-        assert torch.equal(data.view(torch.uint8), state[name][2].view(torch.uint8))
+    for name, t in [*model.named_parameters(), *model.named_buffers()]:
+        dtype, shape, stride, data, ptr = state[name]
+        assert (t.dtype, tuple(t.shape), t.stride(), t.data_ptr()) == (
+            dtype,
+            shape,
+            stride,
+            ptr,
+        ), name
+        if not hasattr(t, "_ckpt") and name not in mirrors:
+            assert torch.equal(t.view(torch.uint8), data.view(torch.uint8)), name
     return plan
 
 
-def _check_plan_equals_cold_start(make, shapes):
+def _check_plan_equals_cold_start(make, shapes, mirrors=()):
     """Plan at the first update's start; that update and a second one reusing
     the plan, with new random weights, must each equal a cold start on them,
     byte for byte, and keep every address."""
     model = _cold_start(make, _checkpoint(shapes, seed=0))
-    ptrs = {n: s[3] for n, s in _state(model).items()}
+    ptrs = {n: s[4] for n, s in _state(model).items()}
     start_reload(model)
-    plan = _plan(model, shapes)
+    plan = _plan(model, shapes, mirrors)
     for seed in (1, 2):
         if seed > 1:
             start_reload(model)
@@ -150,10 +161,10 @@ def _check_plan_equals_cold_start(make, shapes):
         _planned_reload(model, plan, new)
         actual, expected = _state(model), _state(_cold_start(make, new))
         assert actual.keys() == expected.keys()
-        for name, (dtype, shape, data, ptr) in actual.items():
-            assert (dtype, shape) == expected[name][:2], name
+        for name, (dtype, shape, stride, data, ptr) in actual.items():
+            assert (dtype, shape, stride) == expected[name][:3], name
             assert torch.equal(
-                data.view(torch.uint8), expected[name][2].view(torch.uint8)
+                data.view(torch.uint8), expected[name][3].view(torch.uint8)
             )
             assert ptr == ptrs[name], f"{name} moved"
     return model, plan
@@ -409,13 +420,100 @@ def test_fallbacks(loader, reason):
 
 
 def test_noop_to_and_constant_fill_stay_direct():
-    def loader(param, loaded):
-        param.zero_()  # PWAL owns constants: ignored
-        param.copy_(loaded.to(param.device).to(BF16))
+    """A constant write into a checkpoint tensor (padding, as
+    ``VocabParallelEmbedding`` fills) runs while planning and stays out of
+    the plan: post-load processing owns padding."""
 
+    def loader(param, loaded):
+        param[4:].fill_(1)
+        param[:4].copy_(loaded.to(param.device).to(BF16))
+
+    make, shapes = _single(loader, param_shape=(6,))
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    model.layer.weight.zero_()
+    plan = _plan(model, shapes)
+    assert plan.get_dest("layer.weight") is not None
+    assert model.layer.weight[4:].tolist() == [1, 1]  # ran for real
+    assert model.layer.weight[:4].tolist() == [0] * 4  # the trace wrote nothing
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [
+        lambda p, w: p.copy_(w),
+        lambda p, w: p.__setitem__(slice(None), w),
+        lambda p, w: p.index_put_((torch.arange(4),), w),
+        lambda p, w: p.add_(w),
+        lambda p, w: torch.ops.aten.copy_(p, w),
+    ],
+    ids=["copy_", "setitem", "index_put_", "add_", "aten-copy_"],
+)
+def test_trace_writes_reach_no_memory(loader):
+    """The bake runs loaders on the real tensors, but an incoming tensor is a
+    data-free trace: writes from it are recorded or run on meta, never on the
+    destination."""
+    make, shapes = _single(loader)
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    model.layer.weight.fill_(7)
+    plan_loads(model, _metadata(shapes))
+    assert model.layer.weight.tolist() == [7] * 4
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [
+        lambda p, w: (p.copy_(w), p.sum()),
+        lambda p, w: (p.copy_(w), p[0].item()),
+        lambda p, w: (torch.equal(p, p), p.copy_(w)),
+    ],
+    ids=["sum", "item", "equal-before-copy"],
+)
+def test_reading_the_destination_falls_back(loader):
     make, shapes = _single(loader)
     _, plan = _check_plan_equals_cold_start(make, shapes)
-    assert plan.get_dest("layer.weight") is not None
+    assert plan.get_dest("layer.weight") is None
+    assert "reads the destination" in (plan.entries["layer.weight"].reason or "")
+
+
+def _mirror_conv1d(mirror, param, loaded):
+    param.copy_(loaded)
+    if not param.is_meta:  # the planner used to see meta stand-ins
+        mirror.copy_(loaded.view(2, 2).t())
+
+
+def _mirror_norm(mirror, param, loaded):
+    default_weight_loader(param, loaded)
+    if not param.is_meta:
+        mirror.copy_(param.data.view(2, 2))
+
+
+@pytest.mark.parametrize(
+    "loader,reason",
+    [
+        (_mirror_conv1d, "not a checkpoint tensor"),
+        (_mirror_norm, "reads the destination"),
+    ],
+    ids=["from-incoming", "from-destination"],
+)
+def test_mirror_buffer_falls_back(loader, reason):
+    """Kimi-K3 KDA's decode copies: a loader that also writes a non-persistent
+    buffer, behind ``if not param.is_meta``, is a fallback so the buffer is
+    reloaded too."""
+
+    def make():
+        model = _Toy()
+        model.layer = _Layer()
+        mirror = torch.zeros(2, 2, dtype=BF16)
+        model.layer.register_buffer("mirror", mirror, persistent=False)
+        model.layer.weight = _param(4, loader=lambda p, w: loader(mirror, p, w))
+        return model
+
+    shapes = {"layer.weight": ((4,), BF16)}
+    _, plan = _check_plan_equals_cold_start(make, shapes, mirrors={"layer.mirror"})
+    assert plan.get_dest("layer.weight") is None
+    assert reason in (plan.entries["layer.weight"].reason or "")
 
 
 @pytest.mark.parametrize(
@@ -478,8 +576,9 @@ def test_value_read_reruns_without_the_name():
 
 
 def test_meta_failure_is_not_called_a_value_read():
-    """An op that fails on meta stops the bake like a value read, but the
-    fallback reason names the failing op, not "reads tensor values"."""
+    """An op on a trace that fails on meta stops the bake like a value read,
+    but the fallback reason names the failing op, not "reads tensor
+    values"."""
 
     def loader(model, param, loaded):
         # A shape error. On the real path the loader swallows it; under the
@@ -492,7 +591,7 @@ def test_meta_failure_is_not_called_a_value_read():
     make, shapes = _two_names(loader)
     _, plan = _check_plan_equals_cold_start(make, shapes)
     reason = plan.entries["a.weight"].reason or ""
-    assert "fails on meta stand-ins" in reason and "reads tensor values" not in reason
+    assert "fails on meta" in reason and "reads tensor values" not in reason
     assert plan.get_dest("b.weight") is not None
 
 
@@ -508,6 +607,31 @@ def test_state_change_makes_only_its_name_a_fallback():
     plan = _plan(model, shapes)  # also checks the change was undone
     assert "changes module state" in (plan.entries["a.weight"].reason or "")
     assert plan.get_dest("b.weight") is not None
+
+
+def test_layout_change_is_undone_and_falls_back():
+    """A loader that re-lays its parameter out (``param.data = ...``) changes
+    state the direct path would not: planning restores the layout ``begin``
+    applied and makes the name a fallback."""
+
+    def loader(param, loaded):
+        param.copy_(loaded)
+        param.data = param.data.t()
+
+    def make():
+        model = _Toy()
+        model.layer = _Layer(
+            lambda layer: setattr(layer.weight, "data", layer.weight.t())
+        )
+        model.layer.weight = _param(2, 2, loader=loader)
+        return model
+
+    shapes = {"layer.weight": ((2, 2), BF16)}
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    start_reload(model)
+    plan = _plan(model, shapes)  # also checks the layout was restored
+    reason = plan.entries["layer.weight"].reason or ""
+    assert "changes module state (layer.weight)" in reason
 
 
 class _Paired(_Toy):

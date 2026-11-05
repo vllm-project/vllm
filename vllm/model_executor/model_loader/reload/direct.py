@@ -33,7 +33,6 @@ __all__ = [
     "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
-    "loadable_slots",
     "record_checkpoint_layout",
 ]
 
@@ -68,28 +67,20 @@ def _layout(t: torch.Tensor) -> tuple:
     return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
 
 
-def loadable_slots(
-    model: torch.nn.Module,
-) -> Iterator[tuple[str, dict[str, torch.Tensor], str, torch.Tensor]]:
-    """(module name, ``_parameters`` or ``_buffers``, key, tensor) for every
-    parameter and persistent buffer slot; a tied tensor once per slot."""
-    for module_name, module in model.named_modules():
-        for key, t in module._parameters.items():
-            if t is not None:
-                yield module_name, module._parameters, key, t
-        for key, t in module._buffers.items():
-            if t is not None and key not in module._non_persistent_buffers_set:
-                yield module_name, module._buffers, key, t
-
-
 def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """Parameters and persistent buffers, each object once."""
     seen: set[int] = set()
-    for module_name, _, key, tensor in loadable_slots(model):
-        if id(tensor) in seen:
-            continue
-        seen.add(id(tensor))
-        yield (f"{module_name}.{key}" if module_name else key), tensor
+    for module_name, module in model.named_modules():
+        persistent = (
+            (n, b)
+            for n, b in module._buffers.items()
+            if n not in module._non_persistent_buffers_set
+        )
+        for name, tensor in [*module._parameters.items(), *persistent]:
+            if tensor is None or id(tensor) in seen:
+                continue
+            seen.add(id(tensor))
+            yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
 def _check_supported_modules(model: torch.nn.Module) -> None:

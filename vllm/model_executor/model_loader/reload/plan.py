@@ -3,11 +3,12 @@
 """Load plan: which part of each checkpoint tensor this rank needs, and where
 in live memory those bytes go.
 
-``plan_loads`` traces the model's ``load_weights`` once (``bake.py``),
-between ``start_reload`` and ``finish_reload`` so that it sees the layout
-direct mode actually restored (the NCCL engine does it at its first target
-update), and reduces each traced ``copy_`` to a box of the checkpoint tensor
-and a strided region of the target's storage (``geometry.py``). A name is
+``plan_loads`` traces the model's ``load_weights`` once (``bake.py``) on
+the real tensors, between ``start_reload`` and ``finish_reload`` so that it
+sees the layout direct mode actually restored (the NCCL engine does it at its
+first target update), and reduces each traced ``copy_`` to a box of the
+checkpoint tensor and a strided region of the target's storage
+(``geometry.py``). A name is
 direct only if every byte it writes is a copy of one incoming byte; anything
 else is a fallback, which the engine sends in full through ``load_weights``.
 The plan holds for every later update of the same model.
@@ -30,7 +31,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
-from .bake import Copy, StandIns, Traced, trace_loads
+from .bake import Copy, Targets, Traced, trace_loads
 from .direct import direct_reload_active, direct_reload_enabled
 from .geometry import (
     Box,
@@ -93,10 +94,11 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
     """Trace ``model.load_weights`` over the declared checkpoint tensors once
     and return where each lands on this rank.
 
-    Call between ``start_reload`` and ``finish_reload``: the plan takes every
-    tensor's layout from what ``begin_direct_reload`` applied, its single
-    source. It is a dry run on meta stand-ins and changes no parameter or
-    persistent buffer.
+    Call between ``start_reload`` and ``finish_reload``: the plan traces
+    the real tensors in the layout ``begin_direct_reload`` applied. Incoming
+    tensors are data-free traces, so nothing is loaded; loaders' constant
+    writes (``fill_``, ``zero_``) do land in checkpoint tensors, which the
+    update rewrites. Module and parameter state is restored.
 
     Raises:
         ValueError: a name is declared twice.
@@ -119,8 +121,8 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
     # VLLM_DIRECT_RELOAD_EXCLUDE_REGEX) is missing from `metas`.
 
     t0 = time.perf_counter()
-    stand_ins = StandIns(model)
-    traced = trace_loads(model, metas, stand_ins)
+    targets = Targets(model)
+    traced = trace_loads(model, metas, targets)
     if traced.lonely:
         lonely = list(dict.fromkeys(traced.lonely))
         raise RuntimeError(
@@ -128,11 +130,11 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
             f"(e.g. {lonely[:3]}); their loaders combine several checkpoint "
             "tensors. Move the combine into process_weights_after_loading."
         )
-    for name, reason in _overlaps(traced, stand_ins).items():
+    for name, reason in _overlaps(traced, targets).items():
         traced.reasons.setdefault(name, reason)
-    entries = {name: _entry(meta, traced, stand_ins) for name, meta in metas.items()}
+    entries = {name: _entry(meta, traced, targets) for name, meta in metas.items()}
     dests = {
-        name: tuple((w.src, _dest(stand_ins, w, e.dtype)) for w in e.writes)
+        name: tuple((w.src, _dest(targets, w, e.dtype)) for w in e.writes)
         for name, e in entries.items()
         if e.writes is not None
     }
@@ -181,14 +183,14 @@ def check_plannable(model: torch.nn.Module) -> None:
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
 
 
-def _entry(meta: "ParamMeta", traced: Traced, stand_ins: StandIns) -> Entry:
+def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:
     name, shape = meta.name, tuple(meta.shape)
     full: Box = tuple((0, n) for n in shape)
     try:
         if name in traced.reasons:
             raise Fallback(traced.reasons[name])
         copies = traced.copies.get(name, ())
-        found = [_write(c, shape, meta.dtype, stand_ins) for c in copies]
+        found = [_write(c, shape, meta.dtype, targets) for c in copies]
     except Fallback as e:
         return Entry(name, shape, meta.dtype, (full,), None, str(e))
     writes = [w for w in found if w is not None]
@@ -200,7 +202,7 @@ def _entry(meta: "ParamMeta", traced: Traced, stand_ins: StandIns) -> Entry:
 
 
 def _write(
-    copy: Copy, shape: tuple[int, ...], dtype: torch.dtype, stand_ins: StandIns
+    copy: Copy, shape: tuple[int, ...], dtype: torch.dtype, targets: Targets
 ) -> Write | None:
     """``copy`` as a box and region; ``None`` if it copies nothing.
 
@@ -216,7 +218,7 @@ def _write(
             f"casts {src.dtype} to {copy.dtype} at copy_ "
             f"(send it as {copy.dtype} to make it direct)"
         )
-    target = stand_ins.by_storage.get(copy.storage)
+    target = targets.by_storage.get(copy.storage)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
     size = dtype.itemsize
@@ -240,22 +242,22 @@ def _write(
     )
 
 
-def _dest(stand_ins: StandIns, write: Write, dtype: torch.dtype) -> torch.Tensor:
+def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
     """The live tensor of ``write``, in the checkpoint dtype."""
-    target = stand_ins.by_name[(write.module, write.tensor)]
+    target = targets.by_name[(write.module, write.tensor)]
     r = write.dst
     offset = target.byte_offset // dtype.itemsize + r.offset
     storage = target.real.untyped_storage()
     return storage_view(storage, offset, r.shape, r.stride, dtype)
 
 
-def _overlaps(traced: Traced, stand_ins: StandIns) -> dict[str, str]:
+def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
     """Names whose writes share a byte with another write: direct writes land
     in any order, so these go through ``load_weights`` in arrival order."""
     runs: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
     for name, copies in traced.copies.items():
         for c in copies:
-            if c.storage in stand_ins.by_storage and 0 not in c.shape:
+            if c.storage in targets.by_storage and 0 not in c.shape:
                 spans = byte_runs(c.byte_offset, c.shape, c.stride, c.dtype.itemsize)
                 runs[c.storage] += [(a, b, name) for a, b in spans]
     reasons: dict[str, str] = {}

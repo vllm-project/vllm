@@ -1,25 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The load plan's bake: run ``load_weights`` once over ``TraceTensor``s with
-every parameter and persistent buffer replaced by a meta stand-in of itself as
-``begin_direct_reload`` left it, and record each ``copy_`` and every reason a
-name cannot be written directly."""
+"""The load plan's bake: run ``load_weights`` once over ``TraceTensor``s, on
+the model's real tensors as ``begin_direct_reload`` left them, and record each
+``copy_`` from a trace and every reason a name cannot be written directly.
+
+A trace has no data, so nothing it feeds reaches memory: its ``copy_`` is
+recorded, and any other op on it runs on meta copies of its arguments. Ops on
+real tensors alone run for real: ``_TargetGuard`` makes a loader that reads a
+checkpoint tensor a fallback, and constant writes into one (``fill_``,
+``zero_``) happen, mid-update, and stay out of the plan (post-load processing
+owns padding)."""
 
 import itertools
 from collections import defaultdict
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.utils import _pytree as pytree
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.logger import init_logger
-from vllm.model_executor.utils import storage_view
 
-from .direct import loadable_slots
+from .direct import _loadable_tensors
 from .trace import TraceSink, TraceTensor
 
 if TYPE_CHECKING:
@@ -30,7 +34,7 @@ logger = init_logger(__name__)
 _META = torch.device("meta")
 
 
-# ---- stand-ins
+# ---- targets
 
 
 @dataclass
@@ -43,64 +47,21 @@ class Target:
     byte_offset: int  # in its storage, as `begin_direct_reload` viewed it
 
 
-class _Slot(NamedTuple):
-    tensors: dict[str, torch.Tensor]  # a module's _parameters or _buffers
-    key: str
-    original: torch.Tensor
-    stand_in: torch.Tensor
-
-
-class StandIns:
-    """Every parameter and persistent buffer as it is now, on meta: one meta
-    storage per real storage, so tensors sharing storage (tied weights) alias
-    exactly as in the model.
-
-    Built after ``begin_direct_reload``, so each tensor's current layout and
-    loader attributes are the ones ``begin`` applied: the stand-ins copy them
-    rather than re-deriving the checkpoint layout from the cold-start record
-    (``begin`` uses the current storage offset of a tensor whose storage
-    moved, for example by a ``set_`` into a fused buffer)."""
+class Targets:
+    """Every checkpoint tensor in the layout ``begin_direct_reload`` applied
+    (its single layout source; for example, a tensor ``set_`` into a fused
+    buffer keeps its new offset), by storage and by name."""
 
     def __init__(self, model: torch.nn.Module):
-        self.slots: list[_Slot] = []
-        self.by_storage: dict[int, Target] = {}  # meta storage key
+        self.by_storage: dict[int, Target] = {}
         self.by_name: dict[tuple[str, str], Target] = {}
-        stand_ins: dict[int, torch.Tensor] = {}
-        meta_storages: dict[int, torch.UntypedStorage] = {}
-        for module_name, tensors, key, t in loadable_slots(model):
-            if id(t) not in stand_ins:
-                storage = t.untyped_storage()
-                if storage._cdata not in meta_storages:
-                    meta_storages[storage._cdata] = torch.UntypedStorage(
-                        storage.nbytes(), device=_META
-                    )
-                meta = meta_storages[storage._cdata]
-                stand_ins[id(t)] = self._stand_in(module_name, key, t, meta)
-            self.slots.append(_Slot(tensors, key, t, stand_ins[id(t)]))
-
-    def _stand_in(
-        self, module_name: str, key: str, t: torch.Tensor, meta: torch.UntypedStorage
-    ) -> torch.Tensor:
-        offset = t.storage_offset()
-        stand_in = storage_view(meta, offset, t.shape, t.stride(), t.dtype)
-        stand_in.__class__ = t.__class__
-        stand_in.__dict__ = t.__dict__.copy()
-        if hasattr(t, "_ckpt"):  # a checkpoint tensor: a write target
-            target = Target(module_name, key, t, offset * t.dtype.itemsize)
-            # writes into this storage are labelled with its first target
-            self.by_storage.setdefault(meta._cdata, target)
-            self.by_name[(module_name, key)] = target
-        return stand_in
-
-    @contextmanager
-    def swapped(self) -> Iterator[None]:
-        for slot in self.slots:
-            slot.tensors[slot.key] = slot.stand_in
-        try:
-            yield
-        finally:
-            for slot in self.slots:
-                slot.tensors[slot.key] = slot.original
+        for name, t in _loadable_tensors(model):
+            if hasattr(t, "_ckpt"):
+                module, _, key = name.rpartition(".")
+                target = Target(module, key, t, t.storage_offset() * t.dtype.itemsize)
+                # writes into a storage are labelled with its first target
+                self.by_storage.setdefault(t.untyped_storage()._cdata, target)
+                self.by_name[(module, key)] = target
 
 
 def _storage_key(t: torch.Tensor) -> int | None:
@@ -132,7 +93,7 @@ class Copy:
 
 @dataclass
 class _PlanSink(TraceSink):
-    stand_ins: StandIns
+    targets: Targets
     copies: dict[str, list[Copy]] = field(default_factory=lambda: defaultdict(list))
     fallback: dict[str, str] = field(default_factory=dict)
     # Names that stopped the bake, and why. Kept even though these also raise:
@@ -177,8 +138,9 @@ class _PlanSink(TraceSink):
     def unsupported(
         self, func: Callable, args: tuple, kwargs: dict, traces: list[TraceTensor]
     ) -> Any:
-        """Mark the names fallbacks and run ``func`` on meta stand-ins; tensor
-        results become traces of the first name, with no geometry."""
+        """Mark the names fallbacks and run ``func`` on meta copies of its
+        arguments, so it writes no real tensor; tensor results become traces
+        of the first name, with no geometry."""
         if _mutates_first_arg(func) and not isinstance(args[0], TraceTensor):
             reason = f"writes it without Tensor.copy_ ({func.__name__})"
             self.wrote.update(t._name for t in traces)
@@ -202,14 +164,12 @@ class _PlanSink(TraceSink):
         except Exception as e:  # no meta kernel, a shape error, ...
             # the error stays out of the reason, which groups the report
             logger.debug(
-                "load plan: %s on %s fails on meta stand-ins: %r",
+                "load plan: %s on %s fails on meta: %r",
                 func.__name__,
                 traces[0]._name,
                 e,
             )
-            self.stops.setdefault(
-                traces[0]._name, f"{func.__name__} fails on meta stand-ins"
-            )
+            self.stops.setdefault(traces[0]._name, f"{func.__name__} fails on meta")
             raise _BakeStopped from e
         originals = {id(m): a for m, a in zip(meta_flat, flat)}
         first = traces[0]
@@ -245,7 +205,8 @@ _METADATA_OPS = {
     torch.ops.aten.new_full,
 }
 # Writes into a target that do not read it: constants, or copies of tensors
-# that are not checkpoint tensors. Post-load processing owns padding.
+# that are not checkpoint tensors. They run, and stay out of the plan:
+# post-load processing owns padding.
 _CONSTANT_WRITES = {
     torch.ops.aten.copy_,
     torch.ops.aten.fill_,
@@ -255,10 +216,14 @@ _CONSTANT_WRITES = {
 
 
 class _TargetGuard(TorchDispatchMode):
-    """Catches loaders that read their destination, such as
-    ``composed_weight_loader``'s ``param.copy_(fn(param))``: the direct path
-    would skip ``fn``. The last name written into that storage (or the name
-    being loaded) becomes a fallback."""
+    """Ops on real tensors alone run for real. One that reads a checkpoint
+    tensor (not a view, not only its metadata) makes the last name written
+    into that storage (or the name being loaded) a fallback: the direct path
+    would skip it. For example ``composed_weight_loader``'s
+    ``param.copy_(fn(param))``, a check such as ``torch.equal(param, x)``, or
+    a mirror copied from ``param``. Reads that bypass the dispatcher
+    (``tolist()`` or ``numpy()`` of a CPU tensor, a raw kernel launch) go
+    unseen."""
 
     def __init__(self, sink: _PlanSink):
         super().__init__()
@@ -278,7 +243,7 @@ class _TargetGuard(TorchDispatchMode):
             return  # the trace's own handler marks its name
         for a in leaves:
             key = _storage_key(a) if isinstance(a, torch.Tensor) else None
-            if key is not None and key in self.sink.stand_ins.by_storage:
+            if key is not None and key in self.sink.targets.by_storage:
                 name = self.sink.last_writer.get(key, self.sink.current)
                 if name is not None:
                     self.sink.mark(name, f"its loader reads the destination ({packet})")
@@ -289,9 +254,11 @@ class _TargetGuard(TorchDispatchMode):
 
 
 class _Snapshot:
-    """Module and parameter attributes and CPU tensors, compared and restored
-    after a bake: a loader that sets such state will not run on the direct
-    path."""
+    """Module and parameter attributes, CPU tensors among them, and where each
+    parameter and persistent buffer points, compared and restored after a
+    bake: a loader that changes such state will not run on the direct path,
+    and planning must leave none behind. Target bytes are not saved; the
+    update rewrites them."""
 
     def __init__(self, model: torch.nn.Module):
         self.dicts: list[tuple[str, dict, dict[str, _Value]]] = []
@@ -300,6 +267,7 @@ class _Snapshot:
             for p_name, p in module._parameters.items():
                 if p is not None:
                     self._add(f"{module_name}.{p_name}", p.__dict__)
+        self.layouts = [(name, t, t.data) for name, t in _loadable_tensors(model)]
 
     def _add(self, label: str, d: dict) -> None:
         self.dicts.append((label, d, {k: _Value(v) for k, v in d.items()}))
@@ -315,7 +283,16 @@ class _Snapshot:
                 if k not in d or not value.holds(d[k]):
                     changed.append(f"{label}.{k}")
                     d[k] = value.restore()
+        for name, t, data in self.layouts:  # e.g. `param.data = ...`
+            if _where(t) != _where(data):
+                changed.append(name)
+                t.data = data
         return changed
+
+
+def _where(t: torch.Tensor) -> tuple:
+    storage = t.untyped_storage()._cdata
+    return storage, t.storage_offset(), t.shape, t.stride(), t.dtype
 
 
 class _Value:
@@ -363,11 +340,11 @@ def _bake(
     model: torch.nn.Module,
     metas: dict[str, "ParamMeta"],
     names: list[str],
-    stand_ins: StandIns,
+    targets: Targets,
 ) -> tuple[_PlanSink, list[str]]:
     """One traced ``load_weights`` over ``names``; returns the sink and the
     state it changed (restored)."""
-    sink = _PlanSink(stand_ins)
+    sink = _PlanSink(targets)
 
     def weights() -> Iterator[tuple[str, torch.Tensor]]:
         for name in names:
@@ -376,15 +353,14 @@ def _bake(
             shape = torch.Size(meta.shape)
             yield name, TraceTensor.checkpoint(name, shape, meta.dtype, sink)
 
-    with stand_ins.swapped():
-        snapshot = _Snapshot(model)
-        try:
-            with torch.no_grad(), _TargetGuard(sink):
-                model.load_weights(weights())
-        except _BakeStopped:
-            pass  # in sink.stops; the caller reruns without the name
-        finally:
-            changed = snapshot.restore()
+    snapshot = _Snapshot(model)
+    try:
+        with torch.no_grad(), _TargetGuard(sink):
+            model.load_weights(weights())
+    except _BakeStopped:
+        pass  # in sink.stops; the caller reruns without the name
+    finally:
+        changed = snapshot.restore()
     return sink, changed
 
 
@@ -397,7 +373,7 @@ class Traced:
 
 
 def trace_loads(
-    model: torch.nn.Module, metas: dict[str, "ParamMeta"], stand_ins: StandIns
+    model: torch.nn.Module, metas: dict[str, "ParamMeta"], targets: Targets
 ) -> Traced:
     """Bake all names. Each name whose loader reads tensor values (or runs an
     op that fails on meta) reruns the whole bake without it (at most one full
@@ -407,7 +383,7 @@ def trace_loads(
     names = list(metas)
     for rebakes in itertools.count():
         try:
-            sink, changed = _bake(model, metas, names, stand_ins)
+            sink, changed = _bake(model, metas, names, targets)
         except Exception as e:
             raise RuntimeError(f"load plan: tracing load_weights failed: {e!r}") from e
         if not sink.stops:
@@ -418,7 +394,7 @@ def trace_loads(
 
     lonely = [n for n in sink.fallback if n not in sink.wrote]
     if changed:
-        _bisect_state(model, metas, names, changed, sink, stand_ins, reasons, lonely)
+        _bisect_state(model, metas, names, changed, sink, targets, reasons, lonely)
     for name, reason in sink.fallback.items():
         reasons.setdefault(name, reason)
     return Traced(sink.copies, reasons, lonely, rebakes)
@@ -430,7 +406,7 @@ def _bisect_state(
     names: list[str],
     changed: list[str],
     sink: _PlanSink,
-    stand_ins: StandIns,
+    targets: Targets,
     reasons: dict[str, str],
     lonely: list[str],
 ) -> None:
@@ -446,15 +422,15 @@ def _bisect_state(
     half = len(names) // 2
     for part in (names[:half], names[half:]):
         try:
-            part_sink, part_changed = _bake(model, metas, part, stand_ins)
+            part_sink, part_changed = _bake(model, metas, part, targets)
         except Exception as e:
             if len(part) > 1:  # find the name that fails
-                _bisect_state(model, metas, part, [], sink, stand_ins, reasons, lonely)
+                _bisect_state(model, metas, part, [], sink, targets, reasons, lonely)
             else:
                 reasons[part[0]] = f"its loader fails when loaded alone ({e!r})"
                 lonely.append(part[0])
             continue
         if part_changed:
             _bisect_state(
-                model, metas, part, part_changed, part_sink, stand_ins, reasons, lonely
+                model, metas, part, part_changed, part_sink, targets, reasons, lonely
             )

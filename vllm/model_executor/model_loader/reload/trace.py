@@ -135,15 +135,15 @@ class TraceTensor(torch.Tensor):
             return func(*args, **kwargs)
 
     def _is_noop_to(self, args: tuple, kwargs: dict) -> bool:
-        """``.to()`` that changes neither dtype nor device."""
+        """``.to()`` that keeps the dtype, such as ``.to(param.device)``: a
+        device move keeps every byte, and a trace has no device to move
+        from."""
         kwargs = {k: v for k, v in kwargs.items() if k != "copy"}
         try:
-            device, dtype, _, _ = torch._C._nn._parse_to(*args, **kwargs)
+            _, dtype, _, _ = torch._C._nn._parse_to(*args, **kwargs)
         except (TypeError, RuntimeError):
             return False
-        return (device is None or torch.device(device) == self.device) and (
-            dtype is None or dtype == self.dtype
-        )
+        return dtype is None or dtype == self.dtype
 
     def _view(self, func: Callable, args: tuple, kwargs: dict) -> Any:
         """Run the view op on ``_geom`` for the children's shapes and
