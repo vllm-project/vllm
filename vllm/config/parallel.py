@@ -259,6 +259,13 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    pp_sdma_handoff: bool = False
+    """ROCm (gfx950): hand off the pipeline-parallel intermediate tensors on
+    SDMA copy engines instead of NCCL send / recv, so the copy uses no compute
+    units on either stage. Requires pipeline_parallel_size 2,
+    tensor_parallel_size 1, both stages on one node and eager execution
+    (cudagraph_mode NONE)."""
+
     enable_shm_tensor_arena: bool = False
     """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
     engine→worker broadcast through a zero-copy shared-memory arena instead of
@@ -1026,6 +1033,8 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
+            # How PP intermediate tensors travel; the values are the same.
+            "pp_sdma_handoff",
             "enable_shm_tensor_arena",
             "ray_workers_use_nsight",
             "ray_runtime_env",

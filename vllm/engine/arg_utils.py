@@ -649,6 +649,7 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
+    pp_sdma_handoff: bool = ParallelConfig.pp_sdma_handoff
     language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -1331,6 +1332,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-shm-tensor-arena",
             **parallel_kwargs["enable_shm_tensor_arena"],
+        )
+        parallel_group.add_argument(
+            "--pp-sdma-handoff", **parallel_kwargs["pp_sdma_handoff"]
         )
         parallel_group.add_argument(
             "--ubatch-size",
@@ -2622,6 +2626,7 @@ class EngineArgs:
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
             enable_shm_tensor_arena=self.enable_shm_tensor_arena,
+            pp_sdma_handoff=self.pp_sdma_handoff,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
