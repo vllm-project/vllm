@@ -16,6 +16,10 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
+    from vllm.v1.sample.ops.topk_topp_flashinfer import (
+        apply_top_k_top_p_flashinfer,
+        can_apply_top_k_top_p_flashinfer,
+    )
     from vllm.v1.sample.ops.topk_topp_triton import (
         _topk_topp,
         _topp_split_mask,
@@ -506,16 +510,24 @@ def apply_top_k_top_p(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     has_topp_only_rows: bool = True,
+    top_k_bounds: tuple[int, int] | None = None,
 ) -> torch.Tensor:
     """Apply top-k and/or top-p masking to logits.
 
     has_topp_only_rows must be True if any row has p < 1 and
     k >= logits.shape[-1] (no active top-k).
+
+    top_k_bounds is the host-side (min, max) of k over all rows, when the caller
+    tracks it. It enables the FlashInfer candidate path for eligible batches.
     """
     if p is None and k is None:
         return logits
 
     if HAS_TRITON:
+        if top_k_bounds is not None and can_apply_top_k_top_p_flashinfer(
+            logits, k, top_k_bounds
+        ):
+            return apply_top_k_top_p_flashinfer(logits, k, p, top_k_bounds)
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
         )

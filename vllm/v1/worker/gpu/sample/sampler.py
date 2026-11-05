@@ -342,7 +342,11 @@ class Sampler:
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
             processed_logits = apply_top_k_top_p(
-                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+                processed_logits,
+                top_k,
+                top_p,
+                has_topp_only_rows=has_topp_only_rows,
+                top_k_bounds=self.sampling_states.top_k_bounds(idx_mapping_np),
             )
             sampled = gumbel_sample(
                 processed_logits,

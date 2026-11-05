@@ -1225,3 +1225,90 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="Requires CUDA and flashinfer",
+)
+class TestFlashInferTopkToppFastpath:
+    """The FlashInfer candidate path must reproduce the Triton mask.
+
+    Inputs are dense and eligible, so exact ties (where the two kernels break
+    differently) do not arise here.
+    """
+
+    VOCAB_SIZE = 131072
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        torch.set_default_device(DEVICE_TYPE)
+        self.generator = Generator(device=DEVICE_TYPE).manual_seed(7)
+
+    def _kept(
+        self, k: torch.Tensor, p: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the (flashinfer, triton) kept-token masks for one batch."""
+        from vllm.v1.sample.ops.topk_topp_flashinfer import (
+            apply_top_k_top_p_flashinfer,
+        )
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.randn(
+            (k.shape[0], self.VOCAB_SIZE), generator=self.generator
+        ).float()
+        bounds = (int(k.min()), int(k.max()))
+        flashinfer = apply_top_k_top_p_flashinfer(logits.clone(), k, p, bounds)
+        triton = apply_top_k_top_p_triton(logits.clone(), k, p)
+        return flashinfer != float("-inf"), triton != float("-inf")
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 64])
+    @pytest.mark.parametrize("top_k", [1, 20, 256])
+    def test_top_k_only_matches_triton(self, batch_size: int, top_k: int):
+        k = torch.full((batch_size,), top_k, dtype=torch.int32)
+
+        flashinfer, triton = self._kept(k, None)
+
+        assert torch.equal(flashinfer, triton)
+        assert int(flashinfer.sum(dim=-1).max()) == top_k
+
+    @pytest.mark.parametrize(("top_k", "top_p"), [(20, 0.5), (20, 0.8), (256, 0.95)])
+    def test_top_k_topp_keeps_same_support(self, top_k: int, top_p: float):
+        k = torch.full((64,), top_k, dtype=torch.int32)
+        p = torch.full((64,), top_p, dtype=torch.float32)
+
+        flashinfer, triton = self._kept(k, p)
+
+        kept_delta = (flashinfer.sum(dim=-1) - triton.sum(dim=-1)).abs()
+        assert int(kept_delta.max()) <= 1
+
+    def test_heterogeneous_k_matches_triton(self):
+        k = torch.randint(1, 21, (64,), generator=self.generator).to(torch.int32)
+
+        flashinfer, triton = self._kept(k, None)
+
+        assert torch.equal(flashinfer, triton)
+
+    def test_dispatch_uses_bounds(self):
+        """Host bounds route to FlashInfer only for eligible batches."""
+        from vllm.v1.sample.ops.topk_topp_flashinfer import (
+            apply_top_k_top_p_flashinfer,
+        )
+        from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.randn((8, self.VOCAB_SIZE), generator=self.generator).float()
+        k = torch.full((8,), 20, dtype=torch.int32)
+
+        flashinfer = apply_top_k_top_p_flashinfer(logits.clone(), k, None, (20, 20))
+        triton = apply_top_k_top_p_triton(logits.clone(), k, None)
+
+        dispatched = apply_top_k_top_p(logits.clone(), k, None, top_k_bounds=(20, 20))
+        assert torch.equal(dispatched, flashinfer)
+        assert torch.equal(apply_top_k_top_p(logits.clone(), k, None), triton)
+
+        # Below FlashInfer's vocabulary floor the bounds are ignored.
+        narrow = torch.randn((8, 1024), generator=self.generator).float()
+        dispatched = apply_top_k_top_p(narrow.clone(), k, None, top_k_bounds=(20, 20))
+        triton = apply_top_k_top_p_triton(narrow.clone(), k, None)
+        assert torch.equal(dispatched, triton)

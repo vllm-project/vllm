@@ -4,8 +4,9 @@
 """Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
 All implementations return masked logits. Timings include a fresh-input copy.
-FlashInfer timings include candidate filtering and dense masked-logit reconstruction.
-L2 is flushed before each measured iteration, outside the timed region.
+The FlashInfer entry is the sampler's own path, so a case it is not eligible for
+is reported as skipped rather than timed. L2 is flushed before each measured
+iteration, outside the timed region.
 
 Scenarios:
 - top_k only (whole batch, partial batch)
@@ -20,12 +21,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import flashinfer
 import pandas as pd
 import torch
 from flashinfer.testing import bench_gpu_time_with_cupti
 
-from vllm.triton_utils import tl, triton
+from vllm.v1.sample.ops.topk_topp_flashinfer import (
+    apply_top_k_top_p_flashinfer,
+    can_apply_top_k_top_p_flashinfer,
+)
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
@@ -115,7 +118,7 @@ def create_logits(
     return logits
 
 
-def apply_top_k_top_p_flashinfer_fastpath(
+def apply_flashinfer_fastpath(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
@@ -123,131 +126,17 @@ def apply_top_k_top_p_flashinfer_fastpath(
     top_k_min: int,
     top_k_max: int,
 ) -> torch.Tensor:
-    """Filter device tensors with required host bounds on per-row k.
-
-    Every entry of k must lie in [top_k_min, top_k_max].
-    """
-    if can_use_fi_topk_topp_fastpath(logits, k, top_k_min, top_k_max):
-        return apply_fi_topk_topp_fastpath(
-            logits, k, p, top_k_min=top_k_min, top_k_max=top_k_max
-        )
-    raise NotImplementedError()
-
-
-def can_use_fi_topk_topp_fastpath(
-    logits: torch.Tensor,
-    k: torch.Tensor | None,
-    top_k_min: int,
-    top_k_max: int,
-) -> bool:
-    # Match FlashInfer's top-k-first gate, with no indices mapping.
-    return (
-        k is not None
-        and k.shape == (logits.shape[0],)
-        and 0 < top_k_min <= top_k_max <= 256
-        and logits.shape[-1] >= 65536
-        and top_k_max < logits.shape[-1]
-    )
-
-
-def apply_fi_topk_topp_fastpath(
-    logits: torch.Tensor,
-    k: torch.Tensor | None,
-    p: torch.Tensor | None,
-    *,
-    top_k_min: int,
-    top_k_max: int,
-) -> torch.Tensor:
+    """Run the sampler's FlashInfer path, or reject configurations it skips."""
+    top_k_bounds = (top_k_min, top_k_max)
+    if not can_apply_top_k_top_p_flashinfer(logits, k, top_k_bounds):
+        raise NotImplementedError(str(top_k_bounds))
     assert k is not None
-    values, indices = flashinfer.top_k(
-        logits.contiguous(),
-        top_k_max,
-        sorted=p is not None or top_k_min != top_k_max,
-        deterministic=True,
-        tie_break=1,
-        dsa_graph_safe=logits.shape[-1] % 4 != 0,
-    )
-    output = torch.full_like(logits, -float("inf"))
-    if p is None and top_k_min == top_k_max:
-        return output.scatter_(1, indices, values)
-    _fi_candidates_to_logits_kernel[(logits.shape[0],)](
-        values,
-        indices,
-        k,
-        p,
-        output,
-        values.stride(0),
-        values.stride(1),
-        indices.stride(0),
-        indices.stride(1),
-        output.stride(0),
-        output.stride(1),
-        k.stride(0),
-        p.stride(0) if p is not None else 0,
-        top_k_max,
-        p is not None,
-        top_k_min == top_k_max,
-        triton.next_power_of_2(top_k_max),
-        num_warps=4,
-    )
-    return output
-
-
-@triton.jit
-def _fi_candidates_to_logits_kernel(
-    values_ptr,
-    indices_ptr,
-    k_ptr,
-    p_ptr,
-    output_ptr,
-    value_row_stride,
-    value_col_stride,
-    index_row_stride,
-    index_col_stride,
-    output_row_stride,
-    output_col_stride,
-    k_stride,
-    p_stride,
-    TOP_K_MAX: tl.constexpr,
-    HAS_P: tl.constexpr,
-    UNIFORM_K: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """Filter [batch, top_k_max] FP32 candidates and scatter retained logits."""
-    row = tl.program_id(0)
-    offset = tl.arange(0, BLOCK)
-    rank = TOP_K_MAX - 1 - offset
-    valid = offset < TOP_K_MAX
-    value = tl.load(
-        values_ptr + row * value_row_stride + rank * value_col_stride,
-        mask=valid,
-        other=-float("inf"),
-    ).to(tl.float32)
-    index = tl.load(
-        indices_ptr + row * index_row_stride + rank * index_col_stride,
-        mask=valid,
-        other=0,
-    )
-    if not UNIFORM_K:
-        row_k = tl.load(k_ptr + row * k_stride)
-        value = tl.where(rank < row_k, value, -float("inf"))
-    keep = valid
-    if HAS_P:
-        weight = tl.exp(value - tl.max(value, 0))
-        probability = weight / tl.sum(weight, 0)
-        cumulative = tl.cumsum(probability, 0)
-        p = tl.load(p_ptr + row * p_stride)
-        keep = valid & (~(cumulative <= 1.0 - p) | (offset == TOP_K_MAX - 1))
-    tl.store(
-        output_ptr + row * output_row_stride + index * output_col_stride,
-        value,
-        mask=keep,
-    )
+    return apply_top_k_top_p_flashinfer(logits, k, p, top_k_bounds)
 
 
 IMPLEMENTATIONS = {
     "triton": apply_top_k_top_p_triton,
-    "flashinfer-fastpath": apply_top_k_top_p_flashinfer_fastpath,
+    "flashinfer-fastpath": apply_flashinfer_fastpath,
     "pytorch": apply_top_k_top_p_pytorch,
 }
 
@@ -445,16 +334,20 @@ def run_benchmark(
             func = IMPLEMENTATIONS[name]
             kwargs = prepare_kwargs(name, k, p, config.vocab_size)
             reset_memory_stats()
-            times = bench_gpu_time_with_cupti(
-                # note: measured runtime includes logits.clone()
-                lambda func=func, logits=logits, k=k, p=p, kwargs=kwargs: func(
-                    logits.clone(), k, p, **kwargs
-                ),
-                dry_run_iters=warmup_iters,
-                repeat_iters=benchmark_iters,
-                use_cuda_graph=False,  # sampling is outside cuda graph
-                cold_l2_cache=True,
-            )
+            try:
+                times = bench_gpu_time_with_cupti(
+                    # note: measured runtime includes logits.clone()
+                    lambda func=func, logits=logits, k=k, p=p, kwargs=kwargs: func(
+                        logits.clone(), k, p, **kwargs
+                    ),
+                    dry_run_iters=warmup_iters,
+                    repeat_iters=benchmark_iters,
+                    use_cuda_graph=False,  # sampling is outside cuda graph
+                    cold_l2_cache=True,
+                )
+            except NotImplementedError as error:
+                print(f"Skipped {name} on {config.name}: {error}", flush=True)
+                continue
             elapsed = sum(times) / len(times)
             _, memory = measure_memory()
             timings[name] = dict(time_ms=elapsed, peak_memory=memory)
@@ -504,7 +397,12 @@ def check_implementations(
     checks = {}
     for name in implementations:
         kwargs = prepare_kwargs(name, k, p, config.vocab_size)
-        actual = IMPLEMENTATIONS[name](logits.clone(), k, p, **kwargs).softmax(dim=-1)
+        try:
+            actual = IMPLEMENTATIONS[name](logits.clone(), k, p, **kwargs)
+        except NotImplementedError as error:
+            checks[name] = {"skipped": str(error)}
+            continue
+        actual = actual.softmax(dim=-1)
         total_variation = (actual - reference).abs().sum(-1).max().item() / 2
         checks[name] = {
             "close": torch.allclose(actual, reference, rtol=1e-5, atol=1e-6),
@@ -534,8 +432,8 @@ def create_result_row(config, timings, checks) -> dict:
     for name, data in timings.items():
         row[f"{name} mem"] = format_memory(data["peak_memory"])
     for name, data in checks.items():
-        row[f"{name} check"] = data["close"]
-        row[f"{name} max TV"] = data["max_total_variation"]
+        row[f"{name} check"] = data.get("close", "skipped")
+        row[f"{name} max TV"] = data.get("max_total_variation")
     return row
 
 
