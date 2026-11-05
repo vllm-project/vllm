@@ -212,8 +212,10 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.
     - "float" is shorthand for FP32 precision.
     - "float32" for FP32 precision."""
-    seed: int = 0
+    seed: int = Field(default=0, ge=0, le=2**32 - 1)
     """Random seed for reproducibility.
+
+    The seed must be in the range [0, 2**32 - 1].
 
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
@@ -1724,9 +1726,13 @@ class ModelConfig:
 
         total_num_hidden_layers = self.get_total_num_hidden_layers()
 
-        # the layout order is: DP x PP x TP
+        # the layout order is: DP x PP x PCP x TP
         pp_rank = (
-            parallel_config.rank // parallel_config.tensor_parallel_size
+            parallel_config.rank
+            // (
+                parallel_config.tensor_parallel_size
+                * parallel_config.prefill_context_parallel_size
+            )
         ) % parallel_config.pipeline_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
@@ -2071,6 +2077,18 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
+
+    @property
+    def speculator_config_class(self) -> str | None:
+        """For a speculative decoding draft model, the config class of the
+        speculator it's for, if it declares one (see `SpeculativeDraftModel`)."""
+        return self._model_info.speculator_config_class
+
+    @property
+    def may_use_target_embed(self) -> bool:
+        """For a speculative decoding draft model, whether it may reuse the
+        target's input embedding under pipeline parallelism."""
+        return self._model_info.may_use_target_embed
 
     @property
     def supports_replayssm(self) -> bool:

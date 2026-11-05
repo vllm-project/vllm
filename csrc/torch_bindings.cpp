@@ -8,6 +8,17 @@
 // Note: We register under namespace "_C" so ops are accessible as
 // torch.ops._C.<op_name> for compatibility with existing code.
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
+#ifdef VLLM_ENABLE_FUSED_MQA_TOPK
+  // Single-launch fused FP8 MQA-logits + top-k (512/1024/2048) prefill
+  // selection (SM100 family). Workspace tensors are caller-owned; counter must
+  // be zero.
+  ops.def(
+      "fused_mqa_topk_prefill(Tensor q, Tensor k, Tensor scales, "
+      "Tensor weights, Tensor starts, Tensor ends, Tensor! out, "
+      "Tensor! counter, Tensor! values, Tensor! indices, Tensor! retained, "
+      "Tensor! retained_indices, Tensor! counts, Tensor! defer) -> ()");
+#endif
+
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   // The dummy arguments are here so we can correctly fuse with RMSNorm.
   ops.def(
@@ -82,7 +93,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
       "Tensor? b_bias_or_none,Tensor b_scales, "
-      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? global_scale, Tensor? b_zeros_or_none, "
       "Tensor workspace, int b_type_id, "
       "SymInt size_m, SymInt size_n, SymInt size_k, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
@@ -91,19 +102,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, "
-      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+      "SymInt size_k, SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
   // awq_marlin repack from AWQ.
   ops.def(
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
-      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
-  // conditionally compiled so impl registrations are in source file
-
-  // preprocess W-int4A-fp8 weight for marlin kernel
-  ops.def(
-      "marlin_int4_fp8_preprocess(Tensor qweight, "
-      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+      "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 #endif
 
@@ -606,6 +611,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX
+  // SM100 only; impl registration is in csrc/qwen4_exp/hc_up_gate_mix.cu.
+  ops.def(
+      "qwen4_exp_hc_up_gate_mix(Tensor! out, Tensor lowrank, Tensor xn, "
+      "Tensor w_up) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
@@ -792,6 +804,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
+#ifdef VLLM_ENABLE_FUSED_MQA_TOPK
+  ops.impl("fused_mqa_topk_prefill", TORCH_BOX(&fused_mqa_topk_prefill));
+#endif
+
   // LongCat n-gram embedding index kernel.
   ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
   ops.impl("vocab_parallel_embedding", TORCH_BOX(&vocab_parallel_embedding));
@@ -1062,21 +1078,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 int max_union_rows,"
-      "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? stats=None,"
-      "                 Tensor(c!)? attention_indices=None,"
+      "                 Tensor(a!)? stats=None,"
+      "                 Tensor(b!)? attention_indices=None,"
       "                 int attention_block_stride=0,"
       "                 Tensor? request_ids=None,"
       "                 Tensor? source_block_table=None,"
       "                 int source_block_size=0,"
-      "                 Tensor(d!)? resolved_global_indices=None,"
-      "                 Tensor(e!)? valid_counts=None,"
-      "                 Tensor(f!)? swap_host_physical_rows=None,"
-      "                 Tensor(g!)? swap_device_physical_rows=None,"
-      "                 Tensor(h!)? swap_counts=None,"
+      "                 Tensor(c!)? valid_counts=None,"
+      "                 Tensor(d!)? swap_host_physical_rows=None,"
+      "                 Tensor(e!)? swap_device_physical_rows=None,"
+      "                 Tensor(f!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0,"
       "                 Tensor? num_valid_rows=None) -> ()");
 
   ops.def(
@@ -1092,10 +1105,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! hot_cache,"
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
-      "                     Tensor miss_mask,"
-      "                     Tensor? request_state_indices,"
-      "                     Tensor(a!)? attention_indices=None,"
-      "                     int attention_block_stride=0) -> ()");
+      "                     Tensor miss_mask) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"
