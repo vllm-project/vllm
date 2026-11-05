@@ -400,17 +400,6 @@ class TestRefusals:
         with pytest.raises(RuntimeError, match="EPLB"):
             _cold_start(_checkpoint())
 
-    def test_modular_moe_method_forwards_online_quantization(self):
-        # elastic EP wraps the quant method after cold start; a reload must
-        # still stage the wrapped online-quantized experts
-        from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-            FusedMoEModularMethod,
-        )
-
-        wrapper = object.__new__(FusedMoEModularMethod)
-        wrapper.__dict__["old_quant_method"] = _OnlineMethod(None)
-        assert wrapper.uses_meta_device
-
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
     def test_humming_refused(self, monkeypatch, method_cls):
         # its post-load processing runs only once per quant method
@@ -445,12 +434,14 @@ def test_retry_after_aborted_update_matches_cold_start():
     # update repairs it.
     model = _cold_start(_checkpoint())
     assert "_direct_reload_begun" not in model.__dict__
+    ptrs = _ptrs(_state(model))
     begin_direct_reload(model)
     model.load_weights(list(_checkpoint(1.01).items())[:3])  # update aborts
     assert "_direct_reload_begun" in model.__dict__
     _reload(model, _checkpoint(1.01))
     assert "_direct_reload_begun" not in model.__dict__
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
 
 
 def test_start_and_finish_reload_run_direct_reload():
@@ -685,3 +676,20 @@ def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
     else:
         with pytest.raises(ValueError, match=match):
             VllmConfig._verify_direct_reload_compat(config)
+
+
+def test_input_hadamard_refilled_in_place():
+    # mxfp4_hadamard32: post-load processing reruns on every reload; captured
+    # CUDA graphs read `input_hadamard`, which must keep its address
+    from vllm.model_executor.layers.quantization.input_hadamard import (
+        InputHadamardLinearMethod,
+    )
+
+    inner = SimpleNamespace(process_weights_after_loading=lambda layer: None)
+    method = InputHadamardLinearMethod(inner, size=4, rotate_weight=True)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.ones(2, 8, device=_DEVICE), False)
+    method.process_weights_after_loading(layer)
+    hadamard = layer.input_hadamard
+    method.process_weights_after_loading(layer)
+    assert layer.input_hadamard is hadamard

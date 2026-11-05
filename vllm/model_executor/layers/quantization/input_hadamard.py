@@ -18,7 +18,7 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     register_weight_loader_v2_supported_method,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import refill_derived, set_weight_attrs
 
 
 @functools.cache
@@ -137,7 +137,10 @@ class InputHadamardLinearMethod(LinearMethodBase):
                     )
                 del layer.input_rotation
         self.quant_method.process_weights_after_loading(layer)
-        layer.input_hadamard = hadamard_matrix(self.size, layer.weight.device)
+        # in place on a rerun (weight reload): captured CUDA graphs read it
+        refill_derived(
+            layer, "input_hadamard", hadamard_matrix(self.size, layer.weight.device)
+        )
 
     def apply(
         self,

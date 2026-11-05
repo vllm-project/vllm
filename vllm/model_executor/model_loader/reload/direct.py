@@ -215,8 +215,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     """Make every tensor writable by its checkpoint weight loader.
 
     Everything that can refuse the reload is checked first and raises with
-    the model untouched. Once this returns, the model holds checkpoint-layout
-    bytes until a finish succeeds."""
+    the model untouched beyond unstaging an aborted update. Once this returns,
+    the model holds checkpoint-layout bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
     online = [
