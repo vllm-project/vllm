@@ -287,91 +287,6 @@ class _TargetGuard(TorchDispatchMode):
                 return
 
 
-# ---- module state
-
-
-class _Snapshot:
-    """Module, parameter and persistent buffer attributes, CPU tensors among
-    them, and where each parameter and persistent buffer points (and whether
-    it requires grad), compared and restored after a bake: a loader that
-    changes such state will not run on the direct path, and planning must
-    leave none behind. Target bytes are not saved; the update rewrites
-    them."""
-
-    def __init__(self, model: torch.nn.Module):
-        self.dicts: list[tuple[str, dict, dict[str, _Value]]] = []
-        for module_name, module in model.named_modules():
-            self._add(module_name, module.__dict__)
-        self.layouts: list[tuple[str, torch.Tensor, torch.Tensor, tuple]] = []
-        for name, t in loadable_tensors(model):
-            self._add(name, t.__dict__)
-            self.layouts.append((name, t, t.data, _where(t)))
-
-    def _add(self, label: str, d: dict) -> None:
-        self.dicts.append((label, d, {k: _Value(v) for k, v in d.items()}))
-
-    def restore(self) -> list[str]:
-        """Undo every change; returns what changed."""
-        changed = []
-        for label, d, saved in self.dicts:
-            for k in d.keys() - saved.keys():
-                changed.append(f"{label}.{k}")
-                del d[k]
-            for k, value in saved.items():
-                if k not in d or not value.holds(d[k]):
-                    changed.append(f"{label}.{k}")
-                    d[k] = value.restore()
-        for name, t, data, where in self.layouts:  # e.g. `param.data = ...`
-            if _where(t) != where:
-                changed.append(name)
-                t.data = data
-                t.requires_grad_(where[-1])
-        return changed
-
-
-def _where(t: torch.Tensor) -> tuple:
-    storage = t.untyped_storage()._cdata
-    return storage, t.storage_offset(), t.shape, t.stride(), t.dtype, t.requires_grad
-
-
-class _Value:
-    """An attribute's value, with a shallow copy of a container or a clone of
-    a CPU tensor so in-place changes are seen too."""
-
-    def __init__(self, v: Any):
-        self.obj = v
-        self.copy: Any = None
-        if isinstance(v, torch.Tensor):
-            if v.device.type == "cpu" and not isinstance(v, TraceTensor):
-                self.copy = v.detach().clone()
-        elif isinstance(v, list | dict | set):
-            self.copy = type(v)(v)
-
-    def holds(self, v: Any) -> bool:
-        if v is not self.obj:  # equal scalars count as unchanged
-            scalar = type(v) in (bool, int, float, str) and type(v) is type(self.obj)
-            return scalar and v == self.obj
-        c = self.copy
-        if isinstance(c, torch.Tensor):
-            return torch.equal(v, c)
-        if isinstance(c, list):
-            return len(v) == len(c) and all(a is b for a, b in zip(v, c))
-        if isinstance(c, dict):
-            return v.keys() == c.keys() and all(v[k] is c[k] for k in c)
-        return c is None or v == c
-
-    def restore(self) -> Any:
-        v, c = self.obj, self.copy
-        if isinstance(c, torch.Tensor):
-            v.copy_(c)
-        elif isinstance(c, list):
-            v[:] = c
-        elif isinstance(c, dict | set):
-            v.clear()
-            v.update(c)
-        return v
-
-
 # ---- the bake
 
 
@@ -380,9 +295,9 @@ def _bake(
     metas: dict[str, "ParamMeta"],
     names: list[str],
     targets: Targets,
-) -> tuple[_PlanSink, list[str]]:
-    """One traced ``load_weights`` over ``names``; returns the sink and the
-    state it changed (restored)."""
+) -> _PlanSink:
+    """One traced ``load_weights`` over ``names``. Module state a loader sets
+    stays: it is what that loader would leave on the ``load_weights`` path."""
     sink = _PlanSink(targets)
 
     def weights() -> Iterator[tuple[str, torch.Tensor]]:
@@ -392,22 +307,19 @@ def _bake(
             shape = torch.Size(meta.shape)
             yield name, TraceTensor.checkpoint(name, shape, meta.dtype, sink)
 
-    snapshot = _Snapshot(model)
     try:
         with torch.no_grad(), _TargetGuard(sink):
             model.load_weights(weights())
     except _BakeStopped:
         pass  # in sink.stops; the caller reruns without the name
-    finally:
-        changed = snapshot.restore()
-    return sink, changed
+    return sink
 
 
 @dataclass
 class Traced:
     copies: dict[str, list[Copy]]  # per name, from the full bake
     reasons: dict[str, str]  # fallback names and why
-    lonely: list[str]  # fallbacks that write nothing when loaded alone
+    lonely: list[str]  # fallbacks that wrote nothing in the bake
     rebakes: int  # full bakes rerun after a name stopped one
 
 
@@ -416,13 +328,12 @@ def trace_loads(
 ) -> Traced:
     """Bake all names. Each name whose loader reads tensor values (or runs an
     op that fails on meta) reruns the whole bake without it (at most one full
-    bake per such name). Names that change module state are then found by
-    bisecting, only if the full bake did."""
+    bake per such name)."""
     reasons: dict[str, str] = {}
     names = list(metas)
     for rebakes in itertools.count():
         try:
-            sink, changed = _bake(model, metas, names, targets)
+            sink = _bake(model, metas, names, targets)
         except Exception as e:
             raise RuntimeError(f"load plan: tracing load_weights failed: {e!r}") from e
         if not sink.stops:
@@ -432,44 +343,6 @@ def trace_loads(
         names = [n for n in names if n not in reasons]
 
     lonely = [n for n in sink.fallback if n not in sink.wrote]
-    if changed:
-        _bisect_state(model, metas, names, changed, sink, targets, reasons, lonely)
     for name, reason in sink.fallback.items():
         reasons.setdefault(name, reason)
     return Traced(sink.copies, reasons, lonely, rebakes)
-
-
-def _bisect_state(
-    model: torch.nn.Module,
-    metas: dict[str, "ParamMeta"],
-    names: list[str],
-    changed: list[str],
-    sink: _PlanSink,
-    targets: Targets,
-    reasons: dict[str, str],
-    lonely: list[str],
-) -> None:
-    """Given that baking ``names`` changed state, find the names whose loader
-    changes it when run alone. A name whose loader fails or writes nothing
-    alone is lonely."""
-    if len(names) == 1:
-        (name,) = names
-        reasons[name] = f"its loader changes module state ({', '.join(changed)})"
-        if name not in sink.wrote:
-            lonely.append(name)
-        return
-    half = len(names) // 2
-    for part in (names[:half], names[half:]):
-        try:
-            part_sink, part_changed = _bake(model, metas, part, targets)
-        except Exception as e:
-            if len(part) > 1:  # find the name that fails
-                _bisect_state(model, metas, part, [], sink, targets, reasons, lonely)
-            else:
-                reasons[part[0]] = f"its loader fails when loaded alone ({e!r})"
-                lonely.append(part[0])
-            continue
-        if part_changed:
-            _bisect_state(
-                model, metas, part, part_changed, part_sink, targets, reasons, lonely
-            )

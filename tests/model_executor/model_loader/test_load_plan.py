@@ -616,88 +616,6 @@ def test_meta_failure_is_not_called_a_value_read():
     assert plan.get_dest("b.weight") is not None
 
 
-def test_state_change_makes_only_its_name_a_fallback():
-    def loader(model, param, loaded):
-        param.copy_(loaded)
-        model.a.loads = getattr(model.a, "loads", 0) + 1
-
-    make, shapes = _two_names(loader)
-    model = _cold_start(make, _checkpoint(shapes, 0))
-    del model.a.loads
-    start_reload(model)
-    plan = _plan(model, shapes)  # also checks the change was undone
-    assert "changes module state" in (plan.entries["a.weight"].reason or "")
-    assert plan.get_dest("b.weight") is not None
-
-
-def test_layout_change_is_undone_and_falls_back():
-    """A loader that re-lays its parameter out (``param.data = ...``) changes
-    state the direct path would not: planning restores the layout ``begin``
-    applied and makes the name a fallback."""
-
-    def loader(param, loaded):
-        param.copy_(loaded)
-        param.data = param.data.t()
-
-    def make():
-        model = _Toy()
-        model.layer = _Layer(
-            lambda layer: setattr(layer.weight, "data", layer.weight.t())
-        )
-        model.layer.weight = _param(2, 2, loader=loader)
-        return model
-
-    shapes = {"layer.weight": ((2, 2), BF16)}
-    model = _cold_start(make, _checkpoint(shapes, 0))
-    start_reload(model)
-    plan = _plan(model, shapes)  # also checks the layout was restored
-    reason = plan.entries["layer.weight"].reason or ""
-    assert "changes module state (layer.weight)" in reason
-
-
-@pytest.mark.parametrize("change", ["buffer-attr", "requires-grad", "cpu-attr"])
-def test_tensor_state_change_is_undone_and_falls_back(change):
-    """State set on a persistent buffer, a parameter's ``requires_grad`` and
-    a CPU tensor held as a module attribute are restored after planning, and
-    the name that set them falls back."""
-
-    def loader(model, param, loaded):
-        param.copy_(loaded)
-        if change == "buffer-attr":
-            model.layer.buf.tag = "set"
-        elif change == "requires-grad":
-            param.requires_grad_(True)
-        else:
-            model.layer.scratch.add_(1)
-
-    def make():
-        model = _Toy()
-        model.layer = _Layer()
-        model.layer.weight = _param(4, loader=lambda p, w: loader(model, p, w))
-        model.layer.register_buffer("buf", torch.zeros(4, dtype=BF16))
-        model.layer.scratch = torch.zeros(2)
-        return model
-
-    shapes = {"layer.weight": ((4,), BF16)}
-    model = _cold_start(make, _checkpoint(shapes, 0))
-    # undo what the cold start's loader did, so planning has a change to see
-    model.layer.buf.__dict__.pop("tag", None)
-    model.layer.weight.requires_grad_(False)
-    model.layer.scratch.zero_()
-    start_reload(model)
-    plan = _plan(model, shapes)
-    changed = {
-        "buffer-attr": "layer.buf.tag",
-        "requires-grad": "layer.weight",
-        "cpu-attr": "layer.scratch",
-    }[change]
-    reason = plan.entries["layer.weight"].reason or ""
-    assert f"changes module state ({changed})" in reason
-    assert not hasattr(model.layer.buf, "tag")
-    assert not model.layer.weight.requires_grad
-    assert model.layer.scratch.tolist() == [0, 0]
-
-
 class _Paired(_Toy):
     """Stashes ``weight_a`` until ``weight_b`` arrives: a list that ends up
     empty again, or an attribute that stays (``keep_stash``)."""
@@ -724,8 +642,8 @@ class _Paired(_Toy):
 
 @pytest.mark.parametrize("keep_stash", [False, True])
 def test_paired_loader_is_refused(monkeypatch, keep_stash):
-    """With ``keep_stash`` the state bisect traces ``weight_b`` alone, whose
-    loader then fails: that is a refusal too, not an error."""
+    """Whether the loader keeps its stash or not, ``weight_a`` writes
+    nothing, so the plan is refused."""
     monkeypatch.setattr(_Paired, "keep_stash", keep_stash)
     shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
     model = _cold_start(_Paired, _checkpoint(shapes, 0))
@@ -733,7 +651,7 @@ def test_paired_loader_is_refused(monkeypatch, keep_stash):
     start_reload(model)
     with pytest.raises(RuntimeError, match="write nothing when loaded alone"):
         plan_loads(model, _metadata(shapes))
-    assert model.pending == [] and not hasattr(model, "stash")
+    assert model.pending == []
 
 
 def test_overlapping_writes_fall_back():

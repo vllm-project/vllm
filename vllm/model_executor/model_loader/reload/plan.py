@@ -100,7 +100,8 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
     writes land, as on the ``load_weights`` path; so do writes into
     non-checkpoint GPU tensors fed by a read of a checkpoint tensor (a
     mirror), which are not restored: that name falls back and the update
-    rewrites them. Module, parameter and buffer state is restored.
+    rewrites them. Module, parameter and buffer state a loader sets stays,
+    as it would after ``load_weights``.
 
     Raises:
         ValueError: a name is declared twice.
