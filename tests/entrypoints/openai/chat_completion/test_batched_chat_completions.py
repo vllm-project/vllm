@@ -600,3 +600,104 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
         chat_template_kwargs=engine_chat_template_kwargs,
     )
     assert reasoner.is_reasoning_end([]) is True
+
+
+def _build_batch_serving() -> OpenAIServingChatBatch:
+    mock_model_config = MockModelConfig()
+    shared_renderer = _build_renderer(mock_model_config)
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.model_config = mock_model_config
+    mock_engine.errored = False
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = shared_renderer
+    mock_engine.generate.side_effect = lambda *args, **kwargs: _generator(0, "ok")
+
+    models = OpenAIServingModels(mock_engine, BASE_MODEL_PATHS)
+    online_renderer = OnlineRenderer(
+        model_config=mock_model_config,
+        renderer=mock_engine.renderer,
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+    )
+    serving = OpenAIServingChatBatch(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+    return serving
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("tool_call_id", [None, "", "call_orphan"])
+async def test_batched_chat_rejects_orphan_tool_result(tool_call_id) -> None:
+    """A batch conversation with an orphan tool result must be rejected.
+
+    `/v1/chat/completions/batch` renders each conversation directly, so it
+    must apply the same tool-result ID validation as the single-conversation
+    endpoint rather than answering from the orphan result.
+    """
+    serving = _build_batch_serving()
+
+    tool_message = {"role": "tool", "content": "clear"}
+    if tool_call_id is not None:
+        tool_message["tool_call_id"] = tool_call_id
+    conversation = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_known",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        tool_message,
+    ]
+
+    result = await serving.create_batch_chat_completion(
+        BatchChatCompletionRequest(
+            model=MOCK_MODEL_NAME,
+            messages=[conversation],
+        )
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.type == "invalid_request_error"
+    assert result.error.param == "tool_call_id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_chat_accepts_matching_tool_result() -> None:
+    """A batch conversation answering a prior call must still be rendered."""
+    serving = _build_batch_serving()
+    conversation = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_known",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_known", "content": "clear"},
+    ]
+
+    result = await serving.create_batch_chat_completion(
+        BatchChatCompletionRequest(
+            model=MOCK_MODEL_NAME,
+            messages=[conversation],
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)

@@ -129,12 +129,6 @@ an earlier call with a `function_call_output` is accepted. Parallel tool calls
 may be answered in any order, and results may answer calls from any earlier
 turn.
 
-!!! note
-    GPT-OSS (Harmony) Responses keep their existing behavior: a
-    `function_call_output` whose `call_id` matches no prior call is still
-    rejected, but with `param="input"` and the message
-    `No call message found for <id>`.
-
 ## Constrained Decoding Behavior
 
 Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:

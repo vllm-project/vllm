@@ -357,7 +357,7 @@ class OnlineRenderer:
         validate_tool_call_ids: bool = True,
     ) -> ResponsesRenderResult | ErrorResponse:
         """Render a Responses request using only explicitly supplied history."""
-        if validate_tool_call_ids and not getattr(self, "use_harmony", False):
+        if validate_tool_call_ids:
             try:
                 validate_responses_tool_call_ids(
                     previous_messages=previous_messages or (),

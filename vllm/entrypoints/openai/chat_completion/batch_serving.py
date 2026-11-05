@@ -22,8 +22,12 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _get_mm_token_counts,
     _make_prompt_tokens_details,
 )
+from vllm.entrypoints.openai.tool_call_validation import (
+    validate_chat_tool_call_ids,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -99,6 +103,14 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         all_engine_prompts: list[EngineInput] = []
 
         for messages in request.messages:
+            try:
+                validate_chat_tool_call_ids(messages)
+            except VLLMValidationError as exc:
+                return renderer.create_error_response(
+                    str(exc),
+                    err_type="invalid_request_error",
+                    param=exc.parameter,
+                )
             single_request = request.to_chat_completion_request(messages)
             if renderer.use_harmony:
                 renderer.adjust_harmony_request(single_request)
