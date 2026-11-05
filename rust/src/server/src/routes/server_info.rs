@@ -13,7 +13,6 @@ use serde::Deserialize;
 use crate::error::ApiError;
 use crate::server_info::ServerInfoConfigFormat;
 use crate::state::AppState;
-use crate::utils::invalid_query;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,7 +45,7 @@ pub async fn server_info(
     State(state): State<Arc<AppState>>,
     params: Result<Query<ServerInfoParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
-    let Query(params) = params.map_err(invalid_query)?;
+    let Query(params) = params?;
     Ok(
         match state.server_info_response(params.config_format.into()) {
             Some(response) => Json(response).into_response(),

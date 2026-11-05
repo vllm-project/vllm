@@ -12,7 +12,7 @@ use vllm_metrics::METRICS;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::{invalid_query, utility_call_error};
+use crate::utils::utility_call_error;
 
 #[derive(Serialize)]
 pub(crate) struct IsSleepingResponse {
@@ -54,7 +54,7 @@ pub async fn sleep(
     State(state): State<Arc<AppState>>,
     params: Result<Query<SleepParams>, QueryRejection>,
 ) -> Result<Json<SleepResponse>, ApiError> {
-    let Query(SleepParams { level, mode }) = params.map_err(invalid_query)?;
+    let Query(SleepParams { level, mode }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state

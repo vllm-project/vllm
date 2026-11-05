@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::{deserialize_query_bool, invalid_query};
+use crate::utils::deserialize_query_bool;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorldSizeParams {
@@ -44,7 +44,7 @@ pub async fn get_world_size(
     State(state): State<Arc<AppState>>,
     params: Result<Query<WorldSizeParams>, QueryRejection>,
 ) -> Result<Json<WorldSizeResponse>, ApiError> {
-    let Query(params) = params.map_err(invalid_query)?;
+    let Query(params) = params?;
     let client = state.engine_core_client();
 
     let ws = client.world_size();
