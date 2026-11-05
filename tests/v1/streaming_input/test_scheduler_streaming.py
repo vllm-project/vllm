@@ -69,7 +69,7 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(max_model_len: int = 1024) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
@@ -77,7 +77,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.supports_multimodal_inputs = False
     vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.is_diffusion = False
-    vllm_config.model_config.max_model_len = 1024
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
@@ -787,3 +787,85 @@ def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
     assert request not in scheduler.kv_holding_waiting
     assert request not in scheduler.deferred_waiting
     assert "req" not in scheduler.schedule().num_scheduled_tokens
+
+
+def test_paused_resume_exceeding_context_is_length_capped():
+    """A paused streaming session whose next input chunk pushes the accumulated
+    prompt past max_model_len must be finished (length-capped) rather than
+    scheduled past its KV allocation, where it would stall forever."""
+    scheduler = create_scheduler(max_model_len=8)
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=1)
+    scheduler.add_request(session)
+    # One decode; max_tokens=1 stops the turn and the session pauses.
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert session in scheduler.kv_holding_waiting
+    assert scheduler.num_waiting_for_streaming_input == 1
+
+    # Next chunk: prompt becomes [1, 2, 3, 4, 5, 6, 7, 8, 9] = 9 > max_model_len.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[4, 5, 6, 7, 8, 9]))
+
+    assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert scheduler.num_waiting_for_streaming_input == 0
+    assert session not in scheduler.kv_holding_waiting
+    assert session not in scheduler.waiting
+    assert session not in scheduler.deferred_waiting
+    assert "session" not in scheduler.requests
+
+    # The next step surfaces a length-capped finish to the client.
+    empty_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    outputs = scheduler.update_from_output(scheduler.schedule(), empty_output)
+    [output] = outputs[session.client_index].outputs
+    assert output.finish_reason == FinishReason.LENGTH
+    assert output.new_token_ids == []
+
+
+def test_queued_resume_exceeding_context_is_length_capped():
+    """A chunk queued while the session runs is applied at the stop boundary;
+    if it overflows the context the session finishes with a length cap."""
+    scheduler = create_scheduler(max_model_len=8)
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=2)
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    assert session.status == RequestStatus.RUNNING
+
+    # Queue the next chunk while running; it is applied at the next stop.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[4, 5, 6, 7, 8, 9]))
+    assert session.streaming_queue is not None
+    assert len(session.streaming_queue) == 1
+
+    # Second decode hits max_tokens=2 and stops; the queued chunk makes the
+    # prompt [1, 2, 3, 10, 4, 5, 6, 7, 8, 9] = 10 > max_model_len.
+    outputs = scheduler.update_from_output(
+        scheduler.schedule(), _model_output("session", [11])
+    )
+    [output] = outputs[session.client_index].outputs
+    assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert output.finish_reason == FinishReason.LENGTH
+    # The turn's final token is still delivered with the finish.
+    assert output.new_token_ids == [11]
+    assert "session" not in scheduler.requests
+
+
+def test_resume_within_context_still_schedules():
+    """A resume that fits the context is unaffected by the length check."""
+    scheduler = create_scheduler(max_model_len=64)
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=1)
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[4, 5]))
+    assert session.status == RequestStatus.WAITING
+    assert "session" in scheduler.requests
+
+    output = scheduler.schedule()
+    assert session.status == RequestStatus.RUNNING
+    assert output.num_scheduled_tokens["session"] >= 1

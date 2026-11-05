@@ -265,6 +265,11 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
 
+        # Resumed streaming sessions whose accumulated prompt exceeded the
+        # model's context length. They are freed when the chunk arrives and
+        # their length-capped outputs are emitted in update_from_output.
+        self.length_exceeded_session_reqs: list[Request] = []
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = vllm_config.model_config.supports_multimodal_inputs
@@ -1947,10 +1952,14 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
-    ) -> None:
+    ) -> bool:
         """Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+
+        Returns False, leaving the session's status untouched, if the
+        accumulated prompt exceeds the model's context length; the caller must
+        then finish the session instead of re-queuing it.
         """
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
@@ -1984,12 +1993,19 @@ class Scheduler(SchedulerInterface):
         session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
+        if session.num_prompt_tokens > self.max_model_len:
+            # The update pushed the accumulated prompt past the model's context
+            # length, so the session cannot be scheduled without writing KV
+            # beyond its allocation. The caller finishes it.
+            return False
+
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+        return True
 
     def _make_cached_request_data(
         self,
@@ -2560,6 +2576,11 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    # _handle_stopped_request may finish a resumed streaming
+                    # session with a different reason (a length cap when the
+                    # accumulated prompt exceeds the context length), so re-read
+                    # it now that the status is final.
+                    finish_reason = request.get_finished_reason()
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (
                         prefill_stats is not None
@@ -2665,6 +2686,22 @@ class Scheduler(SchedulerInterface):
                         error=request_errors.get(request.request_id),
                     )
                 )
+
+        # Resumed streaming sessions whose accumulated prompt exceeded the
+        # context length were freed when their chunk arrived; emit their
+        # length-capped outputs now so the client observes the finish.
+        if self.length_exceeded_session_reqs:
+            for request in self.length_exceeded_session_reqs:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
+            self.length_exceeded_session_reqs = []
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -2891,7 +2928,11 @@ class Scheduler(SchedulerInterface):
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update)
+            if not self._update_request_as_session(request, update):
+                # The resumed prompt exceeds the context length; finish the
+                # session with a length cap instead of resuming it.
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -3096,7 +3137,14 @@ class Scheduler(SchedulerInterface):
                 existing.streaming_queue.append(update)
             elif update is not None:
                 # Commence next input chunk.
-                self._update_request_as_session(existing, update)
+                if not self._update_request_as_session(existing, update):
+                    # The resumed prompt exceeds the context length. Finish the
+                    # paused session with a length cap instead of scheduling it
+                    # past its KV allocation; its output is emitted next step.
+                    self.finish_requests(
+                        existing.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                    )
+                    self.length_exceeded_session_reqs.append(existing)
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
