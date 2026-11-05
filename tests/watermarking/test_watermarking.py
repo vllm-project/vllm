@@ -1165,7 +1165,7 @@ def _pin_sampler(watermarking, temperatures, contexts, scope="none"):
     return sampler
 
 
-def test_pin_to_watermarked_sample_pins_only_watermarked_rows(monkeypatch):
+def test_set_watermarked_sample_as_argmax_pins_only_watermarked_rows(monkeypatch):
     sampler = _pin_sampler(
         watermarking=[True, False, True, True],
         temperatures=[1.0, 1.0, 0.0, 1.0],
@@ -1178,7 +1178,7 @@ def test_pin_to_watermarked_sample_pins_only_watermarked_rows(monkeypatch):
     logits = torch.randn(4, 8)
     original = logits.clone()
 
-    temperature, restore = sampler.pin_to_watermarked_sample(
+    temperature, restore = sampler.set_watermarked_sample_as_argmax(
         logits,
         torch.arange(4),
         np.arange(4),
@@ -1204,7 +1204,7 @@ def test_pin_to_watermarked_sample_pins_only_watermarked_rows(monkeypatch):
     [([False, False], [1.0, 1.0]), ([True, True], [0.0, 0.0])],
     ids=["unwatermarked", "greedy"],
 )
-def test_pin_to_watermarked_sample_ignores_requests_without_watermark_sampling(
+def test_set_watermarked_sample_as_argmax_ignores_requests_without_watermark_sampling(
     watermarking, temperatures
 ):
     sampler = _pin_sampler(watermarking, temperatures, contexts=[[3], [4]])
@@ -1212,7 +1212,7 @@ def test_pin_to_watermarked_sample_ignores_requests_without_watermark_sampling(
     logits = torch.randn(2, 8)
     original = logits.clone()
 
-    temperature, restore = sampler.pin_to_watermarked_sample(
+    temperature, restore = sampler.set_watermarked_sample_as_argmax(
         logits,
         torch.arange(2),
         np.arange(2),
