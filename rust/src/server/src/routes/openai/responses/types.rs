@@ -165,6 +165,28 @@ pub enum ServiceTier {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponsesTool {
     Function(Function),
+    /// Function tools grouped under a namespace. The model sees each one as
+    /// `<namespace>__<name>`; see `tools.rs`.
+    Namespace(NamespaceTool),
+}
+
+/// Responses API `namespace` tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamespaceTool {
+    /// The namespace name used in tool calls.
+    pub name: String,
+    /// A description of the namespace. Only echoed: like Python, the model
+    /// sees the flattened function tools alone.
+    pub description: String,
+    pub tools: Vec<NamespacedTool>,
+}
+
+/// One tool inside a [`NamespaceTool`]. Custom tools are rejected during
+/// deserialization, as they are at the top level.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NamespacedTool {
+    Function(Function),
 }
 
 /// Responses API `tool_choice` field.
@@ -436,6 +458,9 @@ pub enum ResponseInputContentPart {
 pub struct ResponseInputFunctionCall {
     pub call_id: String,
     pub name: String,
+    /// Namespace of a function from a `namespace` tool.
+    #[serde(default)]
+    pub namespace: Option<String>,
     pub arguments: String,
     #[serde(default)]
     pub id: Option<String>,
@@ -547,7 +572,11 @@ pub enum ResponseOutputItem {
     FunctionCall {
         id: String,
         call_id: String,
+        /// The function name, without its namespace.
         name: String,
+        /// Namespace of a function from a `namespace` tool.
+        #[serde(default)]
+        namespace: Option<String>,
         arguments: String,
         #[serde(default)]
         status: Option<ResponseItemStatus>,
