@@ -178,7 +178,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
-from vllm.v1.worker.gpu.ubatch_utils import (
+from vllm.v1.worker.gpu.ubatch_runner import (
     UBatchRunner,
     UBatchState,
     maybe_build_ubatch_runner,
