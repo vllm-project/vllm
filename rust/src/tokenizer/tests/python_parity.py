@@ -51,7 +51,7 @@ class TokenizerCase:
     tokenizer_mode: str = "auto"
 
     def trust_remote_code(self) -> bool:
-        recipe = yaml.safe_load((RECIPES_DIR / self.recipe).read_text())
+        recipe = yaml.safe_load((RECIPES_DIR / self.recipe).read_text(encoding="utf-8"))
         return "--trust-remote-code" in recipe["model"]["base_args"]
 
 
@@ -167,11 +167,11 @@ def check_overrides_ignored(
         copy = Path(tmp) / "model"
         shutil.copytree(source, copy)
         target = copy / "tokenizer.json"
-        tokenizer_json = json.loads(target.read_text())
+        tokenizer_json = json.loads(target.read_text(encoding="utf-8"))
         tokenizer_json.update(corpus["tokenizer_json_overrides"])
         # Hub cache files are read-only; replace the copy instead of writing to it.
         target.unlink()
-        target.write_text(json.dumps(tokenizer_json))
+        target.write_text(json.dumps(tokenizer_json), encoding="utf-8")
         overridden = encode_corpus(load(case, copy), corpus, special_token)
     if overridden != ids:
         raise AssertionError(f"{case.key}: truncation or padding changed the ids")
@@ -212,7 +212,7 @@ def generate(case: TokenizerCase, corpus: dict, corpus_sha256: str) -> None:
     ids = encode_corpus(tokenizer, corpus, special_token)
     check_overrides_ignored(case, corpus, special_token, ids)
     out = SNAPSHOT_DIR / f"{case.key}.json"
-    out.write_text(snapshot(case, corpus_sha256, special_token, ids))
+    out.write_text(snapshot(case, corpus_sha256, special_token, ids), encoding="utf-8")
     print(f"wrote {out} ({sum(map(len, ids.values()))} ids)")
 
 

@@ -62,7 +62,7 @@ impl Corpus {
     fn load() -> Self {
         let bytes = fs::read(Path::new(SNAPSHOT_DIR).join("corpus.json")).unwrap();
         let mut corpus: Self = serde_json::from_slice(&bytes).unwrap();
-        corpus.sha256 = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+        corpus.sha256 = format!("{:x}", Sha256::digest(&bytes));
         corpus
     }
 
@@ -155,8 +155,11 @@ type LoadedBackend = (Backend, Variant, Box<dyn Tokenizer>);
 
 /// The backend `HuggingFaceTokenizer::new` is expected to pick for every `tokenizer.json` here.
 const DEFAULT_HF_BACKEND: Backend = Backend::Fastokens;
-/// The backend `TiktokenTokenizer::new` is expected to pick for `tiktoken.model`.
+/// The backend `TiktokenTokenizer::new` is expected to pick for `tiktoken.model`, unless
+/// [`DISABLE_RIPTOKEN_ENV`] is set.
 const DEFAULT_TIKTOKEN_BACKEND: Backend = Backend::Riptoken;
+/// Makes `TiktokenTokenizer::new` load tiktoken-rs, when set to any value.
+const DISABLE_RIPTOKEN_ENV: &str = "VLLM_RS_DISABLE_RIPTOKEN";
 
 /// The result of one Rust encode, with the error rendered as its report.
 type Outcome = Result<Vec<u32>, String>;
@@ -276,8 +279,11 @@ const EXPECTED_DIVERGENCES: &[ExpectedDivergence] = &[
                 ]),
             ),
         ],
-        cause: "riptoken: splits a long run of spaces into different BPE tokens from tiktoken, \
-                sometimes one more; tiktoken-rs loaded from the same file matches Python",
+        cause: "riptoken: emits a long run of spaces as the same tokens as tiktoken in reverse \
+                order (the 7- to 10-space remainder, then the 128-space token, then the 256-space \
+                tokens). When the run ends in a newline, tab or CRLF, it also emits the 8-space \
+                remainder and that character as two tokens where tiktoken emits one, so it returns \
+                one more id. tiktoken-rs loaded from the same file matches Python",
     },
 ];
 
@@ -294,10 +300,13 @@ fn load_production(path: &Path) -> (Backend, Box<dyn Tokenizer>) {
             Box::new(HuggingFaceTokenizer::new(path).unwrap()),
         )
     } else {
-        (
-            DEFAULT_TIKTOKEN_BACKEND,
-            Box::new(TiktokenTokenizer::new(path).unwrap()),
-        )
+        // Read the variable as `TiktokenTokenizer::new` does.
+        let default = if std::env::var_os(DISABLE_RIPTOKEN_ENV).is_some() {
+            Backend::TiktokenRs
+        } else {
+            DEFAULT_TIKTOKEN_BACKEND
+        };
+        (default, Box::new(TiktokenTokenizer::new(path).unwrap()))
     }
 }
 
@@ -561,4 +570,22 @@ fn expected_divergences_name_tested_tokenizers_once() {
     }
     // `check` uses the first entry and case that match, so a duplicate would never be checked.
     assert!(duplicates.is_empty(), "{}", duplicates.join("\n"));
+}
+
+#[test]
+fn snapshots_name_tested_tokenizers() {
+    let snapshots: BTreeSet<String> = fs::read_dir(SNAPSHOT_DIR)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .map(|path| path.file_stem().unwrap().to_str().unwrap().to_owned())
+        .filter(|stem| stem != "corpus")
+        .collect();
+    let tested: BTreeSet<String> = TOKENIZER_KEYS.iter().map(|key| key.to_string()).collect();
+    let untested: Vec<_> = snapshots.difference(&tested).collect();
+    let missing: Vec<_> = tested.difference(&snapshots).collect();
+    assert!(
+        untested.is_empty() && missing.is_empty(),
+        "snapshots no test checks: {untested:?}; tests without a snapshot: {missing:?}"
+    );
 }
