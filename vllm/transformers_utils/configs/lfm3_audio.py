@@ -13,12 +13,6 @@ def _lfm2_config(values: dict[str, Any]) -> Lfm2Config:
     # export as an LFM3 stack without the attention gate and sandwich norms,
     # which is the same network.
     if values.pop("model_type", "lfm2") == "lfm3":
-        if values.pop("use_attention_gate", True) or values.pop(
-            "use_sandwich_norm", True
-        ):
-            raise ValueError("The LFM3-Audio encoder has no attention gate")
-        values.pop("head_dim", None)
-        values.pop("sliding_window", None)
         (values["rope_parameters"],) = values["rope_parameters"].values()
         values["layer_types"] = [
             "full_attention" if layer_type == "sliding_attention" else layer_type
@@ -38,13 +32,11 @@ class Lfm3AudioEncoderConfig(PreTrainedConfig):
         text_config: dict | Lfm2Config | None = None,
         num_mel_bins: int = 128,
         conv_channels: int = 256,
-        hidden_size: int = 768,
         sliding_window: int | None = None,
         **kwargs: Any,
     ) -> None:
         num_mel_bins = kwargs.pop("dim_in", num_mel_bins)
         conv_channels = kwargs.pop("dim_conv", conv_channels)
-        hidden_size = kwargs.pop("dim_out", hidden_size)
         backbone = kwargs.pop("lfm", text_config)
         if isinstance(backbone, dict):
             sliding_window = sliding_window or backbone.get("sliding_window")
@@ -52,7 +44,6 @@ class Lfm3AudioEncoderConfig(PreTrainedConfig):
         self.text_config: Lfm2Config = backbone or Lfm2Config()
         self.num_mel_bins = num_mel_bins
         self.conv_channels = conv_channels
-        self.hidden_size = hidden_size
         # Past frames each frame attends to, itself included
         self.sliding_window = sliding_window or 32
         super().__init__(**kwargs)

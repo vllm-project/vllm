@@ -8,6 +8,7 @@ weights are skipped on load.
 
 import copy
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -40,6 +41,7 @@ from vllm.transformers_utils.processors.lfm3_audio import (
     Lfm3AudioFeatureExtractor,
     Lfm3AudioProcessor,
 )
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     HasInnerState,
@@ -61,16 +63,47 @@ from .utils import (
 MAX_AUDIO_SECONDS = 600
 
 
+class Lfm3AudioFeatureInputs(TensorSchema):
+    """Dimensions:
+    - na: Number of audios
+    - nmb: Number of mel bins
+    - nf: Number of spectrogram frames
+    """
+
+    type: Literal["audio_features"]
+    input_features: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na", "nmb", "nf", dynamic_dims={"nf"}),
+    ]
+
+
+class Lfm3AudioEmbeddingInputs(TensorSchema):
+    """Dimensions:
+    - na: Number of audios
+    - nt: Number of audio tokens
+    - hs: Hidden size of the language model
+    """
+
+    type: Literal["audio_embeds"]
+    audio_embeds: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na", "nt", "hs", dynamic_dims={"nt"}),
+    ]
+
+
+Lfm3AudioInputs: TypeAlias = Lfm3AudioFeatureInputs | Lfm3AudioEmbeddingInputs
+
+
 def split_audio_features(processed_data: BatchFeature) -> BatchFeature:
     """Keeps each clip's own frames: the features are padded to the longest clip
     of the call, so cached and freshly processed items would differ."""
-    if (masks := processed_data.get("feature_attention_mask")) is not None:
-        lengths = masks.sum(-1).tolist()
-        for key in ("input_features", "feature_attention_mask"):
-            processed_data[key] = [
-                value[..., :length]
-                for value, length in zip(processed_data[key], lengths)
-            ]
+    if (masks := processed_data.pop("feature_attention_mask", None)) is not None:
+        processed_data["input_features"] = [
+            features[..., :length]
+            for features, length in zip(
+                processed_data["input_features"], masks.sum(-1).tolist()
+            )
+        ]
     return processed_data
 
 
@@ -98,7 +131,9 @@ class Lfm3AudioDownsampler(nn.Module):
         self.conv_end = nn.Conv2d(channels, channels, groups=channels, **conv)
         self.lin_end = nn.Conv2d(channels, channels, kernel_size=1)
         self.lin_out = nn.Conv1d(
-            config.num_mel_bins * channels // 8, config.hidden_size, kernel_size=1
+            config.num_mel_bins * channels // 8,
+            config.text_config.hidden_size,
+            kernel_size=1,
         )
         self.act = nn.SiLU()
 
@@ -135,7 +170,7 @@ class Lfm3AudioEncoder(nn.Module):
 class Lfm3AudioProjector(nn.Module):
     def __init__(self, config: Lfm3AudioConfig, prefix: str = "") -> None:
         super().__init__()
-        in_features = config.audio_encoder_config.hidden_size
+        in_features = config.audio_encoder_config.text_config.hidden_size
         out_features = config.text_config.hidden_size
         self.layer_norm = nn.LayerNorm(in_features)
         self.linear_1 = ReplicatedLinear(
@@ -222,7 +257,6 @@ class Lfm3AudioMultiModalProcessor(BaseMultiModalProcessor[Lfm3AudioProcessingIn
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "input_features": MultiModalFieldConfig.batched("audio"),
-            "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "audio_embeds": MultiModalFieldConfig.batched("audio"),
         }
 
@@ -240,9 +274,9 @@ class Lfm3AudioMultiModalProcessor(BaseMultiModalProcessor[Lfm3AudioProcessingIn
             if (embeds := item.get("audio_embeds")) is not None:
                 count = len(embeds.data)
             else:
-                mask = item["feature_attention_mask"].data
-                assert isinstance(mask, torch.Tensor)
-                count = extractor.num_encoder_tokens(int(mask.sum()))
+                features = item["input_features"].data
+                assert isinstance(features, torch.Tensor)
+                count = extractor.num_encoder_tokens(features.shape[-1])
             return [processor.audio_token_id] * count
 
         return [PromptReplacement("audio", [processor.audio_token_id], audio_tokens)]
@@ -326,21 +360,32 @@ class Lfm3AudioForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+    def _parse_and_validate_audio_input(
+        self, **kwargs: object
+    ) -> Lfm3AudioInputs | None:
+        input_features = kwargs.pop("input_features", None)
+        audio_embeds = kwargs.pop("audio_embeds", None)
+        if audio_embeds is not None:
+            return Lfm3AudioEmbeddingInputs(
+                type="audio_embeds", audio_embeds=audio_embeds
+            )
+        if input_features is not None:
+            return Lfm3AudioFeatureInputs(
+                type="audio_features", input_features=input_features
+            )
+        return None
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        audio_embeds = kwargs.get("audio_embeds")
-        if isinstance(audio_embeds, (torch.Tensor, list)):
-            return list(audio_embeds)
-        input_features = kwargs.get("input_features")
-        masks = kwargs.get("feature_attention_mask")
-        if not isinstance(input_features, (torch.Tensor, list)):
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is None:
             return []
-        assert isinstance(masks, (torch.Tensor, list))
+        if audio_input["type"] == "audio_embeds":
+            return list(audio_input["audio_embeds"])
         dtype = self.audio_encoder.downsample.conv_in.weight.dtype
-        embeddings = []
-        for features, mask in zip(input_features, masks):
-            features = features[None, :, : int(mask.sum())].to(dtype)
-            embeddings.append(self.audio_projector(self.audio_encoder(features)[0]))
-        return embeddings
+        return [
+            self.audio_projector(self.audio_encoder(features[None].to(dtype))[0])
+            for features in audio_input["input_features"]
+        ]
 
     def forward(
         self,

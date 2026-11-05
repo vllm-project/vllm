@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
-import regex as re
 import torch
 from transformers import AutoTokenizer, BatchFeature
 from transformers.audio_utils import mel_filter_bank
@@ -88,11 +87,6 @@ class Lfm3AudioFeatureExtractor(SequenceFeatureExtractor):
         return_tensors: str | None = None,
         **kwargs,
     ) -> BatchFeature:
-        if sampling_rate is not None and sampling_rate != self.sampling_rate:
-            raise ValueError(
-                f"Expected audio sampled at {self.sampling_rate} Hz, "
-                f"got {sampling_rate} Hz"
-            )
         if isinstance(raw_speech, np.ndarray) and raw_speech.ndim == 1:
             raw_speech = [raw_speech]
         features = [
@@ -119,10 +113,6 @@ class Lfm3AudioFeatureExtractor(SequenceFeatureExtractor):
 
 
 class Lfm3AudioProcessor(ProcessorMixin):
-    attributes = ["feature_extractor", "tokenizer"]
-    feature_extractor_class = "Lfm3AudioFeatureExtractor"
-    tokenizer_class = "AutoTokenizer"
-
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         # The hub processor also loads the speech codec, which only speech
@@ -146,34 +136,13 @@ class Lfm3AudioProcessor(ProcessorMixin):
         self,
         text: str | list[str] | None = None,
         audio: np.ndarray | list[np.ndarray] | None = None,
-        sampling_rate: int | None = None,
         return_tensors: str | None = None,
         **kwargs,
     ) -> BatchFeature:
+        # vLLM expands the audio placeholders itself, so text is only tokenized
         data = {}
-        num_tokens: list[int] = []
         if audio is not None:
-            data.update(
-                self.feature_extractor(
-                    audio, sampling_rate=sampling_rate, return_tensors=return_tensors
-                )
-            )
-            num_tokens = [
-                self.feature_extractor.num_encoder_tokens(int(length))
-                for length in data["feature_attention_mask"].sum(-1)
-            ]
+            data.update(self.feature_extractor(audio, return_tensors=return_tensors))
         if text is not None:
-            texts = [text] if isinstance(text, str) else list(text)
-            if sum(t.count(self.audio_token) for t in texts) != len(num_tokens):
-                raise ValueError(
-                    f"The number of {self.audio_token} tokens in the text must "
-                    "match the number of audio clips"
-                )
-            counts = iter(num_tokens)
-            pattern = re.escape(self.audio_token)
-            texts = [
-                re.sub(pattern, lambda _: self.audio_token * next(counts), t)
-                for t in texts
-            ]
-            data.update(self.tokenizer(texts, return_tensors=return_tensors, **kwargs))
+            data.update(self.tokenizer(text, return_tensors=return_tensors, **kwargs))
         return BatchFeature(data, tensor_type=return_tensors)

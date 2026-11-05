@@ -36,7 +36,6 @@ TRANSFORMERS_NATIVE = {
     "audio_encoder_config": {
         "num_mel_bins": 128,
         "conv_channels": 256,
-        "hidden_size": 768,
         "text_config": {
             "model_type": "lfm3",
             "vocab_size": 2,
@@ -67,7 +66,7 @@ def test_config_layouts(layout):
     encoder = config.audio_encoder_config
     assert config.audio_token_id == 125031
     assert config.text_config.model_type == "lfm3"
-    assert (encoder.num_mel_bins, encoder.hidden_size) == (128, 768)
+    assert (encoder.num_mel_bins, encoder.text_config.hidden_size) == (128, 768)
     assert encoder.sliding_window == 32
     backbone = encoder.text_config
     assert backbone.model_type == "lfm2"
