@@ -27,6 +27,10 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
+    # More than one logical output partition (e.g. QKV). Per-tensor weight
+    # scales of such layers hold one scale per partition and are expanded to
+    # per-channel scales after loading.
+    is_fused_module: bool = False
 
 
 @dataclass

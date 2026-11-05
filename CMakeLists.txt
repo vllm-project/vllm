@@ -31,6 +31,9 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+if (VLLM_TARGET_DEVICE STREQUAL "rocm" OR "$ENV{VLLM_KERNEL_SYMBOL_MAP}" STREQUAL "1")
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -404,6 +407,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         COMMAND patch --batch --forward -p1
           "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} -c
+          "import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({sys.argv[2]: sys.argv[3:]}))"
+          "${CMAKE_CURRENT_BINARY_DIR}/generated-source-deps.json"
+          "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         COMMAND_ERROR_IS_FATAL ANY)
 
       include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
@@ -1517,12 +1529,69 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The paged attention *instantiations* are split over one translation unit
+  # per (dtype, kv-cache dtype, head size) combination: compiling them all in a
+  # single file serializes ~10 min of device code generation onto one core.
+  # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
+  # the kernels and launchers. A file listed here is dead weight unless
+  # attention_dispatch.cu also dispatches its entry point (guarded below).
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
-    "csrc/rocm/attention.cu")
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+    "csrc/rocm/attention_dispatch.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu")
+
+  # Each attention_paged_attn_*.cu file below instantiates one kernel set and
+  # exposes it as one entry point. That entry point is only reachable if
+  # paged_attention() in csrc/rocm/attention_dispatch.cu names it in one of its
+  # ATTN_HEAD_SWITCH() calls (the dispatch arms); otherwise the file is compiled
+  # and linked unnecessarily. Fail at configure time instead.
+  file(READ "${CMAKE_SOURCE_DIR}/csrc/rocm/attention_dispatch.cu" _attn_dispatch)
+  string(FIND "${_attn_dispatch}" "#define ATTN_HEAD_SWITCH" _attn_arms_pos)
+  if (_attn_arms_pos EQUAL -1)
+    message(FATAL_ERROR
+      "csrc/rocm/attention_dispatch.cu no longer defines ATTN_HEAD_SWITCH; "
+      "update the instantiation guard in CMakeLists.txt accordingly.")
+  endif()
+  string(SUBSTRING "${_attn_dispatch}" ${_attn_arms_pos} -1 _attn_arms)
+  foreach (_attn_src ${VLLM_ROCM_EXT_SRC})
+    if (_attn_src MATCHES "^csrc/rocm/attention_paged_attn_.*\\.cu$")
+      file(READ "${CMAKE_SOURCE_DIR}/${_attn_src}" _attn_tu)
+      string(REGEX MATCHALL "ATTN_ENTRY\\([A-Za-z0-9_]+\\)" _attn_entries
+        "${_attn_tu}")
+      foreach (_attn_entry ${_attn_entries})
+        string(REGEX REPLACE "ATTN_ENTRY\\((.*)\\)" "\\1" _attn_name
+          "${_attn_entry}")
+        if (NOT _attn_arms MATCHES "${_attn_name}[,)]")
+          message(FATAL_ERROR
+            "${_attn_src} instantiates ${_attn_name}, but "
+            "csrc/rocm/attention_dispatch.cu never dispatches it: the file "
+            "would be compiled and linked for nothing. Add it to one of the "
+            "ATTN_HEAD_SWITCH() calls in paged_attention().")
+        endif()
+      endforeach()
+    endif()
+  endforeach()
+  # Compress the offloaded device binaries. The 9-arch release build packs
+  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
+  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
+  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
+  # .eh_frame out of range". --offload-compress keeps the device debug info
+  # (so the RelWithDebInfo build type is unchanged) while shrinking the
+  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
@@ -1561,7 +1630,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
-      "csrc/rocm/moe_q_gemm_rdna3.cu")
+      "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")
   endif()
 
   define_extension_target(

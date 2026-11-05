@@ -14,6 +14,19 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: label-recipe
+  description: Automatically apply recipe label
+  conditions:
+    - label != stale
+    - -closed
+    - files~=^recipes/
+  actions:
+    label:
+      add:
+        - recipe
+    comment:
+      message: "Recipe preview: https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
+
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
@@ -333,6 +346,28 @@ pull_request_rules:
     label:
       add:
         - minimax
+
+- name: label-beam
+  description: Automatically apply beam label for Reflection AI's model
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/models/beam/
+      - files=vllm/transformers_utils/configs/beam.py
+      - files=vllm/parser/beam.py
+      - files=vllm/reasoning/beam_reasoning_parser.py
+      - files=vllm/tool_parsers/beam_tool_parser.py
+      - files~=^rust/src/parser/src/unified/beam(?:\.rs|/)
+      - files~=^tests/models/test_beam_.*\.py$
+      - files=tests/parser/test_beam_parser.py
+      - files=tests/transformers_utils/test_beam_config.py
+      - files~=^recipes/models/reflection/Beam-
+      # Bare "beam" also describes beam search; require a model identifier.
+      - title~=(?i)(?:\bbeam[- ]\d|\breflection(?:\s+ai)?[ /-]+beam\b|\bBeamForCausalLM\b|\bBeamConfig\b|\[beam\])
+  actions:
+    label:
+      add:
+        - beam
 
 - name: label-inkling
   description: Automatically apply inkling label

@@ -204,7 +204,7 @@ def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=torch.bfloat16,
-        device="cuda",
+        device=current_platform.device_type,
         routing_method=RoutingMethodType.TopK,
         **config_kwargs,
     )

@@ -82,6 +82,7 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
@@ -202,6 +203,10 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        if self.use_v2_model_runner and not HAS_TRITON:
+            raise ValueError("Model Runner V2 requires Triton.")
+
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -237,8 +242,6 @@ class Worker(WorkerBase):
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
-
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -702,9 +705,15 @@ class Worker(WorkerBase):
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        compilation_config = self.vllm_config.compilation_config
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.use_v2_model_runner
+                and compilation_config.cudagraph_mm_encoder
+                and not self.model_config.enforce_eager
+            )
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -1392,6 +1401,7 @@ class Worker(WorkerBase):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
@@ -1422,9 +1432,11 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
+                    profiler_kwargs=profiler_kwargs,
                 )
 
             self.profiler.set_output_name(trace_name)
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(
                 delay_iterations=delay_iterations,
                 max_iterations=max_iterations,

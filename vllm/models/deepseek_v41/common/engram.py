@@ -1016,7 +1016,7 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": self.vocab_start_idx,
                 },
             )
-        if cpu_offload:
+        if cpu_offload and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
@@ -1036,6 +1036,14 @@ class ParallelEngramEmbedding(nn.Module):
         return self.tp_size * self.dp_size, engram_head_shard_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        scale_dim = self.dim // self.block_size
+        if torch.get_default_device().type == "meta" or not self.cpu_offload:
+            return (
+                torch.empty(
+                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
+                ),
+                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
+            )
         if self.dp_shared_memory:
             group = get_engram_dp_group()
             assert group is not None
@@ -1045,15 +1053,8 @@ class ParallelEngramEmbedding(nn.Module):
             self._shared_memory = storage
             self._weight_loader = storage.load_weight
             return storage.weight, storage.weight_scale_inv
-        scale_dim = self.dim // self.block_size
-        if not self.cpu_offload:
-            return (
-                torch.empty(
-                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
-                ),
-                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
-            )
-        if self.use_thp:
+        # pin_memory rounds up to a power of two. ROCm pins huge pages either way.
+        if self.use_thp or current_platform.is_rocm():
             weight_bytes = self.part_num_embeddings * self.dim
             packed = _allocate_huge_page_storage(
                 weight_bytes + weight_bytes // self.block_size

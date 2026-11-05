@@ -7,8 +7,9 @@ description: Time a vLLM model's forward pass on exact batch shapes (decode, pre
 
 Builds the batch without the scheduler, runs it through MRV2's real
 `execute_model`, and times the forward as a one-shot CUDA graph (prefill
-included). Sampling, the speculator, and CPU step overhead are excluded, so
-expect results somewhat below a serving step.
+included). The configured drafter is included by default; use
+`--exclude-drafter` for target-only timing. All draft tokens are accepted.
+Target sampling, rejection sampling, and CPU step overhead are excluded.
 
 ## Usage
 

@@ -5,8 +5,11 @@
 import time
 
 import pytest
+import torch
+from transformers import Llama4ForCausalLM, Llama4TextConfig
 
-from vllm import LLM, SamplingParams, TokensPrompt
+from tests.models.utils import check_logprobs_close
+from vllm import LLM, SamplingParams, TokensPrompt, envs
 from vllm.config import KVTransferConfig
 from vllm.platforms import current_platform
 
@@ -24,6 +27,90 @@ PERF_MODELS = [
     "meta-llama/Llama-3.1-8B",
     "openai/gpt-oss-20b",
 ]
+
+
+def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
+    """A CPU suffix after a short GPU hit must preserve the cold prediction."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+    config = Llama4TextConfig(
+        vocab_size=512,
+        hidden_size=128,
+        intermediate_size=256,
+        intermediate_size_mlp=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        max_position_embeddings=256,
+        attention_chunk_size=64,
+        no_rope_layers=[1, 0],
+        interleave_moe_layer_step=100,
+        num_local_experts=2,
+        use_qk_norm=False,
+        initializer_range=0.08,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(1234)
+        model = Llama4ForCausalLM(config)
+        model.save_pretrained(tmp_path)
+        del model
+
+    with vllm_runner(
+        str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="float16",
+        enforce_eager=True,
+        compilation_config={"mode": 0},
+        attention_config={"backend": "TRITON_ATTN"},
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=1,
+        block_size=16,
+        num_gpu_blocks_override=64,
+        kv_cache_memory_bytes=16 << 20,
+        enable_prefix_caching=True,
+        disable_hybrid_kv_cache_manager=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"cpu_bytes_to_use": 16 << 20},
+        ),
+    ) as runner:
+        llm = runner.get_llm()
+        tokens = [3 + (i * 37) % 500 for i in range(81)]
+        prompt = TokensPrompt(prompt_token_ids=tokens)
+        params = SamplingParams(
+            temperature=0, max_tokens=1, logprobs=5, ignore_eos=True, detokenize=False
+        )
+        cold = llm.generate(prompt, params, use_tqdm=False)[0].outputs[0]
+
+        def reset_gpu_cache():
+            deadline = time.monotonic() + 30
+            while not llm.reset_prefix_cache():
+                assert time.monotonic() < deadline, "CPU stores did not finish"
+                llm.llm_engine.step()
+
+        reset_gpu_cache()
+        cpu_hit = llm.generate(prompt, params, use_tqdm=False)[0]
+        assert cpu_hit.num_cached_tokens == 80
+        reset_gpu_cache()
+        short_params = params.clone()
+        short_params.skip_reading_prefix_cache = True
+        llm.generate(
+            TokensPrompt(prompt_token_ids=tokens[:17]), short_params, use_tqdm=False
+        )
+        mixed_hit = llm.generate(prompt, params, use_tqdm=False)[0]
+        for name, output in (("CPU hit", cpu_hit), ("mixed hit", mixed_hit)):
+            cached = output.outputs[0]
+            check_logprobs_close(
+                outputs_0_lst=[(list(cold.token_ids), "", cold.logprobs)],
+                outputs_1_lst=[(list(cached.token_ids), "", cached.logprobs)],
+                name_0="cold",
+                name_1=name,
+                always_check_logprobs=True,
+            )
+        assert mixed_hit.num_cached_tokens == 16
 
 
 def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:

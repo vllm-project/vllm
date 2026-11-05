@@ -191,6 +191,8 @@ class DSparkSpeculator(DFlashSpeculator):
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
+            if hasattr(self.model, "apply_output_logit_transform"):
+                logits_i = self.model.apply_output_logit_transform(logits_i)
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )

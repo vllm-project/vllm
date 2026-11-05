@@ -205,10 +205,15 @@ def install_routing(
         return mode, None
     parallel = runner.parallel_config
     ep_size = (
-        parallel.data_parallel_size * parallel.tensor_parallel_size
+        parallel.data_parallel_size
+        * parallel.tensor_parallel_size
+        * parallel.prefill_context_parallel_size
         if parallel.enable_expert_parallel
         else 1
     )
+    # Without EP, MoE gathers PCP rows, including replicated decode queries.
+    if not parallel.enable_expert_parallel:
+        num_tokens *= parallel.prefill_context_parallel_size
     try:
         routing = BalancedRouting(
             runner.model,
