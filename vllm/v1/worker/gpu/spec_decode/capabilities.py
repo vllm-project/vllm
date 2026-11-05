@@ -17,29 +17,18 @@ therefore runs as a chain.
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal
 
 from vllm.logger import init_logger
+from vllm.v1.spec_decode.resources import PLAN_KINDS, PlanKind, plan_kind_rank
 
 if TYPE_CHECKING:
+    from vllm.v1.spec_decode.resources import SpecResources
     from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry
-    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
     from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
     from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
-
-PlanKind = Literal["none", "chain", "tree"]
-"""The plans a model verifies, in increasing order: ``"none"`` (no speculative
-decoding), ``"chain"`` (each row follows the one before it), ``"tree"`` (each
-row names its parent row and sees its ancestors)."""
-
-PLAN_KINDS: tuple[PlanKind, ...] = get_args(PlanKind)
-
-
-def plan_kind_rank(kind: PlanKind) -> int:
-    """The position of ``kind`` in :data:`PLAN_KINDS`."""
-    return PLAN_KINDS.index(kind)
 
 
 def min_plan_kind(kinds: Iterable[PlanKind]) -> PlanKind:

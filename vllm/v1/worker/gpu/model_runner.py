@@ -84,6 +84,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.spec_decode.resources import SpecResources
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -171,7 +172,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
-from vllm.v1.worker.gpu.spec_decode.round import SpecResources, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
 from vllm.v1.worker.gpu.spec_decode.round_runner import (
     SpecRound,
     is_chain,

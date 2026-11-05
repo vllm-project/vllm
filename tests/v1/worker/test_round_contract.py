@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
 )
+from vllm.v1.spec_decode.resources import BudgetView, SpecResources
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -50,13 +51,7 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     chain_parents,
     chain_path,
 )
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    BudgetView,
-    SpecResources,
-    VerifyOutput,
-    VerifyPlan,
-)
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyOutput, VerifyPlan
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree, walk_tree
 from vllm.v1.worker.utils import AttentionGroup

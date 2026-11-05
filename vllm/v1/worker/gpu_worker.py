@@ -161,9 +161,9 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.spec_decode.resources import SpecResources
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
-    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 

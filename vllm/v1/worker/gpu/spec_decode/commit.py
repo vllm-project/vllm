@@ -21,8 +21,8 @@ from dataclasses import dataclass
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.spec_decode.resources import PlanKind
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
-from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     ABOVE_NONE,
     CommitStep,

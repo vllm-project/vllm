@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""What speculative decoding holds, shared by the scheduler, the engine core and
+the workers."""
+
+from dataclasses import dataclass
+from typing import Literal, get_args
+
+PlanKind = Literal["none", "chain", "tree"]
+"""The plans a model verifies, in increasing order: ``"none"`` (no speculative
+decoding), ``"chain"`` (each row follows the one before it), ``"tree"`` (each
+row names its parent row and sees its ancestors)."""
+
+PLAN_KINDS: tuple[PlanKind, ...] = get_args(PlanKind)
+
+
+def plan_kind_rank(kind: PlanKind) -> int:
+    """The position of ``kind`` in :data:`PLAN_KINDS`."""
+    return PLAN_KINDS.index(kind)
+
+
+@dataclass(frozen=True)
+class SpecResources:
+    """What speculation holds.
+
+    The runner captures a decode CUDA graph for each entry of ``capture_rows``,
+    and no request verifies more rows than the largest (``max_rows``).
+
+    The speculator's config declares them (``SpeculatorConfig.resources``), and the
+    KV and recurrent-state pools are sized for ``num_speculative_tokens``. The engine
+    core then lowers them, never raises them, to what the model's layers verify
+    (``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
+    to every worker.
+    """
+
+    capture_rows: tuple[int, ...]
+    """Rows per request, the root included, of each decode graph (1 = plain
+    decode); at most ``num_speculative_tokens + 1``."""
+    max_branching: int = 1
+    """1 for chains. Above 1 the attention backend and the linear-attention layers must
+    take a parent per row."""
+
+    @property
+    def plan_kind(self) -> PlanKind:
+        """The plans the speculator verifies: trees when it branches."""
+        return "tree" if self.max_branching > 1 else "chain"
+
+    @property
+    def max_rows(self) -> int:
+        """The most rows a request verifies, the root included."""
+        return max(self.capture_rows)
+
+    def __post_init__(self) -> None:
+        bad = [n for n in self.capture_rows if not isinstance(n, int) or n < 1]
+        if not self.capture_rows or bad:
+            raise ValueError(
+                f"capture_rows must be positive ints, at least one; got "
+                f"{self.capture_rows}."
+            )
+        if self.max_branching < 1:
+            raise ValueError(
+                f"max_branching ({self.max_branching}) must be >= 1: 1 is a chain."
+            )
+
+
+@dataclass(frozen=True)
+class BudgetView:
+    """What the scheduler knows when it asks for the step's candidate budget
+    (:meth:`SpeculatorConfig.candidate_budget`). Host integers, read once all
+    of this step's requests are scheduled and their blocks allocated."""
+
+    num_scheduled_reqs: int
+    num_running: int
+    num_waiting: int
+    num_free_blocks: int
+    max_num_seqs: int
+    block_size: int
+    """Tokens per block of the unified pool (the scheduler's block size)."""

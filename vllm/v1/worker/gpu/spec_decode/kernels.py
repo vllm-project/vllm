@@ -56,12 +56,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.worker.gpu.spec_decode.capabilities import (
-    PLAN_KINDS,
-    PlanKind,
-    SpecLayerKind,
-    plan_kind_rank,
-)
+from vllm.v1.spec_decode.resources import PLAN_KINDS, PlanKind, plan_kind_rank
+from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

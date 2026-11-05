@@ -10,6 +10,7 @@ import torch
 
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.spec_decode.resources import SpecResources
 from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
     SpecLayerKind,
@@ -32,12 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     chain_parents,
     chain_path,
 )
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    PlanInputs,
-    SpecResources,
-    VerifyPlan,
-)
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, PlanInputs, VerifyPlan
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

@@ -113,7 +113,7 @@ from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
+    from vllm.v1.spec_decode.resources import SpecResources
 
 logger = init_logger(__name__)
 

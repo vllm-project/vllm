@@ -25,8 +25,8 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+    from vllm.v1.spec_decode.resources import SpecResources
     from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
-    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 else:
     SchedulerOutput = object
     GrammarOutput = object

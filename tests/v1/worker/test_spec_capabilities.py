@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     RSWASpec,
     SlidingWindowSpec,
 )
+from vllm.v1.spec_decode.resources import SpecResources
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
@@ -62,7 +63,6 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
     SpecKernel,
     SpecLayerSpec,
 )
-from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.utils import AttentionGroup

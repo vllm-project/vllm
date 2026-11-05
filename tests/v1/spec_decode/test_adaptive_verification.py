@@ -369,8 +369,8 @@ def test_draft_budget_kernel_admits_exact_budget_on_ties():
 def test_adaptive_verification_reserves_the_full_candidate_budget():
     """With adaptive verification the config asks for every candidate (the
     worker trims); the runner captures the variable-length decode graphs."""
+    from vllm.v1.spec_decode.resources import BudgetView
     from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
-    from vllm.v1.worker.gpu.spec_decode.round import BudgetView
 
     spec = fake_speculative_config(
         DSparkSpeculatorConfig,

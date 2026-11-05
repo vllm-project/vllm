@@ -22,8 +22,8 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.spec_decode.resources import BudgetView, SpecResources
     from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
-    from vllm.v1.worker.gpu.spec_decode.round import BudgetView, SpecResources
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -161,7 +161,7 @@ class SpeculatorConfig:
         schedule (adaptive verification captures its variable-length graphs
         itself).
         """
-        from vllm.v1.worker.gpu.spec_decode.round import SpecResources
+        from vllm.v1.spec_decode.resources import SpecResources
 
         if self.spec_config.uses_dynamic_speculative_decoding():
             rows = {n + 1 for n in self._dynamic_sd_schedule(max_num_seqs)[1:]}

@@ -326,11 +326,9 @@ that cannot verify trees, and returns a plan each step. It must override
 only greedy requests accept.
 
 ```python
+from vllm.v1.spec_decode.resources import SpecResources
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
-from vllm.v1.worker.gpu.spec_decode.round import (
-    SpecResources,
-    VerifyPlan,
-)
+from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
 
 
 class MyTreeConfig(MyChainConfig):

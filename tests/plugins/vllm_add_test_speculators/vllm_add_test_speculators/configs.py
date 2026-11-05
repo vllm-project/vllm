@@ -6,10 +6,10 @@ runner) lives in `speculators` and is named by its qualified name."""
 
 from dataclasses import replace
 
+from vllm.v1.spec_decode.resources import BudgetView, SpecResources
 from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramGPUSpeculatorConfig
-from vllm.v1.worker.gpu.spec_decode.round import BudgetView, SpecResources
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 _SPECULATORS = f"{__package__}.speculators"
