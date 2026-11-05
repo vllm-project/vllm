@@ -1579,6 +1579,7 @@ if _is_cuda():
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
         ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._c128_C", optional=True))
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )

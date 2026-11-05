@@ -182,6 +182,35 @@ if(FLASH_MLA_ARCHS)
         ${flashmla_SOURCE_DIR}/csrc/3rdparty/cutlass/tools/util/include
     )
 
+    cuda_archs_loose_intersection(C128_ARCHS "9.0a" "${CUDA_ARCHS}")
+    if(C128_ARCHS)
+        set(C128_SOURCES
+            csrc/attention/deepseek_v4_c128/prefill.cu
+            csrc/attention/deepseek_v4_c128/bindings.cpp)
+        set_gencode_flags_for_srcs(
+            SRCS "${C128_SOURCES}" CUDA_ARCHS "${C128_ARCHS}")
+        define_extension_target(
+            _c128_C
+            DESTINATION vllm
+            LANGUAGE CUDA
+            SOURCES ${C128_SOURCES}
+            COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+                --expt-relaxed-constexpr --expt-extended-lambda
+                --ptxas-options=--register-usage-level=10
+            ARCHITECTURES ${VLLM_GPU_ARCHES}
+            INCLUDE_DIRECTORIES ${FlashMLA_INCLUDES}
+            USE_SABI 3
+            WITH_SOABI)
+        target_compile_definitions(_c128_C PRIVATE
+            FLASH_MLA_IS_BUILD_ON_CUDA USE_CUDA
+            TORCH_TARGET_VERSION=0x020B000000000000ULL)
+        target_compile_options(_c128_C PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
+            $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)
+    else()
+        add_custom_target(_c128_C)
+    endif()
+
     set_gencode_flags_for_srcs(
         SRCS "${FlashMLA_SOURCES}"
         CUDA_ARCHS "${FLASH_MLA_ARCHS}")
@@ -250,4 +279,5 @@ else()
     # Create empty targets for setup.py on unsupported systems
     add_custom_target(_flashmla_C)
     add_custom_target(_flashmla_extension_C)
+    add_custom_target(_c128_C)
 endif()

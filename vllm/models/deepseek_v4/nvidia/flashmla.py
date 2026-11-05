@@ -5,12 +5,17 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+)
+from vllm.models.deepseek_v4.nvidia.ops.c128_prefill import (
+    HAS_NATIVE_C128,
+    c128_prefill_attention,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
@@ -20,6 +25,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -313,6 +319,16 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
+        shared_c128 = (
+            HAS_NATIVE_C128
+            and self.compress_ratio == 128
+            and self.n_local_heads == 8
+            and self.window_size == 128
+            and q.dtype == torch.bfloat16
+            and swa_metadata.prefill_left_visible is None
+            and not envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_device_capability_family(90)
+        )
         combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
@@ -355,6 +371,25 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             query_end = (
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
+            # Exact FlashMLA ordering makes query-specific tails expensive.
+            # Use sharing only where the long common prefix amortizes them.
+            if (
+                shared_c128
+                and chunk_size == 1
+                and chunk_N >= 512
+                and query_end - query_start >= 4096
+            ):
+                c128_prefill_attention(
+                    q[query_start:query_end],
+                    kv,
+                    self.attn_sink,
+                    output[query_start:query_end],
+                    seq_lens[chunk_start:chunk_end],
+                    gather_lens[chunk_start:chunk_end],
+                    chunk_N,
+                    self.scale,
+                )
+                continue
             combined_indices_out = combined_indices_out[: query_end - query_start]
             combined_lens_out = combined_lens_out[: query_end - query_start]
 
