@@ -132,6 +132,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata,
     Mamba2AttentionMetadataBuilder,
@@ -2522,6 +2523,7 @@ class GPUModelRunner(
             if use_spec_decode and isinstance(
                 builder,
                 (
+                    Mamba1AttentionMetadataBuilder,
                     Mamba2AttentionMetadataBuilder,
                     GDNAttentionMetadataBuilder,
                     BailingLinearAttentionMetadataBuilder,

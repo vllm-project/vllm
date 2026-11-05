@@ -13,6 +13,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByTy
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata,
     Mamba2AttentionMetadataBuilder,
@@ -59,6 +60,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         if not isinstance(
             attn_metadata_builder,
             (
+                Mamba1AttentionMetadataBuilder,
                 Mamba2AttentionMetadataBuilder,
                 GDNAttentionMetadataBuilder,
                 ShortConvAttentionMetadataBuilder,

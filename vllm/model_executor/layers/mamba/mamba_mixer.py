@@ -188,7 +188,8 @@ class MambaMixer(MambaBase, PluggableLayer):
             else None
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -198,6 +199,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+        self.num_spec = vllm_config.num_speculative_tokens
 
     def _ssm_transform(
         self, x: torch.Tensor
@@ -356,6 +358,8 @@ class MambaMixer(MambaBase, PluggableLayer):
             # state_indices_tensor_d is assigned when attn_metadata is not None,
             # and has_decode is only True when attn_metadata is not None
             assert state_indices_tensor_d is not None
+            num_accepted_tokens = attn_metadata.num_accepted_tokens
+            query_start_loc_d = attn_metadata.query_start_loc_d
             # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
                 hidden_states_BC_d.transpose(0, 1),
@@ -364,6 +368,9 @@ class MambaMixer(MambaBase, PluggableLayer):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
+                num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=query_start_loc_d,
+                max_query_len=state_indices_tensor_d.size(-1),
             ).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
@@ -388,6 +395,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 state_batch_indices=state_indices_tensor_d,
                 dst_state_batch_indices=state_indices_tensor_d,
                 out=scan_outputs_d,
+                num_accepted_tokens=num_accepted_tokens,
+                cu_seqlens=query_start_loc_d,
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
@@ -421,6 +430,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             intermediate_size=self.intermediate_size,
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
+            num_spec=self.num_spec,
         )
 
     @property
