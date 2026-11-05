@@ -48,9 +48,9 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     chain_parents,
     chain_path,
 )
-from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyOutput, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
-from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree, walk_tree
+from vllm.v1.worker.gpu.spec_decode.tree_accept import VerifyOutput, walk_tree
 from vllm.v1.worker.utils import AttentionGroup
 
 HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -349,13 +349,9 @@ def test_mrope_tree_positions(last_parent):
 # --- Tree accept ------------------------------------------------------------
 
 
-def _verify_output(drafted, row_start, target=None, is_greedy=(True,)):
+def _verify_output(drafted, row_start, target):
     return VerifyOutput(
-        logits=None,
-        target=target,
-        is_greedy=np.array(is_greedy),
-        row_start=row_start,
-        drafted=drafted,
+        logits=None, target=target, row_start=row_start, drafted=drafted
     )
 
 
@@ -395,9 +391,11 @@ def test_walk_tree_matches_reference(seed):
         for r in range(1, count):
             if drafted[row_start[b] + r] != -1 and gen.random() < 0.5:
                 target[row_start[b] + parent[b, r]] = drafted[row_start[b] + r]
-    output = _verify_output(_t(drafted, torch.int64), _t(row_start))
+    output = _verify_output(
+        _t(drafted, torch.int64), _t(row_start), _t(target, torch.int64)
+    )
 
-    result = walk_tree(_plan(parent, counts), output, _t(target, torch.int64), 8)
+    result = walk_tree(_plan(parent, counts), output, 8)
 
     assert result.sampled.shape == (num_reqs, 8)
     for b, count in enumerate(counts):
@@ -406,24 +404,6 @@ def test_walk_tree_matches_reference(seed):
         n = int(result.path_len[b])
         assert result.path[b, :n].tolist() == path
         assert result.sampled[b, :n].tolist() == sampled
-
-
-@requires_kernels
-def test_default_tree_accept_walks_the_greedy_target():
-    """Greedy requests walk each row's target token; sampled requests are
-    refused. The output carries no sampler, only what the runner computed."""
-    drafted, row_start = _t([-1, 2, 3, 6], torch.int64), _t([0, 4])
-    target = _t([3, 0, 6, 1], torch.int64)
-    plan = _plan([[-1, 0, 0, 2]], [4])
-
-    result = accept_greedy_tree(plan, _verify_output(drafted, row_start, target), 4)
-
-    # Root's target 3 -> row 2 (token 3); its target 6 -> row 3; then token 1.
-    assert result.path[0, :3].tolist() == [0, 2, 3]
-    assert result.sampled[0, :3].tolist() == [3, 6, 1]
-    sampled = _verify_output(drafted, row_start, target, is_greedy=(False,))
-    with pytest.raises(ValueError, match="greedy"):
-        accept_greedy_tree(plan, sampled, 4)
 
 
 # --- Commit -----------------------------------------------------------------

@@ -2,25 +2,41 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Verification of a plan that is not a chain: the walk down the tree.
 
-Every plan row gets the target's token. The walk then goes from the root to the
-child whose token equals the current row's target token, until a row has no such
-child. The accepted rows are the path (root first); the committed tokens are the
-target tokens of the path rows, the last of which is the bonus token.
+Every plan row gets the target's token: the argmax for a greedy request, else a
+draw from the row's processed target distribution at its plan position. The walk
+then goes from the root to the child whose token equals the current row's target
+token, until a row has no such child. The accepted rows are the path (root
+first); the committed tokens are the target tokens of the path rows, the last of
+which is the bonus token.
 
-A speculator that verifies trees overrides ``accept`` and passes its own per-row
-target tokens to :func:`walk_tree`. When its ``accept`` returns None, vLLM takes
-the argmax, which is exact for greedy requests.
+Each committed token is the target's draw at its prefix, so the walk is lossless
+whenever the drafted tokens do not depend on that draw (deterministic drafts,
+such as a draft model's top-k).
 """
 
-import numpy as np
+from dataclasses import dataclass
+
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    VerifyOutput,
-    VerifyPlan,
-)
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
+
+
+@dataclass
+class VerifyOutput:
+    """What the target computed for the rows of a request range, in plan order
+    (every tensor indexed from the range's first row)."""
+
+    logits: torch.Tensor
+    """``[num_rows, vocab]`` logits after the sampling parameters."""
+    target: torch.Tensor
+    """``[num_rows]`` int64 the target's token at each row."""
+    row_start: torch.Tensor
+    """``[num_reqs + 1]`` int32 cumulative row offsets of each request."""
+    drafted: torch.Tensor
+    """``[num_rows]`` int64 token each row holds (row 0: the last committed
+    token); -1 for a row that must not be accepted (a placeholder or a
+    grammar-rejected draft)."""
 
 
 @triton.jit
@@ -62,25 +78,18 @@ def _walk_tree_kernel(
     tl.store(path_len_ptr + b, length)
 
 
-def walk_tree(
-    plan: VerifyPlan,
-    output: VerifyOutput,
-    target: torch.Tensor,
-    width: int | None = None,
-) -> AcceptResult:
-    """The accepted path of each request given ``target [num_rows]``, the
-    target's token at every row. ``sampled`` is ``[R, width]`` (default ``C``);
-    rows past a request's verified rows and rows whose ``output.drafted`` is -1
-    are never accepted."""
+def walk_tree(plan: VerifyPlan, output: VerifyOutput, width: int) -> AcceptResult:
+    """The accepted path of each request: the walk on ``output.target``.
+    ``sampled`` is ``[R, width]``; rows past a request's verified rows and rows
+    whose ``output.drafted`` is -1 are never accepted."""
     num_reqs, num_cols = plan.parent.shape
-    width = num_cols if width is None else width
     assert width >= num_cols
-    device = target.device
+    device = output.target.device
     sampled = torch.zeros(num_reqs, width, dtype=torch.int64, device=device)
     path = torch.empty(num_reqs, num_cols, dtype=torch.int32, device=device)
     path_len = torch.empty(num_reqs, dtype=torch.int32, device=device)
     _walk_tree_kernel[(num_reqs,)](
-        target,
+        output.target,
         output.drafted,
         output.row_start,
         plan.parent,
@@ -95,17 +104,3 @@ def walk_tree(
         num_warps=1,
     )
     return AcceptResult(path=path, path_len=path_len, sampled=sampled)
-
-
-def accept_greedy_tree(
-    plan: VerifyPlan, output: VerifyOutput, width: int
-) -> AcceptResult:
-    """The default ``accept`` of a plan that is not a chain: the walk on each
-    row's target token. Only greedy requests; a speculator that verifies sampled
-    trees overrides ``accept``."""
-    if not bool(np.all(output.is_greedy)):
-        raise ValueError(
-            "a plan that is not a chain verifies sampled requests only through "
-            "the speculator's accept; the default accepts greedy requests"
-        )
-    return walk_tree(plan, output, output.target, width)

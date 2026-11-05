@@ -6,21 +6,16 @@ import numpy as np
 import torch
 
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    PlanInputs,
-    VerifyOutput,
-    VerifyPlan,
-)
-from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree
+from vllm.v1.worker.gpu.spec_decode.round import PlanInputs, VerifyPlan
 
 from . import OFF_CHAIN
 
 
 class NgramTreeSpeculator(NgramGPUSpeculator):
     """Verifies the n-gram drafts as a tree: the first draft gets a sibling
-    holding another token, and the chain continues from the first draft. Accepts
-    greedily, and prints ``OFF_CHAIN`` the first time a path skips a row."""
+    holding another token, and the chain continues from the first draft. Prints
+    ``OFF_CHAIN`` the first time a request committed its sibling (the path skips
+    the first draft's row)."""
 
     _printed = False
 
@@ -34,6 +29,12 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
             shape = (self.req_states.max_num_reqs, num_cols)
             self._parent = torch.empty(shape, dtype=torch.int32, device=self.device)
             self._tokens = torch.empty(shape, dtype=torch.int32, device=self.device)
+            # Per request slot: where the last tree's sibling would commit, and
+            # its token (-1: no tree).
+            self._sibling = torch.full(
+                (2, self.req_states.max_num_reqs), -1, device=self.device
+            )
+        self._check_sibling(inputs.idx_mapping)
         rows = inputs.scheduled_rows.astype(np.int32)
         parent = np.tile(np.arange(-1, num_cols - 1, dtype=np.int32), (num_reqs, 1))
         # Row i holds draft i - 1 (row 0, the root, is ignored).
@@ -55,18 +56,23 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
         tokens = tokens.clamp(min=0) % self.vllm_config.model_config.get_vocab_size()
         self._parent[:num_reqs].copy_(torch.from_numpy(parent), non_blocking=True)
         self._tokens[:num_reqs].copy_(tokens.to(torch.int32))
+        # The first committed token lands after the root; the sibling only
+        # tells when it differs from the first draft.
+        root_pos = self.req_states.total_len.gpu[inputs.idx_mapping]
+        is_tree = torch.from_numpy(tree).to(self.device, non_blocking=True)
+        is_tree &= tokens[:, 2] != tokens[:, 1]
+        self._sibling[0, inputs.idx_mapping] = torch.where(is_tree, root_pos, -1)
+        self._sibling[1, inputs.idx_mapping] = tokens[:, 2].long()
         return VerifyPlan(
             parent=self._parent[:num_reqs], tokens=self._tokens[:num_reqs]
         )
 
-    def accept(self, plan: VerifyPlan, output: VerifyOutput) -> AcceptResult | None:
-        result = accept_greedy_tree(plan, output, plan.parent.shape[1])
-        if not self._printed:
-            num_reqs = len(output.is_greedy)
-            path = result.path[:num_reqs].cpu()
-            rows = torch.arange(path.shape[1])
-            in_path = rows < result.path_len[:num_reqs].cpu()[:, None]
-            if bool(((path != rows) & in_path).any()):
-                print(OFF_CHAIN, flush=True)
-                self._printed = True
-        return result
+    def _check_sibling(self, slots: torch.Tensor) -> None:
+        if self._printed:
+            return
+        pos, token = self._sibling[0, slots], self._sibling[1, slots]
+        committed = self.req_states.all_token_ids.gpu[slots, pos.clamp(min=0)]
+        is_new = pos < self.req_states.total_len.gpu[slots]
+        if bool(((pos >= 0) & is_new & (committed == token)).any()):
+            print(OFF_CHAIN, flush=True)
+            self._printed = True

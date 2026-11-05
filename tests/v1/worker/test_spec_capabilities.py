@@ -284,7 +284,7 @@ def _resolve(**settings):
     runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
     runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
     runner.batch_sharder, runner.adaptive_verification = None, None
-    runner.speculator_hooks = frozenset({"plan", "accept"})
+    runner.speculator_hooks = frozenset({"plan"})
     for setting, value in settings.items():
         setattr(runner, setting, value)
     spec_round = object.__new__(SpecRound)
@@ -311,29 +311,22 @@ def _resolve(**settings):
             CacheConfig(mamba_cache_mode="align"),
             _gdn_reason("align"),
         ),
-        (
-            "speculator_hooks",
-            frozenset({"plan"}),
-            "the speculator does not override accept",
-        ),
     ],
 )
 def test_runner_settings_lower_trees_to_chains(setting, value, reason):
-    """The runner's settings, the Mamba state mode it reads from the cache
-    config, and a speculator without its own accept lower a model that verifies
-    trees to chains."""
+    """The runner's settings, and the Mamba state mode it reads from the cache
+    config, lower a model that verifies trees to chains."""
     caps = _resolve(**({} if setting is None else {setting: value}))
 
     assert caps.plan_kind == ("tree" if reason is None else "chain")
     assert [limit.reason for limit in caps.limits] == ([reason] if reason else [])
 
 
-@pytest.mark.parametrize("hooks", [{"plan"}, {"accept"}])
-def test_adaptive_verification_refuses_plan_hooks(hooks):
+def test_adaptive_verification_refuses_plan_hooks():
     """Adaptive verification sets each request's verified drafts itself, so a
-    speculator that plans or accepts cannot run with it."""
+    speculator that plans cannot run with it."""
     with pytest.raises(ValueError, match="enable_adaptive_verification=false"):
-        _resolve(adaptive_verification=object(), speculator_hooks=frozenset(hooks))
+        _resolve(adaptive_verification=object())
 
 
 # --- resolving the speculator's resources -------------------------------------

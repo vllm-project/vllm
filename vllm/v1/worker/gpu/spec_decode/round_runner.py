@@ -119,8 +119,7 @@ class SpecRound:
         if runner.adaptive_verification is not None and runner.speculator_hooks:
             raise ValueError(
                 "Adaptive verification sets each request's verified drafts, so it "
-                "cannot run a speculator that overrides "
-                f"{' or '.join(sorted(runner.speculator_hooks))}. Pass "
+                "cannot run a speculator that overrides plan. Pass "
                 "enable_adaptive_verification=false in the speculative config."
             )
         limits = layer_spec_limits(
@@ -141,9 +140,6 @@ class SpecRound:
             for what, applies in settings.items()
             if applies
         ]
-        if "accept" not in runner.speculator_hooks:
-            # The default accept walks greedy trees only.
-            limits.append(SpecLimit("chain", "the speculator does not override accept"))
         self.capabilities = SpecCapabilities.from_limits(limits)
         return self.capabilities
 
@@ -285,8 +281,7 @@ class SpecRound:
 
     def restore(self, input_batch: "InputBatch") -> None:
         """Undo :meth:`lay_out` after the forward: the sampler, the prompt
-        logprobs and the drafter read chain positions (accept gets the plan
-        positions as ``VerifyOutput.positions``)."""
+        logprobs and the drafter read chain positions."""
         if self.layout is not None:
             self.layout.restore_positions(input_batch.positions, input_batch.num_tokens)
 

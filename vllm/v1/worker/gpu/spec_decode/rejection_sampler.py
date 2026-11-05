@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import fields, replace
 from typing import Any
 
@@ -27,12 +27,8 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    VerifyOutput,
-    VerifyPlan,
-)
-from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree
+from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.tree_accept import VerifyOutput, walk_tree
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -41,9 +37,6 @@ from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree
 # its traffic entirely.
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
-
-
-AcceptFn = Callable[[VerifyPlan, VerifyOutput, Sampler], "AcceptResult | None"]
 
 
 def slice_plan(plan: VerifyPlan, start: int, end: int) -> VerifyPlan:
@@ -194,11 +187,8 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
-        accept: AcceptFn | None = None,
     ):
         self.sampler = sampler
-        # The speculator's accept, when it overrides the chain verification.
-        self.accept = accept
         self.watermark_key = watermark_key
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
@@ -337,7 +327,6 @@ class RejectionSampler:
         return VerifyOutput(
             logits=processed,
             target=target,
-            is_greedy=is_greedy,
             row_start=input_batch.cu_num_logits[start : end + 1] - lo,
             drafted=draft_sampled[lo:hi],
         )
@@ -453,20 +442,9 @@ class RejectionSampler:
                 output = self._verify_output(
                     input_batch, logits, plan_pos, draft_sampled, start, end
                 )
-                width = self.num_speculative_steps + 1
-                if self.accept is not None:
-                    result = self.accept(plan, output)
-                if result is None:
-                    result = accept_greedy_tree(plan, output, width)
-                if result is not None and result.sampled.shape[1] < width:
-                    # Committed tokens are read at the chain's width.
-                    result.sampled = torch.nn.functional.pad(
-                        result.sampled, (0, width - result.sampled.shape[1])
-                    )
+                result = walk_tree(plan, output, self.num_speculative_steps + 1)
             chunk_logits = logits[lo:hi]
             if result is None:
-                if path_chunks:
-                    raise RuntimeError("accept returned a path for part of a batch")
                 # draft_logits uses persistent request-state indices, not batch
                 # rows.
                 processed_logits, sampled, num_sampled = self._verify(
@@ -482,8 +460,6 @@ class RejectionSampler:
                     input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
                 )
             else:
-                if sampled_chunks and not path_chunks:
-                    raise RuntimeError("accept returned a path for part of a batch")
                 sampled, num_sampled = result.sampled, result.path_len
                 path_chunks.append(result.path)
                 processed_logits = output.logits

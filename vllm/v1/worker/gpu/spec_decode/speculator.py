@@ -43,12 +43,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.gpu.spec_decode.round import (
-    AcceptResult,
-    PlanInputs,
-    VerifyOutput,
-    VerifyPlan,
-)
+from vllm.v1.worker.gpu.spec_decode.round import PlanInputs, VerifyPlan
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -175,29 +170,12 @@ class BaseSpeculator(ABC):
         """
         return None
 
-    def accept(self, plan: VerifyPlan, output: VerifyOutput) -> AcceptResult | None:
-        """Which rows of each request the target confirmed.
-
-        Called on the sampler's stream for every verified plan that is not a chain
-        (vLLM's rejection sampler verifies chains), once per request range when a
-        large batch is verified in pieces; ``plan`` and ``output`` cover that range.
-        Called eagerly, outside any captured CUDA graph. Return None (the default)
-        to walk the tree on each row's target token, which only greedy requests
-        accept. Trees need this override: without it the model verifies chains. The
-        runner commits the KV and the recurrent state along the returned path and
-        takes each committed token's logprobs from its path row.
-        """
-        return None
-
     def overridden_hooks(self) -> frozenset[str]:
         """The optional per-step hooks this speculator overrides. The model
         runner reads them once and skips the no-op defaults on every step."""
         return frozenset(
             name
-            for name in (
-                "plan",
-                "accept",
-            )
+            for name in ("plan",)
             if getattr(type(self), name) is not getattr(BaseSpeculator, name)
         )
 

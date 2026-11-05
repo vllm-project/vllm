@@ -3,8 +3,8 @@
 """Types of the speculative round contract.
 
 A speculative step is a round: the speculator plans the rows the target verifies
-(:class:`VerifyPlan`), the target runs them, the speculator accepts a path through them
-(:class:`AcceptResult`) and the runner commits the KV and the recurrent state along that
+(:class:`VerifyPlan`), the target runs them, the runner accepts a path through them
+(:class:`AcceptResult`) and commits the KV and the recurrent state along that
 path. What speculation holds is :class:`vllm.v1.spec_decode.resources.SpecResources`.
 
 Everything a speculator hands the runner is either a frozen dataclass of host integers
@@ -83,29 +83,6 @@ class PlanInputs:
     budget, a custom processor), structured output, or a parallelism mode that does
     not lay out other plans (pipeline, context parallel). The plan must then
     be a chain; it may still verify fewer rows."""
-
-
-@dataclass
-class VerifyOutput:
-    """What the target computed for the rows of the requests ``accept`` verifies,
-    in plan order. A large batch is verified in request ranges; every tensor here
-    and the plan ``accept`` gets cover the same range, indexed from 0."""
-
-    logits: torch.Tensor
-    """``[num_rows, vocab]`` logits after the sampling parameters (penalties,
-    temperature, top-k/top-p, the grammar bitmask): what vLLM samples from and
-    takes processed logprobs from."""
-    target: torch.Tensor
-    """``[num_rows]`` int64 the target's token for each row: what vLLM's sampler
-    draws from ``logits`` at the row's plan position (the argmax for a greedy
-    request)."""
-    is_greedy: np.ndarray
-    """``[num_reqs]`` bool: whether each request samples greedily."""
-    row_start: torch.Tensor
-    """``[num_reqs + 1]`` int32 cumulative row offsets of each request."""
-    drafted: torch.Tensor
-    """``[num_rows]`` int64 token each row holds (row 0: the last committed token); -1
-    for a row that must not be accepted (a placeholder or a grammar-rejected draft)."""
 
 
 @dataclass

@@ -54,7 +54,6 @@ def _make_rejection_sampler(
     """RejectionSampler for standard, fixed-boundary, unwatermarked verification."""
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = sampler
-    rejection_sampler.accept = None
     rejection_sampler.num_speculative_steps = num_speculative_steps
     rejection_sampler.enable_adaptive_verification = False
     rejection_sampler.synthetic_conditional_rates = None
@@ -322,8 +321,11 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert torch.equal(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)
 
 
-def test_chunked_accept_sees_every_plan_field():
-    """Each chunk's ``accept`` gets its requests' slice of every plan tensor."""
+def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
+    """Each chunk walks its requests' slice of every plan tensor, sampled
+    requests on the target's draw and greedy ones on the argmax."""
+    import vllm.v1.worker.gpu.spec_decode.rejection_sampler as rs
+
     num_reqs, rows = 3, 3
     cu_num_logits_np = np.arange(0, num_reqs * rows + 1, rows, dtype=np.int32)
     input_batch = _make_input_batch(
@@ -335,31 +337,43 @@ def test_chunked_accept_sees_every_plan_field():
         rows=np.array([3, 2, 1], dtype=np.int32),
     )
     seen: list[VerifyPlan] = []
+    drawn: list[torch.Tensor] = []
 
-    def accept(plan, output):
+    def walk_tree(plan, output, width):
         seen.append(plan)
         num = plan.parent.shape[0]
         return AcceptResult(
             path=torch.zeros(num, rows, dtype=torch.int32),
             path_len=torch.ones(num, dtype=torch.int32),
-            sampled=torch.zeros(num, rows, dtype=torch.int64),
+            sampled=torch.zeros(num, width, dtype=torch.int64),
         )
 
-    greedy = SimpleNamespace(np=np.zeros(num_reqs, dtype=np.float32))
+    def gumbel_sample(logits, *args, **kwargs):
+        drawn.append(logits)
+        return logits.argmax(dim=-1)
+
+    monkeypatch.setattr(rs, "walk_tree", walk_tree)
+    monkeypatch.setattr(rs, "gumbel_sample", gumbel_sample)
+    temperature = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    states = SimpleNamespace(
+        temperature=SimpleNamespace(np=temperature, gpu=torch.from_numpy(temperature)),
+        seeds=SimpleNamespace(gpu=torch.zeros(num_reqs, dtype=torch.int64)),
+    )
     rejection_sampler = _make_rejection_sampler(
         SimpleNamespace(
             logprobs_mode="raw_logprobs",
             return_sampling_mask=False,
             apply_sampling_params=lambda logits, *args: logits,
-            sampling_states=SimpleNamespace(temperature=greedy),
+            sampling_states=states,
+            use_fp64_gumbel=False,
         ),
         num_speculative_steps=rows - 1,
     )
-    rejection_sampler.accept = accept
     logits = torch.zeros(num_reqs * rows, 8)
     pos = torch.arange(num_reqs * rows)
     for max_chunk_logits in (num_reqs * rows, rows):
         seen.clear()
+        drawn.clear()
         rejection_sampler._verify_in_chunks(
             logits,
             input_batch,
@@ -375,3 +389,7 @@ def test_chunked_accept_sees_every_plan_field():
                 getattr(input_batch.verify_plan, name),
             ), name
         assert np.concatenate([plan.rows for plan in seen]).tolist() == [3, 2, 1]
+        # Only chunks holding the sampled request draw from the target.
+        assert sum(d.shape[0] for d in drawn) == (
+            num_reqs * rows if max_chunk_logits > rows else rows
+        )

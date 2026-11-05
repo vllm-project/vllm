@@ -2,8 +2,8 @@
 
 This page is for authors of [custom speculators](README.md#custom-speculators-experimental).
 It describes how a speculator controls a whole speculative round with the V2 model
-runner. The round has four parts: the plan of rows the target verifies, which of
-them it accepts, how many candidates the next round may take, and the kernels that
+runner. The round has four parts: the plan of rows the target verifies, the path
+vLLM accepts through them, how many candidates the next round may take, and the kernels that
 verify and commit trees.
 
 Every hook has a default that keeps the standard behaviour. A speculator overrides
@@ -17,9 +17,10 @@ only the hooks it needs.
 | The speculator owns | vLLM owns |
 | --- | --- |
 | The rows the target verifies each step: chain or tree (`BaseSpeculator.plan`) | The target forward, its CUDA graphs and its parallelism |
-| Which rows are accepted (`BaseSpeculator.accept`) | KV cache and recurrent-state memory, sized at startup |
-| The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Scheduling, preemption and the order of the waiting queue |
-| Its own drafting (`BaseSpeculator.propose`) | Committing the accepted path to the KV cache and recurrent state |
+| The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Accepting a path through the plan's rows |
+| Its own drafting (`BaseSpeculator.propose`) | KV cache and recurrent-state memory, sized at startup |
+| | Scheduling, preemption and the order of the waiting queue |
+| | Committing the accepted path to the KV cache and recurrent state |
 | Optional verify and commit kernels (`SpeculatorConfig.spec_kernel_providers`) | Deciding what each layer of the target can verify |
 | | The in-tree kernels, used for every key a speculator does not provide |
 
@@ -180,32 +181,23 @@ The runner builds the inputs from the plan and runs the target forward. Each row
 position is `num_computed_tokens` plus its depth. With M-RoPE, the shift is the same
 on every section. Attention sees each row's ancestors. The forward replays the captured graph for the batch's shape.
 
-### 4. Accept: `BaseSpeculator.accept`
+### 4. Accept
 
-```python
-def accept(self, plan: VerifyPlan, output: VerifyOutput) -> AcceptResult | None
-```
+vLLM checks chains with its rejection sampler. For a plan that is not a chain, it
+gives every row the target's token: the argmax for a greedy request, else a draw
+from the row's logits after the sampling parameters, at the row's plan position.
+It then walks from the root to the child whose token is the current row's target
+token, until no child matches. The committed tokens are the target tokens of the
+accepted rows; the last is the bonus token. Each is the target's draw at its
+prefix, so the walk is lossless when the drafted tokens do not depend on those
+draws, as with a draft model's top-k.
 
-The runner calls this on the sampler's stream for every verified plan that is not
-a chain; vLLM checks chains with its rejection sampler. A large batch is verified
-in request ranges, with one call per range, and `plan` and `output` cover that
-range. `VerifyOutput` carries, in plan order, each row's logits after the sampling
-parameters, the target's token for each row (what vLLM's sampler draws from those
-logits at the row's plan position; the argmax for a greedy request), whether each
-request is greedy, and the drafted tokens.
-
-Return `None`, the default, to walk the tree on each row's target token, which only
-greedy requests accept. A speculator verifies trees only when
-it overrides `accept`; otherwise startup lowers it to chains.
-
-`AcceptResult` has these fields:
+The result, `AcceptResult`, has these fields:
 
 - `path`: `path[r, :path_len[r]]` lists the accepted rows from the root down. Each
   row is a child of the previous one, so `path[r, j] >= j`.
 - `path_len`: the number of accepted rows per request.
-- `sampled`: `sampled[r, :path_len[r]]` holds the committed tokens. They are the
-  accepted candidates' tokens followed by the bonus token, sampled from the logits
-  of the last accepted row.
+- `sampled`: `sampled[r, :path_len[r]]` holds the committed tokens.
 The runner takes each committed token's logprobs from its row on the path.
 
 ### 5. Commit
@@ -317,9 +309,7 @@ Register the config with `register_speculative_method` as shown in
 ## Example: a tree speculator
 
 A tree speculator also declares branching resources, chooses its chain for models
-that cannot verify trees, and returns a plan each step. It must override
-`accept`; returning `None` for a batch walks the tree on each row's target, which
-only greedy requests accept.
+that cannot verify trees, and returns a plan each step.
 
 ```python
 from vllm.v1.spec_decode.resources import SpecResources
