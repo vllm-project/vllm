@@ -159,6 +159,7 @@ impl SchedulerStatsRecorder {
         model_name: &str,
         engines: &[ConnectedEngine],
     ) -> Self {
+        Self::record_cache_config_info(metrics, engines);
         let engines = engines
             .iter()
             .filter_map(|engine| {
@@ -174,6 +175,22 @@ impl SchedulerStatsRecorder {
         // Engines start awake, as Python sets when it creates the stat logger.
         recorder.record_sleep_state(EngineSleepState::Awake);
         recorder
+    }
+
+    /// Export each engine's cache config as `vllm:cache_config_info`, which
+    /// Python also creates with its stat logger.
+    fn record_cache_config_info(metrics: &SchedulerMetrics, engines: &[ConnectedEngine]) {
+        for engine in engines {
+            let (Some(index), Some(info)) = (
+                engine.engine_id.engine_index(),
+                &engine.ready_response.cache_config_info,
+            ) else {
+                continue;
+            };
+            let mut labels = info.clone();
+            labels.insert("engine".to_string(), index.to_string());
+            metrics.cache_config_info.get_or_create(&labels.into_iter().collect()).set(1.0);
+        }
     }
 
     /// Record the sleep state of every connected engine. Sleep and wake are

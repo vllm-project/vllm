@@ -256,6 +256,10 @@ pub struct SchedulerMetrics {
     /// seconds.
     pub lora_info: Family<LoraInfoLabels, F64Gauge>,
 
+    /// `vllm:cache_config_info`, one series per engine, always `1`. Labeled
+    /// with every `CacheConfig.metrics_info()` field plus `engine`.
+    pub cache_config_info: Family<Vec<(String, String)>, F64Gauge>,
+
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
@@ -375,6 +379,13 @@ impl SchedulerMetrics {
             "vllm:lora_requests_info",
             "Running stats on lora requests.",
             lora_info.clone(),
+        );
+
+        let cache_config_info = Family::default();
+        registry.register(
+            "vllm:cache_config_info",
+            "Information of the LLMEngine CacheConfig",
+            cache_config_info.clone(),
         );
 
         // Prefix-cache counters, including the connector-backed external cache path.
@@ -688,6 +699,7 @@ impl SchedulerMetrics {
             kv_cache_usage,
             engine_sleep_state,
             lora_info,
+            cache_config_info,
             prefix_cache_queries,
             prefix_cache_hits,
             external_prefix_cache_queries,
