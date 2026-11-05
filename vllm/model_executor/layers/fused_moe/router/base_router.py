@@ -5,7 +5,10 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fused_moe.eplb_triton import eplb_map_and_record
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -22,14 +25,14 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         logical_to_physical_ptr,
         out_ids_ptr,
         out_ptr,
+        physical_load_ptr,
         record_enabled_ptr,
         num_unpadded_tokens_ptr,
         num_logical_experts,
         map_slots,
-        out_size,
+        num_physical_experts,
         numel,
         num_active_experts,
-        HAS_NUM_UNPADDED: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -37,31 +40,6 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         mask = offs < numel
 
         expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
-        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-        safe_expert_id = tl.where(valid_expert, expert_id, 0)
-
-        # 1. Convert the logical expert ids to physical expert ids
-        replica_count = tl.load(
-            logical_replica_count_ptr + safe_expert_id,
-            mask=mask & valid_expert,
-            other=1,
-        )
-        # Avoid invalid modulo/div by forcing at least 1.
-        replica_count = tl.maximum(replica_count, 1)
-        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
-        KNUTH_MULTIPLIER = 2654435769
-        token_idx = (offs // num_active_experts).to(tl.int64)
-        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
-        replica_idx = hashed % replica_count
-        map_index = safe_expert_id * map_slots + replica_idx
-        physical_id = tl.load(
-            logical_to_physical_ptr + map_index,
-            mask=mask & valid_expert,
-            other=-1,
-        )
-        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
-
-        # 2. Record expert load metrics per logical expert.
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
         # can be done in a more unified way, since
@@ -74,22 +52,21 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         # If later refactor moved all the MoE kernel calls
         # to the modular kernel, we can move this logic there
         # to achieve better efficiency.
-
-        record_enabled = tl.load(record_enabled_ptr) != 0
-        # Skip padded tokens when recording.
-        if HAS_NUM_UNPADDED:
-            num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-            is_unpadded = offs < num_unpadded_tokens * num_active_experts
-        else:
-            is_unpadded = True
-        valid = (
-            mask
-            & record_enabled
-            & is_unpadded
-            & (physical_id >= 0)
-            & (expert_id < out_size)
+        physical_id = eplb_map_and_record(
+            expert_id,
+            offs // num_active_experts,
+            mask,
+            logical_to_physical_ptr,
+            logical_replica_count_ptr,
+            num_logical_experts,
+            map_slots,
+            out_ptr,
+            physical_load_ptr,
+            num_physical_experts,
+            record_enabled_ptr,
+            num_unpadded_tokens_ptr,
         )
-        tl.atomic_add(out_ptr + safe_expert_id, 1, mask=valid)
+        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
@@ -98,6 +75,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None,
+        physical_load_view: torch.Tensor | None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
@@ -113,14 +91,14 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             logical_to_physical_map.contiguous(),
             out_flat,
             expert_load_view,
+            physical_load_view,
             record_enabled,
             num_unpadded_tokens,
             logical_replica_count.shape[0],
             logical_to_physical_map.shape[1],
-            expert_load_view.shape[0],
+            physical_load_view.shape[0] if physical_load_view is not None else 0,
             numel,
             num_active_experts,
-            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
             BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
@@ -132,6 +110,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        physical_load_view: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -141,6 +120,7 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
             expert_load_view=expert_load_view,
             record_enabled=record_enabled,
             num_unpadded_tokens=num_unpadded_tokens,
+            physical_load_view=physical_load_view,
         )
 else:
 
@@ -151,8 +131,22 @@ else:
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
+        physical_load_view: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
+
+
+def get_moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    """Rows of the current batch that are CUDA graph or DP padding.
+
+    Routers set these rows' expert ids to -1 so the dispatch and experts skip
+    them; None when VLLM_MOE_SKIP_PADDING is off or the runner does not mark
+    padding.
+    """
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        return is_padding[:num_tokens] if is_padding is not None else None
+    return None
 
 
 class BaseRouter(FusedMoERouter):
@@ -217,6 +211,7 @@ class BaseRouter(FusedMoERouter):
                 num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
                     dbo_current_ubatch_id()
                 ],
+                physical_load_view=eplb_state.physical_load_view,
             )
         return topk_ids
 

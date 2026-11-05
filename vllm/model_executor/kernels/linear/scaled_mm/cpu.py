@@ -142,8 +142,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             32,
         )
         # weight is prepacked and maintained by the dnnl_handler,
-        # release the original weight
-        setattr(layer, w_q_name, None)
+        # release the original weight storage
+        replace_parameter(layer, w_q_name, weight.new_empty(0))
         del weight
 
     def process_weights_for_sgl(self, layer: torch.nn.Module) -> None:

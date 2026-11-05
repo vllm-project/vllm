@@ -37,6 +37,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkConfidenceHead,
@@ -423,6 +426,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
 
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This TP rank's vocab shard of compute_draft_logits, not gathered."""
+        return self.logits_processor(
+            self.lm_head, self.model.norm(hidden_states), skip_gather=True
+        )
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
@@ -564,7 +573,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if self.model.confidence_head is not None and not loaded_confidence_head:
+        if (
+            self.model.confidence_head is not None
+            and not loaded_confidence_head
+            and is_mtp_completeness_check_enabled()
+        ):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params

@@ -77,6 +77,24 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
     )
 
 
+def test_select_experts_rejects_noncontiguous_custom_routing() -> None:
+    """A custom routing function returning column slices of one packed tensor
+    would otherwise reach every MoE backend with the wrong row stride."""
+
+    def packed_routing(hidden_states, gating_output, topk, renormalize):
+        return gating_output[:, :topk], gating_output[:, topk:].to(torch.int32)
+
+    router = create_fused_moe_router(
+        top_k=1,
+        global_num_experts=4,
+        custom_routing_function=packed_routing,
+    )
+    routing = torch.tensor([[0.5, 3.0], [0.25, 1.0]], device=DEVICE)
+
+    with pytest.raises(ValueError, match="non-contiguous"):
+        router.select_experts(torch.empty((2, 8), device=DEVICE), routing)
+
+
 def test_multiple_expert_groups_use_grouped_topk() -> None:
     router = create_fused_moe_router(
         top_k=4,
@@ -1015,3 +1033,34 @@ def test_eplb_map_num_unpadded_tokens(
 
     exp_load = torch.tensor(expected_load, dtype=torch.int32, device=DEVICE)
     torch.testing.assert_close(load, exp_load)
+
+
+def test_eplb_map_records_exact_physical_load():
+    """Logical and physical views count the same unpadded tokens, and the physical
+    view matches where each token was actually routed."""
+    l2p = torch.tensor([[0, 1], [2, -1], [3, -1]], dtype=torch.int64, device=DEVICE)
+    rc = torch.tensor([2, 1, 1], dtype=torch.int64, device=DEVICE)
+    load = torch.zeros(3, dtype=torch.int32, device=DEVICE)
+    # Wider than the four active physical experts, as under Elastic EP.
+    physical_load = torch.zeros(6, dtype=torch.int32, device=DEVICE)
+    rec = torch.tensor(True, dtype=torch.bool, device=DEVICE)
+    ids = (torch.arange(128, device=DEVICE, dtype=torch.int32) % 3).reshape(-1, 2)
+    num_unpadded = 50
+
+    out = eplb_map_to_physical_and_record(
+        topk_ids=ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+        num_unpadded_tokens=torch.tensor(
+            num_unpadded, dtype=torch.int32, device=DEVICE
+        ),
+        physical_load_view=physical_load,
+    )
+
+    logical_counts = torch.bincount(ids[:num_unpadded].flatten(), minlength=3)
+    physical_counts = torch.bincount(out[:num_unpadded].flatten(), minlength=6)
+    assert torch.equal(load, logical_counts.to(load.dtype))
+    assert torch.equal(physical_load, physical_counts.to(physical_load.dtype))
+    assert (physical_load[:2] > 0).all()
