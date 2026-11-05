@@ -5,11 +5,20 @@ import pytest
 
 from ..utils import run_acceptance_length_eval
 
+GEMMA4_EXPECTED_ACCEPTANCE_LENGTHS = {
+    "mt-bench": 2.28,
+    "humaneval": 2.68,
+    "gsm8k": 2.67 * 0.975,
+}
 
+
+# One case per dataset, so CI can run the datasets in different shards.
+@pytest.mark.parametrize("dataset", list(GEMMA4_EXPECTED_ACCEPTANCE_LENGTHS))
 @pytest.mark.parametrize("use_mrv2", [False, True])
 def test_gemma4_mtp_acceptance_lengths(
     monkeypatch: pytest.MonkeyPatch,
     use_mrv2: bool,
+    dataset: str,
     vllm_runner,
 ):
     run_acceptance_length_eval(
@@ -29,9 +38,7 @@ def test_gemma4_mtp_acceptance_lengths(
             "disable_log_stats": False,
         },
         expected_acceptance_lengths={
-            "mt-bench": 2.28,
-            "humaneval": 2.68,
-            "gsm8k": 2.67 * 0.975,
+            dataset: GEMMA4_EXPECTED_ACCEPTANCE_LENGTHS[dataset],
         },
         chat_template_kwargs={},
         use_mrv2=use_mrv2,
