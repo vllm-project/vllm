@@ -78,21 +78,21 @@ def pack_replayssm_rows(
         packed = values.new_zeros((num_rows, executed_query_width, *values.shape[1:]))
         packed[:, 0].copy_(values)
         return packed
-    if (
-        uniform
-        and values.shape[0] == num_rows * executed_query_width
-        and (
-            values.is_contiguous()
-            or (
-                allow_strided_rows
-                and values.ndim == 2
-                and values.stride(1) == 1
-                and values.stride(0) >= values.shape[1]
-                and values.stride(0) * values.element_size() % 16 == 0
+    if uniform and values.shape[0] == num_rows * executed_query_width:
+        if not (
+            values.data_ptr() % 16 == 0
+            and (
+                values.is_contiguous()
+                or (
+                    allow_strided_rows
+                    and values.ndim == 2
+                    and values.stride(1) == 1
+                    and values.stride(0) >= values.shape[1]
+                    and values.stride(0) * values.element_size() % 16 == 0
+                )
             )
-        )
-        and values.data_ptr() % 16 == 0
-    ):
+        ):
+            values = values.clone(memory_format=torch.contiguous_format)
         return values.view(num_rows, executed_query_width, *values.shape[1:])
     if num_rows == 0:
         return values.new_empty((0, executed_query_width, *values.shape[1:]))
@@ -245,9 +245,9 @@ def run_gdn_replayssm(
         mode_kwargs = {"restart_hist_on_flush": False}
         flush_min = GDN_REPLAY_LOGICAL_WINDOW + 1 - executed_query_width
     kernel(
-        # These are immutable model parameters. CuTe's DLPack bridge rejects
-        # tensors whose Parameter wrapper still advertises autograd tracking,
-        # even while vLLM executes under inference mode.
+        # CuTe rejects Parameters that advertise autograd tracking. Fresh
+        # detached wrappers also prevent stale FlashInfer casts after in-place
+        # weight reloads. Captured casts read the live parameter storage.
         A_log=A_log.detach(),
         a=packed_a,
         dt_bias=dt_bias.detach(),

@@ -85,6 +85,9 @@ def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
     assert viewed.data_ptr() == projection.data_ptr()
     assert viewed.stride() == (width * 8, 8, 1)
     torch.testing.assert_close(viewed, packed)
+    gate = pack_replayssm_rows(projection, starts, width, uniform=True)
+    assert gate.is_contiguous() and gate.data_ptr() % 16 == 0
+    torch.testing.assert_close(gate, packed)
     # Eager staging can include a zero-token graph-padding row.
     padded_starts = torch.tensor([0, width, width])
     padded = pack_replayssm_rows(values[:width], padded_starts, width, uniform=True)
@@ -174,6 +177,7 @@ def _reconstruct_replayssm_state(
     "width,query_len,accepted",
     [(1, 1, 1), (4, 3, 2), (4, 4, 2), (8, 6, 4), (8, 8, 4)],
 )
+@torch.inference_mode()
 def test_gdn_replayssm_output_and_accepted_state(
     monkeypatch, width, query_len, accepted
 ):
@@ -212,14 +216,17 @@ def test_gdn_replayssm_output_and_accepted_state(
     checkpoint.copy_(random_tensor(2, 2, 128, 128) * 0.03)
     ring_start = torch.zeros(2, dtype=torch.int32, device=device)
     committed = torch.zeros_like(ring_start)
-    A_log = torch.full((2,), -3.0, device=device)
-    dt_bias = random_tensor(2).float() * 0.2
+    A_log = torch.nn.Parameter(torch.full((2,), -3.0, device=device))
+    dt_bias = torch.nn.Parameter(random_tensor(2) * 0.2)
     accepted_state = checkpoint[1].float().clone()
     padding_page = pages[0].clone()
     graph = None
 
     # Eighteen steps cross the native STP flush and the MTP ring boundary.
-    for _ in range(18):
+    for step in range(18):
+        if width == 1 and step == 9:
+            # Captured execution must observe an in-place weight reload.
+            A_log.add_(2.0)
         q, k = random_tensor(query_len, 1, 128), random_tensor(query_len, 1, 128)
         v = random_tensor(query_len, 2, 128) * 0.1
         a, b = random_tensor(query_len, 2) * 0.2, random_tensor(query_len, 2)
@@ -228,6 +235,8 @@ def test_gdn_replayssm_output_and_accepted_state(
             projection = mixed_qkv.new_zeros(query_len, mixed_qkv.shape[1] + 128)
             projection[:, : mixed_qkv.shape[1]].copy_(mixed_qkv)
             mixed_qkv = projection[:, : mixed_qkv.shape[1]]
+            gates = torch.stack((a, b), dim=1)
+            a, b = gates[:, 0], gates[:, 1]
         if width == 1:
             # Captured padding has input storage but no token or live state.
             mixed_qkv = torch.cat((mixed_qkv, torch.ones_like(mixed_qkv)))
