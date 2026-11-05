@@ -85,12 +85,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*cohere.*\.py
-      - files~=^tests/.*cohere.*\.py
-      - files~=^vllm/model_executor/models/.*cohere.*\.py
-      - files~=^vllm/tool_parsers/.*cohere.*\.py
-      - files~=^vllm/reasoning/.*cohere.*\.py
-      - files~=^vllm/transformers_utils/.*cohere.*\.py
+      - files~=(?i)cohere
       - title~=(?i)Cohere
   actions:
     label:
@@ -165,10 +160,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*llama.*\.py
-      - files~=^tests/.*llama.*\.py
-      - files~=^vllm/model_executor/models/.*llama.*\.py
-      - files~=^vllm/tool_parsers/.*llama.*\.py
+      - files~=(?i)llama
       - title~=(?i)llama
   actions:
     label:
@@ -194,12 +186,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*mistral.*\.py
-      - files~=^tests/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
-      - files~=^vllm/model_executor/models/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
-      - files~=^vllm/reasoning/.*mistral.*\.py
-      - files~=^vllm/tool_parsers/.*mistral.*\.py
-      - files~=^vllm/transformers_utils/.*(?:mistral|voxtral|pixtral).*\.py
+      - files~=(?i)(?:mistral|voxtral|mixtral|pixtral)
       - title~=(?i)(?:mistral|ministral|voxtral|mixtral|pixtral)
   actions:
     label:
@@ -257,12 +244,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*qwen.*\.py
-      - files~=^tests/.*qwen.*\.py
-      - files~=^vllm/model_executor/models/.*qwen.*\.py
-      - files~=^vllm/tool_parsers/.*qwen.*\.py
-      - files~=^vllm/reasoning/.*qwen.*\.py
-      - files~=^vllm/transformers_utils/.*qwen.*\.py
+      - files~=(?i)qwen
       - title~=(?i)Qwen
   actions:
     label:
@@ -321,10 +303,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^vllm/models/minimax.*/
-      - files~=^vllm/model_executor/models/.*minimax.*\.py
-      - files~=^vllm/tool_parsers/.*minimax.*\.py
-      - files~=^tests/.*minimax.*\.py
+      - files~=(?i)minimax
       - title~=(?i)minimax
   actions:
     label:
