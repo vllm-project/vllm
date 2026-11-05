@@ -1534,3 +1534,344 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+@pytest.mark.parametrize("kind", ["string", "array", "object"])
+@pytest.mark.parametrize("chunk_size", [1, 16])
+def test_nested_parameter_text_visible_before_xml_close(kind, chunk_size):
+    """Nested text should become visible while the model is still generating it."""
+    from tokenizers import Tokenizer, models
+    from transformers import TokenizersBackend
+
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    value = 'alpha beta "quoted" \\ path\n中文 😀 ' + "more text " * 40
+    schema: dict = {"type": "string"}
+    if kind == "array":
+        value = [{"text": value}]
+        schema = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        }
+    elif kind == "object":
+        value = {"text": value}
+        schema = {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "additionalProperties": False,
+        }
+    request = ChatCompletionRequest(
+        model="parser-test",
+        messages=[{"role": "user", "content": "Emit the payload."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "emit_payload",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"payload": schema},
+                        "required": ["payload"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        tool_choice="auto",
+        stream=True,
+    )
+    raw_value = value if kind == "string" else json.dumps(value)
+    text = (
+        "<tool_call><function=emit_payload><parameter=payload>"
+        f"{raw_value}</parameter></function></tool_call>"
+    )
+    parser_kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_xml", enable_auto_tools=True
+    )
+    assert parser_cls is not None
+    parser_cls(tokenizer, request.tools, **parser_kwargs).adjust_request(request)
+    nonstream = Qwen3Parser(tokenizer, request.tools, **parser_kwargs)
+    expected = (
+        nonstream.extract_tool_calls(text, request).tool_calls[0].function.arguments
+    )
+    parser = Qwen3Parser(tokenizer, request.tools, **parser_kwargs)
+    results = simulate_tool_streaming(
+        parser,
+        request,
+        [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)],
+    )
+    results.append((parser.finish_streaming(), text))
+    assert json.loads(collect_tool_arguments(results)) == {"payload": value}
+    cumulative = ""
+    for delta, consumed in results:
+        cumulative += collect_tool_arguments([(delta, consumed)])
+        assert expected.startswith(cumulative)
+    before_close = [result for result in results if "</parameter>" not in result[1]]
+    assert "alpha beta" in collect_tool_arguments(before_close)
+
+
+@pytest.fixture
+def nested_file_call():
+    from tokenizers import Tokenizer, models
+    from transformers import TokenizersBackend
+
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    request = ChatCompletionRequest(
+        model="parser-test",
+        messages=[],
+        tool_choice="auto",
+        stream=True,
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "files": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 20,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "file_path": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 512,
+                                        },
+                                        "content": {
+                                            "type": "string",
+                                            "maxLength": 1048576,
+                                        },
+                                    },
+                                    "required": ["file_path", "content"],
+                                },
+                            }
+                        },
+                        "required": ["files"],
+                    },
+                },
+            }
+        ],
+    )
+    args = {
+        "files": [
+            {"file_path": "/workspace/rtl/example.sv", "content": "alpha beta " * 30},
+            {
+                "file_path": "/workspace/rtl/第二个.sv",
+                "content": 'true null 1e2 "42"\t\r\b\f',
+            },
+        ]
+    }
+    text = (
+        "<tool_call><function=write_file><parameter=files>"
+        + json.dumps(args["files"])
+        + "</parameter></function></tool_call>"
+    )
+    return tokenizer, request, text, args
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        "strict",
+        "server_floor",
+        "unprepared",
+        "disabled",
+        "mixed_tools",
+        "serialized",
+        "replaced",
+        "format_union",
+    ],
+)
+def test_nested_stream_requires_active_parameter_grammar(
+    nested_file_call, monkeypatch, gate
+):
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+    from vllm.sampling_params import StructuredOutputsParams
+
+    tokenizer, request, text, args = nested_file_call
+    if gate == "disabled":
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+    if gate in ("mixed_tools", "server_floor"):
+        request.tools[0].function.strict = False
+    if gate == "mixed_tools":
+        other = request.tools[0].model_copy(deep=True)
+        other.function.name, other.function.strict = "other_tool", True
+        request.tools.append(other)
+    if gate == "format_union":
+        data = request.model_dump()
+        data["response_format"] = {"type": "json_object"}
+        request = ChatCompletionRequest.model_validate(data)
+    cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_xml",
+        enable_auto_tools=True,
+        tool_strict_level="parameter" if gate == "server_floor" else None,
+    )
+    kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    assert cls is not None
+    if gate != "unprepared":
+        cls(tokenizer, request.tools, **kwargs).adjust_request(request)
+    if gate == "serialized":
+        request = ChatCompletionRequest.model_validate_json(request.model_dump_json())
+    if gate == "replaced":
+        request.structured_outputs = StructuredOutputsParams(json={"type": "object"})
+    parser = Qwen3Parser(tokenizer, request.tools, **kwargs)
+    results = simulate_tool_streaming(
+        parser, request, [text[i : i + 7] for i in range(0, len(text), 7)]
+    )
+    results.append((parser.finish_streaming(), text))
+    assert json.loads(collect_tool_arguments(results)) == args
+    early = collect_tool_arguments([r for r in results if "</parameter>" not in r[1]])
+    assert ("alpha beta" in early) == (gate in ("strict", "server_floor"))
+
+
+def test_nested_stream_disabled(nested_file_call):
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+
+    tokenizer, request, text, args = nested_file_call
+    kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    cls = ParserManager.get_parser(tool_parser_name="qwen3_xml", enable_auto_tools=True)
+    assert cls is not None
+    cls(tokenizer, request.tools, **kwargs).adjust_request(request)
+    parser = Qwen3Parser(
+        tokenizer,
+        request.tools,
+        **kwargs,
+        parser_engine_config=dataclasses.replace(
+            qwen3_config(thinking=False),
+            stream_arg_deltas=False,
+            arg_value_extender=None,
+        ),
+    )
+    results = simulate_tool_streaming(
+        parser, request, [text[i : i + 7] for i in range(0, len(text), 7)]
+    )
+    assert json.loads(collect_tool_arguments(results)) == args
+    early = [r for r in results if "</parameter>" not in r[1]]
+    assert collect_tool_arguments(early) == ""
+
+
+def test_nested_stream_truncated(nested_file_call):
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+
+    tokenizer, request, text, _ = nested_file_call
+    kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    cls = ParserManager.get_parser(tool_parser_name="qwen3_xml", enable_auto_tools=True)
+    assert cls is not None
+    cls(tokenizer, request.tools, **kwargs).adjust_request(request)
+    parser = Qwen3Parser(tokenizer, request.tools, **kwargs)
+    truncated = text[: text.index("alpha beta") + 20]
+    results = simulate_tool_streaming(parser, request, list(truncated))
+    results.append((parser.finish_streaming(), truncated))
+    partial = collect_tool_arguments(results)
+    assert "alpha beta" in partial
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(partial)
+
+
+def test_nested_stream_multiple_calls_and_reset(nested_file_call):
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+
+    tokenizer, request, text, args = nested_file_call
+    kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    cls = ParserManager.get_parser(tool_parser_name="qwen3_xml", enable_auto_tools=True)
+    assert cls is not None
+    cls(tokenizer, request.tools, **kwargs).adjust_request(request)
+    parser = Qwen3Parser(tokenizer, request.tools, **kwargs)
+    response = text + text.replace("example.sv", "second.sv")
+    results = simulate_tool_streaming(
+        parser, request, [response[i : i + 7] for i in range(0, len(response), 7)]
+    )
+    results.append((parser.finish_streaming(), response))
+    by_call = ["", ""]
+    for delta, _ in results:
+        for call in (delta.tool_calls or []) if delta else []:
+            if call.function and call.function.arguments:
+                by_call[call.index] += call.function.arguments
+    assert json.loads(by_call[0]) == args
+    assert json.loads(by_call[1])["files"][0]["file_path"] == "/workspace/rtl/second.sv"
+    nonstream = parser.extract_tool_calls(text, request)
+    assert json.loads(nonstream.tool_calls[0].function.arguments) == args
+    results = simulate_tool_streaming(parser, request, list(text))
+    assert json.loads(collect_tool_arguments(results)) == args
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_nested_stream_unsupported_schema_retains_buffering(nested_file_call, required):
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+
+    tokenizer, request, _, _ = nested_file_call
+    item = {
+        "type": "object",
+        "properties": {"content": {"type": "integer" if required else "string"}},
+        "required": ["content"] if required else [],
+        "additionalProperties": False,
+    }
+    request.tools[0].function.parameters["properties"]["files"]["items"] = item
+    value = [{"content": 123 if required else "alpha beta " * 20}]
+    text = (
+        "<tool_call><function=write_file><parameter=files>"
+        + json.dumps(value)
+        + "</parameter></function></tool_call>"
+    )
+    kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    cls = ParserManager.get_parser(tool_parser_name="qwen3_xml", enable_auto_tools=True)
+    assert cls is not None
+    cls(tokenizer, request.tools, **kwargs).adjust_request(request)
+    parser = Qwen3Parser(tokenizer, request.tools, **kwargs)
+    results = simulate_tool_streaming(parser, request, list(text))
+    results.append((parser.finish_streaming(), text))
+    assert json.loads(collect_tool_arguments(results)) == {"files": value}
+    early = collect_tool_arguments([r for r in results if "</parameter>" not in r[1]])
+    assert "content" not in early
+
+
+@pytest.mark.parametrize("marker", ["</parameter>", "<parameter=extra>"])
+def test_nested_stream_embedded_xml_does_not_complete_batch(nested_file_call, marker):
+    from vllm.parser.parser_manager import ParserManager
+    from vllm.parser.qwen3 import Qwen3Parser
+
+    tokenizer, request, text, _ = nested_file_call
+    text = text.replace("alpha beta ", f"alpha beta {marker}", 1)
+    kwargs = {"chat_template_kwargs": {"enable_thinking": False}}
+    cls = ParserManager.get_parser(tool_parser_name="qwen3_xml", enable_auto_tools=True)
+    assert cls is not None
+    cls(tokenizer, request.tools, **kwargs).adjust_request(request)
+    parser = Qwen3Parser(tokenizer, request.tools, **kwargs)
+    results = simulate_tool_streaming(parser, request, list(text))
+    results.append((parser.finish_streaming(), text))
+    partial = collect_tool_arguments(results)
+    assert "alpha beta" in partial
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(partial)

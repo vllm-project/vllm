@@ -30,6 +30,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.tool_parsers.utils import find_tool_properties
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -140,7 +141,11 @@ def _param_value_end_window(text: str) -> str:
 
 
 def _param_value_extender(
-    raw_args: str, trim_newlines: bool, closed: _ClosedParams | None = None
+    raw_args: str,
+    trim_newlines: bool,
+    closed: _ClosedParams | None = None,
+    *,
+    json_escape: bool = True,
 ) -> ArgValueExtender | None:
     """Extend the open trailing ``<parameter=...>`` value of *raw_args*.
 
@@ -175,7 +180,7 @@ def _param_value_extender(
             text = text[: len(text) - len(held)]
         else:
             text = delta
-        return json.dumps(text, ensure_ascii=False)[1:-1]
+        return json.dumps(text, ensure_ascii=False)[1:-1] if json_escape else text
 
     return extend
 
@@ -330,6 +335,93 @@ def qwen3_config(
     )
 
 
+def _is_string_tree(schema: dict, depth: int = 0) -> bool:
+    if depth > 64 or any(
+        k in schema
+        for k in ("$ref", "anyOf", "oneOf", "allOf", "prefixItems", "patternProperties")
+    ):
+        return False
+    kind = schema.get("type")
+    if kind == "string":
+        return True
+    if kind == "array":
+        items = schema.get("items")
+        return isinstance(items, dict) and _is_string_tree(items, depth + 1)
+    if kind == "object" and schema.get("additionalProperties") is False:
+        props = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not isinstance(required, list) or not isinstance(props, dict):
+            return False
+        if not all(isinstance(key, str) for key in required) or set(required) != set(
+            props
+        ):
+            return False
+        return all(
+            isinstance(prop, dict) and _is_string_tree(prop, depth + 1)
+            for prop in props.values()
+        )
+    return False
+
+
+class _StringTreeStream:
+    """Canonicalize appended JSON containing only containers and strings."""
+
+    _TEXT = re.compile(r'[^"\\\x00-\x1f]+')
+
+    def __init__(self) -> None:
+        self.pending = ""
+        self.in_string = False
+
+    def feed(self, delta: str) -> str:
+        text = self.pending + delta
+        self.pending = ""
+        out: list[str] = []
+        i = 0
+        while i < len(text):
+            c = text[i]
+            if self.in_string:
+                match = self._TEXT.match(text, i)
+                if match is not None:
+                    out.append(match[0])
+                    i = match.end()
+                    continue
+                if c == "\\":
+                    if i + 1 == len(text):
+                        break
+                    end = i + (6 if text[i + 1] == "u" else 2)
+                    if end > len(text):
+                        break
+                    if (
+                        text[i + 1] == "u"
+                        and 0xD800 <= int(text[i + 2 : end], 16) <= 0xDBFF
+                    ):
+                        if len(text) < end + 2:
+                            break
+                        if text[end : end + 2] == "\\u":
+                            if len(text) < end + 6:
+                                break
+                            if 0xDC00 <= int(text[end + 2 : end + 6], 16) <= 0xDFFF:
+                                end += 6
+                    decoded = json.loads('"' + text[i:end] + '"')
+                    out.append(json.dumps(decoded, ensure_ascii=False)[1:-1])
+                    i = end
+                    continue
+                if c != '"':
+                    raise ValueError("Invalid constrained JSON string")
+                self.in_string = False
+            elif c == '"':
+                self.in_string = True
+            elif c in " \t\r\n":
+                i += 1
+                continue
+            elif c not in "[]{}:,":
+                raise ValueError("Unexpected value in constrained string container")
+            out.append(c + " " if c in ":," else c)
+            i += 1
+        self.pending = text[i:]
+        return "".join(out)
+
+
 class Qwen3Parser(ParserEngine):
     """Qwen3 parser: ``<think>``/``</think>`` reasoning +
     ``<tool_call>`` XML tool calls in a single engine.
@@ -355,6 +447,9 @@ class Qwen3Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        self._constrained_tools: frozenset[str] = frozenset()
+        self._nested_extenders: dict[int, ArgValueExtender] = {}
+        self._nested_checked: dict[int, ArgValueExtender | None] = {}
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
@@ -381,6 +476,86 @@ class Qwen3Parser(ParserEngine):
             self._arg_value_extender = functools.partial(
                 _qwen3_arg_value_extender, closed=closed
             )
+
+    def _reset(self, initial_state: ParserState | None = None) -> None:
+        self._nested_extenders.clear()
+        self._nested_checked.clear()
+        super()._reset(initial_state)
+
+    def _check_skip_tool_parsing(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> None:
+        super()._check_skip_tool_parsing(request)
+        marker = getattr(request, "_tool_parameter_grammar", None)
+        structured = getattr(request, "structured_outputs", None) if marker else None
+        self._constrained_tools = (
+            marker[1]
+            if (
+                getattr(request, "stream", False)
+                and marker
+                and structured
+                and structured.structural_tag == marker[0]
+            )
+            else frozenset()
+        )
+
+    def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
+        slot = self._tool_slots[idx]
+        if (
+            not self._stream_arg_deltas
+            or slot.name not in self._constrained_tools
+            or self.parser_engine_config.arg_converter is not _qwen3_arg_converter
+        ):
+            return super()._compute_arg_delta(idx, raw_delta)
+        if (extend := self._nested_extenders.get(idx)) is not None:
+            delta = extend(raw_delta)
+            if delta is not None:
+                if delta:
+                    slot.append_streamed(delta)
+                return delta or None
+            del self._nested_extenders[idx]
+
+        if (
+            slot.extend_open_value is not None
+            and slot.extend_open_value is self._nested_checked.get(idx)
+        ):
+            return super()._compute_arg_delta(idx, raw_delta)
+
+        closed, match = _qwen3_parse_params(slot.args, True)
+        if match is not None and match[1] not in closed:
+            key, value = match[1], match[2]
+            properties = find_tool_properties(self._tools, slot.name)
+            schema = properties.get(key, {}) if properties else {}
+            if (
+                isinstance(schema, dict)
+                and schema.get("type") in ("array", "object")
+                and _is_string_tree(schema)
+            ):
+                prefix = self._fix_arg_types(
+                    json.dumps(closed, ensure_ascii=False), slot.name
+                )[:-1]
+                prefix += (
+                    (", " if closed else "")
+                    + json.dumps(key, ensure_ascii=False)
+                    + ": "
+                )
+                scanner = _StringTreeStream()
+                prefix += scanner.feed(value)
+                raw_extend = _param_value_extender(slot.args, False, json_escape=False)
+                if raw_extend is not None and prefix.startswith(slot.streamed_json):
+
+                    def extend_nested(delta: str) -> str | None:
+                        raw = raw_extend(delta)
+                        return None if raw is None else scanner.feed(raw)
+
+                    self._nested_extenders[idx] = extend_nested
+                    delta = prefix[len(slot.streamed_json) :]
+                    slot.streamed_json = prefix
+                    slot.extend_open_value = None
+                    return delta or None
+        delta = super()._compute_arg_delta(idx, raw_delta)
+        self._nested_checked[idx] = slot.extend_open_value
+        return delta
 
     def extract_reasoning(
         self,

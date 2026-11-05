@@ -536,6 +536,11 @@ class ResponsesRequest(OpenAIBaseModel):
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser's adjust_request."""
 
+    _tool_parameter_grammar: tuple[str, frozenset[str]] | None = PrivateAttr(
+        default=None
+    )
+    """Structural tag and schema-constrained tools, set only by adjust_request."""
+
     _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
         default=None
     )
