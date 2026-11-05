@@ -292,7 +292,7 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            kernel_cls, reason = oracle.try_backend(backend)
+            kernel_cls, rejected = oracle.try_backend(backend)
             if kernel_cls is not None:
                 logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
                 return backend, kernel_cls
@@ -306,7 +306,9 @@ def select_unquantized_moe_backend(
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s "
                 "Falling back to try the remaining available MoE backends: %s.",
-                oracle.make_log_unsupported(backend, reason),
+                oracle.make_log_unsupported(
+                    backend, rejected[-1][1] if rejected else None
+                ),
                 ", ".join(
                     b.value
                     for b in AVAILABLE_BACKENDS

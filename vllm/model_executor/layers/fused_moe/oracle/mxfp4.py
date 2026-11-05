@@ -716,7 +716,7 @@ def select_mxfp4_moe_backend(
         _get_priority_backends_for_gpt_oss(), requested_activation_key
     )
 
-    unsupported_reasons = []
+    unsupported_reasons: list[tuple[Mxfp4MoeBackend, str | None]] = []
     oracle = Mxfp4MoEKernelOracle(
         config, kMxfp4Static, requested_activation_key, activation_format
     )
@@ -727,12 +727,12 @@ def select_mxfp4_moe_backend(
             if backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(backend)
         )
-        kernel_cls, reason = oracle.try_backend(backend, activation_key=act_key)
+        kernel_cls, rejected = oracle.try_backend(backend, activation_key=act_key)
         if kernel_cls is not None:
             logger.info_once(oracle.make_log_backend(backend))
             _warn_on_bf16_fallback(backend, requested_activation_key)
             return backend, kernel_cls
-        unsupported_reasons.append((backend, reason))
+        unsupported_reasons.extend((backend, reason) for _, reason in rejected)
 
     if current_platform.is_xpu():
         return oracle.return_or_raise(

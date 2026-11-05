@@ -31,6 +31,7 @@ logger = init_logger(__name__)
 _UNSET = cast("QuantKey | None", object())
 
 BackendT = TypeVar("BackendT", bound=Enum)
+Rejection = tuple[type[mk.FusedMoEExperts], str | None]
 
 
 class MoEKernelOracle(ABC, Generic[BackendT]):
@@ -179,7 +180,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backend: BackendT,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
-    ) -> tuple[type[mk.FusedMoEExperts] | None, str | None]:
+    ) -> tuple[type[mk.FusedMoEExperts] | None, list[Rejection]]:
         """Probe `backend`'s candidate kernel classes, first supported wins.
 
         A miss logs a DEBUG line and yields to the next candidate; whether that
@@ -187,10 +188,13 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         own key for oracles whose activation key varies per backend.
 
         Returns:
-            `(kernel_cls, None)`, or `(None, reason)` with the last reason.
+            `(kernel_cls, rejected)`: the winning class, or `None`, plus every
+            `(kernel_cls, reason)` probed and rejected before it, in order, so
+            that callers collecting reasons for a report keep one entry per
+            candidate rather than only the last.
 
         """
-        reason: str | None = None
+        rejected: list[Rejection] = []
         act_quant_key = (
             self.activation_key if activation_key is _UNSET else activation_key
         )
@@ -205,9 +209,10 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 self.activation_format,
             )
             if supported:
-                return kernel_cls, None
+                return kernel_cls, rejected
             logger.debug_once(self.make_log_unsupported(backend, reason))
-        return None, reason
+            rejected.append((kernel_cls, reason))
+        return None, rejected
 
     def return_or_raise(
         self,
@@ -223,8 +228,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 configuration; the message carries the last rejection reason.
 
         """
-        kernel_cls, reason = self.try_backend(backend, kernel_classes, activation_key)
+        kernel_cls, rejected = self.try_backend(backend, kernel_classes, activation_key)
         if kernel_cls is None:
+            reason = rejected[-1][1] if rejected else None
             raise ValueError(self.make_log_unsupported(backend, reason))
         logger.info_once(self.make_log_backend(backend, available_backends))
         return backend, kernel_cls

@@ -331,9 +331,9 @@ TRY_BACKEND_CASES = [
 @pytest.mark.parametrize(("oracle_class", "backend"), TRY_BACKEND_CASES)
 def test_try_backend(oracle_class, backend, monkeypatch):
     """Each oracle class carries its own backend -> kernel-class mapping, and
-    `try_backend` probes exactly that list: first supported wins, otherwise the
-    last rejection reason, with an optional caller-supplied list (mxfp4's
-    LoRA-aware candidates)."""
+    `try_backend` probes exactly that list: first supported wins and the reason
+    of every rejection is returned, with an optional caller-supplied list
+    (mxfp4's LoRA-aware candidates)."""
     oracle = oracle_class(make_dummy_moe_config())
     candidates = oracle.backend_to_kernel_cls(backend)
     assert candidates
@@ -346,17 +346,26 @@ def test_try_backend(oracle_class, backend, monkeypatch):
             "is_supported_config",
             staticmethod(lambda *_, why=rejection: (False, why)),
         )
-    assert oracle.try_backend(backend) == (None, f"{candidates[-1].__name__} rejected")
+    assert oracle.try_backend(backend) == (
+        None,
+        [(candidate, f"{candidate.__name__} rejected") for candidate in candidates],
+    )
 
     monkeypatch.setattr(
         candidates[-1], "is_supported_config", staticmethod(lambda *_: (True, None))
     )
-    assert oracle.try_backend(backend) == (candidates[-1], None)
+    assert oracle.try_backend(backend) == (
+        candidates[-1],
+        [
+            (candidate, f"{candidate.__name__} rejected")
+            for candidate in candidates[:-1]
+        ],
+    )
 
     monkeypatch.setattr(
         TritonExperts, "is_supported_config", staticmethod(lambda *_: (True, None))
     )
-    assert oracle.try_backend(backend, [TritonExperts]) == (TritonExperts, None)
+    assert oracle.try_backend(backend, [TritonExperts]) == (TritonExperts, [])
 
 
 @pytest.mark.parametrize("unknown", [False, True], ids=["explicit", "unknown"])
