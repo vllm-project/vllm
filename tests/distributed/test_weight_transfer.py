@@ -426,31 +426,52 @@ def test_sparse_nccl_refuses_use_load_plan():
         engine.init_transfer_engine(init_info)
 
 
-def test_nccl_update_must_match_the_load_plan():
-    from vllm.distributed.weight_transfer.nccl_engine import _check_planned
-    from vllm.model_executor.model_loader.reload.plan import Entry, LoadPlan
-
-    entries = {n: Entry(n, (4,), torch.float32, None, ()) for n in ("w", "v")}
-    plan = LoadPlan(entries=entries, dests={})
-    # one broadcaster's subset
-    _check_planned(
-        plan,
-        NCCLWeightTransferUpdateInfo(
-            names=["w"], dtype_names=["float32"], shapes=[[4]]
-        ),
+def test_nccl_update_must_match_the_load_plan_manifest():
+    from vllm.distributed.weight_transfer.nccl_engine import (
+        _check_manifest,
+        _manifest,
     )
-    for name, dtype_name, shape in (
-        ("x", "float32", [4]),
-        ("w", "bfloat16", [4]),
-        ("w", "float32", [8]),
+
+    manifest = _manifest(
+        [ParamMeta("w", torch.float32, (4,)), ParamMeta("v", torch.float32, (4,))]
+    )
+    _check_manifest(manifest, [("w", torch.float32, [4])])  # a subset
+    for sent in (
+        ("x", torch.float32, [4]),
+        ("w", torch.bfloat16, [4]),
+        ("w", torch.float32, [8]),
     ):
-        with pytest.raises(ValueError, match="re-init the engine"):
-            _check_planned(
-                plan,
-                NCCLWeightTransferUpdateInfo(
-                    names=[name], dtype_names=[dtype_name], shapes=[shape]
-                ),
-            )
+        with pytest.raises(ValueError, match=f"{sent[0]!r}.*re-init the engine"):
+            _check_manifest(manifest, [sent])
+
+
+def test_nccl_trainer_refuses_an_update_off_the_load_plan(monkeypatch):
+    """With `use_load_plan` the trainer checks each update against the
+    metadata it sent at init, before any RPC or broadcast."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: object()
+    )
+    module = _module_with(("w", torch.zeros(4)), ("v", torch.zeros(2)))
+    source = ModuleSource(module)
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=0,
+            use_load_plan=True,
+        ),
+        client=client,
+        source=source,
+    )
+    module.w = torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+    del source.metadata  # cached on first read
+    with pytest.raises(ValueError, match="'w'.*not in the metadata sent at init"):
+        engine.send_weights()
+    assert client.order == ["init"]
 
 
 # --- Unit Tests: Engine Registry ---

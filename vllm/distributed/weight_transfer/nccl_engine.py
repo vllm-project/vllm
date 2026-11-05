@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based (dense) weight transfer engine."""
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from functools import partial
@@ -87,7 +87,9 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     load plan instead of `load_weights` where the plan allows (off by default).
     The workers get `source.metadata` at init and plan from it at the first
     weight update, inside `start_weight_update`, so that update's start takes
-    longer (the plan's trace time). The inference server must run with
+    longer (the plan's trace time). Every later update must send a subset of
+    that metadata with the same dtypes and shapes; `send_weights` checks this
+    before contacting the workers. The inference server must run with
     `VLLM_RELOAD_MODE=direct`."""
 
 
@@ -121,22 +123,32 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
             )
 
 
-def _check_planned(plan: "LoadPlan", update_info: NCCLWeightTransferUpdateInfo) -> None:
-    """Every sent name must be one the plan was built for, with its dtype and
-    shape; a broadcaster sends only its own subset."""
-    for name, dtype_name, shape in zip(
-        update_info.names, update_info.dtype_names, update_info.shapes
-    ):
-        entry = plan.entries.get(name)
-        if entry is None or (entry.dtype, entry.shape) != (
-            getattr(torch, dtype_name),
-            tuple(shape),
-        ):
+# name -> (dtype, shape) of the tensors a load plan is built for
+Manifest = Mapping[str, tuple[torch.dtype, tuple[int, ...]]]
+
+
+def _manifest(metadata: Iterable[ParamMeta]) -> dict[str, tuple]:
+    return {m.name: (m.dtype, tuple(m.shape)) for m in metadata}
+
+
+def _check_manifest(
+    manifest: Manifest, sent: Iterable[tuple[str, torch.dtype, Sequence[int]]]
+) -> None:
+    """Every sent (name, dtype, shape) must be in the manifest sent at init; a
+    subset is fine (a broadcaster sends only its own). The trainer checks
+    before an update; the worker checks again for trainers that drive it out
+    of band."""
+    for name, dtype, shape in sent:
+        if manifest.get(name) != (dtype, tuple(shape)):
             raise ValueError(
-                f"NCCL weight transfer: {name!r} ({dtype_name}, {list(shape)}) "
-                "does not match the load plan's metadata; re-init the engine "
-                "to re-plan"
+                f"NCCL weight transfer: {name!r} ({dtype}, {list(shape)}) is not "
+                "in the metadata sent at init with use_load_plan; re-init the "
+                "engine to re-plan"
             )
+
+
+def _metadata_payload(metadata: Iterable[ParamMeta]) -> list:
+    return [(m.name, str(m.dtype).split(".")[-1], list(m.shape)) for m in metadata]
 
 
 class NCCLWeightTransferEngine(
@@ -173,6 +185,7 @@ class NCCLWeightTransferEngine(
         ] = {}
         # With `use_load_plan`: the trainer's metadata from init, and the plan
         # for the target model, built at its first update.
+        self._plan_manifest: dict[str, tuple] | None = None
         self._plan_metadata: list[ParamMeta] | None = None
         self._plan: LoadPlan | None = None
 
@@ -191,7 +204,7 @@ class NCCLWeightTransferEngine(
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
         self._last_update_info.clear()
-        self._plan = self._plan_metadata = None
+        self._plan = self._plan_metadata = self._plan_manifest = None
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
@@ -207,6 +220,7 @@ class NCCLWeightTransferEngine(
                 ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
                 for name, dtype_name, shape in init_info.metadata
             ]
+            self._plan_manifest = _manifest(self._plan_metadata)
 
     def start_weight_update(self) -> None:
         """Begin reloading the incoming checkpoint weights; with
@@ -278,7 +292,16 @@ class NCCLWeightTransferEngine(
         # A draft update session keeps load_weights: the plan is the target's.
         plan = self._plan if self.model is self._default_model else None
         if plan is not None:
-            _check_planned(plan, update_info)
+            assert self._plan_manifest is not None
+            _check_manifest(
+                self._plan_manifest,
+                (
+                    (name, getattr(torch, dtype_name), shape)
+                    for name, dtype_name, shape in zip(
+                        update_info.names, update_info.dtype_names, update_info.shapes
+                    )
+                ),
+            )
         model = self.model
         load_weights = (
             model.load_weights if plan is None else partial(load_planned, model, plan)
@@ -357,15 +380,25 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self._group_rank = 0
         # Metadata the worker already holds; an unchanged round sends none.
         self._sent_meta: list[ParamMeta] | None = None
+        # With `use_load_plan`: the metadata the workers plan from, sent at init.
+        self._plan_manifest: dict[str, tuple] | None = None
 
     @classmethod
-    def _build_worker_init_payload(cls, init_info: NCCLTrainerInitInfo) -> dict:
+    def _build_worker_init_payload(
+        cls,
+        init_info: NCCLTrainerInitInfo,
+        *,
+        metadata: list[ParamMeta] | None = None,
+    ) -> dict:
+        """`metadata`: what the workers plan from; passed only with
+        `use_load_plan`, so overrides without it keep working otherwise."""
         return build_worker_init_payload(
             init_info,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
             use_load_plan=init_info.use_load_plan,
+            metadata=None if metadata is None else _metadata_payload(metadata),
         )
 
     def _open_trainer_endpoint(self, init_info: NCCLTrainerInitInfo) -> None:
@@ -441,6 +474,9 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
         )
+        plan_meta = source.metadata if init_info.use_load_plan else None
+        if plan_meta is not None:
+            engine._plan_manifest = _manifest(plan_meta)
         if engine.rank not in group_ranks:
             # Ranks that broadcast nothing stay out of the transfer group; they
             # only join the trainer-side gathers in send_weights.
@@ -450,13 +486,11 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             engine._open_trainer_endpoint(init_info)
             return engine
 
-        payload = cls._build_worker_init_payload(init_info)
+        if plan_meta is None:
+            payload = cls._build_worker_init_payload(init_info)
+        else:
+            payload = cls._build_worker_init_payload(init_info, metadata=plan_meta)
         payload["rank_offset"] = len(group_ranks)
-        if init_info.use_load_plan:
-            payload["metadata"] = [
-                (m.name, str(m.dtype).split(".")[-1], list(m.shape))
-                for m in source.metadata
-            ]
         run_trainer_rendezvous(
             init_worker=lambda: engine.client.init_weight_transfer_engine(payload),
             init_trainer=lambda: engine._open_trainer_endpoint(init_info),
@@ -471,6 +505,12 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # Metadata is declared without gathering. For Megatron it is itself a
         # collective, so every rank runs it; only the sender ships it.
         meta = source.metadata
+        if self._plan_manifest is not None:
+            # Before any RPC or broadcast, on every rank alike: a worker that
+            # refused mid-broadcast would leave the trainer waiting.
+            _check_manifest(
+                self._plan_manifest, ((m.name, m.dtype, m.shape) for m in meta)
+            )
         group_ranks, slices = self._broadcast_plan(meta)
 
         if self.rank not in group_ranks:
