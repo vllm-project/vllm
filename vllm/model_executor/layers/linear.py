@@ -1487,8 +1487,9 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         ]
 
         # Skip QKVParallelLinear.__init__ (3-group layout); build the 5-group
-        # column-parallel weight directly.
-        ColumnParallelLinear.__init__(
+        # column-parallel weight directly. StackedColumnParallelLinear.__init__
+        # still runs: it sets up the per-shard loading record.
+        StackedColumnParallelLinear.__init__(
             self,
             input_size=self.hidden_size,
             output_size=sum(self.output_sizes),
