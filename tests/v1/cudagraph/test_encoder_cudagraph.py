@@ -1358,6 +1358,24 @@ class TestEncoderCudaGraphVideoReplay:
         assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
         assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
 
+    def test_frame_slots_capped_by_budget(self):
+        """A large per-video frame limit must not inflate small graphs."""
+        mgr = _make_manager_for_gpu(
+            self.model,
+            _BUDGETS,
+            _VIDEO_MAX_BATCH,
+            self.device,
+            self.dtype,
+            max_frames_per_batch=1000,
+        )
+        mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        for budget, meta in mgr.budget_graphs["default"].items():
+            assert meta.max_frames_per_batch == budget
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        result = mgr.execute(_make_video_mm_kwargs(grid_thw, self.device, self.dtype))
+        assert result is not None
+        assert [r.shape[0] for r in result] == [8, 4]
+
     # --- output shape ---
 
     def test_video_execute_returns_one_tensor_per_video(self):
