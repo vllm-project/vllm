@@ -118,7 +118,7 @@ steps:
       tests/quantization/test_blackwell_moe.py
       tests/quantization/test_keep_param_objects.py
       tests/model_executor/model_loader/test_reload_moe_kernels.py
-      tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_balanced_routing
+      tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
   mirror:
     amd:
       automatic_shard: true
