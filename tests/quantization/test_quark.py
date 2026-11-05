@@ -1741,7 +1741,7 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w8a8_per_block_moe(vllm_runner, tp):
     """Test per-block (128x128) FP8 MoE quantization with a tiny Qwen3 MoE model."""
-    model_path = "Adamji/tiny-qwen3-moe-fp8-per-block"
+    model_path = "vllm-project/tiny-qwen3-moe-fp8-per-block"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -1853,11 +1853,11 @@ class AccuracyTestConfig:
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
         excepted_value=11.3,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6,
     ),
 ]
@@ -1929,6 +1929,30 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         measured_value - rtol < EXPECTED_VALUE
         and measured_value + rtol > EXPECTED_VALUE
     ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+# Quark MXFP4 with an online 64-wide Hadamard rotation on q/k/v/gate/up
+# (`input_rotation` tensors). The weights are stored rotated, so a loader that
+# skips the activation rotation produces garbage.
+ONLINE_ROTATION_CONFIG = AccuracyTestConfig(
+    model_name="amd-quark/internal-testing-qwen3_0.6b-mxfp4-hadamard",
+    excepted_value=45.9,
+)
+
+
+@pytest.mark.skipif(not current_platform.supports_mx(), reason="requires MX support")
+def test_quark_online_rotation_wikitext():
+    config = ONLINE_ROTATION_CONFIG
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=1, kwargs={"cudagraph_capture_sizes": [16]}
+        ),
+        tasks="wikitext",
+        batch_size=64,
+    )
+    measured_value = results["results"]["wikitext"]["word_perplexity,none"]
+    assert measured_value == pytest.approx(config.excepted_value, abs=0.1)
 
 
 @pytest.mark.skipif(
