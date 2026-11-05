@@ -1556,9 +1556,9 @@ def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
     return "weight_scale" if use_mxfp8 else "weight_scale_inv"
 
 
-def _make_deepseek_v4_weights_mapper(
-    expert_dtype: str, linear_scale_name: str = "weight_scale_inv"
-) -> WeightsMapper:
+def _make_deepseek_v4_scale_regex(
+    expert_dtype: str, linear_scale_name: str
+) -> dict[re.Pattern, str]:
     if expert_dtype == "fp4":
         # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
         # ``w{1,2,3}_weight_scale`` (no _inv suffix). Linear scales use the
@@ -1588,6 +1588,13 @@ def _make_deepseek_v4_weights_mapper(
             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
             re.compile(r"\.scale$"): f".{linear_scale_name}",
         }
+    return scale_regex
+
+
+def _make_deepseek_v4_weights_mapper(
+    expert_dtype: str, linear_scale_name: str = "weight_scale_inv"
+) -> WeightsMapper:
+    scale_regex = _make_deepseek_v4_scale_regex(expert_dtype, linear_scale_name)
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",

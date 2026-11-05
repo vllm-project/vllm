@@ -10,6 +10,8 @@ from vllm.distributed.eplb.eplb_state import (
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.model_executor.models.utils import WeightsMapper
+from vllm.v1.worker.sentinel.eplb_redistribute import _moe_layer_of_weight
 
 
 def _make_model_state(
@@ -182,3 +184,16 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)
+
+
+def test_moe_layer_of_weight_matches_checkpoint_names_through_the_mapper():
+    """Expert reload selects checkpoint weights by their runtime layer."""
+    mapper = WeightsMapper(orig_to_new_prefix={"layers.": "model.layers."})
+    prefixes = {3: "model.layers.3.mlp."}
+
+    def find(name, mapper=mapper):
+        return _moe_layer_of_weight(name, mapper, lambda n: n, prefixes)
+
+    assert find("layers.3.mlp.experts.0.w1.weight") == 3
+    assert find("model.layers.3.mlp.experts.0.w1.weight", mapper=None) == 3
+    assert find("layers.4.mlp.experts.0.w1.weight") is None

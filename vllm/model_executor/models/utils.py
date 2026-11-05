@@ -89,14 +89,15 @@ class WeightsMapper:
 
         regex = dict(self.orig_to_new_regex)
         for substr, new in (orig_to_new_substr or {}).items():
-            regex[re.compile(rf"(?s)\A(.*?){re.escape(substr)}")] = replacement(
-                new, r"\g<1>"
-            )
+            pattern = re.compile(rf"(?s)\A(.*?){re.escape(substr)}")
+            regex[pattern] = replacement(new, r"\g<1>")
         for prefix, new in (orig_to_new_prefix or {}).items():
             regex[re.compile(rf"\A{re.escape(prefix)}")] = replacement(new)
         for suffix, new in (orig_to_new_suffix or {}).items():
             regex[re.compile(rf"{re.escape(suffix)}\Z")] = replacement(new)
-        self.orig_to_new_regex = regex
+        # `regex` patterns compare by identity, so later rules override by source.
+        rules = {(p.pattern, p.flags): (p, new) for p, new in regex.items()}
+        self.orig_to_new_regex = dict(rules.values())
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""

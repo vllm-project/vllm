@@ -226,3 +226,32 @@ def test_molmo_shaped_index_not_filtered_for_shared_hf_root():
             weights_mapper=_molmo_mapper(),
         )
         assert kept == files
+
+
+def test_dropped_key_under_lm_prefix_keeps_shard_filtering():
+    """A key the mapper drops is not a non-LM weight, so filtering stays on."""
+    mapper = WeightsMapper(orig_to_new_substr={"rotary": None})
+    with tempfile.TemporaryDirectory() as folder:
+        files = [
+            os.path.join(folder, "lm.safetensors"),
+            os.path.join(folder, "dropped.safetensors"),
+            os.path.join(folder, "vision.safetensors"),
+        ]
+        for path in files:
+            open(path, "wb").close()
+        _write_index(
+            folder,
+            {
+                "language_model.layers.0.weight": "lm.safetensors",
+                "language_model.layers.0.rotary.inv_freq": "dropped.safetensors",
+                "visual.blocks.0.weight": "vision.safetensors",
+            },
+        )
+        kept = filter_mm_encoder_only_safetensors_files(
+            files,
+            folder,
+            SAFE_WEIGHTS_INDEX_NAME,
+            ("language_model.",),
+            weights_mapper=mapper,
+        )
+        assert kept == files[1:]

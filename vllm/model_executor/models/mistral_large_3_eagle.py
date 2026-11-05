@@ -134,15 +134,21 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         return output
 
 
+# These match checkpoint names, so they run before the base mapper's rules.
+_EAGLE_LINEAR_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        regex.compile(r"\Aeagle_linear\.weight\Z"): r"model.fc.weight",
+        regex.compile(r"\Aeagle_linear\.qscale_act\Z"): r"model.fc.input_scale",
+        regex.compile(r"\Aeagle_linear\.qscale_weight\Z"): r"model.fc.weight_scale",
+    },
+)
+
+
 class EagleMistralLarge3ForCausalLM(
     _EagleMistralLarge3ForCausalLMBase, SupportsMultiModalEmbeddings
 ):
-    hf_to_vllm_mapper = MistralLarge3ForCausalLM.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_regex={
-            regex.compile(r"\Aeagle_linear\.weight\Z"): r"model.fc.weight",
-            regex.compile(r"\Aeagle_linear\.qscale_act\Z"): r"model.fc.input_scale",
-            regex.compile(r"\Aeagle_linear\.qscale_weight\Z"): r"model.fc.weight_scale",
-        },
+    hf_to_vllm_mapper = (
+        _EAGLE_LINEAR_MAPPER | MistralLarge3ForCausalLM.hf_to_vllm_mapper
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

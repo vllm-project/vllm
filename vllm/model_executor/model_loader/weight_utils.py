@@ -731,9 +731,13 @@ def filter_mm_encoder_only_safetensors_files(
             return False
         return any(mapped.startswith(p) for p in prefixes)
 
-    shared_root_keys = [
-        key for key in weight_map if key.startswith(prefixes) and not _is_lm_key(key)
-    ]
+    def _is_shared_root_key(key: str) -> bool:
+        mapped = _mapped_weight_name(weights_mapper, key)
+        if mapped is None or not key.startswith(prefixes):
+            return False
+        return not mapped.startswith(prefixes)
+
+    shared_root_keys = [key for key in weight_map if _is_shared_root_key(key)]
     if shared_root_keys:
         logger.warning_once(
             "mm-encoder-only whole-shard filter not applied: LM module "

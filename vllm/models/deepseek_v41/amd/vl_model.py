@@ -57,7 +57,7 @@ from ..decoder_replay_layers import DecoderReplayLayers
 from .model import (
     DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
-    _make_deepseek_v4_weights_mapper,
+    _make_deepseek_v4_scale_regex,
 )
 
 
@@ -95,10 +95,10 @@ def _make_deepseek_v4_vl_weights_mapper(
     expert_dtype: str, linear_scale_name: str
 ) -> WeightsMapper:
     """Text-checkpoint mapping rules re-rooted under ``language_model.``."""
-    base = _make_deepseek_v4_weights_mapper(expert_dtype, linear_scale_name)
+    scale_regex = _make_deepseek_v4_scale_regex(expert_dtype, linear_scale_name)
     return WeightsMapper(
         orig_to_new_prefix=dict(_VL_PREFIX_MAPPING),
-        orig_to_new_regex=base.orig_to_new_regex,
+        orig_to_new_regex=scale_regex,
         orig_to_new_suffix={
             "head.weight": "language_model.lm_head.weight",
             "embed.weight": "embed_tokens.weight",

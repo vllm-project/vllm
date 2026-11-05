@@ -10,6 +10,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.bert import BertModel, BertPoolingModel
+from vllm.model_executor.models.mistral_large_3_eagle import (
+    EagleMistralLarge3ForCausalLM,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -396,3 +400,30 @@ def test_cache_scale_mapper_matches_names_after_model_rules(name, expected):
     mapped = mapper | QuantizationConfig.get_cache_scale_mapper()
 
     assert mapped.map_name(name) == expected
+
+
+def test_weights_mapper_later_literal_rule_overrides_earlier_one():
+    """`regex` patterns compare by identity, so this must not rely on its cache."""
+    drop = WeightsMapper(orig_to_new_prefix={"head.": None})
+    re.purge()
+    keep = WeightsMapper(orig_to_new_prefix={"head.": "model.head."})
+
+    assert (drop | keep).map_name("head.w") == "model.head.w"
+
+
+def test_bert_pooling_model_keeps_the_pooler_that_bert_model_drops():
+    assert BertModel.hf_to_vllm_mapper.map_name("pooler.dense.weight") is None
+    pooling_mapper = BertPoolingModel.hf_to_vllm_mapper
+    assert pooling_mapper.map_name("pooler.dense.weight") == "pooler.dense.weight"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("eagle_linear.weight", "model.fc.weight"),
+        ("eagle_linear.qscale_act", "model.fc.input_scale"),
+        ("eagle_linear.qscale_weight", "model.fc.weight_scale"),
+    ],
+)
+def test_mistral_large_3_eagle_maps_quantized_eagle_linear(name, expected):
+    assert EagleMistralLarge3ForCausalLM.hf_to_vllm_mapper.map_name(name) == expected

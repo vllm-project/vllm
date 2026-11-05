@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Set
-from dataclasses import replace
 
 import torch
 from torch import nn
@@ -364,6 +363,21 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
+_BERT_WEIGHTS_MAPPER = WeightsMapper(
+    # Original google-bert checkpoints use the legacy `gamma`/`beta` LayerNorm
+    # names; rename to vLLM's `weight`/`bias`.
+    orig_to_new_substr={
+        "LayerNorm.gamma": "LayerNorm.weight",
+        "LayerNorm.beta": "LayerNorm.bias",
+    },
+    orig_to_new_stacked={
+        ".self.query": (".self.qkv_proj", "q"),
+        ".self.key": (".self.qkv_proj", "k"),
+        ".self.value": (".self.qkv_proj", "v"),
+    },
+)
+
+
 @support_torch_compile
 @default_pooling_type(seq_pooling_type="CLS")
 class BertModel(nn.Module, SupportsQuant):
@@ -371,19 +385,8 @@ class BertModel(nn.Module, SupportsQuant):
 
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
-    hf_to_vllm_mapper = WeightsMapper(
-        # Original google-bert checkpoints use the legacy `gamma`/`beta`
-        # LayerNorm names; rename to vLLM's `weight`/`bias`.
-        orig_to_new_substr={
-            "LayerNorm.gamma": "LayerNorm.weight",
-            "LayerNorm.beta": "LayerNorm.bias",
-        },
-        orig_to_new_stacked={
-            ".self.query": (".self.qkv_proj", "q"),
-            ".self.key": (".self.qkv_proj", "k"),
-            ".self.value": (".self.qkv_proj", "v"),
-        },
-        orig_to_new_prefix={"pooler.": None},
+    hf_to_vllm_mapper = _BERT_WEIGHTS_MAPPER | WeightsMapper(
+        orig_to_new_prefix={"pooler.": None}
     )
 
     def __init__(
@@ -426,7 +429,7 @@ class BertPoolingModel(BertModel):
     is_pooling_model = True
 
     # Unlike `BertModel`, this model has a pooler to load weights into.
-    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
+    hf_to_vllm_mapper = _BERT_WEIGHTS_MAPPER
 
     def __init__(
         self,

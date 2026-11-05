@@ -326,6 +326,9 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
         f"language_model.model.layers.0.attn.wq_a.{scale_name}",
         "language_model.model.layers.0.attn.wkv.weight",
     ]
+    # The text mapper drops the vision tower; the VL mapper must not.
+    vision_name = "vision.blocks.0.attn.wqkv.weight"
+    assert mapper.map_name(vision_name) == vision_name
 
 
 def test_deepseek_v41_vl_exposes_quant_mappings_on_class():

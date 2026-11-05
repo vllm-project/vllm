@@ -11,7 +11,7 @@ recovery.
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from inspect import signature
 from itertools import zip_longest
 from typing import TYPE_CHECKING
@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.v1.worker.sentinel.expert_reload import _placement_weight_loader
 
 if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -144,6 +145,25 @@ def redistribute_expert_placement(
     return reassignments
 
 
+def _moe_layer_of_weight(
+    name: str,
+    mapper: WeightsMapper | None,
+    rename_checkpoint_weight: Callable[[str], str],
+    runtime_prefixes: dict[int, str],
+) -> int | None:
+    """Return the MoE layer that loads checkpoint weight `name`, if any.
+
+    Model-specific checkpoint renaming is honored here, while `load_weights` still
+    receives the original name for its normal conversion.
+    """
+    mapped = name if mapper is None else mapper.map_name(name)
+    names = tuple(n for n in (mapped, rename_checkpoint_weight(name)) if n is not None)
+    for layer_idx, prefix in runtime_prefixes.items():
+        if any(n.startswith(prefix) for n in names):
+            return layer_idx
+    return None
+
+
 def reload_experts_from_disk(
     model: torch.nn.Module,
     vllm_config: VllmConfig,
@@ -171,22 +191,13 @@ def reload_experts_from_disk(
     from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 
     moe_layers = list(model.moe_layers)
-    prefix_renames = getattr(
-        getattr(model, "hf_to_vllm_mapper", None), "orig_to_new_prefix", {}
-    )
-
-    def ckpt_prefix(layer_idx: int) -> str:
-        prefix = moe_layers[layer_idx].layer_name + "."
-        for orig, new in prefix_renames.items():
-            if new and prefix.startswith(new):
-                return orig + prefix[len(new) :]
-        return prefix
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
 
     # Runtime-format expert reload: processing can merge scales or repack weights.
     # Reload every expert in an affected layer so finalization never consumes
     # uninitialized checkpoint storage for unchanged local experts.
     layer_indices = sorted({i for i, _ in reload_set})
-    prefixes = tuple(ckpt_prefix(i) for i in layer_indices)
+    runtime_prefixes = {i: moe_layers[i].layer_name + "." for i in layer_indices}
     layers = [
         getattr(moe_layers[i], "routed_experts", moe_layers[i]) for i in layer_indices
     ]
@@ -199,15 +210,12 @@ def reload_experts_from_disk(
 
     def filtered_iter() -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, tensor in all_weights:
-            # Honor model-specific checkpoint renaming before filtering, while
-            # passing the original name to load_weights for its normal conversion.
-            renamed = rename_checkpoint_weight(name)
-            for layer_idx, prefix in zip(layer_indices, prefixes):
-                runtime_prefix = moe_layers[layer_idx].layer_name + "."
-                if name.startswith(prefix) or renamed.startswith(runtime_prefix):
-                    matched.add(layer_idx)
-                    yield name, tensor
-                    break
+            layer_idx = _moe_layer_of_weight(
+                name, mapper, rename_checkpoint_weight, runtime_prefixes
+            )
+            if layer_idx is not None:
+                matched.add(layer_idx)
+                yield name, tensor
 
     # Reload recovered placement: remap before the layerwise loader buffers its
     # arguments, so deferred processing replays physical IDs against runtime maps.
