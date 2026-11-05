@@ -370,6 +370,7 @@ def rope_quant_insert(
         CACHE_BLOCK=kv_cache.shape[1],
         COMPRESS_RATIO=compress_ratio,
         STORE_FP8=store_fp8,
+        FP8_MAX=torch.finfo(kv_cache.dtype).max,
         num_warps=4,
         **launch_kwargs,
     )
@@ -547,6 +548,7 @@ def _rope_plain_insert_kernel(
     CACHE_BLOCK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     STORE_FP8: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     t = tl.program_id(0)
     slot = tl.load(cache_slots + t)
@@ -563,5 +565,13 @@ def _rope_plain_insert_kernel(
         + (slot % CACHE_BLOCK) * ROW_STRIDE
     )
     rope_store_plain_kv_row(
-        normed, position, cos_sin, COS_STRIDE, dst, fp8_scale, COMPRESS_RATIO, STORE_FP8
+        normed,
+        position,
+        cos_sin,
+        COS_STRIDE,
+        dst,
+        fp8_scale,
+        COMPRESS_RATIO,
+        STORE_FP8,
+        FP8_MAX,
     )

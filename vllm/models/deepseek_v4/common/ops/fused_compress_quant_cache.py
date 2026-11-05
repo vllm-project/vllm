@@ -52,7 +52,11 @@ def _plain_fp8_store_kwargs(
     assert kv_cache.dim() == 3 and kv_cache.stride(-1) == 1
     assert fp8_scale is not None and fp8_scale.numel() == 1
     assert fp8_scale.dtype == torch.float32
-    return {"fp8_scale_ptr": fp8_scale, "STORE_PLAIN_FP8": True}
+    return {
+        "fp8_scale_ptr": fp8_scale,
+        "STORE_PLAIN_FP8": True,
+        "PLAIN_FP8_MAX": torch.finfo(kv_cache.dtype).max,
+    }
 
 
 def compress_norm_rope_store_triton(
@@ -200,6 +204,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     SANITIZE_CACHE_NANS: tl.constexpr,
     fp8_scale_ptr=None,
     STORE_PLAIN_FP8: tl.constexpr = False,
+    PLAIN_FP8_MAX: tl.constexpr = 0.0,
 ):
     """Fused compress → RMSNorm → FP8 quant (nope) → RoPE → bf16 store (rope).
 
@@ -295,10 +300,11 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
             position,
             cos_sin_cache_ptr,
             cos_sin_stride,
-            fp8_ptr.to(tl.pointer_type(tl.float8e4nv)),
+            fp8_ptr.to(tl.pointer_type(k_cache_ptr.dtype.element_ty)),
             fp8_scale_ptr,
             COMPRESS_RATIO,
             STORE_FP8=True,
+            FP8_MAX=PLAIN_FP8_MAX,
         )
         return
     scale_ptr = (
@@ -385,6 +391,7 @@ def rope_store_plain_kv_row(
     fp8_scale,
     COMPRESS_RATIO: tl.constexpr,
     STORE_FP8: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     """GPT-J RoPE on the last 64 lanes of a [448 NoPE | 64 RoPE] fp32 row, then
     store it as a plain bf16 row or a per-tensor fp8 one."""
@@ -399,7 +406,7 @@ def rope_store_plain_kv_row(
     d = tl.arange(0, 512)
     if STORE_FP8:
         scaled = row.to(tl.float32) * (1.0 / tl.load(fp8_scale))
-        tl.store(dst + d, tl.clamp(scaled, -448.0, 448.0).to(tl.float8e4nv))
+        tl.store(dst + d, tl.clamp(scaled, -FP8_MAX, FP8_MAX).to(dst.dtype.element_ty))
     else:
         tl.store(dst + d, row)
 
@@ -527,6 +534,7 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     SANITIZE_CACHE_NANS: tl.constexpr,
     fp8_scale_ptr=None,
     STORE_PLAIN_FP8: tl.constexpr = False,
+    PLAIN_FP8_MAX: tl.constexpr = 0.0,
 ):
     """Stage 2: read compressed_kv[512] from scratch buffer, then
     RMSNorm + FP8 quant (nope) + RoPE + bf16 store, or a plain fp8 row
@@ -567,10 +575,11 @@ def _finalize_norm_rope_quant_store_sparse_attn(
             position,
             cos_sin_cache_ptr,
             cos_sin_stride,
-            fp8_ptr.to(tl.pointer_type(tl.float8e4nv)),
+            fp8_ptr.to(tl.pointer_type(k_cache_ptr.dtype.element_ty)),
             fp8_scale_ptr,
             COMPRESS_RATIO,
             STORE_FP8=True,
+            FP8_MAX=PLAIN_FP8_MAX,
         )
         return
     scale_ptr = (
