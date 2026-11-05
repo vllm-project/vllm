@@ -148,9 +148,11 @@ class SparseNCCLWeightTransferEngine(
         """No layerwise reload; rebuild model-level derived state once."""
         from vllm.model_executor.model_loader.weight_utils import (
             finalize_model_weights,
+            refresh_derived_weights,
         )
 
         finalize_model_weights(self.model)
+        refresh_derived_weights(self.model)
 
     def receive_weights(self, update_info: SparseNCCLWeightTransferUpdateInfo) -> None:
         """Receive sparse flat-index patches from the trainer and apply them."""
