@@ -112,7 +112,7 @@ def _compact_kv_kernel(
     table_ptrs,  # [L] uint64: the layer's group block table, [num_reqs, max_blocks]
     table_strides,  # [L] int64: row stride of that table
     table_block_sizes,  # [L] int32: tokens per block of that table
-    count_ptr,  # [R] int32: verify rows per request, by batch row
+    rows_ptr,  # [R] int32: verify rows per request, by batch row
     seq_lens_ptr,  # [num_reqs] int32
     path_ptr,  # [R, C] int32, by batch row
     stride_path,
@@ -127,7 +127,7 @@ def _compact_kv_kernel(
 ):
     b, layer, head = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     # The verify rows are the query's last rows, so row r sits at context + r.
-    context = tl.load(seq_lens_ptr + b) - tl.load(count_ptr + b)
+    context = tl.load(seq_lens_ptr + b) - tl.load(rows_ptr + b)
     base = tl.load(layer_ptrs + layer).to(tl.pointer_type(DTYPE))
     table = tl.load(table_ptrs + layer).to(tl.pointer_type(tl.int32))
     table_row = table + b * tl.load(table_strides + layer)
@@ -207,7 +207,7 @@ class KvCompactor(SpecKernel):
 
     def commit(self, step: CommitStep) -> None:
         """Copy the KV of ``result.path[b, j]`` to chain slot ``j`` of the first
-        ``num_reqs`` batch rows, whose ``count[b]`` verify rows end at
+        ``num_reqs`` batch rows, whose ``rows[b]`` verify rows end at
         ``seq_lens[b]``."""
         result = step.result
         for layout, layer_ptrs, table_ptrs, table_strides, table_sizes in self.launches:
@@ -217,7 +217,7 @@ class KvCompactor(SpecKernel):
                 table_ptrs,
                 table_strides,
                 table_sizes,
-                step.count,
+                step.rows,
                 step.seq_lens,
                 result.path,
                 result.path.stride(0),

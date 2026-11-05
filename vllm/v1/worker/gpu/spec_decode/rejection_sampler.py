@@ -46,13 +46,13 @@ AcceptFn = Callable[[VerifyPlan, VerifyOutput, Sampler], "AcceptResult | None"]
 
 
 def slice_plan(plan: VerifyPlan, start: int, end: int) -> VerifyPlan:
-    """The plan of batch rows ``[start, end)``: every tensor field is per request."""
+    """The plan of batch rows ``[start, end)``: every array field is per request."""
     return replace(
         plan,
         **{
             f.name: value[start:end]
             for f in fields(plan)
-            if isinstance(value := getattr(plan, f.name), torch.Tensor)
+            if isinstance(value := getattr(plan, f.name), (torch.Tensor, np.ndarray))
         },
     )
 

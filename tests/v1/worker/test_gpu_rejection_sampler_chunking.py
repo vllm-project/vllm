@@ -331,8 +331,8 @@ def test_chunked_accept_sees_every_plan_field():
     )
     input_batch.verify_plan = VerifyPlan(
         parent=torch.tensor([[-1, 0, 0]] * num_reqs, dtype=torch.int32),
-        count=torch.full((num_reqs,), rows, dtype=torch.int32),
         tokens=torch.randint(0, 100, (num_reqs, rows), dtype=torch.int32),
+        rows=np.array([3, 2, 1], dtype=np.int32),
     )
     seen: list[VerifyPlan] = []
 
@@ -363,8 +363,9 @@ def test_chunked_accept_sees_every_plan_field():
             max_chunk_logits=max_chunk_logits,
             max_num_logprobs=NO_LOGPROBS,
         )
-        for name in ("parent", "count", "tokens"):
+        for name in ("parent", "tokens"):
             assert torch.equal(
                 torch.cat([getattr(plan, name) for plan in seen]),
                 getattr(input_batch.verify_plan, name),
             ), name
+        assert np.concatenate([plan.rows for plan in seen]).tolist() == [3, 2, 1]

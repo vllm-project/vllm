@@ -32,11 +32,11 @@ holds. vLLM sizes memory and CUDA graphs for it once, at startup.
 
 | `SpecResources` field | Meaning |
 | --- | --- |
-| `max_candidates: int` | Rows per request, the root included. Must equal `num_speculative_tokens + 1`; the scheduler reserves this many KV slots per decoding request. |
-| `capture_shapes: tuple[PlanShape, ...]` | The target-forward shapes to capture. `PlanShape(n)` is `n` rows for every request. |
+| `capture_rows: tuple[int, ...]` | Rows per request, the root included, of each decode graph to capture; at most `num_speculative_tokens + 1`. The largest, `max_rows`, caps the rows any request verifies. |
 | `max_branching: int = 1` | 1 for chains. Above 1, plans may branch. |
 
-The default is a chain of up to K drafts: `max_candidates` is K + 1, with one
+The scheduler reserves `num_speculative_tokens + 1` KV slots per decoding request.
+The default is a chain of up to K drafts: `capture_rows` is `(K + 1,)`, with one
 recurrent-state row per draft. `SpecResources.plan_kind` follows from the fields:
 `"tree"` when `max_branching > 1`, else `"chain"`.
 
@@ -113,7 +113,7 @@ def candidate_budget(self, view: BudgetView) -> int
 ```
 
 This returns the rows per request, root included, that the drafts proposed after
-this step may take. The value must be in `[1, max_candidates]`. The scheduler calls
+this step may take. The value must be in `[1, num_speculative_tokens + 1]`. The scheduler calls
 it once per `schedule()` that schedules requests, after allocation. The drafts
 proposed now are verified next step, so the budget binds one step later. This
 matches the Dynamic SD schedule.
@@ -121,12 +121,12 @@ matches the Dynamic SD schedule.
 A budget of 1 proposes no drafts. The scheduler sets `skip_drafts`, and the runner
 does not run the drafter after this step. Under data parallelism the drafter is
 skipped only when every rank skips it. The next step is a plain decode. It replays
-the uniform-1 graph when `PlanShape(1)` is in `capture_shapes`. A drafter with its
+the plain-decode graph when 1 is in `capture_rows`. A drafter with its
 own KV leaves the skipped tokens' draft KV unwritten. The target verifies every
 draft, so outputs do not change.
 
 The default is K + 1, or the Dynamic SD schedule's K + 1 at this batch size. The
-scheduler caps the answer at the effective `max_candidates`. `BudgetView` holds
+scheduler caps the answer at the effective `max_rows`. `BudgetView` holds
 host integers read after this step's requests are scheduled.
 
 On a model with recurrent (Mamba, GDN) layers, a request holds one recurrent-state
@@ -136,7 +136,7 @@ for more running requests (`view.num_free_blocks` shows the pool).
 ### 2. Plan: `BaseSpeculator.plan`
 
 ```python
-def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None
+def plan(self, inputs: PlanInputs) -> VerifyPlan | None
 ```
 
 The runner calls this once per scheduled batch that carries drafts, before it builds
@@ -157,8 +157,8 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | Field | Shape and meaning |
 | --- | --- |
 | `parent` | `[R, C]` int32. `parent[r, 0] == -1`. `parent[r, i]` is the row candidate `i` continues, in `[0, i)`. Rows are ordered parent first. A chain has `parent[r, i] == i - 1`. |
-| `count` | `[R]` int32 in `[1, C]`. 1 is a plain decode. Entries past `count[r]` are ignored. |
 | `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. |
+| `rows` | Host `[R]` int32, or `None`. `rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`; the drafts past it leave the batch and count as rejected. `None` verifies every scheduled row. Entries past a request's rows are ignored. |
 | `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then skips ancestor sets and KV compaction. It never derives this flag from the tensors. |
 
 Row 0 is the root, the request's last committed token. Each row writes its KV at the
@@ -166,16 +166,13 @@ chain slot of its row index. After acceptance, the commit moves the accepted pat
 into place. Plan buffers belong to the speculator. They must stay valid until the
 commit returns, so that CUDA graph replays read stable addresses.
 
-`PlanBound` gives the host integers the runner needs before the device plan exists.
-`rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`. The
-drafts past it leave the batch and count as rejected. `rows=None` verifies every
-scheduled row. The batch's graph shape follows from the rows. The device `count`
-equals the rows each request verifies; a row with no candidate to verify holds
+The batch's graph shape follows from the rows; the runner counts each request's
+rows on the device from its query length. A row with no candidate to verify holds
 token -1.
 
 A plan that is not a chain needs `max_branching > 1` in the bound resources, and a
 batch that is not `chain_only`. The runner checks each plan against the effective
-resources and rejects a plan with more than `max_candidates` rows.
+resources and rejects a plan with more than `num_speculative_tokens + 1` rows.
 
 ### 3. Verify
 
@@ -331,8 +328,6 @@ only greedy requests accept.
 ```python
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.round import (
-    PlanBound,
-    PlanShape,
     SpecResources,
     VerifyPlan,
 )
@@ -345,19 +340,15 @@ class MyTreeConfig(MyChainConfig):
         # The root and K candidates: run with num_speculative_tokens=15.
         rows = self.num_speculative_tokens + 1
         return SpecResources(
-            max_candidates=rows,
-            # Graphs are captured only at declared shapes: include the chain's.
-            capture_shapes=(PlanShape(1), PlanShape(5), PlanShape(rows)),
+            # Graphs are captured only at declared rows: include the chain's.
+            capture_rows=(1, 5, rows),
             max_branching=4,
         )
 
     def adapt_resources(self, declared, caps):
         if caps.plan_kind == "chain":
             # Our best chain is 4 drafts, not 15.
-            return SpecResources(
-                max_candidates=5,
-                capture_shapes=(PlanShape(1), PlanShape(5)),
-            )
+            return SpecResources(capture_rows=(1, 5))
         return declared
 
 
@@ -371,13 +362,8 @@ class MyTreeSpeculator(EagleSpeculator):
         if not self.trees or inputs.chain_only:
             return None  # vLLM verifies the scheduled drafts as a chain
         n = len(inputs.req_ids)
-        # Fill self.parent[:n], self.count[:n] and self.tokens[:n] on device.
-        plan = VerifyPlan(
-            parent=self.parent[:n],
-            count=self.count[:n],
-            tokens=self.tokens[:n],
-        )
-        return plan, PlanBound(rows=None)
+        # Fill self.parent[:n] and self.tokens[:n] on device.
+        return VerifyPlan(parent=self.parent[:n], tokens=self.tokens[:n])
 ```
 
 ## Coverage by model family

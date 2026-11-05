@@ -65,7 +65,7 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, PlanShape
+    from vllm.v1.worker.gpu.spec_decode.round import AcceptResult
 
 logger = init_logger(__name__)
 
@@ -115,10 +115,10 @@ class KernelContext:
     plan_kind: PlanKind
     """The plan kind the target runs (the engine core's ``SpecResources``)."""
     max_num_reqs: int
-    max_candidates: int
+    max_rows: int
     """Verify rows per request, the root included."""
-    capture_shapes: "tuple[PlanShape, ...]"
-    """The shapes the decode CUDA graphs are captured at."""
+    capture_rows: tuple[int, ...]
+    """Rows per request of each decode CUDA graph."""
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ class CommitStep:
 
     result: "AcceptResult"
     num_reqs: int
-    count: torch.Tensor
+    rows: torch.Tensor
     """``[R]`` int32: the verify rows of each request."""
     seq_lens: torch.Tensor
     """``[R]`` int32: each request's sequence length, its verify rows included."""
@@ -376,19 +376,17 @@ class KernelRegistry:
 
         if not self._commits:
             return
-        num_reqs, rows = ctx.max_num_reqs, ctx.max_candidates
+        num_reqs, rows = ctx.max_num_reqs, ctx.max_rows
         path = torch.arange(rows, dtype=torch.int32, device=ctx.device)
         path = path.expand(num_reqs, rows).contiguous()
-        for shape in ctx.capture_shapes:
-            count = torch.full(
-                (num_reqs,), shape.uniform_count, dtype=torch.int32, device=ctx.device
-            )
+        for n in ctx.capture_rows:
+            rows = torch.full((num_reqs,), n, dtype=torch.int32, device=ctx.device)
             step = CommitStep(
                 result=AcceptResult(
-                    path=path, path_len=count, sampled=torch.zeros_like(path)
+                    path=path, path_len=rows, sampled=torch.zeros_like(path)
                 ),
                 num_reqs=num_reqs,
-                count=count,
-                seq_lens=count,
+                rows=rows,
+                seq_lens=rows,
             )
             run(functools.partial(self.commit, step))

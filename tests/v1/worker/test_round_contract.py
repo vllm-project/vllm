@@ -53,7 +53,6 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
 from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
     BudgetView,
-    PlanShape,
     SpecResources,
     VerifyOutput,
     VerifyPlan,
@@ -95,8 +94,8 @@ def _plan(parent, counts, tokens=None):
     parent = _t(parent)
     return VerifyPlan(
         parent=parent,
-        count=_t(counts),
         tokens=torch.zeros_like(parent) if tokens is None else _t(tokens),
+        rows=np.asarray(counts, dtype=np.int32),
     )
 
 
@@ -108,19 +107,12 @@ _PARENT = [[-1, 0, 0, 1]]
 @pytest.mark.parametrize(
     "make, match",
     [
-        (lambda: VerifyPlan(parent=_t(_PARENT), count=None), "count and tokens"),
-        (lambda: VerifyPlan(parent=_t(_PARENT), count=_t([4])), "count and tokens"),
-        (lambda: SpecResources(max_candidates=0, capture_shapes=()), "max_candidates"),
-        (
-            lambda: SpecResources(max_candidates=2, capture_shapes=(PlanShape(3),)),
-            "outside",
-        ),
-        (
-            lambda: SpecResources(max_candidates=2, capture_shapes=(), max_branching=0),
-            "max_branching",
-        ),
+        (lambda: VerifyPlan(parent=_t(_PARENT)), "tokens"),
+        (lambda: SpecResources(capture_rows=()), "capture_rows"),
+        (lambda: SpecResources(capture_rows=(0,)), "capture_rows"),
+        (lambda: SpecResources(capture_rows=(2,), max_branching=0), "max_branching"),
     ],
-    ids=["plan-no-count", "plan-no-tokens", "candidates", "shape", "branching"],
+    ids=["plan-no-tokens", "no-rows", "zero-rows", "branching"],
 )
 def test_plan_and_resources_are_validated(make, match):
     with pytest.raises(ValueError, match=match):
@@ -129,40 +121,36 @@ def test_plan_and_resources_are_validated(make, match):
 
 @pytest.mark.parametrize("is_chain", [False, True])
 @pytest.mark.parametrize(
-    "max_candidates, rows, match",
+    "max_rows, rows, match",
     [
-        (3, [4], "max_candidates 3"),
+        (3, [4], "num_speculative_tokens \\+ 1 = 3"),
         (4, [4, 4], "every request"),
         (8, [5], "verifies up to 5"),
     ],
 )
-def test_spec_round_checks_a_plan_with_counts(is_chain, max_candidates, rows, match):
-    """A plan with counts is laid out from its parents, so its shape is
-    checked even when it is a chain: it fits the resources and has a column
-    for every row it verifies."""
+def test_spec_round_checks_a_plans_shape(is_chain, max_rows, rows, match):
+    """A plan is laid out from its parents, so its shape is checked even when
+    it is a chain: it fits the runner's buffers and has a column for every
+    row it verifies."""
     spec_round = object.__new__(SpecRound)
-    spec_round.resources = SpecResources(
-        max_candidates=max_candidates, capture_shapes=()
-    )
+    spec_round.max_rows = max_rows
     plan = _plan(_PARENT, [4])
     plan.is_chain = is_chain
     with pytest.raises(ValueError, match=match):
-        spec_round._check_plan(plan, np.array(rows), chain_only=False)
+        spec_round._check_plan(plan, np.array(rows))
 
 
 def test_valid_plan_and_resources():
-    # Only the runner's own chain plan leaves its counts and tokens to it.
-    assert VerifyPlan(parent=_t(_PARENT), count=None, is_chain=True).tokens is None
+    # Only a chain may leave its tokens to the runner's draft buffer.
+    assert VerifyPlan(parent=_t(_PARENT), is_chain=True).tokens is None
     assert not _plan(_PARENT, [4]).is_chain
-    resources = SpecResources(
-        max_candidates=4, capture_shapes=(PlanShape(4), PlanShape(1), PlanShape(4))
-    )
+    resources = SpecResources(capture_rows=(4, 1, 4))
     assert resources.max_branching == 1
-    assert resources.uniform_counts == [1, 4]
-    # A shape is a row count; graphs of mixed rows are adaptive verification's.
-    for bad in (0, 5, None):
-        with pytest.raises(ValueError, match="outside"):
-            SpecResources(max_candidates=4, capture_shapes=(PlanShape(bad),))
+    assert resources.max_rows == 4
+    # Each entry is a row count; graphs of mixed rows are adaptive verification's.
+    for bad in (0, None):
+        with pytest.raises(ValueError, match="capture_rows"):
+            SpecResources(capture_rows=(bad,))  # type: ignore[arg-type]
 
 
 # --- Plan layout ------------------------------------------------------------
@@ -198,7 +186,7 @@ def test_layout_matches_reference(kind, seed):
         parent = chain_parents(num_reqs, max_rows, DEVICE).cpu().numpy()
     tokens = gen.integers(100, 1000, (num_reqs, max_rows)).astype(np.int32)
     if kind == "runner-chain":
-        plan = VerifyPlan(parent=_t(parent), count=None, is_chain=True)
+        plan = VerifyPlan(parent=_t(parent), is_chain=True)
     elif kind == "bad-tree":
         # Parents at their own row or later are laid out as chain steps.
         rows = np.arange(max_rows)
@@ -248,9 +236,7 @@ def test_layout_matches_reference(kind, seed):
 def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
     """A speculator that never branches launches nothing; one that branches
     lays out every batch, a batch without drafts as the chain of its rows."""
-    resources = SpecResources(
-        max_candidates=4, capture_shapes=(), max_branching=max_branching
-    )
+    resources = SpecResources(capture_rows=(4,), max_branching=max_branching)
     spec_round = SpecRound(
         None,  # type: ignore[arg-type]
         resources,
@@ -284,6 +270,34 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
     sampled = SamplerOutput(zeros, None, None, zeros[:, 0], zeros[:, 0])
     result = spec_round.accept_result(sampled, batch)
     assert (result is None) == (max_branching == 1)
+
+
+@requires_kernels
+def test_spec_round_verifies_the_rows_of_each_query():
+    """The runner takes each request's verify rows from its query length (the
+    plan's rows, trimmed by plan_batch), for the layout and the commit: a plan
+    carries no device count that could disagree with the batch."""
+    resources = SpecResources(capture_rows=(4,), max_branching=2)
+    spec_round = SpecRound(None, resources, 4, 16, 3, DEVICE, plans=True)  # type: ignore[arg-type]
+    buffers = InputBuffers(4, 16, DEVICE)
+    spec_round.kernels = KernelRegistry()
+    spec_round.set_resources(resources, buffers, [])
+    batch = InputBatch.make_dummy(2, 5, buffers)
+    batch.query_start_loc[:3].copy_(_t([0, 2, 5]))
+    batch.positions.copy_(torch.arange(5))
+    parent = [[-1, 0, 0, -1], [-1, 0, 0, 1]]
+    batch.verify_plan = VerifyPlan(
+        parent=_t(parent),
+        tokens=torch.zeros(2, 4, dtype=torch.int32, device=DEVICE),
+        rows=np.array([2, 3], dtype=np.int32),
+    )
+
+    spec_round.lay_out(batch)
+
+    assert spec_round.rows is not None
+    assert spec_round.rows[:2].tolist() == [2, 3]
+    assert batch.tree_parents is not None
+    assert batch.tree_parents.tolist() == [-1, 0, -1, 0, 0]
 
 
 class _Staged:
@@ -321,7 +335,7 @@ def test_mrope_tree_positions(last_parent):
     input_ids = torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE)
     layout = PlanLayout(num_tokens, max_rows, DEVICE)
     plan = _plan(parent, counts)
-    layout.apply(plan, plan.count, _t(qsl), chain_pos, input_ids, 3, num_tokens)
+    layout.apply(plan, _t(counts), _t(qsl), chain_pos, input_ids, 3, num_tokens)
 
     def rope_positions(pos_delta):
         args = (idx_mapping, _t(qsl), _t([6, 9, 20]), num_computed)
@@ -539,8 +553,8 @@ def _kernel_context():
         device=DEVICE,
         plan_kind="tree",
         max_num_reqs=4,
-        max_candidates=4,
-        capture_shapes=(PlanShape(4),),
+        max_rows=4,
+        capture_rows=(4,),
     )
 
 
@@ -595,7 +609,7 @@ def test_kv_compaction_moves_the_path(kind, path_kind):
         CommitStep(
             AcceptResult(_t(path), _t(path_len), sampled),
             num_reqs,
-            count=_t(counts),
+            rows=_t(counts),
             seq_lens=_t(seq_lens),
         )
     )
@@ -737,9 +751,7 @@ def test_builtin_configs_keep_todays_resources_and_budget(qualname):
     size."""
     config_cls = resolve_obj_by_qualname(f"vllm.v1.worker.gpu.spec_decode.{qualname}")
     config = config_cls(_StaticSpec())
-    assert config.resources(16) == SpecResources(
-        max_candidates=4, capture_shapes=(PlanShape(4),)
-    )
+    assert config.resources(16) == SpecResources(capture_rows=(4,))
     for num_reqs in (1, 7, 16):
         view = BudgetView(num_reqs, num_reqs, 0, 0, 16, 16)
         assert config.candidate_budget(view) == 4

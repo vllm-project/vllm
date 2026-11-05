@@ -335,10 +335,10 @@ class Scheduler(SchedulerInterface):
             resources = self.speculator_config.resources(
                 self.scheduler_config.max_num_seqs
             )
-            if resources.max_candidates != self.num_spec_tokens + 1:
+            if resources.max_rows > self.num_spec_tokens + 1:
                 raise ValueError(
-                    f"SpecResources.max_candidates ({resources.max_candidates}) "
-                    "must be num_speculative_tokens + 1 "
+                    f"SpecResources.capture_rows ({resources.capture_rows}) must "
+                    "be at most num_speculative_tokens + 1 "
                     f"({self.num_spec_tokens + 1}): KV slots and the runner's "
                     "buffers are sized from num_speculative_tokens."
                 )
@@ -552,9 +552,9 @@ class Scheduler(SchedulerInterface):
                 f"candidate_budget returned {budget}, outside "
                 f"[1, num_speculative_tokens + 1 = {self.num_spec_tokens + 1}]."
             )
-        # KV slots are reserved for the declared max_candidates; the rows run
-        # are capped by the effective resources the engine core set.
-        return min(budget, self.spec_resources.max_candidates)
+        # KV slots are reserved for num_speculative_tokens; the rows run are
+        # capped by the effective resources the engine core set.
+        return min(budget, self.spec_resources.max_rows)
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int

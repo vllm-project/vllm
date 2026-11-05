@@ -6,24 +6,23 @@ import numpy as np
 import torch
 
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
-from vllm.v1.worker.gpu.spec_decode.round import PlanBound, PlanInputs, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import PlanInputs, VerifyPlan
 
 
 class NgramTreeSpeculator(NgramGPUSpeculator):
     """Verifies the n-gram drafts as a tree: the first draft gets a sibling
     holding another token, and the chain continues from the first draft."""
 
-    def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None:
+    def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
         if inputs.chain_only:
             return None
         assert self.resources is not None
         num_reqs = len(inputs.req_ids)
-        num_cols = self.resources.max_candidates
+        num_cols = self.resources.max_rows
         if not hasattr(self, "_parent"):
             shape = (self.req_states.max_num_reqs, num_cols)
             self._parent = torch.empty(shape, dtype=torch.int32, device=self.device)
             self._tokens = torch.empty(shape, dtype=torch.int32, device=self.device)
-            self._count = torch.empty(shape[0], dtype=torch.int32, device=self.device)
         rows = inputs.scheduled_rows.astype(np.int32)
         parent = np.tile(np.arange(-1, num_cols - 1, dtype=np.int32), (num_reqs, 1))
         # Row i holds draft i - 1 (row 0, the root, is ignored).
@@ -45,10 +44,6 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
         tokens = tokens.clamp(min=0) % self.vllm_config.model_config.get_vocab_size()
         self._parent[:num_reqs].copy_(torch.from_numpy(parent), non_blocking=True)
         self._tokens[:num_reqs].copy_(tokens.to(torch.int32))
-        self._count[:num_reqs].copy_(torch.from_numpy(rows), non_blocking=True)
-        plan = VerifyPlan(
-            parent=self._parent[:num_reqs],
-            count=self._count[:num_reqs],
-            tokens=self._tokens[:num_reqs],
+        return VerifyPlan(
+            parent=self._parent[:num_reqs], tokens=self._tokens[:num_reqs]
         )
-        return plan, PlanBound()

@@ -62,7 +62,7 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
     SpecKernel,
     SpecLayerSpec,
 )
-from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
+from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.utils import AttentionGroup
@@ -345,11 +345,7 @@ class _TreeConfig(SpeculatorConfig):
         self.changes = changes
 
     def resources(self, max_num_seqs):
-        return SpecResources(
-            max_candidates=4,
-            capture_shapes=(PlanShape(4),),
-            max_branching=2,
-        )
+        return SpecResources(capture_rows=(4,), max_branching=2)
 
     def adapt_resources(self, declared, caps):
         if not self.changes:
@@ -372,15 +368,9 @@ _CHAIN = SpecCapabilities.from_limits(
         (_speculative_config().speculator_config, _CHAIN, "declared", []),
         (_TreeConfig(max_branching=2), _CHAIN, "plan_kind 'tree' is above", []),
         (
-            _TreeConfig(max_branching=1, max_candidates=5),
+            _TreeConfig(max_branching=1, capture_rows=(5,)),
             _CHAIN,
-            "max_candidates 5",
-            [],
-        ),
-        (
-            _TreeConfig(max_branching=1, capture_shapes=(PlanShape(2),)),
-            _CHAIN,
-            "capture_shapes",
+            r"capture_rows \[5\]",
             [],
         ),
     ],
@@ -389,8 +379,7 @@ _CHAIN = SpecCapabilities.from_limits(
         "tree-kept",
         "chain-kept",
         "bad-kind",
-        "bad-candidates",
-        "bad-shapes",
+        "bad-rows",
     ],
 )
 def test_resolve_spec_resources(config, caps, want, logged, caplog):
@@ -439,7 +428,7 @@ def _attn_layer(name, layout="paged_token"):
     )
 
 
-SHAPES = (PlanShape(4),)
+SHAPES = (4,)
 
 
 def _ctx(plan_kind="tree", shapes=SHAPES):
@@ -447,8 +436,8 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
         device=torch.device("cpu"),
         plan_kind=plan_kind,
         max_num_reqs=3,
-        max_candidates=4,
-        capture_shapes=tuple(shapes),
+        max_rows=4,
+        capture_rows=tuple(shapes),
     )
 
 
@@ -580,14 +569,14 @@ def test_bind_commit_capture():
     registry.bind(_ctx("none"), layers)
     assert layers[0].module.spec_verify_kernel is None
 
-    shapes = (PlanShape(4), PlanShape(2))
+    shapes = (4, 2)
     ctx = _ctx("tree", shapes)
     verify.binds.clear()
     registry.bind(ctx, layers)
     assert verify.binds == state.binds == [["m.0", "m.1"]]
     assert kv.binds == [["a.0"]]
     assert all(layer.module.spec_verify_kernel is verify for layer in layers[:2])
-    step = CommitStep(result=None, num_reqs=2, count=None, seq_lens=None)
+    step = CommitStep(result=None, num_reqs=2, rows=None, seq_lens=None)
     registry.commit(step)
     assert state.steps == [step] and kv.steps == [step]
     state.steps.clear()
@@ -596,14 +585,14 @@ def test_bind_commit_capture():
     registry.capture(ctx, run=lambda fn: runs.append(fn()))
     assert len(runs) == len(shapes)
     for kernel in (state, kv):
-        assert [step.count.tolist() for step in kernel.steps] == [
+        assert [step.rows.tolist() for step in kernel.steps] == [
             [4, 4, 4],
             [2, 2, 2],
         ]
         for step in kernel.steps:
             assert step.num_reqs == ctx.max_num_reqs
             assert step.result.path.tolist() == [[0, 1, 2, 3]] * 3
-            assert torch.equal(step.result.path_len, step.count)
+            assert torch.equal(step.result.path_len, step.rows)
 
     # A kernel runs only the plan kinds it supports.
     tree_only = ToyKernel(kinds={"tree"})

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The layout a :class:`VerifyPlan` gives the target's verify forward.
 
-Each request verifies the last ``count[b]`` rows of its query; row 0 of those is the
+Each request verifies the last ``rows[b]`` rows of its query; row 0 of those is the
 root. The runner computes the batch's positions and slot mappings as for a chain
 (``num_computed_tokens + i``) and keeps the slot mappings: every row writes its KV at
 the chain slot of its row index, and the commit compacts the accepted path afterwards.
@@ -38,7 +38,7 @@ def chain_path(max_num_reqs: int, max_rows: int, device: torch.device) -> torch.
 def _plan_layout_kernel(
     parent_ptr,  # [R, C] int32, by batch row
     stride_parent,
-    count_ptr,  # [R] int32, by batch row
+    rows_ptr,  # [R] int32: verify rows per request, by batch row
     tokens_ptr,  # [R, C] int32 candidate tokens, by batch row (unused unless TOKENS)
     stride_tokens,
     query_start_loc_ptr,  # [num_reqs + 1] int32
@@ -56,8 +56,8 @@ def _plan_layout_kernel(
     b = tl.program_id(0)
     query_start = tl.load(query_start_loc_ptr + b)
     end = tl.load(query_start_loc_ptr + b + 1)
-    count = tl.load(count_ptr + b)
-    start = end - count
+    num_rows = tl.load(rows_ptr + b)
+    start = end - num_rows
     # Every token of the request first gets the chain layout (prefill tokens in
     # front of the plan rows keep it).
     for block in range(query_start, start, BLOCK):
@@ -68,7 +68,7 @@ def _plan_layout_kernel(
         tl.store(pos_delta_ptr + offs, 0, mask=in_query)
 
     rows = tl.arange(0, CP)
-    is_row = rows < count
+    is_row = rows < num_rows
     parents = tl.load(parent_ptr + b * stride_parent + rows, mask=rows < C, other=-1)
     # A parent that is not an earlier row is a chain step, so a bad plan stays
     # within its request.
@@ -148,7 +148,7 @@ class PlanLayout:
     def apply(
         self,
         plan: VerifyPlan,
-        count: torch.Tensor,
+        rows: torch.Tensor,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
@@ -158,21 +158,21 @@ class PlanLayout:
     ) -> None:
         """Turn ``positions`` from chain to plan positions, write the plan's
         candidate tokens into ``input_ids`` (a plan with ``tokens``), and fill the
-        layout buffers for the first ``num_reqs`` batch rows. ``count`` is the
-        plan's count, or the rows per request of a chain the runner lays out."""
+        layout buffers for the first ``num_reqs`` batch rows, whose requests
+        verify the last ``rows[b]`` tokens of their queries."""
         assert plan.parent.shape[1] <= self.max_rows
         self.chain_positions[:num_tokens].copy_(positions[:num_tokens])
         if num_tokens_padded is not None and num_tokens_padded > num_tokens:
             self.tree_parents[num_tokens:num_tokens_padded].fill_(-1)
             self.tree_ancestors[num_tokens:num_tokens_padded].zero_()
             self.pos_delta[num_tokens:num_tokens_padded].zero_()
-        num_rows = plan.parent.shape[1]
+        width = plan.parent.shape[1]
         tokens = plan.tokens if plan.tokens is not None and not plan.is_chain else None
         assert tokens is None or input_ids is not None
         _plan_layout_kernel[(num_reqs,)](
             plan.parent,
             plan.parent.stride(0),
-            count,
+            rows,
             tokens if tokens is not None else plan.parent,
             tokens.stride(0) if tokens is not None else 0,
             query_start_loc,
@@ -181,8 +181,8 @@ class PlanLayout:
             self.tree_parents,
             self.tree_ancestors,
             self.pos_delta,
-            C=num_rows,
-            CP=triton.next_power_of_2(num_rows),
+            C=width,
+            CP=triton.next_power_of_2(width),
             TOKENS=tokens is not None,
             CHAIN=plan.is_chain,
             BLOCK=256,

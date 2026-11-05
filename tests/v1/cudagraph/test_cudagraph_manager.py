@@ -24,7 +24,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
+from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
@@ -786,16 +786,13 @@ def _full_uniform_counts(manager) -> set[int | None]:
 
 
 def test_decode_graphs_follow_the_declared_plan_shapes(monkeypatch):
-    """The capture list is SpecResources.capture_shapes: a uniform count c is a
-    decode query length of c - 1 drafts plus the sampled token, so declaring
-    PlanShape(1) captures the plain-decode graph that budget 1 replays."""
+    """The capture list is SpecResources.capture_rows: n rows per request is a
+    decode query length of n - 1 drafts plus the sampled token, so declaring
+    1 captures the plain-decode graph that budget 1 replays."""
     monkeypatch.setattr(
         SpeculatorConfig,
         "resources",
-        lambda self, max_num_seqs: SpecResources(
-            max_candidates=4,
-            capture_shapes=(PlanShape(4), PlanShape(1)),
-        ),
+        lambda self, max_num_seqs: SpecResources(capture_rows=(4, 1)),
     )
     manager = _make_spec_decode_manager(
         monkeypatch,

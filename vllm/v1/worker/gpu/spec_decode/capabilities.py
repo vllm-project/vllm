@@ -277,14 +277,9 @@ def validate_effective_resources(
             f"plan_kind {effective.plan_kind!r} is above the declared "
             f"{declared.plan_kind!r} or the model's {caps.plan_kind!r}"
         )
-    if effective.max_candidates > declared.max_candidates:
-        problems.append(
-            f"max_candidates {effective.max_candidates} > declared "
-            f"{declared.max_candidates}"
-        )
-    extra_shapes = set(effective.capture_shapes) - set(declared.capture_shapes)
-    if extra_shapes:
-        problems.append(f"capture_shapes {sorted(extra_shapes, key=str)} not declared")
+    extra_rows = set(effective.capture_rows) - set(declared.capture_rows)
+    if extra_rows:
+        problems.append(f"capture_rows {sorted(extra_rows)} not declared")
     if problems:
         raise ValueError(
             "SpeculatorConfig.adapt_resources returned resources the model cannot "

@@ -10,7 +10,6 @@ from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.worker.gpu.spec_decode.round import PlanShape
 
 
 def _make_lookup(
@@ -147,14 +146,9 @@ def test_scheduler_initializes_dynamic_sd_lookup_from_speculative_config():
     config = scheduler.speculator_config
     assert config is not None
     resources = config.resources(16)
-    assert resources.capture_shapes == (PlanShape(4),)
-    assert resources.max_candidates == 4
-    # Over every batch size the schedule reaches, one uniform shape per K.
-    assert config.resources(256).capture_shapes == (
-        PlanShape(1),
-        PlanShape(3),
-        PlanShape(4),
-    )
+    assert resources.capture_rows == (4,)
+    # Over every batch size the schedule reaches, one decode graph per K.
+    assert config.resources(256).capture_rows == (1, 3, 4)
 
 
 def test_scheduler_uses_dsd_k_based_on_number_of_scheduled_requests():
@@ -256,6 +250,6 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
 
     assert not scheduler.pads_new_decode_rows
     assert scheduler.speculator_config is not None
-    assert scheduler.speculator_config.resources(16).capture_shapes == (PlanShape(4),)
+    assert scheduler.speculator_config.resources(16).capture_rows == (4,)
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3

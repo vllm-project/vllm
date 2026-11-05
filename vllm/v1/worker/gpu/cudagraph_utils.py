@@ -278,7 +278,8 @@ class CudaGraphManager:
         )
         num_new_sampled_tokens_per_step = self.decode_query_len - num_speculative_tokens
         lens = [
-            c - 1 + num_new_sampled_tokens_per_step for c in resources.uniform_counts
+            n - 1 + num_new_sampled_tokens_per_step
+            for n in sorted(set(resources.capture_rows))
         ]
         return lens or [self.decode_query_len]
 

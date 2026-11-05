@@ -370,7 +370,7 @@ def test_adaptive_verification_reserves_the_full_candidate_budget():
     """With adaptive verification the config asks for every candidate (the
     worker trims); the runner captures the variable-length decode graphs."""
     from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
-    from vllm.v1.worker.gpu.spec_decode.round import BudgetView, PlanShape
+    from vllm.v1.worker.gpu.spec_decode.round import BudgetView
 
     spec = fake_speculative_config(
         DSparkSpeculatorConfig,
@@ -381,8 +381,7 @@ def test_adaptive_verification_reserves_the_full_candidate_budget():
     )
     config = spec.speculator_config
     resources = config.resources(max_num_seqs=8)
-    assert resources.max_candidates == 5
-    assert resources.capture_shapes == (PlanShape(5),)
+    assert resources.capture_rows == (5,)
     for num_reqs in (1, 8):
         view = BudgetView(num_reqs, num_reqs, 0, 100, 8, 16)
         assert config.candidate_budget(view) == 5

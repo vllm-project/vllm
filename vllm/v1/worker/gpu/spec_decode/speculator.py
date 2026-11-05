@@ -44,7 +44,6 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
-    PlanBound,
     PlanInputs,
     SpecResources,
     VerifyOutput,
@@ -159,20 +158,19 @@ class BaseSpeculator(ABC):
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
 
-    def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None:
+    def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
         """The rows the target verifies this step.
 
         Called once per scheduled batch that carries drafts, before its inputs
         are built, unless adaptive verification (which sets its own budget) is
         enabled. Return None (the default) to verify every scheduled draft as a
         chain. Otherwise return a plan whose tensors cover ``inputs``' batch rows
-        and stay valid until the step commits, and its host bound: request ``r``
-        verifies ``bound.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``);
-        the drafts past it leave the batch and count as rejected. A plan that is
-        not a chain needs ``SpecResources.max_branching > 1`` (in the bound
+        and stay valid until the step commits. Request ``r`` verifies
+        ``plan.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``); the drafts
+        past it leave the batch and count as rejected. A plan that is not a
+        chain needs ``SpecResources.max_branching > 1`` (in the bound
         resources, see `bind_resources`) and a batch that is not
-        ``inputs.chain_only``. The plan's device ``count`` equals the rows each
-        request verifies; a row with no candidate to verify holds token -1.
+        ``inputs.chain_only``.
         """
         return None
 

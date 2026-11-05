@@ -34,7 +34,6 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
 )
 from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
-    PlanBound,
     PlanInputs,
     SpecResources,
     VerifyPlan,
@@ -74,13 +73,10 @@ class SpecRound:
         self.max_num_tokens = max_num_tokens
         self.max_rows = num_speculative_steps + 1
         self.device = device
-        # The plan of a step that verifies drafts: today always a chain, with its
-        # counts and tokens in the runner's buffers. Other plans are laid out by
-        # layout, built by init_tree_verify.
+        # The plan of a step that verifies drafts without a speculator plan:
+        # a chain, with its tokens in the runner's draft buffer.
         self.chain_plan = VerifyPlan(
-            parent=chain_parents(max_num_reqs, self.max_rows, device),
-            count=None,
-            is_chain=True,
+            parent=chain_parents(max_num_reqs, self.max_rows, device), is_chain=True
         )
         # The accepted path of every chain round, path[r, j] == j.
         self.chain_path = chain_path(max_num_reqs, self.max_rows, device)
@@ -94,12 +90,11 @@ class SpecRound:
         # capture batches too) is laid out, so the attention metadata always
         # carries tree_parents / tree_ancestors and one graph serves every plan.
         self.max_branching = self.resources.max_branching
-        # The rows per request of a chain the runner lays out (max_branching > 1).
-        self.chain_count: torch.Tensor | None = None
+        # The rows each request verifies, from its query length, for the layout
+        # and the commit (max_branching > 1).
+        self.rows: torch.Tensor | None = None
         if self.max_branching > 1:
-            self.chain_count = torch.ones(
-                max_num_reqs, dtype=torch.int32, device=device
-            )
+            self.rows = torch.ones(max_num_reqs, dtype=torch.int32, device=device)
         # The spec verify and commit kernels (registry), bound by set_resources.
         self.kernels: KernelRegistry | None = None
         self.kernel_context: KernelContext | None = None
@@ -162,13 +157,13 @@ class SpecRound:
         if resources.max_branching == 1 < self.max_branching:
             # Lowered to chains: batches keep the chain layout.
             self.max_branching = 1
-            self.chain_count = None
+            self.rows = None
         self.kernel_context = KernelContext(
             device=self.device,
             plan_kind=resources.plan_kind,
             max_num_reqs=self.max_num_reqs,
-            max_candidates=resources.max_candidates,
-            capture_shapes=resources.capture_shapes,
+            max_rows=resources.max_rows,
+            capture_rows=resources.capture_rows,
         )
         self.registry().bind(self.kernel_context, layers)
         self.init_tree_verify(input_buffers)
@@ -199,7 +194,7 @@ class SpecRound:
         chain_only = self._chain_only(
             scheduler_output, sampler, idx_mapping_np, has_prefill
         )
-        planned = speculator.plan(
+        verify_plan = speculator.plan(
             PlanInputs(
                 req_ids=req_ids,
                 idx_mapping=idx_mapping,
@@ -208,17 +203,19 @@ class SpecRound:
                 chain_only=chain_only,
             )
         )
-        verify_plan, bound = None, PlanBound()
-        if planned is not None:
-            verify_plan, bound = planned
-            rows = num_draft_tokens + 1 if bound.rows is None else bound.rows
-            self._check_plan(verify_plan, rows, chain_only)
-        if bound.rows is None:
+        if verify_plan is None:
+            return idx_mapping, None, None
+        rows = verify_plan.rows
+        self._check_plan(verify_plan, num_draft_tokens + 1 if rows is None else rows)
+        if not verify_plan.is_chain and chain_only:
+            raise ValueError(
+                "the speculator returned a plan that is not a chain for a batch "
+                "that can only verify chains (PlanInputs.chain_only)"
+            )
+        if rows is None:
             return idx_mapping, verify_plan, None
         # Unverified drafts leave the batch; they count as rejected.
-        trimmed = trim_draft_tokens(
-            num_scheduled_tokens, num_draft_tokens, bound.rows - 1
-        )
+        trimmed = trim_draft_tokens(num_scheduled_tokens, num_draft_tokens, rows - 1)
         return idx_mapping, verify_plan, trimmed
 
     def _chain_only(
@@ -239,29 +236,18 @@ class SpecRound:
         assert sampler is not None
         return sampler.reads_row_prefix(idx_mapping_np)
 
-    def _check_plan(self, plan: VerifyPlan, rows: np.ndarray, chain_only: bool) -> None:
-        # A plan with counts is laid out from its parents, a chain too.
-        if plan.count is not None:
-            num_reqs, width = plan.parent.shape
-            max_candidates = self.resources.max_candidates
-            if width > max_candidates:
-                raise ValueError(
-                    f"a plan has {width} rows per request; the "
-                    f"speculator runs with max_candidates {max_candidates}"
-                )
-            if num_reqs < len(rows):
-                raise ValueError("a plan must cover every request of the batch")
-            if len(rows) and width < rows.max():
-                raise ValueError(
-                    f"a plan has {width} rows per request but verifies up to "
-                    f"{rows.max()}"
-                )
-        if plan.is_chain:
-            return
-        if chain_only:
+    def _check_plan(self, plan: VerifyPlan, rows: np.ndarray) -> None:
+        num_reqs, width = plan.parent.shape
+        if width > self.max_rows:
             raise ValueError(
-                "the speculator returned a plan that is not a chain for a batch "
-                "that can only verify chains (PlanInputs.chain_only)"
+                f"a plan has {width} rows per request, above "
+                f"num_speculative_tokens + 1 = {self.max_rows}"
+            )
+        if num_reqs < len(rows):
+            raise ValueError("a plan must cover every request of the batch")
+        if len(rows) and width < rows.max():
+            raise ValueError(
+                f"a plan has {width} rows per request but verifies up to {rows.max()}"
             )
 
     def lay_out(self, input_batch: "InputBatch") -> None:
@@ -276,19 +262,16 @@ class SpecRound:
         reads it replays: one graph serves every plan."""
         if self.layout is None:
             return
-        plan = input_batch.verify_plan
         num_reqs = input_batch.num_reqs
-        if plan is None or plan.count is None:
-            assert self.chain_count is not None
-            count = self.chain_count[:num_reqs]
-            torch.diff(input_batch.query_start_loc[: num_reqs + 1], out=count)
-            count.clamp_(1, self.max_rows)
-            plan = self.chain_plan
-        else:
-            count = plan.count
+        # Each request verifies its query rows (the plan's rows, trimmed by
+        # plan_batch); a prefill's are clamped and laid out as a chain.
+        assert self.rows is not None
+        rows = self.rows[:num_reqs]
+        torch.diff(input_batch.query_start_loc[: num_reqs + 1], out=rows)
+        rows.clamp_(1, self.max_rows)
         self.layout.apply(
-            plan,
-            count,
+            input_batch.verify_plan or self.chain_plan,
+            rows,
             input_batch.query_start_loc,
             input_batch.positions,
             input_batch.input_ids,
@@ -330,13 +313,13 @@ class SpecRound:
         plan = input_batch.verify_plan
         if result is None or is_chain(plan):
             return None
-        assert plan is not None and plan.count is not None
+        assert self.rows is not None
         assert self.kernels is not None and self.kernel_context is not None, (
             "set_resources binds the commit kernels"
         )
         num_reqs = input_batch.num_reqs
         self.kernels.commit(
-            CommitStep(result, num_reqs, plan.count, input_batch.seq_lens)
+            CommitStep(result, num_reqs, self.rows[:num_reqs], input_batch.seq_lens)
         )
         return accepted_rows(result, num_reqs)
 

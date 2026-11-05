@@ -35,7 +35,6 @@ def _walk_tree_kernel(
     row_start_ptr,  # [R + 1] int32
     parent_ptr,  # [R, C] int32
     stride_parent,
-    count_ptr,  # [R] int32
     sampled_ptr,  # [R, S] int64 out
     stride_sampled,
     path_ptr,  # [R, C] int32 out
@@ -46,9 +45,7 @@ def _walk_tree_kernel(
 ):
     b = tl.program_id(0)
     start = tl.load(row_start_ptr + b)
-    num_rows = tl.minimum(
-        tl.load(row_start_ptr + b + 1) - start, tl.load(count_ptr + b)
-    )
+    num_rows = tl.load(row_start_ptr + b + 1) - start
     rows = tl.arange(0, CP)
     live = (rows > 0) & (rows < num_rows)
     parent = tl.load(parent_ptr + b * stride_parent + rows, mask=rows < C, other=-1)
@@ -78,9 +75,8 @@ def walk_tree(
 ) -> AcceptResult:
     """The accepted path of each request given ``target [num_rows]``, the
     target's token at every row. ``sampled`` is ``[R, width]`` (default ``C``);
-    rows past ``plan.count`` and rows whose ``output.drafted`` is -1 are never
-    accepted."""
-    assert plan.count is not None
+    rows past a request's verified rows and rows whose ``output.drafted`` is -1
+    are never accepted."""
     num_reqs, num_cols = plan.parent.shape
     width = num_cols if width is None else width
     assert width >= num_cols
@@ -94,7 +90,6 @@ def walk_tree(
         output.row_start,
         plan.parent,
         plan.parent.stride(0),
-        plan.count,
         sampled,
         sampled.stride(0),
         path,

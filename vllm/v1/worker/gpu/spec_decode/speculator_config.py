@@ -156,20 +156,18 @@ class SpeculatorConfig:
     def resources(self, max_num_seqs: int) -> "SpecResources":
         """What speculation holds, declared once at startup; memory is sized for
         it. The engine core may lower it to what the model verifies
-        (`adapt_resources`). The default is a chain of up to K drafts
-        (``max_candidates`` K + 1). Its decode graphs are the uniform K + 1
-        shape, or one uniform shape per K of a Dynamic SD schedule (adaptive
-        verification captures its variable-length graphs itself).
+        (`adapt_resources`). The default is a chain of up to K drafts: one
+        decode graph of K + 1 rows per request, or one per K of a Dynamic SD
+        schedule (adaptive verification captures its variable-length graphs
+        itself).
         """
-        from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
+        from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 
-        k = self.num_speculative_tokens
         if self.spec_config.uses_dynamic_speculative_decoding():
-            counts = {n + 1 for n in self._dynamic_sd_schedule(max_num_seqs)[1:]}
+            rows = {n + 1 for n in self._dynamic_sd_schedule(max_num_seqs)[1:]}
         else:
-            counts = {k + 1}
-        shapes = tuple(PlanShape(c) for c in sorted(counts))
-        return SpecResources(max_candidates=k + 1, capture_shapes=shapes)
+            rows = {self.num_speculative_tokens + 1}
+        return SpecResources(capture_rows=tuple(sorted(rows)))
 
     def adapt_resources(
         self, declared: "SpecResources", caps: "SpecCapabilities"
@@ -187,14 +185,14 @@ class SpeculatorConfig:
 
     def candidate_budget(self, view: "BudgetView") -> int:
         """The rows per request, the root included, that the drafts proposed
-        after this step may take, in ``[1, max_candidates]``.
+        after this step may take, in ``[1, num_speculative_tokens + 1]``.
 
         The scheduler calls it once per `schedule()` that schedules requests,
         in the scheduler process: state kept on this object stays there. The
         drafts proposed now are verified next step, so the budget binds one
         step later, as the Dynamic SD schedule does. 1 proposes no drafts
         (`skip_drafts`): the next step is a plain decode, which replays the
-        uniform-1 graph when ``PlanShape(1)`` is among ``capture_shapes``.
+        plain-decode graph when 1 is among ``capture_rows``.
         The default is K + 1, or the Dynamic SD schedule's K + 1 at this
         batch size.
         """

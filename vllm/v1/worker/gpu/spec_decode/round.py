@@ -12,7 +12,7 @@ or a device tensor in a buffer the speculator owns and keeps alive for the step.
 runner never reads a device value on the host.
 
 Shapes use ``R = max_num_reqs`` (indexed by batch row, the order of ``idx_mapping``)
-and ``C = SpecResources.max_candidates`` (rows per request, the root included).
+and ``C = num_speculative_tokens + 1`` (rows per request, the root included).
 """
 
 from collections.abc import Sequence
@@ -25,33 +25,22 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 
 
 @dataclass(frozen=True)
-class PlanShape:
-    """One target-forward shape the runner captures as a CUDA graph.
-
-    ``uniform_count`` rows per request (a chain's K + 1, or a fixed tree width).
-    """
-
-    uniform_count: int
-
-
-@dataclass(frozen=True)
 class SpecResources:
     """What speculation holds.
 
-    The scheduler reserves ``max_candidates`` KV slots per decoding request and the
-    runner captures ``capture_shapes``.
+    The runner captures a decode CUDA graph for each entry of ``capture_rows``,
+    and no request verifies more rows than the largest (``max_rows``).
 
     The speculator's config declares them (``SpeculatorConfig.resources``), and the
-    KV and recurrent-state pools are sized for that declaration. The engine core then
-    lowers them, never raises them, to what the model's layers verify
+    KV and recurrent-state pools are sized for ``num_speculative_tokens``. The engine
+    core then lowers them, never raises them, to what the model's layers verify
     (``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
     to every worker.
     """
 
-    max_candidates: int
-    """Rows per request in a verify forward, the root row included (1 = plain decode).
-    The ceiling of every ``VerifyPlan.count``."""
-    capture_shapes: tuple[PlanShape, ...]
+    capture_rows: tuple[int, ...]
+    """Rows per request, the root included, of each decode graph (1 = plain
+    decode); at most ``num_speculative_tokens + 1``."""
     max_branching: int = 1
     """1 for chains. Above 1 the attention backend and the linear-attention layers must
     take a parent per row."""
@@ -61,29 +50,22 @@ class SpecResources:
         """The plans the speculator verifies: trees when it branches."""
         return "tree" if self.max_branching > 1 else "chain"
 
+    @property
+    def max_rows(self) -> int:
+        """The most rows a request verifies, the root included."""
+        return max(self.capture_rows)
+
     def __post_init__(self) -> None:
-        if self.max_candidates < 1:
-            raise ValueError(f"max_candidates must be >= 1, got {self.max_candidates}.")
-        bad = [
-            shape.uniform_count
-            for shape in self.capture_shapes
-            if not isinstance(shape.uniform_count, int)
-            or not 1 <= shape.uniform_count <= self.max_candidates
-        ]
-        if bad:
+        bad = [n for n in self.capture_rows if not isinstance(n, int) or n < 1]
+        if not self.capture_rows or bad:
             raise ValueError(
-                f"capture_shapes uniform counts {bad} are outside "
-                f"[1, max_candidates={self.max_candidates}]."
+                f"capture_rows must be positive ints, at least one; got "
+                f"{self.capture_rows}."
             )
         if self.max_branching < 1:
             raise ValueError(
                 f"max_branching ({self.max_branching}) must be >= 1: 1 is a chain."
             )
-
-    @property
-    def uniform_counts(self) -> list[int]:
-        """The uniform rows per request of the listed shapes, ascending."""
-        return sorted({s.uniform_count for s in self.capture_shapes})
 
 
 @dataclass(frozen=True)
@@ -106,10 +88,10 @@ class VerifyPlan:
     """The rows the target verifies this step, per scheduled request, as device tensors.
 
     Row 0 of a request is the root: its last committed token, whose logits sample the
-    bonus token. Rows ``1..count-1`` are candidates; ``parent[r, i]`` is the row that
-    candidate ``i`` continues, in ``[0, i)``, so rows are ordered parent first and any
-    prefix of them is a plan too. A chain has ``parent[r, i] == i - 1``. Entries past
-    ``count[r]`` are ignored.
+    bonus token. Rows ``1..rows[r]-1`` are candidates; ``parent[r, i]`` is the row
+    that candidate ``i`` continues, in ``[0, i)``, so rows are ordered parent first and
+    any prefix of them is a plan too. A chain has ``parent[r, i] == i - 1``. Entries
+    past a request's rows are ignored.
 
     The runner derives from the plan the position of each row (``num_computed_tokens``
     plus its depth), its ancestor set, and its KV slot: every row writes its KV
@@ -122,10 +104,6 @@ class VerifyPlan:
 
     parent: torch.Tensor
     """``[R, C]`` int32, ``parent[r, 0] == -1``."""
-    count: torch.Tensor | None
-    """``[R]`` int32 in ``[1, C]``: the rows each request verifies (``PlanBound.rows``,
-    else ``PlanInputs.scheduled_rows``); 1 is a plain decode. None only for the chain
-    plan the runner builds itself, whose counts are the scheduled drafts plus one."""
     tokens: torch.Tensor | None = None
     """``[R, C]`` int32 candidate tokens (``tokens[r, 0]`` is ignored: the root token is
     known). None only for the runner's chain plan, whose tokens are in its draft
@@ -135,10 +113,15 @@ class VerifyPlan:
     construction. The runner then runs the chain-only path: positions stay
     ``num_computed_tokens + i``, no ancestor sets, no KV compaction. Never derived
     from the device tensors."""
+    rows: np.ndarray | None = None
+    """``[num_reqs]`` host int32: the rows each request verifies, at most the
+    ``PlanInputs.scheduled_rows`` the scheduler reserved; the drafts past them leave
+    the batch and count as rejected. A row with no candidate holds token -1. None
+    verifies every scheduled row."""
 
     def __post_init__(self) -> None:
-        if not self.is_chain and (self.count is None or self.tokens is None):
-            raise ValueError("a plan that is not a chain must carry count and tokens")
+        if not self.is_chain and self.tokens is None:
+            raise ValueError("a plan that is not a chain must carry tokens")
 
 
 @dataclass(frozen=True)
@@ -161,18 +144,6 @@ class PlanInputs:
     budget, a custom processor), structured output, or a parallelism mode that does
     not lay out other plans (pipeline, context parallel). The plan must then
     be a chain; it may still verify fewer rows."""
-
-
-@dataclass(frozen=True)
-class PlanBound:
-    """Host integers the runner needs before the device plan exists.
-
-    ``rows[r]`` is how many rows request ``r`` verifies, at most the
-    ``scheduled_rows[r]`` the scheduler reserved (1 + its drafts); the drafts past
-    it leave the batch and count as rejected. None verifies every scheduled row.
-    """
-
-    rows: np.ndarray | None = None
 
 
 @dataclass
