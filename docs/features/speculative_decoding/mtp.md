@@ -69,6 +69,7 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
 
 ## Local argmax for Qwen4Exp on NVIDIA
 
+This option is disabled by default.
 The NVIDIA Qwen4Exp MTP implementation supports greedy draft selection with
 `"use_local_argmax_reduction": true` in `--speculative-config`:
 
