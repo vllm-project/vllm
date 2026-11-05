@@ -176,7 +176,8 @@ class EngineCore:
         # Setup KV Caches and update CacheConfig after profiling.
         kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
-
+        # setup the guard for reload weight
+        self._needs_reload_weights: bool = False
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
