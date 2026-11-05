@@ -175,17 +175,26 @@ def _lay_out_hisparse_groups(
             )
         page_size = page_sizes.pop()
         names = [name for name, _ in layers]
+        layer_names = [name[: -len(HISPARSE_HOT_SUFFIX)] for name in names]
+        resident_names = [name + HISPARSE_RESIDENT_SUFFIX for name in layer_names]
         resident_groups.append(
             KVCacheGroupSpec(
-                [
-                    name[: -len(HISPARSE_HOT_SUFFIX)] + HISPARSE_RESIDENT_SUFFIX
-                    for name in names
-                ],
+                resident_names,
                 HiSparseResidentSpec(
                     block_size=gpu_block_size,
                     page_size=page_size,
                 ),
-                enable_kv_transfer=False,
+                # Connectors also land an import in resident pages when it has
+                # them: a peer knows these as its sparse-MLA layers.
+                enable_kv_transfer=True,
+                transfer_layer_names=layer_names,
+                transfer_kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=gpu_block_size,
+                    kv_cache_specs={
+                        name: spec
+                        for name, (_, spec) in zip(resident_names, layers, strict=True)
+                    },
+                ),
             )
         )
         hot_groups.append(

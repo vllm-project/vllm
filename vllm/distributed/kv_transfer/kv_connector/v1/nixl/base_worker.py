@@ -557,7 +557,10 @@ class NixlBaseConnectorWorker:
                     f"Engine {engine_id} holds KV layer {layer_name!r}, which "
                     "has no counterpart here."
                 )
-            if len(local_regions) != len(remote_regions):
+            # Several local cache groups may hold a peer's layer: each is a
+            # destination, filled for the requests that have blocks in it.
+            num_destinations, uneven = divmod(len(local_regions), len(remote_regions))
+            if uneven:
                 raise NotImplementedError(
                     f"KV layer {layer_name!r} spans {len(remote_regions)} NIXL "
                     f"regions on engine {engine_id} and {len(local_regions)} here."
@@ -566,13 +569,19 @@ class NixlBaseConnectorWorker:
             layers.add(layer_name)
             # Block ids are listed per group, so the group numbers must match;
             # a region shared by several groups (-1) cannot show that.
-            if remote_layer_groups and remote_layer_groups.get(layer_name) != group:
+            if num_destinations > 1 or (
+                remote_layer_groups and remote_layer_groups.get(layer_name) != group
+            ):
                 groups_match = False
-            for remote, local in zip(remote_regions, local_regions):
+            for i, local in enumerate(local_regions):
+                remote = remote_regions[i % len(remote_regions)]
+                local_group = (
+                    self.region_group_ids[local] if num_destinations > 1 else group
+                )
                 remote_group = remote_groups[remote] if remote_groups else group
                 if remote_group not in (group, _SHARED_REGION_GROUP_ID):
                     groups_match = False
-                triples[(remote, local, group)] = None
+                triples[(remote, local, local_group)] = None
         missing = self._regions_by_layer.keys() - layers
         if missing:
             raise RuntimeError(
@@ -1618,7 +1627,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
-        seen_region_keys: list[tuple[int, int]] = []
+        seen_region_keys: list[tuple[int, int, int | None]] = []
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
         self._ple_block_len = None
@@ -1670,6 +1679,8 @@ class NixlBaseConnectorWorker:
                 )
                 continue
             group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            # Peers pair regions by the name the layer takes in transfers.
+            transfer_name = self.kv_cache_config.transfer_layer_names[layer_name]
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
             physical_page_size = (
@@ -1777,7 +1788,7 @@ class NixlBaseConnectorWorker:
                     ]
                     offset = cache.data_ptr() - storage_addr
                     assert offset >= 0 and offset + physical_page_size <= block_stride
-                    packed_member_layouts[layer_name] = (offset, physical_page_size)
+                    packed_member_layouts[transfer_name] = (offset, physical_page_size)
                 elif storage_is_block_major and (
                     not page_contiguous
                     and (
@@ -1825,8 +1836,14 @@ class NixlBaseConnectorWorker:
                 # Overlaid groups can page the same bytes with different page
                 # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
                 # one address share a region only if their block_len matches.
-                # A packed PP producer keeps one region per layer.
-                region_key = (base_addr, block_len)
+                # A packed PP producer keeps one region per layer. A group that
+                # transfers under other names keeps its own regions: the peer
+                # may hold those layers apart.
+                region_key = (
+                    base_addr,
+                    block_len,
+                    group_id if group.transfer_layer_names is not None else None,
+                )
                 if region_key in seen_region_keys and not split_packed_rows:
                     region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
@@ -1852,9 +1869,9 @@ class NixlBaseConnectorWorker:
                     region_mem_types.append(mem_type)
 
                 if region_index == len(region_layers):
-                    region_layers.append([layer_name])
+                    region_layers.append([transfer_name])
                 else:
-                    region_layers[region_index].append(layer_name)
+                    region_layers[region_index].append(transfer_name)
 
                 if isinstance(layer_spec, MambaSpec):
                     if layer_spec.tp_replicated:

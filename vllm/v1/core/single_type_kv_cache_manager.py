@@ -2503,6 +2503,8 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     def __init__(self, kv_cache_spec: HiSparseResidentSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.residency_changes: dict[str, dict[int, KVCacheBlock]] = {}
+        # Imports the last admission sized to land in resident pages too.
+        self._gpu_imports: set[str] = set()
 
     def get_num_blocks_to_allocate(
         self,
@@ -2518,10 +2520,21 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         del num_tokens_main_model
         assert not new_computed_blocks
         if total_computed_tokens > num_local_computed_tokens:
+            # With room, the import also lands in resident pages, past the
+            # local hit's host-only pages.
+            existing = len(self.req_to_blocks.get(request_id, ()))
+            host_pages = cdiv(num_local_computed_tokens, self.block_size)
+            landed = max(
+                cdiv(num_tokens, self.block_size) - max(existing, host_pages), 0
+            )
+            assert self.coordinator is not None
+            if self.coordinator.can_land_import(landed):
+                self._gpu_imports.add(request_id)
+                return landed
+            self._gpu_imports.discard(request_id)
             # Keep the last imported page writable, including the last-token
             # replay on a full prompt hit. Only earlier pages stay host-only.
             imported_pages = cdiv(total_computed_tokens, self.block_size)
-            existing = len(self.req_to_blocks.get(request_id, ()))
             needs_tail = self.get_resident_page(request_id, imported_pages - 1) is None
             return int(needs_tail) + max(
                 cdiv(num_tokens, self.block_size) - max(imported_pages, existing), 0
@@ -2540,8 +2553,18 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        """Reserve a writable final page; earlier imported pages stay on host."""
+        """Reserve a writable final page; earlier imported pages stay on host
+        unless the admission had room to land them in resident pages too."""
         assert num_external_computed_tokens > 0
+        if request_id in self._gpu_imports:
+            self._gpu_imports.discard(request_id)
+            super().allocate_external_computed_blocks(
+                request_id,
+                num_local_computed_tokens,
+                num_external_computed_tokens,
+                record_for_zeroing,
+            )
+            return
         num_tokens = num_local_computed_tokens + num_external_computed_tokens
         blocks = self.req_to_blocks[request_id]
         tail_page = (num_tokens - 1) // self.block_size

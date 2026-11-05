@@ -1529,6 +1529,11 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # How a peer knows this group's layers in external KV transfer, when it
+    # knows them otherwise: their names, by position in layer_names, and the
+    # spec of their pages. None keeps layer_names and kv_cache_spec.
+    transfer_layer_names: list[str] | None = None
+    transfer_kv_cache_spec: KVCacheSpec | None = None
 
 
 @dataclass
@@ -1606,18 +1611,44 @@ class KVCacheConfig:
 
     @cached_property
     def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
-        """Cache groups that participate in external KV transfer."""
+        """Cache groups that participate in external KV transfer, with the
+        page spec they transfer under."""
         return tuple(
-            self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
+            replace(group, kv_cache_spec=group.transfer_kv_cache_spec)
+            if group.transfer_kv_cache_spec is not None
+            else group
+            for group in (
+                self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
+            )
         )
 
     @cached_property
     def transfer_group_index_by_layer(self) -> dict[str, int]:
-        """Transfer-group tuple index for each participating layer."""
-        return {
-            layer_name: group_index
+        """Transfer-group tuple index for each participating layer, by the name
+        it takes in transfers and, taking precedence, by its own name."""
+        index_by_name = {
+            self.transfer_layer_names[layer_name]: group_index
             for group_index, group in enumerate(self.transfer_groups)
             for layer_name in group.layer_names
+        }
+        index_by_name.update(
+            (layer_name, group_index)
+            for group_index, group in enumerate(self.transfer_groups)
+            for layer_name in group.layer_names
+        )
+        return index_by_name
+
+    @cached_property
+    def transfer_layer_names(self) -> dict[str, str]:
+        """The name each participating layer takes in external KV transfer."""
+        return {
+            layer_name: transfer_name
+            for group in self.transfer_groups
+            for layer_name, transfer_name in zip(
+                group.layer_names,
+                group.transfer_layer_names or group.layer_names,
+                strict=True,
+            )
         }
 
     def select_transfer_block_ids(
