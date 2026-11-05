@@ -1109,6 +1109,8 @@ def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
         ("data_parallel", "does not support data parallelism"),
         ("elastic_ep", "does not support data parallelism"),
         ("encoder_cudagraphs", "encoder CUDA graphs"),
+        ("prompt_embeds", "client-supplied prompt or multimodal embeddings"),
+        ("mm_embeds", "client-supplied prompt or multimodal embeddings"),
     ],
 )
 @torch.inference_mode()
@@ -1128,6 +1130,14 @@ def test_b12x_nvfp4_w4a16_a16_max_tokens_rejects_unsafe_rows(
     config.parallel_config.enable_elastic_ep = setting == "elastic_ep"
     config.compilation_config.cudagraph_mm_encoder = setting == "encoder_cudagraphs"
     layer, _ = _nvfp4_w4a16_layer(256, 256)
+    if setting in ("prompt_embeds", "mm_embeds"):
+        # One request's embeddings would set the scale of every request.
+        config.model_config = types.SimpleNamespace(
+            enable_prompt_embeds=setting == "prompt_embeds",
+            multimodal_config=types.SimpleNamespace(
+                enable_mm_embeds=setting == "mm_embeds"
+            ),
+        )
     with pytest.raises(ValueError, match=match):
         B12xNvFp4W4A16LinearKernel(None).process_weights_after_loading(layer)
 

@@ -256,6 +256,17 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
                     "b12x_nvfp4_w4a16_a16_max_tokens does not support data "
                     "parallelism or encoder CUDA graphs"
                 )
+            # One request's activations set the scale for every request in the
+            # step, so clients must not supply them directly.
+            model_config = config.model_config
+            mm_config = getattr(model_config, "multimodal_config", None)
+            if getattr(model_config, "enable_prompt_embeds", False) or getattr(
+                mm_config, "enable_mm_embeds", False
+            ):
+                raise ValueError(
+                    "b12x_nvfp4_w4a16_a16_max_tokens does not support "
+                    "client-supplied prompt or multimodal embeddings"
+                )
             if packed.padded_in_features % 128:
                 logger.warning_once(
                     "b12x NVFP4 W4A16 keeps BF16 activations for input size %d, "
@@ -264,6 +275,12 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
                 )
                 a16_max_tokens = None
             elif a16_max_tokens >= capacity:
+                logger.info_once(
+                    "b12x_nvfp4_w4a16_a16_max_tokens=%d covers every step of at "
+                    "most %d tokens, so activations stay BF16",
+                    a16_max_tokens,
+                    capacity,
+                )
                 a16_max_tokens = None
         query = blockscaled.BlockscaledQuery(
             recipe="nvfp4",
