@@ -63,7 +63,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
             self._parser_engine.skip_tool_parsing = saved
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self._parser_engine.is_reasoning_end(list(input_ids))
+        return self._parser_engine.is_reasoning_end(input_ids)
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         return self._parser_engine.find_reasoning_end(token_ids)
