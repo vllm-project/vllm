@@ -251,6 +251,28 @@ def test_safetensors_metadata_of_repo_without_safetensors():
     get_safetensors_metadata.assert_called_once()
 
 
+def test_safetensors_metadata_offline_mode_does_not_retry():
+    """Offline mode is a definitive answer, not a transient failure,
+    so it must not be retried."""
+    from huggingface_hub.errors import LocalEntryNotFoundError, OfflineModeIsEnabled
+
+    get_safetensors_metadata = MagicMock(
+        side_effect=OfflineModeIsEnabled("offline mode is enabled")
+    )
+    api = SimpleNamespace(
+        get_safetensors_metadata=get_safetensors_metadata,
+        list_repo_files=MagicMock(
+            side_effect=OfflineModeIsEnabled("offline mode is enabled")
+        ),
+        snapshot_download=MagicMock(side_effect=LocalEntryNotFoundError("no cache")),
+    )
+
+    with patch.object(config_module, "hf_api", lambda: api):
+        assert get_safetensors_params_metadata("some/offline-model") == {}
+
+    get_safetensors_metadata.assert_called_once()
+
+
 def test_safetensors_metadata_of_repo_with_a_nonstandard_file_name():
     """`get_safetensors_metadata` only knows `model.safetensors` and its index,
     so older checkpoints are read through the file listing instead."""
