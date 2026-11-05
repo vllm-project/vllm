@@ -527,7 +527,8 @@ def run_dp_sharded_mrope_vision_model(
         raise ValueError(
             f"{type(vision_model).__name__} returned {image_embeds_local.dtype} "
             f"embeddings, but a rank without images would send {embed_dtype}. "
-            "Set `dtype` on the vision model to its output dtype."
+            "Define `dtype` on the vision model (an attribute or property) as "
+            "the dtype of its returned embeddings."
         )
 
     # Pad the output based on max_len_per_rank
