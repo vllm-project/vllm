@@ -73,7 +73,7 @@ fn build_request(
 ) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id,
-        prompt_token_ids: Some(prompt_token_ids),
+        prompt_token_ids: Some(prompt_token_ids.into()),
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             logprobs: Some(logprobs),

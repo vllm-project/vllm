@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
@@ -32,7 +32,6 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
-from vllm.distributed.utils import sched_yield
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -1900,7 +1899,10 @@ class EngineCoreProc(EngineCore):
         """Wait for a step's model output, meanwhile handling new requests and
         aborts as they arrive."""
         poll: Callable[[], bool] | None = getattr(future, "poll", None)
-        if poll is not None:
+        wait_briefly: Callable[[Sized, float], None] | None = getattr(
+            future, "wait_briefly", None
+        )
+        if poll is not None and wait_briefly is not None:
             pending_inputs = self.input_queue.queue
             spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
             while not self._deferred_inputs and not poll():
@@ -1912,7 +1914,9 @@ class EngineCoreProc(EngineCore):
                     else:
                         self._deferred_inputs.append(req)
                 elif time.monotonic() < spin_deadline:
-                    sched_yield()
+                    # Spin on something cheaper than poll(), to leave the GIL
+                    # free more of the time for the input and output threads.
+                    wait_briefly(pending_inputs, spin_deadline)
                 else:
                     # Long-running step: stop busy-looping and block until the
                     # output arrives. Later inputs are handled after the step.
@@ -2110,6 +2114,7 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             prefix_hash_config=self.prefix_hash_config,
+            cache_config_info=self.vllm_config.cache_config.metrics_info(),
         )
 
     def process_input_sockets(
