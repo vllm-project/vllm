@@ -25,7 +25,7 @@ MoE.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 \
-  vllm serve <Qwen3.6-35B-A3B> -tp 2 --dtype float16 \
+  vllm serve <Qwen3.6-35B-A3B> -tp 2 --dtype float16|bfloat16 \
   --quantization fp8_per_tensor --block-size 64 --monokernel \
   [--speculative-config '{"method": "mtp", "num_speculative_tokens": 1..7}']
 ```
@@ -36,8 +36,9 @@ is built or run.
 ## Supported deployments
 
 Qwen3.5 MoE checkpoints with the 35B-A3B shapes (`runtime.SHAPES`), TP2 on two
-Xe2 (Battlemage) GPUs, float16 activations, online fp8 per-tensor weights,
-float16 KV cache with a block size that is a multiple of 64, float32 recurrent
+Xe2 (Battlemage) GPUs, float16 or bfloat16 activations, online fp8 per-tensor
+weights, a KV cache and conv state of the activations' dtype (no float16 /
+bfloat16 mix) with a block size that is a multiple of 64, float32 recurrent
 state, `max_model_len` up to `_xpu_C.mono_max_context()`, Model Runner V2,
 no torch.compile (the eager model), FULL decode graphs (`FULL_DECODE_ONLY` or
 `FULL_AND_PIECEWISE`), and no speculative decoding or MTP with 1-7 speculative
@@ -50,15 +51,16 @@ If you request the mono decode for anything else, startup fails with one
 - **Config, in the model's `__init__`** (`runtime.unsupported`): other TP sizes,
   pipeline / data / expert / context parallelism, EPLB, DBO, batch-sharded
   sampling, LoRA, KV transfer connectors, sleep mode, CPU weight offload,
-  weight updates, routed-expert capture, other dtypes or quantization, other KV
-  or recurrent state dtypes, other block sizes, other speculative methods or
+  weight updates, routed-expert capture, other dtypes or quantization, KV
+  cache or conv state dtypes other than the model's, other recurrent state
+  dtypes, other block sizes, other speculative methods or
   token counts, adaptive verification, dynamic speculative decoding, the V1
   model runner, torch.compile, decode graphs other than FULL, other shapes or
   architectures, a `max_model_len` above the kernels' limit, another platform
   or GPU, vllm-xpu-kernels without the kernels.
 - **Loaded weights, when the model state builds the executor**
-  (`guards.weight_reasons`): fp8 per-tensor linears and experts, float16 norms
-  and router, in every decoder layer and the MTP drafter's.
+  (`guards.weight_reasons`): fp8 per-tensor linears and experts, norms and
+  router in the model dtype, in every decoder layer and the MTP drafter's.
 - **Caches, at every bind** (`decode.SpecializedDecode.bind_caches`): the
   kernels check every weight and cache shape, dtype and stride when the layers
   are registered.
@@ -81,7 +83,7 @@ kernels serve like real ones.
 The MTP drafter plans its own passes (`plan_draft`): the first pass of a verify
 step (the target's rows), then the one-token passes. Its decoder layer and its
 two pre-fc norms + fc (`mono_mtp_prologue`) run on the kernels; its lm_head is
-the stock fp16 one.
+the stock one (unquantized, the model dtype).
 
 The executor is built by the model state after load
 (`../model_state.Qwen3_5XpuModelState`) and binds the caches in
@@ -90,8 +92,9 @@ one; binding inside graph capture is an error.
 
 ## Sampling
 
-The lm_head stays vLLM's fp16 one. On a decode or verify step of up to 8 rows
-whose requests are all greedy or sample with a top_k within
+The lm_head stays vLLM's unquantized one (the model dtype). On a decode or
+verify step of up to 8 rows whose requests are all greedy or sample with a
+top_k within
 `mono_shard_topk_max_k()` (and need nothing over the whole vocabulary:
 logprobs, penalties, logit bias, bad words, allowed tokens, min_tokens, min_p,
 structured output, a seed, logits processors), the model state's

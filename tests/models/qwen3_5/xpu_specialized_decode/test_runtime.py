@@ -90,7 +90,10 @@ def _vllm_config(**over) -> SimpleNamespace:
             enable_batch_sharded_sampling=None,
         ),
         cache_config=SimpleNamespace(
-            cache_dtype="auto", block_size=64, mamba_ssm_cache_dtype="auto"
+            cache_dtype="auto",
+            block_size=64,
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype="auto",
         ),
         compilation_config=SimpleNamespace(
             mode=CompilationMode.NONE,
@@ -130,6 +133,14 @@ def test_served_deployments(monkeypatch):
         **{"compilation_config.cudagraph_mode": CUDAGraphMode.FULL_DECODE_ONLY}
     )
     assert _reasons(graphs) == []
+    # bf16 activations with a bf16 (auto or explicit) KV cache and conv state
+    bf16 = {"model_config.dtype": torch.bfloat16}
+    assert _reasons(_vllm_config(**bf16)) == []
+    explicit = {
+        "cache_config.cache_dtype": "bfloat16",
+        "cache_config.mamba_cache_dtype": "bfloat16",
+    }
+    assert _reasons(_vllm_config(**bf16, **explicit)) == []
 
 
 def test_switch_off_checks_nothing():
@@ -155,7 +166,17 @@ def test_switch_off_checks_nothing():
         ({"weight_transfer_config": object()}, "weight updates"),
         ({"model_config.enable_sleep_mode": True}, "sleep mode"),
         ({"offload_config.uva.cpu_offload_gb": 4}, "CPU weight offload"),
-        ({"model_config.dtype": torch.bfloat16}, "dtype"),
+        ({"model_config.dtype": torch.float32}, "dtype"),
+        # an fp16 / bf16 mix of activations and KV cache / conv state
+        ({"cache_config.cache_dtype": "bfloat16"}, "KV cache dtype"),
+        (
+            {
+                "model_config.dtype": torch.bfloat16,
+                "cache_config.cache_dtype": "float16",
+            },
+            "KV cache dtype",
+        ),
+        ({"cache_config.mamba_cache_dtype": "bfloat16"}, "conv state dtype"),
         ({"model_config.quantization": None, "quant_config": None}, "quantization"),
         ({"model_config.quantization": "fp8_per_block"}, "quantization"),
         ({"cache_config.cache_dtype": "fp8"}, "KV cache dtype"),

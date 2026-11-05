@@ -38,6 +38,9 @@ SHAPES = dict(
     head_dim=256,
 )
 ARCHITECTURES = ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
+# model dtypes the kernels serve (activations, KV cache and conv state) and
+# their cache dtype names
+DTYPES = {torch.float16: "float16", torch.bfloat16: "bfloat16"}
 # rows of the decode kernels (one token a request)
 DECODE_ROWS = (1, 2, 4, 8)
 # (rows, tokens a request) of the verify kernels: rows = requests x tokens
@@ -119,16 +122,24 @@ def unsupported(vllm_config, ops=None) -> list[str]:
             vllm_config.aux_output_config.enable_return_routed_experts,
             "routed-expert capture",
         ),
-        (mc.dtype != torch.float16, f"dtype {mc.dtype} (float16 only)"),
+        (
+            mc.dtype not in DTYPES,
+            f"dtype {mc.dtype} (float16 or bfloat16 only)",
+        ),
         # the weight check confirms per-tensor scales (``guards``)
         (
             quant is None or mc.quantization not in ("fp8", "fp8_per_tensor"),
             f"quantization {mc.quantization} (online fp8 per-tensor only: "
             "--quantization fp8_per_tensor)",
         ),
+        # activations, KV cache and conv state in one dtype (no fp16 / bf16 mix)
         (
-            cc.cache_dtype not in ("auto", "float16"),
-            f"KV cache dtype {cc.cache_dtype} (float16 only)",
+            cc.cache_dtype not in ("auto", DTYPES.get(mc.dtype)),
+            f"KV cache dtype {cc.cache_dtype} (the model dtype only)",
+        ),
+        (
+            cc.mamba_cache_dtype not in ("auto", DTYPES.get(mc.dtype)),
+            f"conv state dtype {cc.mamba_cache_dtype} (the model dtype only)",
         ),
         (
             cc.block_size is not None and cc.block_size % 64 != 0,

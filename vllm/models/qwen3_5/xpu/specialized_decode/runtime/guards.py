@@ -13,8 +13,9 @@ FP8 = torch.float8_e4m3fn
 
 def weight_reasons(layers) -> list[str]:
     """Why the loaded decoder layers cannot run the kernels (empty: they can):
-    fp8 per-tensor linears and experts, fp16 norms and router. The kernels check
-    every shape and stride again when the layers are bound."""
+    fp8 per-tensor linears and experts, norms and router in the model dtype
+    (float16 or bfloat16). The kernels check every shape and stride again when
+    the layers are bound."""
     reasons: list[str] = []
     for mono in layers:
         layer, where = mono.layer, mono.name
@@ -35,8 +36,11 @@ def weight_reasons(layers) -> list[str]:
         routed = getattr(experts, "routed_experts", experts)
         if t[7].numel() != routed.w13_weight.shape[0]:
             reasons.append(f"{where}: expert scales other than one per expert")
-        if any(w.dtype != torch.float16 for w in (t[0], t[1], t[2])):
-            reasons.append(f"{where}: norms or router other than float16")
+        dtypes = {w.dtype for w in (t[0], t[1], t[2])}
+        if len(dtypes) != 1 or dtypes - {torch.float16, torch.bfloat16}:
+            reasons.append(
+                f"{where}: norms or router other than one float16 / bfloat16"
+            )
     return reasons
 
 

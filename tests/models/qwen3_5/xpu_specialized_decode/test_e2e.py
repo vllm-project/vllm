@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End to end on two Xe2 GPUs: greedy outputs of the mono decode
-(``--monokernel``) against the stock decode of the same eager model, with
-unaligned prompt lengths (different per request), MTP speculative decoding
+(``--monokernel``) against the stock decode of the same eager model (float16,
+some cases bfloat16), with unaligned prompt lengths (different per request),
+MTP speculative decoding
 (verify kernels, the drafter on the kernels, candidate rejection sampling),
 steps that run vLLM's layers (more than 8 rows, a verify width without a
 kernel), candidate sampling, the KV cache bound twice (memory profiling, then
@@ -104,6 +105,9 @@ CASES: dict[str, dict] = {
     "mtp_k7": dict(lengths=[1000], spec=7),
     "mtp_k3_b4": dict(lengths=[1, 64, 65, 4097], spec=3),
     "mtp_k5": dict(lengths=[1000], spec=5),
+    # bfloat16 activations, KV cache and conv state
+    "decode_unaligned_bf16": dict(lengths=PROMPT_LENGTHS, dtype="bfloat16"),
+    "mtp_k3_b2_bf16": dict(lengths=[63, 1000], spec=3, dtype="bfloat16"),
 }
 
 
@@ -216,7 +220,7 @@ def _main(case: dict, out: str) -> None:
     kw = dict(
         model=MODEL,
         tensor_parallel_size=2,
-        dtype="float16",
+        dtype=case.get("dtype", "float16"),
         block_size=64,
         quantization="fp8_per_tensor",
         max_model_len=16384,
