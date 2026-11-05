@@ -58,24 +58,6 @@ def _libc_mmap() -> Callable[..., int | None]:
     return mmap_fn
 
 
-@functools.cache
-def _libc_memfd_create() -> Callable[..., int]:
-    memfd_fn = ctypes.CDLL(None, use_errno=True).memfd_create
-    memfd_fn.argtypes = [ctypes.c_char_p, ctypes.c_uint]
-    memfd_fn.restype = c_int
-    return memfd_fn
-
-
-def _create_memfd(name: str) -> int:
-    create_memfd = getattr(os, "memfd_create", None)
-    if create_memfd is not None:
-        return create_memfd(name)
-    fd = _libc_memfd_create()(name.encode(), 0)
-    if fd < 0:
-        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
-    return fd
-
-
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
     mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
 
@@ -233,7 +215,7 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                reservation = _create_memfd("vllm_offload_reservation")
+                reservation = os.memfd_create("vllm_offload_reservation")
                 try:
                     os.ftruncate(reservation, self.total_size_bytes)
                     self.mmap_obj = mmap.mmap(
