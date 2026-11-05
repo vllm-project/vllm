@@ -173,57 +173,12 @@ class CommitStep:
     """``[R]`` int32: each request's sequence length, its verify rows included."""
 
 
-@dataclass(frozen=True)
-class GDNSpecRows:
-    """The spec-decode rows of one GDN layer's forward.
-
-    ``T`` is the number of spec-decode tokens and ``B`` the number of their
-    requests (a CUDA graph batch may pad ``B``; the in-tree kernels see the
-    same padding). Heads and dims are per tensor-parallel rank.
-    """
-
-    layer_name: str
-    """The layer's prefix, its key in the forward context."""
-    mixed_qkv: torch.Tensor
-    """``[T, conv_dim]`` convolution input (the q, k and v columns). May be a
-    view whose row stride is larger than ``conv_dim``."""
-    a: torch.Tensor
-    """``[T, num_v_heads]`` decay gate input. May be a strided view."""
-    b: torch.Tensor
-    """``[T, num_v_heads]`` beta gate input. May be a strided view."""
-    conv_state: torch.Tensor
-    """``[num_slots, conv_dim, kernel_size - 1]`` convolution states."""
-    conv_weight: torch.Tensor
-    """``[conv_dim, kernel_size]``."""
-    conv_bias: torch.Tensor | None
-    activation: str | None
-    ssm_state: torch.Tensor
-    """``[num_slots, num_v_heads, head_v_dim, head_k_dim]`` recurrent states."""
-    A_log: torch.Tensor
-    dt_bias: torch.Tensor
-    num_k_heads: int
-    num_v_heads: int
-    head_k_dim: int
-    head_v_dim: int
-    state_indices: torch.Tensor
-    """``[B, max_query_len]``: the state slot of each row of each request."""
-    num_accepted_tokens: torch.Tensor
-    """``[B]``: request ``b`` starts from ``state_indices[b, n - 1]``."""
-    query_start_loc: torch.Tensor
-    """``[B + 1]``: the rows of each request in ``mixed_qkv``."""
-    parents: torch.Tensor | None
-    """``[T]`` int32: each row's parent row within its request (-1 for the
-    root), or None for chains."""
-    out: torch.Tensor
-    """``[T, num_v_heads, head_v_dim]``, written by the kernel."""
-
-
 class SpecKernel:
     """A kernel for one key: implement :meth:`supports` and the key's op,
-    ``verify(rows: GDNSpecRows)`` for ``mamba:gdn@*`` keys or
-    ``commit(step: CommitStep)`` for ``layout:*`` keys. A verify kernel keeps the
-    in-tree state layout and runs inside captured graphs: no host syncs and no
-    allocations sized by data.
+    ``verify(layer, attn_metadata, mixed_qkv, a, b, out)`` for ``mamba:gdn@*``
+    keys or ``commit(step: CommitStep)`` for ``layout:*`` keys. A verify kernel
+    keeps the in-tree state layout and runs inside captured graphs: no host
+    syncs and no allocations sized by data.
     """
 
     def supports(self, layer: SpecLayerSpec) -> bool:

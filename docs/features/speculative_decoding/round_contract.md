@@ -212,9 +212,11 @@ A `SpecKernel` implements these methods:
 - `bind(ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None` is called once
   per worker, before capture, with every layer the kernel runs on. Allocate memory
   here. Raise here on anything the kernel cannot run, not at the first step.
-- `verify(rows) -> None`, for `mamba:*` keys, writes every row's output to
-  `rows.out` and keeps the in-tree state layout. Row `i` of request `b` stores its
-  state at `state_indices[b, i]` and continues from row `parents[i]`.
+- `verify(layer, attn_metadata, mixed_qkv, a, b, out) -> None`, for `mamba:gdn@*`
+  keys, gets the GDN layer (its weights and `kv_cache`), its `GDNAttentionMetadata`
+  and the spec rows' projections, writes every row's output to `out` and keeps the
+  in-tree state layout. Row `i` of request `b` stores its state at
+  `spec_state_indices_tensor[b, i]` and continues from row `spec_tree_parents[i]`.
 - `commit(step: CommitStep) -> None`, for `layout:*` keys, moves what the rows on
   `step.result.path` wrote to where the next step reads it. For request `b`
   with context `seq_lens[b] - rows[b]`, the KV of row `path[b, j]` moves to

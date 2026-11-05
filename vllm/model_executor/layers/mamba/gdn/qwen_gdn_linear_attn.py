@@ -7,7 +7,7 @@ import itertools
 import os
 from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import torch
 from einops import rearrange
@@ -108,9 +108,6 @@ if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
     )
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.spec_decode.kernels import SpecKernel
 
 logger = init_logger(__name__)
 
@@ -1647,46 +1644,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
-    def _forward_spec_rows(
-        self,
-        verify_kernel: "SpecKernel",
-        attn_metadata: GDNAttentionMetadata,
-        mixed_qkv: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        conv_state: torch.Tensor,
-        conv_weights: torch.Tensor,
-        ssm_state: torch.Tensor,
-        out: torch.Tensor,
-    ) -> None:
-        """Hand the spec-decode rows to the verify kernel bound to the layer."""
-        from vllm.v1.worker.gpu.spec_decode.kernels import GDNSpecRows
-
-        verify_kernel.verify(  # type: ignore[attr-defined]
-            GDNSpecRows(
-                layer_name=self.prefix,
-                mixed_qkv=mixed_qkv,
-                a=a,
-                b=b,
-                conv_state=conv_state,
-                conv_weight=conv_weights,
-                conv_bias=self.conv1d.bias,
-                activation=self.activation,
-                ssm_state=ssm_state,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                num_v_heads=self.num_v_heads // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                state_indices=attn_metadata.spec_state_indices_tensor,
-                num_accepted_tokens=attn_metadata.num_accepted_tokens,
-                query_start_loc=attn_metadata.spec_query_start_loc,
-                parents=attn_metadata.spec_tree_parents,
-                out=out,
-            )
-        )
-
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -1767,16 +1724,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if verify_kernel is not None and spec_only:
             # Only spec-decode rows: the kernel reads the projections as they
             # are and writes the layer's output buffer.
-            self._forward_spec_rows(
-                verify_kernel,
-                attn_metadata,
-                mixed_qkv,
-                a,
-                b,
-                conv_state,
-                conv_weights,
-                ssm_state,
-                core_attn_out[:num_actual_tokens],
+            verify_kernel.verify(  # type: ignore[attr-defined]
+                self, attn_metadata, mixed_qkv, a, b, core_attn_out[:num_actual_tokens]
             )
             return
 
@@ -1805,16 +1754,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.num_v_heads // self.tp_size,
                     self.head_v_dim,
                 )
-                self._forward_spec_rows(
-                    verify_kernel,
-                    attn_metadata,
-                    mixed_qkv_spec,
-                    a_spec,
-                    b_spec,
-                    conv_state,
-                    conv_weights,
-                    ssm_state,
-                    kernel_out_spec,
+                verify_kernel.verify(  # type: ignore[attr-defined]
+                    self, attn_metadata, mixed_qkv_spec, a_spec, b_spec, kernel_out_spec
                 )
                 mixed_qkv_spec = None
             else:

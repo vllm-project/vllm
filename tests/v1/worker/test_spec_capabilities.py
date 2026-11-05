@@ -41,7 +41,6 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
 )
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,
-    GDNSpecRows,
     KernelContext,
     KernelRegistry,
     SpecKernel,
@@ -657,14 +656,14 @@ class _RecordingKernel(SpecKernel):
 
     def __init__(self, fill: float):
         self.fill = fill
-        self.rows: list = []
+        self.calls: list = []
 
     def supports(self, layer):
         return True
 
-    def verify(self, rows):
-        self.rows.append(rows)
-        rows.out.fill_(self.fill)
+    def verify(self, layer, attn_metadata, mixed_qkv, a, b, out):
+        self.calls.append((layer, attn_metadata, mixed_qkv, out))
+        out.fill_(self.fill)
 
 
 class _Calls:
@@ -741,8 +740,8 @@ def _spec_metadata(parents=None) -> GDNAttentionMetadata:
 
 
 def test_gdn_runs_the_bound_kernel(monkeypatch):
-    """The layer hands its spec rows, as the views they are and with the plan's
-    parents, to the bound kernel; plain decode rows next to them run the in-tree
+    """The layer hands itself, its metadata and its spec rows, as the views they
+    are, to the bound kernel; plain decode rows next to them run the in-tree
     kernels. The fused MTP decode kernel is off while a kernel is bound."""
     kernel = _RecordingKernel(fill=7.0)
     parents = torch.tensor([-1, 0, 0, 1], dtype=torch.int32)
@@ -763,15 +762,9 @@ def test_gdn_runs_the_bound_kernel(monkeypatch):
         mixed_qkv=torch.zeros(NUM_TOKENS + 3, 5), b=b, a=a, core_attn_out=out
     )
 
-    (rows,) = kernel.rows
-    assert isinstance(rows, GDNSpecRows)
-    assert rows.mixed_qkv.shape[0] == NUM_TOKENS and rows.out.shape[0] == NUM_TOKENS
-    assert rows.layer_name == "layer"
-    assert {name: getattr(rows, name) for name in _HEADS} == _HEADS
-    assert rows.state_indices is metadata.spec_state_indices_tensor
-    assert rows.num_accepted_tokens is metadata.num_accepted_tokens
-    assert rows.query_start_loc is metadata.spec_query_start_loc
-    assert rows.parents is parents
+    ((got_layer, got_metadata, mixed_qkv, got_out),) = kernel.calls
+    assert got_layer is layer and got_metadata is metadata
+    assert mixed_qkv.shape[0] == NUM_TOKENS and got_out.shape[0] == NUM_TOKENS
     assert (calls.conv, calls.recurrent) == (1, 1)  # the decode row
     assert torch.all(out[0] == -1.0)
     assert torch.all(out[1 : NUM_TOKENS + 1] == 7.0)
