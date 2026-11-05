@@ -525,17 +525,19 @@ async def test_online_renderer_skips_validation_for_internal_history(
         AsyncMock(return_value=([], [tokens_input([1])])),
     )
 
-    result = await renderer.render_responses(
-        ResponsesRequest(
-            input=[
+    request = ResponsesRequest(input="internal continuation", tools=[]).model_copy(
+        update={
+            "input": [
                 {
                     "role": "tool",
                     "tool_call_id": "call_x",
                     "content": "internal output",
                 }
-            ],
-            tools=[],
-        ),
+            ]
+        }
+    )
+    result = await renderer.render_responses(
+        request,
         validate_tool_call_ids=False,
     )
 
