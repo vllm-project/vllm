@@ -131,7 +131,6 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.models.minimax_m3.nvidia.specialized_decode import (
-    captures_pure_decode,
     specialized_decode_config,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -148,6 +147,9 @@ from vllm.v1.kv_cache_interface import (
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
     from vllm.models.minimax_m3.nvidia.specialized_decode.moe import LowBatchFfn
+    from vllm.models.minimax_m3.nvidia.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
 
 logger = init_logger(__name__)
 
@@ -720,9 +722,6 @@ class MiniMaxM3MoE(nn.Module):
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""
-        ffn = self.low_batch_ffn
-        if ffn is not None and captures_pure_decode() and ffn.accepts(hidden_states):
-            return ffn.run(hidden_states)
         router_logits, _ = self.gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
@@ -1557,6 +1556,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if current_platform.is_cuda()
             else []
         )
+        # decode_backend=latency_specialized: a decode executor over the layers.
+        self.specialized_decode: SpecializedDecode | None = None
         if specialized_decode_config(vllm_config):
             if not deferring:
                 raise ValueError(
@@ -1565,6 +1566,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 )
             for moe in deferring:
                 moe.use_low_batch_ffn = True
+            from vllm.models.minimax_m3.nvidia.specialized_decode.runtime.decode import (  # noqa: E501
+                SpecializedDecode,
+            )
+
+            self.specialized_decode = SpecializedDecode(self)
 
     def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> list[MiniMaxM3MoE]:
         """Let small batches leave a MoE's top-k finalize to the next layer's
@@ -1658,18 +1664,27 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # finishes the previous FFN's deferred all-reduce, so it is read there.
         # Cloned, as the norms may update `residual` in place.
         aux_hidden_states: list[torch.Tensor] = []
-        for idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer], start=self.start_layer
-        ):
-            hidden_states, residual = layer.forward_input_norm(hidden_states, residual)
-            # A later PP stage's start boundary is captured by the stage before.
-            if idx in self.aux_hidden_state_layers and (
-                idx > self.start_layer or get_pp_group().is_first_rank
-            ):
-                aux_hidden_states.append(residual.clone())
-            hidden_states, residual = layer.forward_after_input_norm(
-                positions, hidden_states, residual
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
+        if step is not None:
+            hidden_states, residual = step.run(
+                hidden_states, positions, aux_hidden_states
             )
+        else:
+            for idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer], start=self.start_layer
+            ):
+                hidden_states, residual = layer.forward_input_norm(
+                    hidden_states, residual
+                )
+                # A later PP stage's start boundary is captured by the stage before.
+                if idx in self.aux_hidden_state_layers and (
+                    idx > self.start_layer or get_pp_group().is_first_rank
+                ):
+                    aux_hidden_states.append(residual.clone())
+                hidden_states, residual = layer.forward_after_input_norm(
+                    positions, hidden_states, residual
+                )
         if forward_context is not None:
             forward_context.is_padding = is_padding
 
