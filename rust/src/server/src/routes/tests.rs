@@ -943,8 +943,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
     let app = test_app().await;
 
     for (method, uri) in [
-        ("POST", "/v1/messages"),
-        ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions/batch"),
         ("POST", "/v1/decisions"),
         ("POST", "/v1/systemone"),
@@ -5067,15 +5065,36 @@ async fn engine_request_errors_map_to_http_status() {
         message: "Invalid structured outputs: Grammar error: bad".to_string(),
         retryable: false,
     };
-    for (error, status, error_type) in [
+    for (error, status, openai_error_type, anthropic_error_type) in [
         (
             paused,
             StatusCode::SERVICE_UNAVAILABLE,
             "ServiceUnavailableError",
+            "overloaded_error",
         ),
-        (invalid, StatusCode::BAD_REQUEST, "BadRequestError"),
+        (
+            invalid,
+            StatusCode::BAD_REQUEST,
+            "BadRequestError",
+            "invalid_request_error",
+        ),
+        (
+            RequestError {
+                code: "unknown".into(),
+                message: "Internal server error".into(),
+                retryable: false,
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalServerError",
+            "api_error",
+        ),
     ] {
         let cases = [
+            (
+                "/v1/messages",
+                json!({"model": model, "messages": messages, "max_tokens": 10}),
+                status,
+            ),
             (
                 "/v1/completions",
                 json!({"model": model, "prompt": "hello"}),
@@ -5137,12 +5156,20 @@ async fn engine_request_errors_map_to_http_status() {
             let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
             engine_task.await.expect("mock engine task");
             let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-            assert!(
-                text.contains(&format!("\"type\":\"{error_type}\""))
-                    && text.contains(&format!("\"code\":{}", status.as_u16()))
-                    && text.contains(&error.message),
-                "{uri} {request}: {text}"
-            );
+            if uri == "/v1/messages" {
+                let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    body,
+                    json!({"type": "error", "error": {"type": anthropic_error_type, "message": error.message}})
+                );
+            } else {
+                assert!(
+                    text.contains(&format!("\"type\":\"{openai_error_type}\""))
+                        && text.contains(&format!("\"code\":{}", status.as_u16()))
+                        && text.contains(&error.message),
+                    "{uri} {request}: {text}"
+                );
+            }
         }
     }
 }
@@ -11171,4 +11198,157 @@ async fn log_outputs_disabled_logs_nothing() {
     .await;
 
     assert_eq!(logs, "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_text_generation_reports_content_and_stop() {
+    for (text, finish, expected) in [
+        ("Hello", EngineCoreFinishReason::Length, "max_tokens"),
+        ("", EngineCoreFinishReason::Stop, "end_turn"),
+    ] {
+        let (mut app, engine_task) = test_app_with_stream_output_specs(vec![(
+            bytes_to_token_ids(text.as_bytes()),
+            Some(finish),
+        )])
+        .await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/messages",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10,
+                "messages": [{"role": "user", "content": "Hi"}]
+            }),
+        )
+        .await;
+        engine_task.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["role"], "assistant");
+        assert_eq!(body["content"], json!([{"type": "text", "text": text}]));
+        assert_eq!(body["stop_reason"], expected);
+        assert_eq!(body.get("stop_sequence"), Some(&serde_json::Value::Null));
+        assert_eq!(body["usage"]["output_tokens"], text.len());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_rejects_invalid_sampling_before_generation() {
+    for (field, value, status) in [
+        ("temperature", json!(-1), StatusCode::BAD_REQUEST),
+        ("temperature", json!(1.5), StatusCode::BAD_REQUEST),
+        ("top_p", json!(1.1), StatusCode::BAD_REQUEST),
+        ("stop_sequences", json!([""]), StatusCode::BAD_REQUEST),
+    ] {
+        let (mut app, _engine_task) =
+            test_app_with_stream_output_specs(default_stream_output_specs()).await;
+        let mut request = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "Hi"}]});
+        request[field] = value;
+        let (actual, body) = post_json(&mut app, "/v1/messages", request).await;
+        assert_eq!(actual, status, "{body}");
+        assert_eq!(body["type"], "error");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
+    let (mut app, engine_task) = test_app_with_stream_output_specs(vec![(
+        bytes_to_token_ids(b"continuation"),
+        Some(EngineCoreFinishReason::Length),
+    )])
+    .await;
+    let input = json!({"model": "Qwen/Qwen1.5-0.5B-Chat",
+    "system": [
+        {"type": "text", "text": "x-anthropic-billing-header: ignored"},
+        {"type": "text", "text": "Be precise."}
+    ], "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "Com"}, {"type": "text", "text": "plete"}
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "pre"}, {"type": "text", "text": "fix"}
+        ]}
+    ]});
+    let (status, response) = post_json(&mut app, "/v1/messages", input.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["type"], "invalid_request_error");
+    let (status, count) = post_json(&mut app, "/v1/messages/count_tokens", input.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{count}");
+    // The fixture renderer appends `assistant:` only for a new turn.
+    assert_eq!(
+        count["input_tokens"],
+        b"system: Be precise.\nuser: Complete\nassistant: prefix\n".len()
+    );
+    let mut generation = input;
+    generation["max_tokens"] = json!(20);
+    generation["temperature"] = json!(0.5);
+    generation["stop_sequences"] = json!(["STOP"]);
+    let (status, generation_count) =
+        post_json(&mut app, "/v1/messages/count_tokens", generation.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{generation_count}");
+    assert_eq!(generation_count, count);
+    let (status, response) = post_json(&mut app, "/v1/messages", generation).await;
+    engine_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["usage"]["input_tokens"], count["input_tokens"]);
+    assert_eq!(
+        response["content"],
+        json!([{"type": "text", "text": "continuation"}])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_errors_cover_extraction_and_counting() {
+    let mut app = test_app().await;
+    for (uri, body, status, kind) in [
+        (
+            "/v1/messages",
+            "{".to_owned(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+        (
+            "/v1/messages/count_tokens",
+            "{".to_owned(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+        (
+            "/v1/messages/count_tokens",
+            json!({"model": "missing", "messages": [{"role":"user","content":"Hi"}]}).to_string(),
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+        ),
+        (
+            "/v1/messages/count_tokens",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
+                {"role": "user", "content": [{"type": "document", "source": {}}]}
+            ]})
+            .to_string(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"]["type"], kind);
+        assert!(value["error"].get("code").is_none());
+    }
 }
