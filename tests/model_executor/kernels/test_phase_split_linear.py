@@ -14,7 +14,6 @@ from tests.quantization.utils import quant_spec
 from vllm.model_executor.kernels.linear import check_linear_phase_served
 from vllm.model_executor.kernels.linear.phase_split import (
     DualActivationKernel,
-    PhaseSplitLinearKernel,
     maybe_phase_split,
     padding_rows,
 )
@@ -55,9 +54,14 @@ class _DualKernel(DualActivationKernel):
         return frozenset(_OFFSET)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        if self.phase is not None:
+            self.register_phase_layer(layer)
 
-    def apply_weights(self, layer, x, bias=None, *, mode=None):
+    def apply_weights(self, layer, x, bias=None):
+        assert self.phase is not None
+        return self.apply_phase(layer, x, bias)
+
+    def apply_mode(self, layer, x, bias=None, *, mode):
         self.calls.append((x.shape[0], mode))
         output = x @ layer.weight.T + _OFFSET[mode]
         return output if bias is None else output + bias
@@ -85,27 +89,27 @@ def vllm_config(default_vllm_config):
 
 
 def _loaded(vllm_config):
-    inner = _DualKernel()
-    kernel = maybe_phase_split(inner, _phase(), weight="nvfp4")
-    assert isinstance(kernel, PhaseSplitLinearKernel)
+    kernel = _DualKernel()
+    # The oracle returns the selected kernel itself, with its phase set.
+    assert maybe_phase_split(kernel, _phase(), weight="nvfp4") is kernel
+    assert kernel.phase == _phase()
     layer = _layer()
     kernel.process_weights_after_loading(layer)
-    return kernel, inner, layer
+    return kernel, layer
 
 
 @torch.inference_mode()
 def test_phase_split_dispatches_on_rows(vllm_config) -> None:
     """Calls with at most max_decode_tokens rows use the decode activations,
     with no forward context, as in multimodal encoders run before it is set."""
-    kernel, inner, layer = _loaded(vllm_config)
-    assert kernel.input_quant_key() is None
+    kernel, layer = _loaded(vllm_config)
     bias = torch.randn(6)
     for m in (MAX_DECODE_TOKENS, MAX_DECODE_TOKENS + 1):
         x = torch.randn(1, m, 4)
         out = kernel.apply_weights(layer, x, bias)
         expected = x @ layer.weight.T + bias + (m > MAX_DECODE_TOKENS)
         torch.testing.assert_close(out, expected)
-    assert inner.calls == [
+    assert kernel.calls == [
         (MAX_DECODE_TOKENS, None),
         (MAX_DECODE_TOKENS + 1, kNvfp4DynamicTensor),
     ]
@@ -137,14 +141,16 @@ def test_phase_split_dispatches_every_cell(vllm_config, decode, prefill, cutoff)
     max_decode_tokens, eagerly and through vllm::phase_split_linear. With one
     format for both phases the cutoff is optional."""
     phase = _phase(decode=decode, prefill=prefill, max_decode_tokens=cutoff)
+    assert phase is not None
     if phase.quantized_format == "mxfp8" or phase.quantized_format is None:
         assert phase.scale is None
-    inner = _DualKernel()
-    kernel = maybe_phase_split(inner, phase, weight=phase.quantized_format or "any")
-    assert isinstance(kernel, PhaseSplitLinearKernel)
+    decode_mode, prefill_mode = phase.activation_modes()
+    kernel = maybe_phase_split(
+        _DualKernel(), phase, weight=phase.quantized_format or "any"
+    )
+    assert kernel.phase is phase
     layer = _layer(prefix=f"cell.{decode}.{prefill}.{cutoff}")
     kernel.process_weights_after_loading(layer)
-    decode_mode, prefill_mode = phase.activation_modes()
     name = _encode_layer_name(layer.phase_split_layer_name)
     for m in (1, MAX_DECODE_TOKENS, MAX_DECODE_TOKENS + 1, 40):
         x = torch.randn(m, 4)
@@ -153,7 +159,7 @@ def test_phase_split_dispatches_every_cell(vllm_config, decode, prefill, cutoff)
         torch.testing.assert_close(kernel.apply_weights(layer, x), expected)
         out = torch.ops.vllm.phase_split_linear(x, None, name, 6)
         torch.testing.assert_close(out, expected)
-        assert inner.calls[-2:] == [(m, mode), (m, mode)]
+        assert kernel.calls[-2:] == [(m, mode), (m, mode)]
 
 
 @torch.inference_mode()
@@ -163,7 +169,7 @@ def test_phase_split_dispatches_at_runtime_under_torch_compile(vllm_config) -> N
     run without a forward context, so the op must not need one."""
     from torch._dynamo.testing import CompileCounterWithBackend
 
-    kernel, inner, layer = _loaded(vllm_config)
+    kernel, layer = _loaded(vllm_config)
     counter = CompileCounterWithBackend("aot_eager")
     run = torch.compile(
         lambda x: kernel.apply_weights(layer, x),
@@ -176,7 +182,7 @@ def test_phase_split_dispatches_at_runtime_under_torch_compile(vllm_config) -> N
         expected = x @ layer.weight.T + (m > MAX_DECODE_TOKENS)
         torch.testing.assert_close(run(x), expected)
     assert counter.frame_count == 1
-    assert [mode for _, mode in inner.calls] == [
+    assert [mode for _, mode in kernel.calls] == [
         None,
         kNvfp4DynamicTensor,
         None,
@@ -327,8 +333,8 @@ def test_phase_split_op_rejects_wrong_output_shape(vllm_config) -> None:
     shape raises even under ``python -O``."""
 
     class _WrongShapeKernel(_DualKernel):
-        def apply_weights(self, layer, x, bias=None, *, mode=None):
-            return super().apply_weights(layer, x, bias, mode=mode)[:, :-1]
+        def apply_mode(self, layer, x, bias=None, *, mode):
+            return super().apply_mode(layer, x, bias, mode=mode)[:, :-1]
 
     kernel = maybe_phase_split(_WrongShapeKernel(), _phase(), weight="nvfp4")
     layer = _layer(prefix="wrong.shape")
@@ -415,9 +421,7 @@ def test_phase_split_nvfp4_decode_needs_padding_mask(
     do not need max_decode_tokens above the capture sizes."""
     vllm_config.compilation_config.cudagraph_capture_sizes = [8, 16]
     phase = _phase(decode=decode, prefill=prefill)
-    assert isinstance(
-        maybe_phase_split(_DualKernel(), phase, weight="nvfp4"), PhaseSplitLinearKernel
-    )
+    assert maybe_phase_split(_DualKernel(), phase, weight="nvfp4").phase is phase
     monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "0")
     with pytest.raises(ValueError, match="requires VLLM_MOE_SKIP_PADDING=1"):
         maybe_phase_split(_DualKernel(), phase, weight="nvfp4")
@@ -438,9 +442,7 @@ def test_phase_split_mxfp8_ignores_padding(monkeypatch, vllm_config, decode, pre
     vllm_config.compilation_config.cudagraph_capture_sizes = [8, 16]
     vllm_config.parallel_config.data_parallel_size = 2
     phase = _phase(decode=decode, prefill=prefill)
-    assert isinstance(
-        maybe_phase_split(_DualKernel(), phase, weight="mxfp8"), PhaseSplitLinearKernel
-    )
+    assert maybe_phase_split(_DualKernel(), phase, weight="mxfp8").phase is phase
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     if decode == prefill:
         maybe_phase_split(_DualKernel(), phase, weight="mxfp8")

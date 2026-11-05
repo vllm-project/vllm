@@ -290,10 +290,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 "supported: "
                 f"{sorted(c.__name__ for c in _ONLINE_HADAMARD_LINEAR_METHODS)}"
             )
-        # Online MXFP8 linears select their kernel as checkpoint MXFP8 ones do,
-        # so the phase applies; other online methods pick their own kernels.
+        # Online MXFP8 linears select their kernel through
+        # init_mxfp8_linear_kernel, which raises if that kernel cannot serve
+        # the phase (today only b12x on SM12x can). Other online methods pick
+        # their own kernels.
         if spec.phase is not None and cls is not Mxfp8OnlineLinearMethod:
-            raise ValueError(
+            raise NotImplementedError(
                 f"quantization_config.linear.phase ({spec.phase}) is not "
                 f"supported for online {cls.__name__}; of the online methods, "
                 "only MXFP8 (--quantization mxfp8) supports it"

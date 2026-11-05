@@ -5,7 +5,6 @@ import torch
 
 from vllm.model_executor.kernels.linear import (
     HummingHadamardNvFp4LinearKernel,
-    NvFp4LinearKernel,
     _get_linear_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -63,8 +62,6 @@ class HummingNvFP4HadamardLinearMethod(CompressedTensorsLinearTransformMethod):
         **extra_weight_attrs,
     ):
         assert isinstance(layer.scheme, CompressedTensorsW4A4Fp4)
-        # W4A4 kernels are never phase split.
-        assert isinstance(layer.scheme.kernel, NvFp4LinearKernel)
         layer.scheme.kernel = HummingHadamardNvFp4LinearKernel(
             layer.scheme.kernel.config,
             hadamard_block_size=next(iter(self.input_tfms.values())).scheme.head_dim,

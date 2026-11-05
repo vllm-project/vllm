@@ -19,6 +19,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import (
     B12xWarmupUnit,
+    b12x_activation_mode,
     plan_b12x_linear,
     reuse_packed_weight_storage,
 )
@@ -57,8 +58,8 @@ def _apply_b12x_mxfp8_packed_linear(
 class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
     """ModelOpt MXFP8 linear through the native b12x SM120 dense GEMM path.
 
-    b12x picks BF16 or MXFP8 activations per call by row count. With a phase
-    split, each phase's calls use its activations instead."""
+    b12x picks BF16 or MXFP8 activations per call by row count. With a phase,
+    each phase's calls use its activations instead."""
 
     @classmethod
     def activation_modes(cls) -> frozenset[ActivationMode]:
@@ -132,6 +133,7 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
                 self.phase,
                 getattr(layer, "b12x_mxfp8_plans", None),
             )
+            self.register_phase_layer(layer)
 
     def get_b12x_warmup_unit(
         self,
@@ -180,11 +182,11 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
         output_dtype: torch.dtype,
     ) -> B12xWarmupUnit:
         plans = layer.b12x_mxfp8_plans
-        mode = kMxfp8Dynamic if any(plans.quantized) else None
+        mode = plans.quantized_mode
         planned = {m for plan in plans.plans for m in plan.token_counts}
         prefill_counts = set(plans.plan.token_counts)
         covered = plans.decode_plan is not None and (
-            plans.cutoff is not None and plans.cutoff >= plans.query.num_tokens
+            plans.cutoff is not None and plans.cutoff >= plans.capacity
         )
         packed_weight = layer.b12x_mxfp8_packed_weight
 
@@ -195,11 +197,11 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
                     dtype=output_dtype,
                     device=packed_weight.weight.values.device,
                 )
-                self.apply_weights(layer, source, mode=mode)
+                self.apply_mode(layer, source, mode=mode)
                 if covered and tokens in prefill_counts:
                     # A cutoff at or above every planned row count leaves
                     # the A16 prefill plan to calls above it only.
-                    self.apply_weights(layer, source, mode=None)
+                    self.apply_mode(layer, source, mode=None)
 
         return B12xWarmupUnit(
             name="MXFP8",
@@ -213,11 +215,19 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-        *,
-        mode: ActivationMode = None,
     ) -> torch.Tensor:
         if self.phase is None:
             return _apply_b12x_mxfp8_packed_linear(layer, x, bias)
+        return self.apply_phase(layer, x, bias)
+
+    def apply_mode(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        *,
+        mode: ActivationMode,
+    ) -> torch.Tensor:
         if mode is not None and mode != kMxfp8Dynamic:
             raise ValueError(f"b12x MXFP8 does not support activations {mode}")
         if x.dtype != torch.bfloat16:
@@ -229,26 +239,25 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         # Rows beyond the planned capacity (e.g. an encoder batch) run in
         # capacity-sized chunks; an unplanned call would prepare on first use.
-        capacity = layer.b12x_mxfp8_plans.query.num_tokens
-        quantize = mode is not None
+        capacity = layer.b12x_mxfp8_plans.capacity
         if x_2d.shape[0] <= capacity:
-            output = self._mm(layer, x_2d, quantize)
+            output = self._mm(layer, x_2d, mode)
         else:
-            output = torch.cat(
-                [self._mm(layer, c, quantize) for c in x_2d.split(capacity)]
-            )
+            output = torch.cat([self._mm(layer, c, mode) for c in x_2d.split(capacity)])
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], output.shape[-1])
 
     @staticmethod
-    def _mm(layer: torch.nn.Module, x: torch.Tensor, quantize: bool) -> torch.Tensor:
+    def _mm(
+        layer: torch.nn.Module, x: torch.Tensor, mode: ActivationMode
+    ) -> torch.Tensor:
         mxfp8 = _import_b12x_mxfp8()
         assert mxfp8 is not None
-        plan, quantized = layer.b12x_mxfp8_plans.select(x.shape[0], quantize)
+        plan, mode = layer.b12x_mxfp8_plans.select(x.shape[0], mode)
         return mxfp8.mm(
             x,
             layer.b12x_mxfp8_packed_weight,
             plan=plan,
-            required_mode="quantized" if quantized else "a16",
+            required_mode=b12x_activation_mode(mode),
         )

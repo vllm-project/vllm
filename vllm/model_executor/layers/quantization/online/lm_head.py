@@ -72,7 +72,7 @@ class _LMHeadNvfp4Method(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", scales)
         replace_parameter(layer, "weight_global_scale", global_scale)
         # Activations stay in the model dtype, so quantization_config.linear.phase
-        # and its b12x_nvfp4_w4a16_a16_max_tokens alias do not apply.
+        # does not apply.
         self.kernel = init_nvfp4_linear_kernel(use_a16=True, allow_phase_split=False)
         self.kernel.process_weights_after_loading(layer)
 

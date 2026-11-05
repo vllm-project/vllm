@@ -266,7 +266,9 @@ def test_online_quantization_rejects_phase():
     config = OnlineQuantizationConfig(
         quant_config_args(linear={"weight": "fp8_per_channel_static", "phase": _PHASE})
     )
-    with pytest.raises(ValueError, match="phase .* is not supported for online"):
+    with pytest.raises(
+        NotImplementedError, match="phase .* is not supported for online"
+    ):
         config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
 
 

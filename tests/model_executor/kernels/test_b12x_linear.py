@@ -26,7 +26,6 @@ from vllm.model_executor.kernels.linear import (
     B12xTensorFP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     Mxfp8LinearLayerConfig,
-    PhaseSplitLinearKernel,
     init_fp8_linear_kernel,
     init_mxfp4_linear_kernel,
     init_mxfp8_linear_kernel,
@@ -816,6 +815,13 @@ def _b12x_phase(max_decode_tokens: int | None, **formats: str) -> PhaseSpec:
     return PhaseSpec(max_decode_tokens=max_decode_tokens, **formats)
 
 
+def _with_phase(kernel, phase: PhaseSpec):
+    """``kernel`` with ``phase`` set as the oracle sets it, without the config
+    checks."""
+    kernel.phase = phase
+    return kernel
+
+
 def _use_phase(monkeypatch, phase: PhaseSpec) -> None:
     import vllm.model_executor.kernels.linear as linear_mod
 
@@ -844,33 +850,21 @@ def _select_b12x_w4a16(monkeypatch, default_vllm_config):
     return default_vllm_config
 
 
-@pytest.mark.parametrize("source", ["phase", "a16_max_tokens"])
-def test_b12x_w4a16_serves_phase_split(monkeypatch, _select_b12x_w4a16, source):
-    """quantization_config.linear.phase, or its b12x_nvfp4_w4a16_a16_max_tokens
-    alias, wraps the b12x W4A16 kernel; neither touches an lm_head copy."""
+def test_b12x_w4a16_serves_phase_split(monkeypatch, _select_b12x_w4a16):
+    """The oracle returns the b12x W4A16 kernel itself with
+    quantization_config.linear.phase set; an lm_head copy keeps no phase."""
     phase = _b12x_phase(8)
-    if source == "phase":
-        _use_phase(monkeypatch, phase)
-    else:
-        _select_b12x_w4a16.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = 8
+    _use_phase(monkeypatch, phase)
 
     kernel = init_nvfp4_linear_kernel(use_a16=True)
 
-    assert isinstance(kernel, PhaseSplitLinearKernel)
-    assert isinstance(kernel.kernel, B12xNvFp4W4A16LinearKernel)
-    assert kernel.kernel.phase == phase
-    assert (kernel.decode_mode, kernel.prefill_mode) == (None, kNvfp4DynamicTensor)
+    assert type(kernel) is B12xNvFp4W4A16LinearKernel
+    assert kernel.phase == phase
+    assert (kernel.phase_mode(8), kernel.phase_mode(9)) == (None, kNvfp4DynamicTensor)
     assert kernel.input_quant_key() is None
     bare = init_nvfp4_linear_kernel(use_a16=True, allow_phase_split=False)
     assert type(bare) is B12xNvFp4W4A16LinearKernel
     assert bare.phase is None
-
-
-def test_b12x_w4a16_rejects_phase_and_alias_together(monkeypatch, _select_b12x_w4a16):
-    _use_phase(monkeypatch, _b12x_phase(8))
-    _select_b12x_w4a16.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = 8
-    with pytest.raises(ValueError, match="not both"):
-        init_nvfp4_linear_kernel(use_a16=True)
 
 
 def test_b12x_w4a4_rejects_phase(monkeypatch, _select_b12x_w4a16):
@@ -905,15 +899,16 @@ def test_b12x_w4a16_serves_every_nvfp4_cell(
     phase = _b12x_phase(8, decode=decode, prefill=prefill)
     _use_phase(monkeypatch, phase)
     kernel = init_nvfp4_linear_kernel(use_a16=True)
-    assert isinstance(kernel, PhaseSplitLinearKernel)
-    assert isinstance(kernel.kernel, B12xNvFp4W4A16LinearKernel)
-    assert (kernel.decode_mode, kernel.prefill_mode) == phase.activation_modes()
+    assert type(kernel) is B12xNvFp4W4A16LinearKernel
+    assert (kernel.phase_mode(8), kernel.phase_mode(9)) == phase.activation_modes()
 
 
 def test_b12x_w4a16_keeps_activations_for_mxfp8_phase(monkeypatch, _select_b12x_w4a16):
     """A phase in another quantized format leaves NVFP4 linears alone."""
     _use_phase(monkeypatch, _b12x_phase(8, prefill="mxfp8"))
-    assert type(init_nvfp4_linear_kernel(use_a16=True)) is B12xNvFp4W4A16LinearKernel
+    kernel = init_nvfp4_linear_kernel(use_a16=True)
+    assert type(kernel) is B12xNvFp4W4A16LinearKernel
+    assert kernel.phase is None
 
 
 @pytest.fixture
@@ -940,10 +935,9 @@ def test_b12x_mxfp8_serves_phase_split(
     phase = _b12x_phase(8, decode=decode, prefill=prefill)
     _use_phase(monkeypatch, phase)
     kernel = init_mxfp8_linear_kernel(weight_shape=(2048, 2048))
-    assert isinstance(kernel, PhaseSplitLinearKernel)
-    assert isinstance(kernel.kernel, B12xMxfp8LinearKernel)
-    assert kernel.kernel.phase == phase
-    assert (kernel.decode_mode, kernel.prefill_mode) == phase.activation_modes()
+    assert type(kernel) is B12xMxfp8LinearKernel
+    assert kernel.phase == phase
+    assert (kernel.phase_mode(8), kernel.phase_mode(9)) == phase.activation_modes()
     assert not kernel.supports_pre_processed_weights
 
 
@@ -958,6 +952,7 @@ def test_mxfp8_phase_rejects_other_kernels_and_formats(monkeypatch, _select_b12x
     _use_phase(monkeypatch, _b12x_phase(8))
     kernel = init_mxfp8_linear_kernel(weight_shape=(2048, 2048))
     assert type(kernel) is B12xMxfp8LinearKernel
+    assert kernel.phase is None
 
     _use_phase(monkeypatch, _b12x_phase(8, prefill="mxfp8"))
     monkeypatch.setattr(
@@ -989,14 +984,12 @@ def test_mxfp8_phase_rejects_other_kernels_and_formats(monkeypatch, _select_b12x
         ("encoder_cudagraphs", "encoder CUDA graphs"),
     ],
 )
-def test_b12x_nvfp4_w4a16_a16_max_tokens_rejects_unsafe_rows(
-    _select_b12x_w4a16, setting, match
+def test_b12x_w4a16_phase_rejects_unsafe_rows(
+    monkeypatch, _select_b12x_w4a16, setting, match
 ) -> None:
     """Padded rows are uninitialized and must not reach the shared scale."""
     config = _select_b12x_w4a16
-    config.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = (
-        4 if setting == "capture_sizes" else 8
-    )
+    _use_phase(monkeypatch, _b12x_phase(4 if setting == "capture_sizes" else 8))
     config.parallel_config.data_parallel_size = 2 if setting == "data_parallel" else 1
     config.parallel_config.enable_elastic_ep = setting == "elastic_ep"
     config.compilation_config.cudagraph_mm_encoder = setting == "encoder_cudagraphs"
@@ -1005,7 +998,7 @@ def test_b12x_nvfp4_w4a16_a16_max_tokens_rejects_unsafe_rows(
     )
     with pytest.raises(ValueError, match=match) as error:
         init_nvfp4_linear_kernel(use_a16=True)
-    assert "kernel_config.b12x_nvfp4_w4a16_a16_max_tokens" in str(error.value)
+    assert "quantization_config.linear.phase" in str(error.value)
 
 
 def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
@@ -1249,7 +1242,7 @@ def test_b12x_nvfp4_w4a16_plans_and_dispatches_every_cell(
     )
     layer.weight_global_scale = torch.tensor([0.125])
     phase = _b12x_phase(8, decode=decode, prefill=prefill)
-    kernel = PhaseSplitLinearKernel(object.__new__(B12xNvFp4W4A16LinearKernel), phase)
+    kernel = _with_phase(object.__new__(B12xNvFp4W4A16LinearKernel), phase)
     kernel.process_weights_after_loading(layer)
     expected_plans, expected_calls = _NVFP4_PLANS[(decode, prefill)]
     quantized = phase.quantized_format is not None
@@ -1286,7 +1279,7 @@ def test_b12x_nvfp4_w4a16_plans_and_dispatches_every_cell(
         else:
             assert scale is scales[kind]
     with pytest.raises(ValueError, match="does not support activations"):
-        kernel.kernel.apply_weights(layer, x, mode=kNvfp4Dynamic)
+        kernel.apply_mode(layer, x, mode=kNvfp4Dynamic)
 
     # The warmup prepares every planned shape in its phase's activations.
     calls.clear()
@@ -1348,7 +1341,7 @@ def test_b12x_nvfp4_quantized_decode_cutoff_at_capacity(
     )
     layer.weight_global_scale = torch.tensor([0.125])
     phase = _b12x_phase(max_decode_tokens, decode="nvfp4", prefill="unquantized")
-    kernel = PhaseSplitLinearKernel(object.__new__(B12xNvFp4W4A16LinearKernel), phase)
+    kernel = _with_phase(object.__new__(B12xNvFp4W4A16LinearKernel), phase)
     kernel.process_weights_after_loading(layer)
     assert [(p.query.activation_mode, p.query.num_tokens) for p in plans] == [
         ("a16", 64),
@@ -1465,7 +1458,7 @@ def test_b12x_mxfp8_plans_and_dispatches_every_cell(
         torch.empty((48, 4), dtype=torch.uint8), requires_grad=False
     )
     phase = _b12x_phase(8, decode=decode, prefill=prefill)
-    kernel = PhaseSplitLinearKernel(object.__new__(B12xMxfp8LinearKernel), phase)
+    kernel = _with_phase(object.__new__(B12xMxfp8LinearKernel), phase)
     kernel.process_weights_after_loading(layer)
     expected_plans, expected_calls = _MXFP8_PLANS[(decode, prefill)]
     assert [
@@ -1487,7 +1480,7 @@ def test_b12x_mxfp8_plans_and_dispatches_every_cell(
     assert [(handle, mode) for _, handle, mode, _ in calls] == expected_calls
     assert all(scale is None for *_, scale in calls)
     with pytest.raises(ValueError, match="does not support activations"):
-        kernel.kernel.apply_weights(layer, x, mode=kNvfp4DynamicTensor)
+        kernel.apply_mode(layer, x, mode=kNvfp4DynamicTensor)
     # b12x picks the activation mode per call for BF16 sources only.
     with pytest.raises(ValueError, match="requires BF16 activations"):
         kernel.apply_weights(layer, x.half())
@@ -1553,7 +1546,7 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_warmup(
         kernel.phase = _b12x_phase(8, decode=cell[0], prefill=cell[1])
         mode = kNvfp4DynamicTensor
     kernel.process_weights_after_loading(layer)
-    capacity = layer.b12x_nvfp4_plans.query.num_tokens
+    capacity = layer.b12x_nvfp4_plans.capacity
     kernel.get_b12x_warmup_unit(layer, (1, capacity), torch.bfloat16).compile()
 
     prepared = []
@@ -1577,7 +1570,7 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_warmup(
                 for chunk in x.split(capacity)
             ]
         )
-        actual = kernel.apply_weights(layer, x, mode=mode)
+        actual = kernel.apply_mode(layer, x, mode=mode)
         torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
     assert not prepared
 
@@ -1613,13 +1606,13 @@ def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
     k = 256
     layer, decoded = _nvfp4_w4a16_layer(256, k)
     reference, _ = _nvfp4_w4a16_layer(256, k)
-    kernel = PhaseSplitLinearKernel(B12xNvFp4W4A16LinearKernel(None), _b12x_phase(8))
+    kernel = _with_phase(B12xNvFp4W4A16LinearKernel(None), _b12x_phase(8))
     kernel.process_weights_after_loading(layer)
     a16_kernel = B12xNvFp4W4A16LinearKernel(None)
     a16_kernel.process_weights_after_loading(reference)
-    capacity = layer.b12x_nvfp4_plans.query.num_tokens
+    capacity = layer.b12x_nvfp4_plans.capacity
     source = torch.zeros(capacity, k, device="cuda", dtype=torch.bfloat16)
-    kernel.kernel.apply_weights(layer, source, mode=kNvfp4DynamicTensor)
+    kernel.apply_mode(layer, source, mode=kNvfp4DynamicTensor)
     a16_kernel.apply_weights(reference, source)
 
     counter = CompileCounterWithBackend("inductor")
@@ -1659,11 +1652,11 @@ def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
     )
 
 
-@pytest.mark.parametrize("a16_max_tokens", [None, 32])
+@pytest.mark.parametrize("max_decode_tokens", [None, 32])
 @pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
 @torch.inference_mode()
 def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
-    monkeypatch, default_vllm_config, m, n, k, a16_max_tokens
+    monkeypatch, default_vllm_config, m, n, k, max_decode_tokens
 ) -> None:
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
@@ -1682,9 +1675,9 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
     x = x_storage[..., ::2]
     bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
     kernel = B12xNvFp4W4A16LinearKernel(None)
-    if a16_max_tokens is not None:
+    if max_decode_tokens is not None:
         # Capture sizes up to max_decode_tokens replay the decode phase.
-        kernel = PhaseSplitLinearKernel(kernel, _b12x_phase(a16_max_tokens))
+        kernel = _with_phase(kernel, _b12x_phase(max_decode_tokens))
     kernel.process_weights_after_loading(layer)
     layer.b12x_warmup_provider.get_b12x_warmup_unit(
         layer, (1, 2, 4, 32), x.dtype
@@ -1748,15 +1741,13 @@ def _phase_split_layer(weight, decode, prefill):
         pytest.skip(reason)
     if weight == "nvfp4":
         layer, decoded = _nvfp4_w4a16_layer(256, 256)
-        inner = B12xNvFp4W4A16LinearKernel(None)
+        kernel = B12xNvFp4W4A16LinearKernel(None)
         reference = _nvfp4_activation_reference
     else:
         layer, decoded = _mxfp8_layer(256, 256)
-        inner = B12xMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(256, 256)))
+        kernel = B12xMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(256, 256)))
         reference = _mxfp8_activation_reference
-    kernel = PhaseSplitLinearKernel(
-        inner, _b12x_phase(8, decode=decode, prefill=prefill)
-    )
+    _with_phase(kernel, _b12x_phase(8, decode=decode, prefill=prefill))
     kernel.process_weights_after_loading(layer)
     layer.b12x_warmup_provider.get_b12x_warmup_unit(
         layer, (1, 2, 4, 8), torch.bfloat16

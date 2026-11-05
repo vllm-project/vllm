@@ -67,6 +67,14 @@ def _coerce_quant_key(v: Any) -> QuantKey | None:
         ) from None
 
 
+# Activation keys of PhaseSpec formats; None is unquantized.
+_PHASE_ACTIVATION_KEYS: dict[str, QuantKey | None] = {
+    "unquantized": None,
+    "nvfp4": kNvfp4DynamicTensor,
+    "mxfp8": kMxfp8Dynamic,
+}
+
+
 # Stop pydantic from introspecting QuantKey: it transitively contains a
 # NamedTuple with `ClassVar[GroupShape]` declarations that pydantic refuses.
 QuantKeyField = Annotated[
@@ -136,13 +144,11 @@ class PhaseSpec:
 
     def activation_modes(self) -> tuple[QuantKey | None, QuantKey | None]:
         """(decode, prefill) activation keys; None is unquantized."""
-        keys = {
-            "unquantized": None,
-            "nvfp4": kNvfp4DynamicTensor,
-            "mxfp8": kMxfp8Dynamic,
-        }
         assert self.prefill is not None
-        return keys[self.decode], keys[self.prefill]
+        return (
+            _PHASE_ACTIVATION_KEYS[self.decode],
+            _PHASE_ACTIVATION_KEYS[self.prefill],
+        )
 
     def __str__(self) -> str:
         return (

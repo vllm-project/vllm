@@ -176,7 +176,6 @@ from vllm.model_executor.kernels.linear.nvfp4.pytorch import (
 )
 from vllm.model_executor.kernels.linear.phase_split import (
     DualActivationKernel,
-    PhaseSplitLinearKernel,
     has_phase_split_layers,
     maybe_phase_split,
 )
@@ -968,9 +967,9 @@ def choose_mp_linear_kernel(
 
 def init_mxfp8_linear_kernel(
     *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
-) -> Mxfp8LinearKernel | PhaseSplitLinearKernel:
+) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and `(N, K)` weight shape, wrapped for
+    current platform and `(N, K)` weight shape, set up for
     ``quantization_config.linear.phase``."""
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
@@ -1225,45 +1224,20 @@ def init_wfp8_a16_linear_kernel(
 
 def init_nvfp4_linear_kernel(
     use_a16: bool = False, *, allow_phase_split: bool = True
-) -> NvFp4LinearKernel | PhaseSplitLinearKernel:
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform, wrapped for ``quantization_config.linear.phase`` when
+    current platform, set up for ``quantization_config.linear.phase`` when
     ``allow_phase_split``."""
     kernel = _select_nvfp4_linear_kernel(use_a16)
     if not allow_phase_split:
         return kernel
-    from vllm.config import get_current_vllm_config_or_none
-
-    phase = _user_linear_phase("nvfp4")
-    config = get_current_vllm_config_or_none()
-    a16_max_tokens = (
-        None if config is None else config.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens
-    )
-    # b12x_nvfp4_w4a16_a16_max_tokens is an alias for this phase split, and
-    # only affects the b12x W4A16 kernel.
-    option = "quantization_config.linear.phase.max_decode_tokens"
-    if a16_max_tokens is not None:
-        if _user_linear_phase() is not None:
-            raise ValueError(
-                "Set quantization_config.linear.phase or "
-                "kernel_config.b12x_nvfp4_w4a16_a16_max_tokens, not both"
-            )
-        if isinstance(kernel, B12xNvFp4W4A16LinearKernel):
-            phase = PhaseSpec(
-                decode="unquantized",
-                prefill="nvfp4",
-                max_decode_tokens=a16_max_tokens,
-                scale="dynamic_tensor",
-            )
-            option = "kernel_config.b12x_nvfp4_w4a16_a16_max_tokens"
     return maybe_phase_split(
         kernel,
-        phase,
+        _user_linear_phase("nvfp4"),
         weight="nvfp4_w4a16" if use_a16 else "nvfp4_w4a4",
         candidates=_POSSIBLE_NVFP4_KERNELS.get(current_platform._enum, ())
         if use_a16
         else (),
-        option=option,
     )
 
 
@@ -1477,7 +1451,6 @@ __all__ = [
     "init_int8_linear_kernel",
     "init_nvfp4_linear_kernel",
     "DualActivationKernel",
-    "PhaseSplitLinearKernel",
     "check_linear_phase_served",
     "choose_mp_linear_kernel",
     "register_linear_kernel",

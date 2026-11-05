@@ -3,18 +3,19 @@
 """Per-phase activation formats for linear layers (``QuantSpec.phase``).
 
 A kernel serving several activation formats from one weight copy implements
-``DualActivationKernel``. ``PhaseSplitLinearKernel`` wraps it and picks the
-format per call from the input row count. Under torch.compile the choice runs
-inside the ``vllm::phase_split_linear`` op: vLLM compiles with dynamic shapes,
-so a Python branch on the row count in traced code would be fixed for every
-size.
+``DualActivationKernel``. The kernel oracle sets its ``phase``, and the kernel
+then picks the format per call from the input row count. Under torch.compile
+the choice runs inside the ``vllm::phase_split_linear`` op: vLLM compiles with
+dynamic shapes, so a Python branch on the row count in traced code would be
+fixed for every size.
 """
 
 from __future__ import annotations
 
 import weakref
 from collections.abc import Iterable
-from typing import TypeVar
+from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 import torch
 
@@ -39,6 +40,9 @@ ActivationMode = QuantKey | None
 """An activation format a kernel computes with; None is unquantized."""
 
 _KernelT = TypeVar("_KernelT")
+_PlanT = TypeVar("_PlanT")
+
+_OPTION = "quantization_config.linear.phase"
 
 # Phase-split layers by name, for vllm::phase_split_linear. The name reaches
 # the op as a hoisted LayerName graph input, like the layer names of vLLM's
@@ -75,8 +79,9 @@ class DualActivationKernel:
     """Mixin for linear kernels that serve every format in
     ``activation_modes()`` from one weight copy.
 
-    ``phase`` is set before ``process_weights_after_loading`` so the kernel can
-    prepare each phase's shapes.
+    The kernel oracle sets ``phase`` before ``process_weights_after_loading``,
+    which prepares each phase's shapes and calls ``register_phase_layer``.
+    With a phase, ``apply_weights`` runs ``apply_phase``.
     """
 
     phase: PhaseSpec | None = None
@@ -85,19 +90,99 @@ class DualActivationKernel:
     def activation_modes(cls) -> frozenset[ActivationMode]:
         raise NotImplementedError
 
-    def apply_weights(
+    def apply_mode(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
         *,
-        mode: ActivationMode = None,
+        mode: ActivationMode,
     ) -> torch.Tensor:
         """Run the GEMM with activations in ``mode``."""
         raise NotImplementedError
 
+    def phase_mode(self, rows: int) -> ActivationMode:
+        """Activations of a call with ``rows`` rows: ``phase.decode`` up to
+        ``phase.max_decode_tokens``, or for every call when it is unset. Under
+        CUDA graphs the rows are the padded capture size."""
+        assert self.phase is not None
+        decode, prefill = self.phase.activation_modes()
+        cutoff = self.phase.max_decode_tokens
+        return decode if cutoff is None or rows <= cutoff else prefill
 
-def _check_batch_invariance(phase: PhaseSpec, option: str) -> None:
+    def register_phase_layer(self, layer: torch.nn.Module) -> None:
+        """Let ``vllm::phase_split_linear`` find ``layer``."""
+        layer.phase_split_kernel = self
+        layer.phase_split_layer_name = _register_layer(layer)
+
+    def apply_phase(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """``apply_weights`` with a phase."""
+        out_features = layer.output_size_per_partition
+        x_2d = x.reshape(-1, x.shape[-1])
+        if torch.compiler.is_compiling():
+            output = torch.ops.vllm.phase_split_linear(
+                x_2d,
+                bias,
+                _encode_layer_name(layer.phase_split_layer_name),
+                out_features,
+            )
+        else:
+            # Eager calls, including ones outside a forward pass such as MLA
+            # weight dequantization, pick the phase here.
+            mode = self.phase_mode(x_2d.shape[0])
+            output = self.apply_mode(layer, x_2d, bias, mode=mode)
+        return output.view(*x.shape[:-1], out_features)
+
+
+@dataclass(frozen=True)
+class PhasePlans(Generic[_PlanT]):
+    """A kernel's prepared plans for one weight under a phase.
+
+    ``modes`` are the (decode, prefill) activations the plans serve; a phase
+    that quantizes can still get None for a layer the kernel cannot quantize.
+    Calls with at most ``cutoff`` rows, or every call when it is None, are
+    decode calls. ``capacity`` is the largest planned call, and ``key`` says
+    what the plans were prepared for, so a reload with an equal key keeps them.
+    """
+
+    key: object
+    capacity: int
+    modes: tuple[ActivationMode, ActivationMode]
+    cutoff: int | None
+    plan: _PlanT
+    # For kernels whose plan cannot serve quantized decode calls together with
+    # unquantized prefill calls.
+    decode_plan: _PlanT | None = None
+
+    @property
+    def plans(self) -> tuple[_PlanT, ...]:
+        return (
+            (self.plan,) if self.decode_plan is None else (self.plan, self.decode_plan)
+        )
+
+    @property
+    def quantized_mode(self) -> ActivationMode:
+        """The quantized activations the plans serve, if any."""
+        decode, prefill = self.modes
+        return decode if decode is not None else prefill
+
+    def select(self, rows: int, mode: ActivationMode) -> tuple[_PlanT, ActivationMode]:
+        """The plan of a call with ``rows`` rows in ``mode``, and the
+        activations it runs with: None where the plans do not quantize."""
+        decode = self.cutoff is None or rows <= self.cutoff
+        if self.modes[0 if decode else 1] is None:
+            mode = None
+        if mode is not None and self.decode_plan is not None:
+            return self.decode_plan, mode
+        return self.plan, mode
+
+
+def _check_batch_invariance(phase: PhaseSpec) -> None:
     """Checked before kernel support: VLLM_BATCH_INVARIANT selects its own
     NVFP4 kernels, which would otherwise be reported as unable to serve the
     phase."""
@@ -106,17 +191,15 @@ def _check_batch_invariance(phase: PhaseSpec, option: str) -> None:
         decode != prefill or kNvfp4DynamicTensor in (decode, prefill)
     ):
         raise ValueError(
-            f"{option.removesuffix('.max_decode_tokens')} makes outputs depend "
-            "on the rows in a step and is not supported with VLLM_BATCH_INVARIANT"
+            f"{_OPTION} makes outputs depend on the rows in a step and is not "
+            "supported with VLLM_BATCH_INVARIANT"
         )
 
 
-def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
+def _check_phase_split_config(phase: PhaseSpec) -> None:
     """NVFP4 activations share one scale per call, so uninitialized padding
-    rows (CUDA graphs, data parallelism) must never reach it. ``option`` names
-    the row-count setting the user set, for errors."""
+    rows (CUDA graphs, data parallelism) must never reach it."""
     decode, prefill = phase.activation_modes()
-    name = option.removesuffix(".max_decode_tokens")
     shares_scale = kNvfp4DynamicTensor in (decode, prefill)
     config = get_current_vllm_config()
     if not torch_utils._USE_LAYERNAME:
@@ -124,7 +207,7 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
         # graph reused for other layers (encoder blocks, or another engine's
         # model loaded from the compile cache) would resolve the wrong ones.
         raise ValueError(
-            f"{name} requires LayerName layer names "
+            f"{_OPTION} requires LayerName layer names "
             "(VLLM_USE_LAYERNAME=1, the default on torch >= 2.11)"
         )
     if not shares_scale:
@@ -141,14 +224,14 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
         assert phase.max_decode_tokens is not None
         if phase.max_decode_tokens < max_capture_size:
             raise ValueError(
-                f"{option}={phase.max_decode_tokens} is below the largest CUDA "
-                f"graph capture size {max_capture_size}"
+                f"{_OPTION}.max_decode_tokens={phase.max_decode_tokens} is below "
+                f"the largest CUDA graph capture size {max_capture_size}"
             )
     # NVFP4 decode calls run in CUDA graphs and take their scale from the rows
     # the runner marks as real; V2 only marks them with this flag.
     if decode == kNvfp4DynamicTensor and not envs.VLLM_MOE_SKIP_PADDING:
         raise ValueError(
-            f"{name} with decode=nvfp4 requires VLLM_MOE_SKIP_PADDING=1, which "
+            f"{_OPTION} with decode=nvfp4 requires VLLM_MOE_SKIP_PADDING=1, which "
             "marks the CUDA graph padding rows"
         )
     if (
@@ -157,7 +240,7 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
         or config.compilation_config.cudagraph_mm_encoder
     ):
         raise ValueError(
-            f"{name} does not support data parallelism or encoder CUDA graphs"
+            f"{_OPTION} does not support data parallelism or encoder CUDA graphs"
         )
     # One request's activations set the scale for every request in the step,
     # so clients must not supply them directly.
@@ -167,7 +250,7 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
         mm_config, "enable_mm_embeds", False
     ):
         raise ValueError(
-            f"{name} with NVFP4 does not support client-supplied prompt or "
+            f"{_OPTION} with NVFP4 does not support client-supplied prompt or "
             "multimodal embeddings"
         )
 
@@ -185,66 +268,6 @@ def padding_rows(num_rows: int) -> torch.Tensor | None:
     return is_padding
 
 
-class PhaseSplitLinearKernel:
-    """Serves ``phase.decode`` and ``phase.prefill`` from one
-    ``DualActivationKernel``.
-
-    A call with at most ``phase.max_decode_tokens`` rows, or every call when it
-    is unset, uses the decode format. Under CUDA graphs the rows are the padded
-    capture size.
-    """
-
-    # Loading also prepares each phase's shapes and registers the layer.
-    supports_pre_processed_weights = False
-
-    def __init__(self, kernel: DualActivationKernel, phase: PhaseSpec) -> None:
-        self.kernel = kernel
-        self.phase = phase
-        self.max_decode_tokens = phase.max_decode_tokens
-        self.decode_mode, self.prefill_mode = phase.activation_modes()
-        kernel.phase = phase
-
-    def input_quant_key(self) -> QuantKey | None:
-        # Each phase quantizes its own input.
-        return None
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self.kernel.process_weights_after_loading(layer)  # type: ignore[attr-defined]
-        layer.phase_split_kernel = self
-        layer.phase_split_layer_name = _register_layer(layer)
-
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        out_features = layer.output_size_per_partition
-        x_2d = x.reshape(-1, x.shape[-1])
-        if torch.compiler.is_compiling():
-            output = torch.ops.vllm.phase_split_linear(
-                x_2d,
-                bias,
-                _encode_layer_name(layer.phase_split_layer_name),
-                out_features,
-            )
-        else:
-            # Eager calls, including ones outside a forward pass such as MLA
-            # weight dequantization, pick the phase here.
-            output = self.forward(layer, x_2d, bias)
-        return output.view(*x.shape[:-1], out_features)
-
-    def forward(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
-    ) -> torch.Tensor:
-        """Eager body of ``vllm::phase_split_linear``."""
-        if self.max_decode_tokens is None or x.shape[0] <= self.max_decode_tokens:
-            mode = self.decode_mode
-        else:
-            mode = self.prefill_mode
-        return self.kernel.apply_weights(layer, x, bias, mode=mode)
-
-
 def _serves(kernel_cls: type, phase: PhaseSpec) -> bool:
     return (
         issubclass(kernel_cls, DualActivationKernel)
@@ -257,27 +280,26 @@ def maybe_phase_split(
     phase: PhaseSpec | None,
     weight: str,
     candidates: Iterable[type] = (),
-    option: str = "quantization_config.linear.phase.max_decode_tokens",
-) -> _KernelT | PhaseSplitLinearKernel:
-    """Wrap ``kernel`` for ``phase``, or raise if it cannot serve both phases
-    from one weight copy. ``candidates`` are named in the error when they can;
-    ``option`` names the row-count setting the user set."""
+) -> _KernelT:
+    """Set ``kernel``'s phase, or raise if it cannot serve both phases from
+    one weight copy. ``candidates`` are named in the error when they can."""
     if phase is None:
         return kernel
-    _check_batch_invariance(phase, option)
+    _check_batch_invariance(phase)
     if not (isinstance(kernel, DualActivationKernel) and _serves(type(kernel), phase)):
         capable = [cls.__name__ for cls in candidates if _serves(cls, phase)]
         selected = (
             " (selected by VLLM_BATCH_INVARIANT)" if envs.VLLM_BATCH_INVARIANT else ""
         )
         raise NotImplementedError(
-            f"quantization_config.linear.phase ({phase}) with weight={weight} on "
+            f"{_OPTION} ({phase}) with weight={weight} on "
             f"{current_platform.device_name}: {type(kernel).__name__}{selected} "
             "cannot serve it from one weight copy. Kernels that can, where supported "
             f"(--linear-backend b12x): {', '.join(capable) or 'none'}."
         )
-    _check_phase_split_config(phase, option)
-    return PhaseSplitLinearKernel(kernel, phase)
+    _check_phase_split_config(phase)
+    kernel.phase = phase
+    return kernel
 
 
 def _phase_split_linear(
@@ -287,10 +309,11 @@ def _phase_split_linear(
     out_features: int,
 ) -> torch.Tensor:
     layer = _LAYERS[_resolve_layer_name(layer_name)]
-    output = layer.phase_split_kernel.forward(layer, x, bias)
+    kernel = layer.phase_split_kernel
+    output = kernel.apply_mode(layer, x, bias, mode=kernel.phase_mode(x.shape[0]))
     if output.shape != (x.shape[0], out_features):
         raise RuntimeError(
-            f"{type(layer.phase_split_kernel.kernel).__name__} returned shape "
+            f"{type(kernel).__name__} returned shape "
             f"{tuple(output.shape)}, expected {(x.shape[0], out_features)}"
         )
     return output

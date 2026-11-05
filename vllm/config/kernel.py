@@ -422,23 +422,6 @@ class KernelConfig:
       the budget
     """
 
-    b12x_nvfp4_w4a16_a16_max_tokens: int | None = Field(default=None, ge=1)
-    """Largest input, in rows (normally the tokens in a step), that keeps BF16
-    activations in NVFP4 W4A16 (weight-only) linear layers on the b12x linear
-    backend. Larger inputs are quantized to NVFP4 with one scale per call,
-    computed from the absolute maximum of its real rows and shared by every
-    request in the step, and run the FP4 GEMM, which speeds up long prefills
-    but is lossy. Outputs therefore depend on batch composition. Must be at
-    least the largest CUDA graph capture size; not supported with data
-    parallelism (including elastic EP), encoder CUDA graphs, or client-supplied
-    prompt or multimodal embeddings, and requires VLLM_USE_LAYERNAME=1 (the
-    default on torch >= 2.11). None (default) keeps BF16 activations for every
-    input. Alias for
-    quantization_config.linear.phase with decode "unquantized", prefill "nvfp4",
-    max_decode_tokens set to this value and scale "dynamic_tensor". It has no
-    effect with VLLM_BATCH_INVARIANT, which selects another kernel. The lm_head
-    copies of draft_lm_head_quantization keep BF16 activations."""
-
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
