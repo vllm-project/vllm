@@ -113,7 +113,7 @@ def _generate(
         gpu_memory_utilization=0.7,
         # Timing-based kernel selection is the dominant source of cross-boot
         # numeric noise; disable it so the comparison bounds stay tight.
-        kernel_config={"enable_flashinfer_autotune": False},
+        enable_flashinfer_autotune=False,
     )
     try:
         # Guard against a vacuous comparison: verify every worker is in the

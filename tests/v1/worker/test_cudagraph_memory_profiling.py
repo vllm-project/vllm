@@ -44,6 +44,8 @@ def test_scale_cache_shutdown_and_profiling_teardown_share_one_helper(monkeypatc
     runner.cache_config = SimpleNamespace(num_gpu_blocks=4)
     runner.compilation_config = SimpleNamespace(static_forward_context={"l": layer})
     runner.kv_caches = []
+    runner._replayssm_sync_req_indices = {}
+    runner._replayssm_paused_accepted_tokens = {}
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
     monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
     monkeypatch.setattr(v1, "clear_layer_kv_caches", lambda ls: seen.append(list(ls)))

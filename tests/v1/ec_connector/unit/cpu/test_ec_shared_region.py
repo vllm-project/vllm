@@ -8,6 +8,7 @@ import errno
 import mmap
 import os
 import uuid
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,7 +31,7 @@ def _make_region(num_blocks: int = 8, block_size_bytes: int = 64) -> ECSharedReg
 
 
 @pytest.fixture
-def region() -> ECSharedRegion:
+def region() -> Iterator[ECSharedRegion]:
     r = _make_region()
     yield r
     r.cleanup()

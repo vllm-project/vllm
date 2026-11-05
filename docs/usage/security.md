@@ -94,7 +94,7 @@ denial of service:
 | Environment Variable | Default | Description |
 | --- | --- | --- |
 | `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | Maximum size in MB for a single remote media response. Oversized responses are rejected while streaming before the full body is materialized in memory. |
-| `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB` | `256` | Maximum total HTTP media bytes downloaded for one request, including concurrent downloads. Enforced while streaming. |
+| `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB` | `256` | Maximum total HTTP media bytes downloaded for one request, including concurrent downloads and retried attempts. Enforced while streaming. |
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
 | `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `715827880` (~683 MiB) | Maximum aggregate decoded image, video-frame, and audio bytes in one request. Images are charged at four bytes per pixel before decoding; audio is limited before decoding; video files are charged after frame extraction. |
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
@@ -207,6 +207,9 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/checkpoint/prepare` - Prepare for a process checkpoint (stops serving, needs `--enable-sleep-mode`)
+- `/checkpoint/restore` - Restore after a process checkpoint (needs `--enable-sleep-mode`)
+- `/checkpoint/status` - Check if the server is prepared for a checkpoint (needs `--enable-sleep-mode`)
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
@@ -321,6 +324,7 @@ vLLM enforces several configurable limits to prevent this:
 | `VLLM_P2P_MAX_PEERS` | `128` | Maximum concurrent P2P peer sessions. New peers (both outbound and inbound) are rejected when this limit is reached. |
 | `VLLM_P2P_HANDSHAKE_TIMEOUT_S` | `30` | Seconds to wait for a newly connected peer to complete the P2P handshake. Sessions that remain connected but not ready after this deadline are torn down. |
 | `VLLM_P2P_IDLE_TIMEOUT_S` | `300` | Seconds a P2P session may remain idle (no pending work, no messages) before it is eligible for eviction. Idle eviction runs only when remaining peer slots are within 8 of `VLLM_P2P_MAX_PEERS`. Set to `0` to disable idle eviction. |
+| `VLLM_P2P_TRANSFER_STALL_TIMEOUT_S` | `20` | Seconds a P2P WRITE may stay in progress before its peer is treated as faulted: no new WRITEs to it, and the session is torn down. The stalled transfer's memory stays held until it stops. Set to `0` to disable. |
 
 Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
 
@@ -491,7 +495,7 @@ driver-side credentials from worker-side processes within the same Ray
 cluster.
 
 This assumption is consistent with
-[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+[Ray's own security model](https://docs.ray.io/en/latest/ray-security/index.html),
 which states that any user who can connect to a Ray cluster can run arbitrary
 code on any node in that cluster. In other words, Ray cluster access already
 implies full code execution on worker nodes, so restricting environment

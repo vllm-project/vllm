@@ -80,6 +80,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     _cache_hit_source = CacheHitSource.P2P
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
@@ -142,6 +148,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Push producers keep the decoder's KV cache registration across its sleep.
         return False
 
     @classmethod
@@ -366,6 +373,19 @@ class NixlPullConnector(NixlBaseConnector):
             self.connector_worker = NixlPullConnectorWorker(
                 vllm_config, self.engine_id, kv_cache_config
             )
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Sleep mode is only validated with the UCX backend.
+        return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None

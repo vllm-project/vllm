@@ -98,6 +98,7 @@ def _wrapper_for_messages() -> Any:
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_req_ids = []
     wrapper.done_write_cache_req_ids = []
+    wrapper._write_done_counts = {}
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -354,6 +355,9 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
         def _region_session_indices(self, layer_name):
             return [list(self.kv_caches).index(layer_name)]
 
+        def _check_peer_block_size(self, layer_name, remote_moriio_meta):
+            pass
+
         def _compute_block_transfer_offsets(
             self,
             layer_name,
@@ -422,6 +426,7 @@ def test_hybrid_write_attention_uses_its_own_group_not_the_first_group():
         kv_caches={"draft": torch.empty((8, 1, 4, 3))},
         layer_to_group={"draft": 2},
         _region_session_indices=lambda _: [5],
+        _check_peer_block_size=lambda layer_name, remote_moriio_meta: None,
         _compute_block_transfer_offsets=Mock(return_value=([1], [2], [3])),
     )
     writer = make_moriio_writer(worker)
@@ -453,7 +458,7 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         get_engine_name_with_dp=lambda name, rank: name,
         _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
         _is_mamba_layer=lambda name: True,
-        _mamba_payload_index_by_layer={"kda": 2},
+        _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
         _compute_mamba_transfer_offsets=Mock(
             return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)

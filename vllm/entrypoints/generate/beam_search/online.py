@@ -38,6 +38,7 @@ class BeamSearchOnlineMixin(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -77,7 +78,7 @@ class BeamSearchOnlineMixin(ABC):
             self.engine_client.input_processor.generation_config_fields,
             tokenizer.eos_token_id,
         )
-        sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
+        sort_beams_key = create_sort_beams_key_function(length_penalty)
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -106,6 +107,7 @@ class BeamSearchOnlineMixin(ABC):
                             lora_request=lora_request_item,
                             trace_headers=trace_headers,
                             session_id=session_id,
+                            priority=priority,
                         )
                     )
                 )

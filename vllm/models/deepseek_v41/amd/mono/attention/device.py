@@ -19,6 +19,9 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
+from ..common.arch import GFX942
+from ..common.gfx942 import bf16_hi_pair, fp8x2_f32, mfma_bf16_k32
+
 # The execution model: one CTA a CU of an MI355X, all resident.
 BLOCKS = 256
 THREADS = 512
@@ -29,7 +32,8 @@ WAVES = THREADS // 64
 CM_DEV = 16
 CM_NT = 2
 
-FP8_MAX = 448.0
+# gfx942 quantizes to FNUZ with 224: the same bytes as OCP with 448 (common/gfx942.py).
+FP8_MAX = 224.0 if GFX942 else 448.0
 FP8, FP4 = 0, 4  # f8f6f4 MFMA operand formats
 UNIT_SCALE = 127  # E8M0 code of 1.0
 FLT_MIN = 1.1754943508222875e-38
@@ -97,19 +101,6 @@ def gload(addr, words=4, nt=False):
     ty = i32 if words == 1 else ir.VectorType.get([words], i32)
     v = llvm.LoadOp(ty, _gptr(addr), alignment=4 * words, nontemporal=nt or None).result
     return fx.Int32(v) if words == 1 else fx.Vector(v)
-
-
-def atomic_add_dev(addr, value):
-    """Device-scope atomic add on the global i32 at ``addr``; the old value.
-    Relaxed: an acquire / release here would write back and invalidate L2."""
-    return fx.Int32(
-        fx.atomic_add(
-            _gptr(addr),
-            fx.Int32(value),
-            syncscope="agent",
-            ordering=fx.AtomicOrdering.Monotonic,
-        )
-    )
 
 
 def gstore(addr, value, words=4):
@@ -229,7 +220,9 @@ def xshfl(v, off):
 
 
 def xred(v, off, op):
-    if off < 16:
+    # gfx942 has no permlane swap. The shuffle gives op(a, b) or op(b, a),
+    # the same value for the commutative ops used here.
+    if off < 16 or GFX942:
         return op(v, xshfl(v, off))
     is_f = isinstance(v, fx.Float32)
     x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
@@ -296,7 +289,16 @@ def fp8_pack4(a, b, c, d):
 
 def fp8x8_bf16(w0, w1, scale):
     """Eight E4M3 of two dwords times an f32 ``scale`` -> eight bf16 as a
-    4-dword Vector (exact for a power-of-two scale in range)."""
+    4-dword Vector (exact for a power-of-two scale in range). gfx942: FNUZ
+    bytes, decoded to f32, scaled and truncated to bf16, which is exact as a
+    scaled FP8 value has at most 4 significant bits."""
+    if GFX942:
+        out = []
+        for w in (w0, w1):
+            for hi in (False, True):
+                a, b = fp8x2_f32(w, hi)
+                out.append(bf16_hi_pair(a * scale, b * scale))
+        return fx.Vector.from_elements(out, fx.Int32)
     out = []
     for w in (w0, w1):
         for hi in (False, True):
@@ -334,7 +336,10 @@ def mx_code(amax):
     + 127, 0, 254), amax floored at FLT_MIN."""
     a = fx.max(amax, fx.Float32(FLT_MIN))
     q = div_rn(a, fx.Float32(FP8_MAX), fx.Float32(1.0 / FP8_MAX))
-    return fx.min(fx.max(ceil_exp(q), fx.Int32(0)), fx.Int32(254))
+    bits = q.bitcast(fx.Int32)
+    sub = (bits > 0x400000).select(fx.Int32(1), fx.Int32(0))
+    e = (bits < 0x800000).select(sub, ceil_exp(q))
+    return fx.min(fx.max(e, fx.Int32(0)), fx.Int32(254))
 
 
 def mx_mul(code):
@@ -358,6 +363,8 @@ def mfma_scaled(a, b, c, sa, sb, a_fmt=FP8, b_fmt=FP8):
 
 def mfma_bf16(a, b, c):
     """16x16x32 bf16 MFMA: lane l (row / col l % 16) holds K 8 (l // 16) .. +8."""
+    if GFX942:
+        return mfma_bf16_k32(a, b, c)
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
 
 

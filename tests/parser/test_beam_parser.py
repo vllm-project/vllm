@@ -692,10 +692,12 @@ def test_responses_preserves_text_config_with_template_grammar(
         "verbosity": "low",
     }
     req = ResponsesRequest(input="Answer", text=text)
+    assert req.text is not None
     expected_text = req.text.model_dump(by_alias=True)
     prompt = PROMPT_TOKEN_IDS + ([201, 101, 202] if inside_reasoning else [])
     adjust(req, prompt_token_ids=prompt)
     params = req.to_sampling_params(default_max_tokens=128)
+    assert params.structured_outputs is not None
     grammar = Grammar.from_structural_tag(params.structured_outputs.structural_tag)
     prefix = "" if inside_reasoning else THOUGHT
     assert _is_grammar_accept_string(grammar, prefix + FINAL + '{"a": 1}<|return|>')
