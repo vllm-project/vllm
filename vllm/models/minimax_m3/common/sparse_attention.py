@@ -325,8 +325,6 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             prefill_cu_seqlens_k = torch.empty(
                 num_prefills + 1, dtype=torch.int32, device=seq_lens.device
             )
-            # Not `[0] = 0`: assigning a Python scalar to a CUDA tensor element
-            # is a pageable H2D copy, which waits for all queued GPU work.
             prefill_cu_seqlens_k[:1].zero_()
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
             prefill_cu_seqlens_q = (
