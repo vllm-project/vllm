@@ -375,7 +375,8 @@ fn parameter(input: &mut &str, markers: &HyToolMarkers) -> ModalResult<(String, 
     )
     .parse_next(input)?;
 
-    Ok((name.trim().to_string(), value.to_string()))
+    // Argument names are exact schema keys, including surrounding whitespace.
+    Ok((name.to_string(), value.to_string()))
 }
 
 /// Parse ignored rest after the HY tool block ends.
@@ -392,7 +393,7 @@ mod tests {
 
     use super::{HyDialect, HyToolParser, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
+    use crate::tool::{Tool, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -796,5 +797,51 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_report_string().starts_with("tool parser parsing failed:"));
+    }
+
+    #[test]
+    fn whitespace_distinguishes_argument_names() {
+        let tools = [Tool {
+            name: "record".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "string" },
+                    " count ": { "type": "integer" }
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        let cases = [
+            (
+                HyDialect::V3,
+                "<tool_calls>\n<tool_call>record<tool_sep>\n<arg_key>count</arg_key><arg_value>2</arg_value>\n<arg_key> count </arg_key><arg_value>7</arg_value>\n</tool_call>\n</tool_calls>",
+            ),
+            (
+                HyDialect::V4,
+                "<tool_calls><tool_call>record<arg_key>count</arg_key><arg_value>2</arg_value><arg_key> count </arg_key><arg_value>7</arg_value></tool_call></tool_calls>",
+            ),
+        ];
+
+        for (dialect, input) in cases {
+            let expected = json!({ "count": "2", " count ": 7 });
+
+            let output = HyToolParser::new(&tools, "", dialect).parse_complete(input).unwrap();
+            assert_eq!(
+                parsed_arguments(&output, 0),
+                expected,
+                "{dialect:?} complete"
+            );
+
+            let mut parser = HyToolParser::new(&tools, "", dialect);
+            let output = collect_stream(&mut parser, &split_by_chars(input, 1));
+            assert_eq!(
+                parsed_arguments(&output, 0),
+                expected,
+                "{dialect:?} streaming"
+            );
+        }
     }
 }
