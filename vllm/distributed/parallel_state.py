@@ -63,7 +63,6 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -452,8 +451,8 @@ class GroupCoordinator:
     # device communicator (if use_device_communicator=True)
     device_communicator: DeviceCommunicatorBase | None
     mq_broadcaster: Any | None  # shared memory broadcaster
-    # one communicator per DBO microbatch, set by init_dbo_tp_comms
-    ubatch_comms: list["PyNcclCommunicator"] | None = None
+    # microbatch all-reduces run on the DBO comm stream; set by enable_dbo_tp_overlap
+    dbo_overlap: bool = False
 
     def __init__(
         self,
@@ -754,16 +753,21 @@ class GroupCoordinator:
             return self._all_reduce_out_place(input_)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
-        # Under the vllm.all_reduce custom op, so compiled graphs reach it too.
-        if self.ubatch_comms is not None and not torch.compiler.is_compiling():
-            from vllm.v1.worker.ubatching import dbo_all_reduce
-
-            out = dbo_all_reduce(self, input_)
-            if out is not None:
-                return out
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
-        return self.device_communicator.all_reduce(input_)
+        if not self.dbo_overlap:
+            return self.device_communicator.all_reduce(input_)
+        # DBO hand-off, on the comm stream. Under the vllm.all_reduce custom op,
+        # so compiled graphs reach it too; no-ops outside a microbatch.
+        from vllm.v1.worker.ubatching import (
+            dbo_switch_to_compute_sync,
+            dbo_yield_and_switch_from_compute_to_comm,
+        )
+
+        dbo_yield_and_switch_from_compute_to_comm()
+        out = self.device_communicator.all_reduce(input_)
+        dbo_switch_to_compute_sync()
+        return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size

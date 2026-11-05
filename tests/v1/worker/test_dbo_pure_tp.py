@@ -3,7 +3,6 @@
 """DBO under pure tensor parallelism (one DP rank, no EP), without GPUs."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -160,21 +159,20 @@ def test_workspace_id_shared_across_microbatches(monkeypatch, num_ubatches, expe
     "kwargs",
     [dict(dp=2), dict(ep=True), dict(dbo=False)],
 )
-def test_no_ubatch_comms_outside_pure_tp_dbo(monkeypatch, kwargs):
-    tp = SimpleNamespace(ubatch_comms=None)
+def test_no_dbo_overlap_outside_pure_tp_dbo(monkeypatch, kwargs):
+    tp = SimpleNamespace(dbo_overlap=False)
     monkeypatch.setattr(parallel_state, "_TP", tp)
-    ubatching.init_dbo_tp_comms(_parallel_config(**kwargs))
-    assert tp.ubatch_comms is None
+    ubatching.enable_dbo_tp_overlap(_parallel_config(**kwargs), comm_stream=None)
+    assert not tp.dbo_overlap
 
 
 def test_all_reduce_uses_device_communicator_outside_a_microbatch(monkeypatch):
-    # With or without microbatch communicators, a step that is not split takes
-    # the normal all-reduce.
+    # With or without DBO overlap, a step that is not split takes the normal
+    # all-reduce.
     monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {})
     group = parallel_state.GroupCoordinator.__new__(parallel_state.GroupCoordinator)
     group.device_communicator = SimpleNamespace(all_reduce=lambda x: x + 1)
     x = torch.ones(2)
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
-    # spec=[]: any use of a communicator raises.
-    group.ubatch_comms = [Mock(spec=[]), Mock(spec=[])]
+    group.dbo_overlap = True
     assert torch.equal(group._all_reduce_out_place(x), x + 1)

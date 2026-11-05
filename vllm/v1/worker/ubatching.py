@@ -256,32 +256,16 @@ def make_ubatch_contexts(
 
 
 # DBO under pure TP: each TP all-reduce is a hand-off point and runs on the comm
-# stream, on a per-microbatch communicator, while the other microbatch computes.
-def init_dbo_tp_comms(parallel_config) -> None:
-    """Build the per-microbatch communicators of the TP group (DBO under pure TP
-    only). Collective: every rank calls it in the same order."""
+# stream while the other microbatch computes.
+def enable_dbo_tp_overlap(parallel_config, comm_stream: torch.cuda.Stream) -> None:
+    """Collective: every rank calls it in the same order."""
     if not parallel_config.dbo_tp_only:
         return
     tp = parallel_state.get_tp_group()
-    if tp.ubatch_comms is not None:
-        return
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-
-    comms = [
-        PyNcclCommunicator(group=tp.cpu_group, device=tp.device)
-        for _ in range(parallel_config.num_ubatches)
-    ]
-    if any(c.disabled for c in comms):
-        logger.warning(
-            "DBO: the NCCL library is unavailable, the TP all-reduces of a "
-            "microbatch stay on the compute stream (no overlap)"
-        )
-        return
-    tp.ubatch_comms = comms
-    logger.info(
-        "DBO: %d per-microbatch TP communicators for the comm-stream all-reduce",
-        len(comms),
-    )
+    pynccl_comm = getattr(tp.device_communicator, "pynccl_comm", None)
+    if pynccl_comm is not None:
+        pynccl_comm.bind_stream(comm_stream)
+    tp.dbo_overlap = True
 
 
 def dbo_comm_stream_priority() -> int:
@@ -290,22 +274,3 @@ def dbo_comm_stream_priority() -> int:
     from vllm.platforms import current_platform
 
     return -1 if current_platform.is_rocm() else 0
-
-
-def dbo_all_reduce(group, input_: torch.Tensor) -> torch.Tensor | None:
-    """All-reduce of a microbatch on the comm stream, with the microbatch's own
-    communicator of ``group``. None outside a microbatch."""
-    ctx_idx = _THREAD_ID_TO_CONTEXT.get(threading.get_ident())
-    if ctx_idx is None:
-        return None
-    ctx = _CURRENT_CONTEXTS[ctx_idx]
-    logger.info_once("DBO: TP all-reduces of a microbatch go to the comm stream")
-    # No record_stream: the stream waits already order the buffers, and it would
-    # pin every block until the GPU catches up (out of memory at a 32k step).
-    out = torch.empty_like(input_)
-    ctx.yield_and_switch_from_compute_to_comm()
-    group.ubatch_comms[ctx_idx].all_reduce(
-        input_, out_tensor=out, stream=ctx.comm_stream
-    )
-    ctx.switch_to_compute_sync()
-    return out
