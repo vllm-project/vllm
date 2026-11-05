@@ -145,13 +145,16 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
 
 # aiter's sparse MLA prefill is slower than gather + OPUS at 128 heads per
 # rank, so prefill takes it only up to 64; decode takes it at any head count.
+# A plain fp8 cache takes it at any head count too: gather + OPUS only decodes
+# the packed fp8_ds_mla record.
 _AITER_SPARSE_MLA_PREFILL_MAX_HEADS = 64
 
 
-def _aiter_sparse_mla_prefill_enabled(num_heads: int, has_kv_transfer: bool) -> bool:
-    return (
-        _aiter_sparse_mla_enabled(has_kv_transfer)
-        and num_heads <= _AITER_SPARSE_MLA_PREFILL_MAX_HEADS
+def _aiter_sparse_mla_prefill_enabled(
+    num_heads: int, has_kv_transfer: bool, plain_fp8_kv: bool
+) -> bool:
+    return _aiter_sparse_mla_enabled(has_kv_transfer) and (
+        plain_fp8_kv or num_heads <= _AITER_SPARSE_MLA_PREFILL_MAX_HEADS
     )
 
 
@@ -832,6 +835,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.vllm_config.parallel_config
             ),
             self.vllm_config.kv_transfer_config is not None,
+            self.vllm_config.cache_config.cache_dtype == "fp8_e4m3",
         )
 
     def build(
@@ -951,13 +955,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._use_aiter_sparse_mla_decode = _aiter_sparse_mla_enabled(
             self._has_kv_transfer
         )
-        self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
-            self.n_local_heads, self._has_kv_transfer
-        )
         self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
+        self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
+            self.n_local_heads, self._has_kv_transfer, self._plain_fp8_kv
+        )
         if self._plain_fp8_kv:
-            # The gather + OPUS prefill only decodes the packed record.
-            self._use_aiter_sparse_mla_prefill = self._use_aiter_sparse_mla_decode
             _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla_decode)
 
     def _uses_fp8_ds_mla_layout(self) -> bool:
