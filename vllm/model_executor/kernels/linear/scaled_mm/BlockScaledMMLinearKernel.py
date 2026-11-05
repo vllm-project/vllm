@@ -105,7 +105,9 @@ class Fp8BlockScaledMMLinearKernel(
         **kwargs,
     ) -> torch.Tensor:
         # RowParallelLinear may ask for FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS)
-        out_dtype = getattr(layer, "partial_sum_dtype", None) or self.config.out_dtype
+        out_dtype = self.config.out_dtype
+        if self.supports_partial_sum_dtype:
+            out_dtype = getattr(layer, "partial_sum_dtype", None) or out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
         weight_scale = params.block_scale

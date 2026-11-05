@@ -570,6 +570,17 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
+def get_tp_fp16_partial_sums_shift() -> int:
+    """Get VLLM_TP_FP16_PARTIAL_SUMS_SHIFT, an integer in [0, 14]."""
+    value = os.getenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2")
+    if not (value.isdigit() and 0 <= int(value) <= 14):
+        raise ValueError(
+            f"VLLM_TP_FP16_PARTIAL_SUMS_SHIFT must be an integer in [0, 14], "
+            f"got {value!r}"
+        )
+    return int(value)
+
+
 def _generate_shm_name() -> str:
     import pybase64
 
@@ -2036,9 +2047,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Exact 2^-k prescale of the FP16 partial sums (k in [0, 14]), moving the
     # FP16 overflow threshold to 65504 * 2^k.
-    "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": lambda: int(
-        os.getenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2")
-    ),
+    "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": get_tp_fp16_partial_sums_shift,
     # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
     # This backend has a strict single-stream contract and is opt-in while its
     # integration is being qualified.

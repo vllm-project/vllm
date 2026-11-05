@@ -166,6 +166,10 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
 
     """
 
+    # True if apply_weights honors layer.partial_sum_dtype/partial_sum_scale
+    # (FP16 partial sums of RowParallelLinear, VLLM_TP_FP16_PARTIAL_SUMS).
+    supports_partial_sum_dtype: ClassVar[bool] = False
+
     @classmethod
     @abstractmethod
     def is_supported(
