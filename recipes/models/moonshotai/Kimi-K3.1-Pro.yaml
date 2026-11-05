@@ -26,8 +26,7 @@ model:
   # that doesn't exist.
   min_vllm_version: "0.34.0"
   platform_builds:
-    810e: { base_version: "0.32.0", build_type: custom }
-    m890: { base_version: "0.32.0", build_type: custom }
+    zhenwu: "0.32.0"
   nightly_required: true
   # Day-0 images published with the release. NVIDIA's is a CUDA 13 (cu130) build
   # only; AMD's is ROCm 10.0.
