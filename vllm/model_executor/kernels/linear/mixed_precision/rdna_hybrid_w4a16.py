@@ -114,11 +114,8 @@ def _profile_scope(name: str) -> AbstractContextManager:
 # multiple of the kernel's row tile does the medium kernel fall back to reading
 # the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
-# gfx1151 takes 6..8 rows too: in a kernel sweep of 15 shapes the HIP kernel
-# beat the Triton fallback by 1.5-4.5x (110-214 GB/s on outputs of 2048 or
-# more).
-# At 16 rows it is level with Triton, so the cap stays at 8. Only gfx1151 has
-# been run on hardware; the rest of gfx115x keeps 5.
+# On gfx1151 HIP beats Triton up to 8 rows and is level with it by 16. Other
+# gfx115x are untested and keep 5.
 MAX_SKINNY_BATCH_SIZE_GFX1151 = 8
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
