@@ -85,6 +85,16 @@ _MUSE_OTHER_ROLE_RE = re.compile(r"<\|start\|>(?!assistant(?:\s|<|$))[^\s<]+")
 _MUSE_NON_TOOL_RECIPIENTS = (None, "self", "user", "commentary", "developer")
 
 
+def _is_stray_channel(recipient: str | None, body: str) -> bool:
+    """A recipient outside the known set whose body carries no tool markup:
+    ordinary text behind a missampled header, not a tool call."""
+    return (
+        recipient not in _MUSE_NON_TOOL_RECIPIENTS
+        and _FUNCTION_CALLS_OPEN not in body
+        and "<atem:invoke" not in body
+    )
+
+
 def _muse_messages(text: str) -> Iterator[tuple[str | None, str, bool, str]]:
     """Yield recipient, body, completion status, and framed text per message."""
     headers = list(_MUSE_HEADER_RE.finditer(text))
@@ -259,11 +269,15 @@ class MuseReasoningParser(ReasoningParser):
         return ""
 
     @classmethod
-    def _classify_bodies(cls, text: str) -> tuple[str, str]:
+    def _classify_bodies(cls, text: str, final: bool = False) -> tuple[str, str]:
         """Split ``text`` into (reasoning_body, content_body), channel-aware.
         Framing markers and tool channels contribute nothing -- the tool parser
         owns those. A body ends at ``<|eom|>`` / ``<|eot|>``, at the next channel
         header, or at end-of-text (an OPEN body, which is held back).
+        A recipient outside the known set with no tool markup (a missampled
+        ``to=s<|message|>...``) is content once its body is closed, or at
+        ``final`` (end of generation); while open it may still become a tool
+        channel, so it is held back.
         """
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
@@ -273,7 +287,9 @@ class MuseReasoningParser(ReasoningParser):
                     body = _trim_open_body(body)
                 if recipient in (None, "self"):
                     reasoning_parts.append(body)
-                elif recipient in ("user", "commentary"):
+                elif recipient in ("user", "commentary") or (
+                    _is_stray_channel(recipient, body) and (closed or final)
+                ):
                     content_parts.append(body)
             return "".join(reasoning_parts), "".join(content_parts)
         pos = 0
@@ -319,7 +335,7 @@ class MuseReasoningParser(ReasoningParser):
         ``reasoning_ended`` is still False. Returns only the channel-classified
         ``to=user`` body, and only the portion not already streamed.
         """
-        _, content_body = self._classify_bodies(previous_text)
+        _, content_body = self._classify_bodies(previous_text, final=True)
         remainder = content_body[len(self._emitted_content) :]
         return remainder or None
 
@@ -341,9 +357,12 @@ class MuseReasoningParser(ReasoningParser):
                 )
                 or None
             )
+            # Hand the framed channels to the tool parser only when a call is
+            # complete; a tool call cut by max_tokens has nothing to parse and
+            # would come back as content with its framing, so it is dropped and
+            # the visible channels are returned, as the streamed path does.
             has_tool_call = any(
-                recipient not in _MUSE_NON_TOOL_RECIPIENTS
-                and (_FUNCTION_CALLS_OPEN in body or "<atem:invoke" in body)
+                recipient not in _MUSE_NON_TOOL_RECIPIENTS and "</atem:invoke>" in body
                 for recipient, body, _, _ in messages
             )
             if has_tool_call:
@@ -357,6 +376,7 @@ class MuseReasoningParser(ReasoningParser):
                     body
                     for recipient, body, _, _ in messages
                     if recipient in ("user", "commentary")
+                    or _is_stray_channel(recipient, body)
                 )
             return reasoning, content or None
         collapsed = _COLLAPSE_RE.sub("\n", model_output)
