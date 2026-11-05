@@ -7,13 +7,13 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MoEBackend,
 )
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -504,27 +504,30 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None
-    return args.moe.activation
+    return user_activation_override("moe", get_current_vllm_config())[0]
+
+
+def _user_moe_activation_override_is_set() -> bool:
+    """Whether the user set the MoE activation, explicit `null` included."""
+    return user_activation_override("moe", get_current_vllm_config_or_none())[1]
 
 
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing)."""
+    """Apply ``--quantization-config.moe.activation`` to the checkpoint's
+    activation key. An explicit override wins, ``null`` included (BF16)."""
     user_override = _user_moe_activation_override()
-    if user_override is None:
+    if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key
-    if model_activation_key is None or model_activation_key == user_override:
-        return user_override
-    raise ValueError(
-        f"checkpoint declares MoE activation={model_activation_key} but "
-        f"quantization_config.moe.activation={user_override}; remove the "
-        f"override or align it with the checkpoint."
-    )
+    if model_activation_key is not None and model_activation_key != user_override:
+        logger.warning_once(
+            "Overriding the checkpoint MoE activation=%s with "
+            "quantization_config.moe.activation=%s.",
+            model_activation_key,
+            user_override,
+        )
+    return user_override
 
 
 def _humming_input_schema(model_activation_key: QuantKey | None):
@@ -1275,13 +1278,15 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         from vllm._aiter_ops import rocm_aiter_ops
 
+        # New tensors, not `.data` rebinds: `_setup_kernel` writes them into
+        # the params' storage, which captured CUDA graphs read across reloads.
         s0, s1, _ = w13_weight_scale.shape
-        w13_weight_scale.data = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(
+        w13_weight_scale = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(
             s0, s1, -1
         )
 
         s0, s1, _ = w2_weight_scale.shape
-        w2_weight_scale.data = e8m0_shuffle(w2_weight_scale.view(s0 * s1, -1)).view(
+        w2_weight_scale = e8m0_shuffle(w2_weight_scale.view(s0 * s1, -1)).view(
             s0, s1, -1
         )
 
@@ -1325,26 +1330,28 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             .contiguous()
             .view(e, n, k)
         )
-        w13_weight_scale.data = (
+        # New tensors, not `.data` rebinds: `_setup_kernel` writes them into
+        # the params' storage, which captured CUDA graphs read across reloads.
+        w13_scale = (
             w13_weight_scale.data.view(e, n // 2, 2, -1)
             .permute(0, 2, 1, 3)
             .contiguous()
             .view(e, n, -1)
         )
 
-        # View as native FP4 dtype for AITER shuffle
-        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
-        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
-
-        # Shuffle weights and scales for AITER CK kernel layout
-        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
+        # Shuffle weights (as native FP4) and scales for AITER CK kernel layout
+        w13 = rocm_aiter_ops.shuffle_weight_a16w4(
+            w13_weight.data.view(torch.float4_e2m1fn_x2), 16, True
+        )
         shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
+            w13_scale.view(-1, w13_scale.shape[-1]),
             num_experts,
             True,
         )
 
-        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
+        w2 = rocm_aiter_ops.shuffle_weight_a16w4(
+            w2_weight.data.view(torch.float4_e2m1fn_x2), 16, False
+        )
         shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
             w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
             num_experts,
@@ -1360,12 +1367,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 .view(-1, n)
             )
 
-        w13_weight.is_shuffled = True
-        w2_weight.is_shuffled = True
+        w13.is_shuffled = True
+        w2.is_shuffled = True
 
         return (
-            w13_weight,
-            w2_weight,
+            w13,
+            w2,
             shuffled_w13_scale,
             shuffled_w2_scale,
             w13_bias,
@@ -1612,8 +1619,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
         )
 
+        stage_moe_weights_for_humming(
+            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+        )
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},

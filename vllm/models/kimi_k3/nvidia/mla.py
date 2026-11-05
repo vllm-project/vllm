@@ -75,7 +75,11 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -321,6 +325,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype = "auto"
 
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         self.attn_backend = get_attn_backend(
             self.head_size,
             dtype,
@@ -436,7 +441,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Absorb ``kv_b_proj`` into decode-time ``W_UK_T`` / ``W_UV`` bmm weights.
 
         ``kv_b_proj`` produces ``[k_nope; v]`` per head from the ``kv_lora_rank``
@@ -449,7 +454,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         if not (is_weights_pre_processed() and getattr(self, "W_UV", None) is not None):
             W_UK, W_UV = split_kv_b_proj(
                 self.kv_b_proj,
-                act_dtype,
+                self.act_dtype,
                 self.kv_lora_rank,
                 self.num_local_heads,
                 self.qk_nope_head_dim,
@@ -471,13 +476,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # Precompute reciprocal scales once here (scales are final after load;
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
-        # launching a per-step reciprocal kernel.
-        self.register_buffer(
-            "_q_scale_inv", self._q_scale.reciprocal().reshape(1), persistent=False
-        )
-        self.register_buffer(
-            "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
-        )
+        # launching a per-step reciprocal kernel. Reloads refill them in place.
+        refill_derived(self, "_q_scale_inv", self._q_scale.reciprocal().reshape(1))
+        refill_derived(self, "_k_scale_inv", self._k_scale.reciprocal().reshape(1))
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""
