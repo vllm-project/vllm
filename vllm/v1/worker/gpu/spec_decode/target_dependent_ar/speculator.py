@@ -698,7 +698,7 @@ def update_draft_inputs(
     input_buffers: InputBuffers,
     sample_src_positions: torch.Tensor,
     num_reqs: int,
-    max_model_len: torch.Tensor,  # [1], read on the GPU at every launch
+    max_model_len: torch.Tensor,  # [1] device tensor, loaded inside the kernel
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ):
