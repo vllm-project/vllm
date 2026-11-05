@@ -105,7 +105,9 @@ class SpecRound:
         self.kernel_context: KernelContext | None = None
 
     def init_tree_verify(self, input_buffers: "InputBuffers") -> None:
-        """Buffers of a speculator whose plans branch."""
+        """Buffers of a speculator whose plans branch. Built by set_resources,
+        after the spec kernels are bound: until then (the memory profile) the
+        dummy batches verify chains, which the layers' own kernels run."""
         if self.max_branching == 1:
             return
         self.layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
@@ -158,9 +160,6 @@ class SpecRound:
             # Lowered to chains: batches keep the chain layout.
             self.max_branching = 1
             self.chain_count = None
-            self.layout = None
-            input_buffers.tree_parents = None
-            input_buffers.tree_ancestors = None
         self.kernel_context = KernelContext(
             device=self.device,
             plan_kind=resources.plan_kind,
@@ -169,6 +168,7 @@ class SpecRound:
             capture_shapes=resources.capture_shapes,
         )
         self.registry().bind(self.kernel_context, layers)
+        self.init_tree_verify(input_buffers)
 
     def capture(self) -> None:
         """Capture the bound spec kernels' graphs, if they have any."""
@@ -262,9 +262,8 @@ class SpecRound:
         laid out (a chain, or a batch without drafts, as the chain of its query
         rows), so the tree metadata is current whenever a captured graph that
         reads it replays: one graph serves every plan."""
-        if self.max_branching == 1:
+        if self.layout is None:
             return
-        assert self.layout is not None
         plan = input_batch.verify_plan
         num_reqs = input_batch.num_reqs
         if plan is None or plan.count is None:

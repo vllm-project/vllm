@@ -227,7 +227,10 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
         plans=max_branching > 1,
     )
     buffers = InputBuffers(4, 16, DEVICE)
-    spec_round.init_tree_verify(buffers)
+    # The memory profile runs before the spec kernels are bound, so the layers
+    # run their own chain kernels: set_resources lays out the trees.
+    spec_round.kernels = KernelRegistry()
+    spec_round.set_resources(resources, buffers, [])
     batch = InputBatch.make_dummy(2, 6, buffers)
     batch.positions.copy_(torch.arange(6))
 

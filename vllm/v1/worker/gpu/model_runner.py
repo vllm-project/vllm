@@ -558,8 +558,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
                 self.rejection_sampler = self._build_rejection_sampler()
-            if self.spec_round is not None:
-                self.spec_round.init_tree_verify(self.input_buffers)
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
