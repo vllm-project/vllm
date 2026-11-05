@@ -1,16 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Online-quantized copies of an already-loaded lm_head."""
+"""Online lm_head quantization: weight-only methods selected by
+``quantization_config.lm_head``, and online-quantized copies of an
+already-loaded lm_head."""
 
+from abc import abstractmethod
 from itertools import chain
-from typing import Literal
+from typing import ClassVar, Literal
 from weakref import WeakKeyDictionary
 
 import torch
-from torch.nn import Module
+from torch.nn import Module, Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+    choose_mp_linear_kernel,
+    init_nvfp4_linear_kernel,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineLinearMethod,
@@ -26,10 +34,168 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
+
+
+class OnlineLMHeadMethodBase(OnlineLinearBase):
+    """Weight-only lm_head quantized at load time and run on the platform's
+    mixed-precision linear kernel (`choose_mp_linear_kernel`).
+
+    A subclass sets the weight format and implements `quantize`. An untied
+    head loads its fp16/bf16 weight like any online linear layer and replaces
+    it with the quantized copy. A tied head shares the input embeddings'
+    weight, which stays unchanged: the quantized copy is added next to it.
+    """
+
+    scheme: ClassVar[str]
+    """The ``quantization_config.lm_head`` name, for logs and errors."""
+    weight_type: ClassVar[ScalarType]
+    group_size: ClassVar[int]
+    """Input channels per scale; -1 for one scale per output channel."""
+    zero_points: ClassVar[bool]
+    n_align: ClassVar[int] = 1
+    """Required divisor of the vocab shard (output rows)."""
+    k_align: ClassVar[int] = 1
+    """Required divisor of the hidden size (input columns)."""
+
+    @abstractmethod
+    def quantize(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Quantize ``weight`` [N, K] into the `MPLinearKernel` layout.
+
+        Returns the weight packed along K, the scales [N, K // group_size]
+        ([N, 1] per channel) and the zero points packed along N, or None
+        without zero points.
+        """
+        raise NotImplementedError
+
+    def create_weights(
+        self,
+        layer: Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        output_size_per_partition = sum(output_partition_sizes)
+        # Fail before loading the checkpoint, not after.
+        if params_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                f"lm_head quantization {self.scheme!r} needs an fp16/bf16 "
+                f"lm_head, got {params_dtype}."
+            )
+        if (
+            input_size_per_partition % self.k_align
+            or output_size_per_partition % self.n_align
+        ):
+            raise ValueError(
+                f"lm_head quantization {self.scheme!r} needs a hidden size "
+                f"divisible by {self.k_align} and a vocab shard divisible by "
+                f"{self.n_align}, got {output_size_per_partition} x "
+                f"{input_size_per_partition}."
+            )
+        self.mp_config = MPLinearLayerConfig(
+            full_weight_shape=(input_size, output_size),
+            partition_weight_shape=(
+                input_size_per_partition,
+                output_size_per_partition,
+            ),
+            weight_type=self.weight_type,
+            act_type=params_dtype,
+            group_size=self.group_size,
+            zero_points=self.zero_points,
+        )
+        # Raises if no kernel on this platform can run the layer.
+        self.kernel_cls: type[MPLinearKernel] = choose_mp_linear_kernel(self.mp_config)
+        self.kernel: MPLinearKernel | None = None
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def tie_weights(self, layer: Module, embed_tokens: Module) -> Module:
+        # The head reads the embeddings' loaded weight. Nothing is loaded into
+        # the head itself, so it leaves layerwise loading; the model loader's
+        # process_weights_after_loading pass quantizes it.
+        layer.weight = embed_tokens.weight
+        get_layerwise_info(layer).reset()
+        layer.online_lm_head_tied_weight = True
+        return layer
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+        tied = getattr(layer, "online_lm_head_tied_weight", False)
+        weight = self.get_weight_for_quantization(layer)
+        n, k = weight.shape
+        packed, scales, zero_points = self.quantize(weight)
+        set_weight_attrs(packed, {"packed_dim": 1})
+        set_weight_attrs(scales, {"input_dim": 1, "output_dim": 0})
+        if tied:
+            # `weight` is the input embeddings' parameter: keep it, and add
+            # the quantized copy under its own name.
+            w_q_name = "weight_packed"
+            w_q = Parameter(packed, requires_grad=False)
+            set_weight_attrs(w_q, {"input_dim": 1, "output_dim": 0, "packed_dim": 1})
+            layer.register_parameter(w_q_name, w_q)
+            added = packed.nbytes + scales.nbytes
+            if zero_points is not None:
+                added += zero_points.nbytes
+            logger.info_once(
+                "The lm_head is tied to the input embeddings, which keep their "
+                "%s weight: the %s lm_head adds %.2f GiB per rank instead of "
+                "saving memory.",
+                weight.dtype,
+                self.scheme,
+                added / 2**30,
+            )
+        else:
+            # The loaded parameter already reports input_dim=1, output_dim=0.
+            w_q_name = "weight"
+            replace_parameter(layer, w_q_name, packed)
+        replace_parameter(layer, "weight_scale", scales)
+        w_zp_name = None
+        if zero_points is not None:
+            set_weight_attrs(
+                zero_points, {"input_dim": 1, "output_dim": 0, "packed_dim": 0}
+            )
+            w_zp_name = "weight_zero_point"
+            replace_parameter(layer, w_zp_name, zero_points)
+
+        self.kernel = self.kernel_cls(
+            self.mp_config,
+            w_q_param_name=w_q_name,
+            w_s_param_name="weight_scale",
+            w_zp_param_name=w_zp_name,
+        )
+        self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
+        logger.info_once(
+            "Quantized the lm_head to %s (%d x %d per rank) with %s.",
+            self.scheme,
+            n,
+            k,
+            self.kernel_cls.__name__,
+        )
+        layer._already_called_process_weights_after_loading = True
+
+    def apply(
+        self, layer: Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        assert self.kernel is not None
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 def _quantize_nvfp4(

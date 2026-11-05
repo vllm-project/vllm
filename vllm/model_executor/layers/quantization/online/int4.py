@@ -10,24 +10,15 @@ other linear layer.
 """
 
 import torch
-from torch.nn import Module, Parameter
 
-from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    MPLinearKernel,
-    MPLinearLayerConfig,
-    choose_mp_linear_kernel,
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    OnlineLMHeadMethodBase,
 )
-from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32Asym,
     pack_quantized_values_into_int32,
 )
-from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.scalar_type import scalar_types
-
-logger = init_logger(__name__)
 
 _UINT4_MAX = 15
 # Zero points pack 8 output rows per int32 word.
@@ -95,133 +86,20 @@ def quantize_int4_to_mp_layout(
     return packed, scales, packed_zero_points
 
 
-class Int4PerGroup32AsymLMHeadMethod(OnlineLinearBase):
+class Int4PerGroup32AsymLMHeadMethod(OnlineLMHeadMethodBase):
     """Weight-only asymmetric uint4 lm_head, one scale and zero point per 32
-    input channels, on the platform's mixed-precision linear kernel
-    (`choose_mp_linear_kernel`).
+    input channels."""
 
-    An untied head loads its fp16/bf16 weight like any online linear layer and
-    replaces it with the int4 copy. A tied head shares the input embeddings'
-    weight, which stays unchanged: the int4 copy is added next to it.
-    """
-
+    scheme = "int4_per_group_32_asym"
     weight_quant_key = kInt4Static32Asym
     activation_quant_key = None
+    weight_type = scalar_types.uint4
     group_size = 32
+    zero_points = True
+    n_align = _PACK_FACTOR
+    k_align = group_size
 
-    def create_weights(
-        self,
-        layer: Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        output_size_per_partition = sum(output_partition_sizes)
-        # Fail before loading the checkpoint, not after.
-        if params_dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError(
-                "int4 lm_head quantization needs an fp16/bf16 lm_head, got "
-                f"{params_dtype}."
-            )
-        if (
-            input_size_per_partition % self.group_size
-            or output_size_per_partition % _PACK_FACTOR
-        ):
-            raise ValueError(
-                "int4 lm_head quantization needs a hidden size divisible by "
-                f"{self.group_size} and a vocab shard divisible by {_PACK_FACTOR}, "
-                f"got {output_size_per_partition} x {input_size_per_partition}."
-            )
-        self.mp_config = MPLinearLayerConfig(
-            full_weight_shape=(input_size, output_size),
-            partition_weight_shape=(
-                input_size_per_partition,
-                output_size_per_partition,
-            ),
-            weight_type=scalar_types.uint4,
-            act_type=params_dtype,
-            group_size=self.group_size,
-            zero_points=True,
-        )
-        # Raises if no kernel on this platform can run the layer.
-        self.kernel_cls: type[MPLinearKernel] = choose_mp_linear_kernel(self.mp_config)
-        self.kernel: MPLinearKernel | None = None
-        super().create_weights(
-            layer,
-            input_size_per_partition,
-            output_partition_sizes,
-            input_size,
-            output_size,
-            params_dtype,
-            **extra_weight_attrs,
-        )
-
-    def tie_weights(self, layer: Module, embed_tokens: Module) -> Module:
-        # The head reads the embeddings' loaded weight. Nothing is loaded into
-        # the head itself, so it leaves layerwise loading; the model loader's
-        # process_weights_after_loading pass quantizes it.
-        layer.weight = embed_tokens.weight
-        get_layerwise_info(layer).reset()
-        layer.int4_tied_weight = True
-        return layer
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-        tied = getattr(layer, "int4_tied_weight", False)
-        weight = self.get_weight_for_quantization(layer)
-        n, k = weight.shape
-        packed, scales, zero_points = quantize_int4_to_mp_layout(
-            weight, self.group_size
-        )
-        set_weight_attrs(packed, {"packed_dim": 1})
-        set_weight_attrs(scales, {"input_dim": 1, "output_dim": 0})
-        set_weight_attrs(
-            zero_points, {"input_dim": 1, "output_dim": 0, "packed_dim": 0}
-        )
-        if tied:
-            # `weight` is the input embeddings' parameter: keep it, and add
-            # the int4 copy under its own name.
-            w_q_name = "weight_packed"
-            w_q = Parameter(packed, requires_grad=False)
-            set_weight_attrs(w_q, {"input_dim": 1, "output_dim": 0, "packed_dim": 1})
-            layer.register_parameter(w_q_name, w_q)
-            logger.info_once(
-                "The lm_head is tied to the input embeddings, which keep their "
-                "%s weight: the int4 lm_head adds %.2f GiB per rank instead of "
-                "saving memory.",
-                weight.dtype,
-                (packed.nbytes + scales.nbytes + zero_points.nbytes) / 2**30,
-            )
-        else:
-            # The loaded parameter already reports input_dim=1, output_dim=0.
-            w_q_name = "weight"
-            replace_parameter(layer, w_q_name, packed)
-        replace_parameter(layer, "weight_scale", scales)
-        replace_parameter(layer, "weight_zero_point", zero_points)
-
-        self.kernel = self.kernel_cls(
-            self.mp_config,
-            w_q_param_name=w_q_name,
-            w_s_param_name="weight_scale",
-            w_zp_param_name="weight_zero_point",
-        )
-        self.kernel.process_weights_after_loading(layer)
-        self.release_requantization_source_weights(layer)
-        logger.info_once(
-            "Quantized the lm_head to int4_per_group_32_asym (%d x %d per rank) "
-            "with %s.",
-            n,
-            k,
-            self.kernel_cls.__name__,
-        )
-        layer._already_called_process_weights_after_loading = True
-
-    def apply(
-        self, layer: Module, x: torch.Tensor, bias: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        assert self.kernel is not None
-        return self.kernel.apply_weights(layer, x, bias)
+    def quantize(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return quantize_int4_to_mp_layout(weight, self.group_size)
