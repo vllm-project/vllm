@@ -1117,11 +1117,7 @@ class Platform:
             )
 
         if cache_config.mamba_cache_mode == "align":
-            from vllm.v1.hisparse.binding import get_hisparse_mamba_block_size
-
-            cache_config.mamba_block_size = (
-                get_hisparse_mamba_block_size(vllm_config) or cache_config.block_size
-            )
+            cache_config.mamba_block_size = cache_config.block_size
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token

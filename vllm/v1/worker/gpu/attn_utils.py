@@ -17,6 +17,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.abstract import fit_mamba_blocks_to_attention
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -154,7 +155,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             kv_cache_spec[layer_name] = spec
     if vllm_config.attention_config.hisparse_config is not None:
         kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
-    return kv_cache_spec
+    return fit_mamba_blocks_to_attention(vllm_config, kv_cache_spec, attn_layers)
 
 
 def get_shared_kv_cache_layers(vllm_config: VllmConfig):
