@@ -274,3 +274,81 @@ def test_dbo_schedule_keeps_the_whole_gpu():
     for ubatch_id, (attn, rest) in by_ubatch.items():
         assert attn == rest
         assert hook_streams[ubatch_id] == attn
+
+
+def test_subgpu_deepep_v2_buffer_per_microbatch(monkeypatch):
+    """With micro-batching, DeepEP v2 dispatches and combines on the buffer of
+    the current micro-batch; with a single buffer the index is ignored."""
+    pytest.importorskip("deep_ep")
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        deepep_v2 as mod,
+    )
+
+    b0, b1 = object(), object()
+    pf = mod.DeepEPV2PrepareAndFinalize(
+        buffer=b0,
+        num_dispatchers=1,
+        dp_size=1,
+        rank_expert_offset=0,
+        num_experts=4,
+        num_topk=2,
+        buffers=[b0, b1],
+    )
+    assert len(pf.handles) == 2
+    monkeypatch.setattr(mod, "dbo_current_ubatch_id", lambda: 0)
+    assert pf._ubatch_buffer() is b0
+    monkeypatch.setattr(mod, "dbo_current_ubatch_id", lambda: 1)
+    assert pf._ubatch_buffer() is b1
+
+    single = mod.DeepEPV2PrepareAndFinalize(
+        buffer=b0,
+        num_dispatchers=1,
+        dp_size=1,
+        rank_expert_offset=0,
+        num_experts=4,
+        num_topk=2,
+    )
+    assert single.buffers == [b0]
+    assert single._ubatch_buffer() is b0
+
+
+def test_subgpu_deepep_v2_manager_caches_one_buffer_per_microbatch(monkeypatch):
+    """`get_handle` keys the ElasticBuffer cache by the micro-batch index and
+    does not pass the index to the buffer constructor."""
+    deep_ep = pytest.importorskip("deep_ep")
+    from vllm.distributed.device_communicators import all2all as mod
+
+    made = []
+
+    class FakeBuffer:
+        def __init__(self, **kw):
+            self.kw = kw
+            made.append(self)
+
+        def get_theoretical_num_sms(self, **kw):
+            return 1
+
+    monkeypatch.setattr(deep_ep, "ElasticBuffer", FakeBuffer)
+    mgr = mod.DeepEPV2All2AllManager.__new__(mod.DeepEPV2All2AllManager)
+    mgr.handle_cache = mod.Cache()
+    mgr._num_sms = None
+    mgr._gin_checked = True
+    monkeypatch.setattr(
+        mgr,
+        "_make_all2all_kwargs",
+        lambda **kw: {"hidden": kw["hidden"], "num_topk": kw["num_topk"]},
+    )
+    args = {
+        "num_max_tokens_per_rank": 8,
+        "hidden": 16,
+        "num_topk": 2,
+        "use_fp8_dispatch": False,
+        "num_experts": 4,
+    }
+    h0 = mgr.get_handle(args)
+    h1 = mgr.get_handle(dict(args, ubatch_idx=1))
+    assert h0 is not h1
+    assert mgr.get_handle(dict(args, ubatch_idx=0)) is h0
+    assert mgr.get_handle(dict(args, ubatch_idx=1)) is h1
+    assert len(made) == 2
+    assert all("ubatch_idx" not in b.kw for b in made)

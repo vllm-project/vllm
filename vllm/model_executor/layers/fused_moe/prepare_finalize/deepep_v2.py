@@ -115,9 +115,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
         sp_size: int = 1,
+        buffers: list[deep_ep.ElasticBuffer] | None = None,
     ):
         super().__init__()
         self.buffer = buffer
+        # One buffer per micro-batch when micro-batching is on: the
+        # collectives of two micro-batches in flight at the same time (two
+        # rest streams under SubGPU pipelining) must not share a buffer's
+        # slots, counters and barrier. Index = the current micro-batch id.
+        self.buffers: list[deep_ep.ElasticBuffer] = list(buffers) if buffers else [buffer]
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
@@ -133,7 +139,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.defer_globalize = False
 
         # DBO microbatching: one handle slot per micro-batch.
-        self.handles: list[deep_ep.EPHandle | None] = [None, None]
+        self.handles: list[deep_ep.EPHandle | None] = [None] * max(2, len(self.buffers))
 
         # arange(num_local_experts) + rank_expert_offset. Rank-constant, so it
         # is built once per device instead of once per layer per step.
@@ -217,7 +223,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_topk_weights,
             handle,
             event,
-        ) = self.buffer.dispatch(
+        ) = self._ubatch_buffer().dispatch(
             x=token_data,
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
@@ -372,6 +378,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def supports_async(self) -> bool:
         return True
 
+    def _ubatch_buffer(self) -> deep_ep.ElasticBuffer:
+        """The ElasticBuffer of the current micro-batch (the only one outside
+        micro-batching)."""
+        if len(self.buffers) == 1:
+            return self.buffers[0]
+        return self.buffers[dbo_current_ubatch_id() % len(self.buffers)]
+
     def prepare_async(
         self,
         a1: torch.Tensor,
@@ -485,7 +498,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # DBO drives its own hook/receiver schedule; keep the combine
         # synchronous there (the receiver then only performs the copy).
         combine_async = do_async and not dbo_enabled()
-        combined_x, _, event = self.buffer.combine(
+        combined_x, _, event = self._ubatch_buffer().combine(
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,

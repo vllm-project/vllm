@@ -1267,14 +1267,26 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
     def get_handle(self, kwargs):
         import deep_ep  # type: ignore[import-not-found]
 
+        kwargs = dict(kwargs)
         num_experts = kwargs.pop("num_experts", 256)
+        # Micro-batching: one ElasticBuffer per micro-batch, so that two
+        # micro-batches' collectives in flight at the same time (two rest
+        # streams under SubGPU pipelining) never share a buffer's slots,
+        # counters and barrier. Same constructor arguments, distinct cache
+        # key; the index is not a buffer argument.
+        ubatch_idx = kwargs.pop("ubatch_idx", 0)
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         if not self._gin_checked:
             self._check_gin_support(buffer_kwargs["group"])
             self._gin_checked = True
-        logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
+        logger.debug("DeepEP v2 all2all args %s (ubatch %d)", buffer_kwargs, ubatch_idx)
+
+        def make_buffer(**kw):
+            kw.pop("ubatch_idx", None)
+            return deep_ep.ElasticBuffer(**kw)
+
         handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
-            buffer_kwargs, deep_ep.ElasticBuffer
+            dict(buffer_kwargs, ubatch_idx=ubatch_idx), make_buffer
         )
         if self._num_sms is None:
             self._num_sms = handle.get_theoretical_num_sms(
