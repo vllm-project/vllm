@@ -2039,7 +2039,10 @@ class Scheduler(SchedulerInterface):
         """
         self._free_request_blocks(session)
         self.encoder_cache_manager.free(session)
+        self._pending_encoder_input_ids.pop(session.request_id, None)
         self._inflight_prefills.discard(session)
+        # The session now waits like a new request, so free its runner slot.
+        self.reset_preempted_req_ids.add(session.request_id)
 
         prompt_token_ids = TokenBuffer(update.prompt_token_ids or ())
         session.prompt_token_ids = prompt_token_ids
@@ -2056,7 +2059,7 @@ class Scheduler(SchedulerInterface):
         # identity collide with the previous segment and the prefix cache
         # serves back its audio.
         session.mm_features = list(update.mm_features or ())
-        session.block_hashes = []
+        session.block_hashes.clear()
         session.update_block_hashes()
 
         session.arrival_time = update.arrival_time

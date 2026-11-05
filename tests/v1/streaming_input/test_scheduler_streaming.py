@@ -863,3 +863,21 @@ def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
     assert request not in scheduler.kv_holding_waiting
     assert request not in scheduler.deferred_waiting
     assert "req" not in scheduler.schedule().num_scheduled_tokens
+
+
+def test_restarted_session_frees_its_model_runner_slot():
+    """A single-turn realtime session restarted on a queued chunk waits behind
+    newer requests. Its model-runner slot must be freed, or a request admitted
+    ahead of it finds no free slot."""
+    scheduler = create_async_scheduler(max_num_seqs=1)
+    scheduler._realtime_context_policy = False
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1, 2, 3]))
+    first_chunk = scheduler.schedule()
+    scheduler.add_request(DummyRequest("new", resumable=False, prompt_token_ids=[5]))
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[4, 5, 6]))
+    scheduler.update_from_output(first_chunk, _model_output("session", [STOP_TOKEN]))
+
+    output = scheduler.schedule()
+
+    assert [req.req_id for req in output.scheduled_new_reqs] == ["new"]
+    assert output.preempted_req_ids == {"session"}
