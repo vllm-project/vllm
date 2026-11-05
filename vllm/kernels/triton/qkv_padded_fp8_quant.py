@@ -3,7 +3,8 @@
 """Stride-aware FP8 quantization with head_dim padding for ViT attention.
 
 Reads directly from non-contiguous QKV views using 3D strides and pads
-head_dim to a multiple of 16 for cuDNN compatibility.
+head_dim to a multiple of ``pad_to``: 16 for cuDNN, 128 for AITER's asm FP8
+kernel on ROCm.
 """
 
 import torch
@@ -164,9 +165,9 @@ def quantize_fp8_maybe_pad_head_dim(
     ``pad_to`` (16 by default) only when needed.
 
     Accepts (S, H, D) or (B, S, H, D) input. Uses ``fp8_quant`` (a
-    :class:`QuantFP8` CustomOp) when head_dim is already aligned to 16
-    (no padding); otherwise falls back to a stride-aware Triton kernel
-    that pads head_dim to a multiple of 16.
+    :class:`QuantFP8` CustomOp) when head_dim is already a multiple of
+    ``pad_to`` (no padding); otherwise falls back to a stride-aware Triton
+    kernel that pads head_dim to a multiple of ``pad_to``.
     """
     head_dim = tensor.shape[-1]
     if head_dim % pad_to != 0:

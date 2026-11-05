@@ -397,12 +397,10 @@ class MMEncoderAttention(CustomOp):
         self.skip_scale_q = False
         self.skip_scale_k = False
         self.skip_scale_v = False
-        # Head-dim multiple the FP8 Q/K/V are zero-padded to (16 for cuDNN).
-        # AITER's FP8 varlen flash attention runs about 2x faster at head_dim
-        # 128 than at a smaller unaligned head_dim (e.g. 80), so ROCm can pad
-        # further with VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128: scores are unchanged
-        # and the padded output columns are sliced off.
+        # Head-dim multiple the FP8 Q/K/V are zero-padded to (16 for cuDNN),
+        # and whether AITER gets its descales as shape (1,) (see below).
         self._fp8_pad_to = 16
+        self._fp8_aiter_asm = False
 
         mm_cfg = get_multimodal_config()
         if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
@@ -427,7 +425,24 @@ class MMEncoderAttention(CustomOp):
                     "an AITER build that provides "
                     "flash_attn_varlen_fp8_pertensor_func."
                 ) from exc
-            self._fp8_pad_to = envs.VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM
+            # AITER runs its asm FP8 kernel only at head_dim 128 and only for
+            # per-tensor descales of shape (1,); otherwise it runs CK-tile,
+            # about 1.7x slower. VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 zero-pads
+            # smaller head_dims (e.g. 80) to 128 and passes (1,) descales.
+            # Scores are unchanged (zero columns, softmax scale kept) and the
+            # padded output columns are sliced off. Opt-in: it is validated
+            # only on gfx950 with head_dim 80; gfx942 and other head_dims
+            # (padding 64 or 72 to 128 nearly doubles the work) are not.
+            if envs.VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM == 128:
+                if self.head_size <= 128:
+                    self._fp8_pad_to = 128
+                    self._fp8_aiter_asm = True
+                else:
+                    logger.warning_once(
+                        "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 applies to "
+                        "head_dim <= 128 only; ignored for head_dim %d.",
+                        self.head_size,
+                    )
         elif self.attn_backend == AttentionBackendEnum.FLASHINFER:
             if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
@@ -763,13 +778,18 @@ class MMEncoderAttention(CustomOp):
 
         query, key, value = self._quantize_qkv_fp8(query, key, value)
 
+        descales = (self._fp8_q_scale, self._fp8_k_scale, self._fp8_v_scale)
+        if self._fp8_aiter_asm:
+            # A view of the (1, 1, 1, 1) buffers, so encoder CUDA graphs still
+            # read the current scales.
+            descales = tuple(d.view(1) for d in descales)
         output = vit_aiter_fp8_attn_wrapper(
             q=query,
             k=key,
             v=value,
-            q_descale=self._fp8_q_scale,
-            k_descale=self._fp8_k_scale,
-            v_descale=self._fp8_v_scale,
+            q_descale=descales[0],
+            k_descale=descales[1],
+            v_descale=descales[2],
             batch_size=bsz,
             output_dtype=self.dtype,
             scale=self.scale,
