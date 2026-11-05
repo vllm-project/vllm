@@ -1425,6 +1425,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Rubin LUT-B MoE GEMM; tcgen05 decompress::lut::b needs CUDA 13.4.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
     cuda_archs_loose_intersection(LUT_B_MOE_ARCHS "10.7f" "${CUDA_ARCHS}")
+    # The loose intersection's family fallback maps 10.7f onto any SM10x
+    # target (e.g. a plain 10.0), but tcgen05 and decompress::lut::b only
+    # exist on sm_107a/f. Keep only real SM107 targets.
+    list(FILTER LUT_B_MOE_ARCHS INCLUDE REGEX "^10[.]7")
   endif()
   if(LUT_B_MOE_ARCHS)
     set(LUT_B_MOE_SRC "csrc/moe/lut_b_moe_sm107.cu")
