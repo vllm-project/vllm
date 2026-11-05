@@ -1326,25 +1326,31 @@ def decode_attention_fwd_verify(
     """Causal MLA verify over a per-request block table.
 
     Args:
-        q: [B * qlen, H, Lk] queries, verify tokens of a request contiguous.
-        k_buffer: paged latent cache, [num_pages, page_size, 1, Lk] (or 3D
-            [num_pages * page_size, 1, Lk]).
-        v_buffer: k_buffer[..., :Lv] (V is read from K; only its width is used).
-        o: [B * qlen, H, Lv] output.
-        lse: [B * qlen, H] fp32 natural-log LSE (-inf for rows with no key).
-        req_to_token: [B, max_pages] per-request block table (not repeated).
-        seq_lens: [B] int32 kernel KV lengths L.
-        real_seq_lens: [B] int32 or None; row limit is
+        q (torch.Tensor): [B * qlen, H, Lk] queries, verify tokens of a request
+            contiguous.
+        k_buffer (torch.Tensor): paged latent cache, [num_pages, page_size, 1, Lk]
+            (or 3D [num_pages * page_size, 1, Lk]).
+        v_buffer (torch.Tensor): k_buffer[..., :Lv] (V is read from K; only its
+            width is used).
+        o (torch.Tensor): [B * qlen, H, Lv] output.
+        lse (torch.Tensor): [B * qlen, H] fp32 natural-log LSE (-inf for rows
+            with no key).
+        req_to_token (torch.Tensor): [B, max_pages] per-request block table
+            (not repeated).
+        seq_lens (torch.Tensor): [B] int32 kernel KV lengths L.
+        real_seq_lens (torch.Tensor | None): [B] int32 or None; row limit is
             max(min(L - qlen + 1 + t, L_real), 0).
-        qlen: verify tokens per request.
-        attn_logits: fp32 workspace with >= B * qlen * H * num_kv_splits *
-            (Lv + 1) elements, laid out [B * qlen, H, num_kv_splits, Lv + 1].
+        qlen (int): verify tokens per request.
+        attn_logits (torch.Tensor | None): fp32 workspace with >= B * qlen * H *
+            num_kv_splits * (Lv + 1) elements, laid out
+            [B * qlen, H, num_kv_splits, Lv + 1].
             Unused, and may be None, when num_kv_splits is 1.
-        num_kv_splits: static cap on KV splits per request (see
+        num_kv_splits (int): static cap on KV splits per request (see
             verify_num_kv_splits); shorter requests use fewer, longer splits.
-        sm_scale: softmax scale.
-        page_size: tokens per KV cache page.
-        k_scale: scalar tensor dequantizing an FP8 cache; ignored for bf16.
+        sm_scale (float): softmax scale.
+        page_size (int): tokens per KV cache page.
+        k_scale (torch.Tensor | None): scalar tensor dequantizing an FP8 cache;
+            ignored for bf16.
 
     """
     cfg = select_verify_config(q.shape[0] // qlen, qlen, q.shape[1])
