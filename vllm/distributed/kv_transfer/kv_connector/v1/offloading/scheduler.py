@@ -425,33 +425,6 @@ class RequestOffloadState:
                     len(group_state.offload_keys) * group_config.tokens_per_chunk,
                 )
 
-    def refresh_recomputed_offload_keys(self) -> None:
-        # Chained hashes make matching keys a prefix, so find the first
-        # changed chunk without scanning or rebuilding the unchanged prefix.
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, self.group_states
-        ):
-            keys = group_state.offload_keys
-            if not keys:
-                continue
-            hashes = self.req.block_hashes
-            stride = group_config.hashes_per_chunk
-            available = min(len(keys), len(hashes) // stride)
-            if available == len(keys) and keys[-1] == make_offload_key(
-                hashes[available * stride - 1], group_config.group_idx
-            ):
-                continue
-            lo, hi = 0, available
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if keys[mid] == make_offload_key(
-                    hashes[(mid + 1) * stride - 1], group_config.group_idx
-                ):
-                    lo = mid + 1
-                else:
-                    hi = mid
-            del keys[lo:]
-
     def update_block_id_groups(
         self, new_block_id_groups: tuple[list[int], ...] | None
     ) -> None:
@@ -1427,7 +1400,9 @@ class OffloadingConnectorScheduler:
             return None, False
 
         if request.resumable and self.use_lookahead_block_hashes:
-            req_status.refresh_recomputed_offload_keys()
+            # Core may have recomputed block hashes after preemption.
+            for group_state in req_status.group_states:
+                group_state.offload_keys.clear()
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 

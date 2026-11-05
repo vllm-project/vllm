@@ -177,6 +177,10 @@ def test_streaming_resume_refreshes_recomputed_offload_keys():
         assert group.offload_keys[:unchanged_chunks] == old[:unchanged_chunks]
         assert group.offload_keys[unchanged_chunks:] != old[unchanged_chunks:]
         assert group.offload_keys == expected
+        for chunk_idx, key in enumerate(expected, 1):
+            assert state.req_context.get_offload_key_position(key) == (
+                chunk_idx * config.tokens_per_chunk
+            )
 
 
 @pytest.mark.parametrize(
