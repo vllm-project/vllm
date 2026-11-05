@@ -1215,20 +1215,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building hadacore")
   endif()
 
-  # Fused MQA logits + top-k prefill kernel (SM100 family). It compiles against
-  # DeepGEMM's headers, so DeepGEMM is fetched here.
+  # Fused MQA logits + top-k prefill kernels (SM100 family). They compile
+  # against DeepGEMM's headers, so DeepGEMM is fetched here.
   include(cmake/external_projects/deepgemm.cmake)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
     cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_MQA_TOPK_ARCHS)
-    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set(FUSED_MQA_TOPK_SRC
+      "csrc/fused_mqa_topk/fused_mqa_topk.cu"
+      "csrc/fused_mqa_topk/fp8_indexer.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_MQA_TOPK_SRC}"
       CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
     set_property(SOURCE ${FUSED_MQA_TOPK_SRC} APPEND PROPERTY INCLUDE_DIRECTORIES
       "${deepgemm_SOURCE_DIR}/deep_gemm/include"
       "${deepgemm_SOURCE_DIR}/third-party/cutlass/include")
+    # The NVVM rematerialization of nvcc 12.9 to 13.4 hurts the FP8 producer's
+    # scan loops: they spill for sm_100f and sm_103a on 12.9 to 13.1, and they
+    # are up to 39% longer for every SM100 target on 13.2 (3-5% on 13.4).
+    # Without that pass they are spill-free and short (nvcc >= 13.1 rejects the
+    # pass's older name, -disable-nvvm-remat).
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_LESS 13.5)
+      set_property(SOURCE "csrc/fused_mqa_topk/fp8_indexer.cu" APPEND PROPERTY
+        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-Xcicc;-disable-new-nvvm-remat>")
+    endif()
     list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_MQA_TOPK_SRC}")
     message(STATUS
       "Building fused MQA top-k for archs: ${FUSED_MQA_TOPK_ARCHS}")

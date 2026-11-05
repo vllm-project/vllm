@@ -399,7 +399,11 @@ def sparse_attn_indexer_kpool(
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
                 topk_dst.fill_(-1)
             elif fused_mqa_topk and fused_mqa_topk_chunk(
-                chunk.max_seqlen_k, k_quant.shape[0], select_k, num_rows, dense_rows
+                chunk.max_seqlen_k,
+                k_quant.shape[0],
+                select_k,
+                num_rows,
+                heads=q_slice.shape[1],
             ):
                 fused_mqa_topk_prefill(
                     q_slice,
