@@ -19,6 +19,7 @@ import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
+from vllm.v1.attention.ops.dcp import _V_UP_PROJ_FIRST_MIN_TOKENS
 
 mp.set_start_method("spawn", force=True)
 
@@ -27,6 +28,7 @@ class _FakeCPGroup:
     def __init__(self, world_size: int, device_group: dist.ProcessGroup):
         self.world_size = world_size
         self.device_group = device_group
+        self.rank_in_group = dist.get_rank(device_group)
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
@@ -621,7 +623,7 @@ def _distributed_v_up_proj_a2a_worker(env: dict[str, str]) -> None:
         dtype = _dtype_from_name(env["TEST_DTYPE"])
         device = torch.device(f"cuda:{local_rank}")
         rank = dist.get_rank()
-        B, h_per_rank, L, V = 7, 2, 64, 32
+        B, h_per_rank, L, V = int(env["TEST_NUM_TOKENS"]), 2, 64, 32
         H = world_size * h_per_rank
         cp_group = _FakeCPGroup(world_size, dist.group.WORLD)
 
@@ -671,11 +673,17 @@ def _distributed_v_up_proj_a2a_worker(env: dict[str, str]) -> None:
     torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
 )
 @pytest.mark.parametrize("dtype_name", ["bfloat16", "float32"])
-def test_distributed_v_up_proj_a2a_matches_combine_then_v_up_proj(dtype_name: str):
+@pytest.mark.parametrize(
+    "num_tokens",
+    [_V_UP_PROJ_FIRST_MIN_TOKENS - 1, _V_UP_PROJ_FIRST_MIN_TOKENS],
+)
+def test_distributed_v_up_proj_a2a_matches_combine_then_v_up_proj(
+    dtype_name: str, num_tokens: int
+):
     _distributed_run(
         _distributed_v_up_proj_a2a_worker,
         world_size=2,
-        extra_env={"TEST_DTYPE": dtype_name},
+        extra_env={"TEST_DTYPE": dtype_name, "TEST_NUM_TOKENS": str(num_tokens)},
     )
 
 

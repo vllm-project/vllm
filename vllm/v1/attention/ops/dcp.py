@@ -1014,6 +1014,11 @@ def dcp_a2a_lse_reduce(
     )
 
 
+# Below this many tokens, reading every head's W_UV costs more than the smaller
+# All-to-All saves (measured on MI355X, DCP8).
+_V_UP_PROJ_FIRST_MIN_TOKENS = 8
+
+
 def dcp_a2a_v_up_proj_lse_reduce(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
@@ -1024,11 +1029,13 @@ def dcp_a2a_v_up_proj_lse_reduce(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> None:
-    """Up-project partial MLA outputs by W_UV, then combine them with All-to-All.
+    """Combine partial MLA outputs with All-to-All and up-project them by W_UV.
 
     The LSE merge is a per-head weighted sum and W_UV is linear per head, so
-    this matches ``dcp_a2a_lse_reduce`` followed by the up-projection up to
-    rounding, while the All-to-All carries V instead of L values per head.
+    up-projecting first matches ``dcp_a2a_lse_reduce`` followed by the
+    up-projection up to rounding, while the All-to-All carries V instead of L
+    values per head. Below ``_V_UP_PROJ_FIRST_MIN_TOKENS`` tokens it merges
+    first and projects only this rank's heads instead.
 
     Args:
         cp_attn_out: [B, H, L] partial latent outputs, H = total heads
@@ -1043,6 +1050,24 @@ def dcp_a2a_v_up_proj_lse_reduce(
     """
     B, H, _ = cp_attn_out.shape
     V = w_uv.shape[-1]
+    if B < _V_UP_PROJ_FIRST_MIN_TOKENS:
+        H_per_rank = H // cp_group.world_size
+        rank = cp_group.rank_in_group
+        latent = dcp_a2a_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            cp_group,
+            is_lse_base_on_e=is_lse_base_on_e,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+        assert isinstance(latent, torch.Tensor)
+        torch.bmm(
+            latent.transpose(0, 1),
+            w_uv[rank * H_per_rank : (rank + 1) * H_per_rank],
+            out=out.view(B, H_per_rank, V).transpose(0, 1),
+        )
+        return
     v = cp_attn_out.new_empty((B, H, V))
     # (H, B, L) x (H, L, V) -> (H, B, V) written transposed into (B, H, V)
     torch.bmm(cp_attn_out.transpose(0, 1), w_uv, out=v.transpose(0, 1))
