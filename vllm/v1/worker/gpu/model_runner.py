@@ -174,11 +174,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
-from vllm.v1.worker.gpu.spec_decode.round_runner import (
-    SpecRound,
-    is_chain,
-    spec_kernel_layers,
-)
+from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
@@ -1705,11 +1701,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is not None:
-            if not is_chain(input_batch.verify_plan):
-                raise NotImplementedError(
-                    "verify plans that are not chains do not support context "
-                    "parallelism yet"
-                )
             return self.pcp_manager.prepare_attn(input_batch)
 
         # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
