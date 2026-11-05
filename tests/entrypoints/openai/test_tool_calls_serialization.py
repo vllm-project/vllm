@@ -151,6 +151,31 @@ def test_responses_result_can_use_stored_prior_call():
     )
 
 
+def test_responses_chat_messages_match_tool_results():
+    validate_responses_tool_call_ids(
+        input_items=[
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_chat"}],
+            },
+            {"role": "tool", "tool_call_id": "call_chat"},
+        ]
+    )
+
+
+def test_responses_chat_messages_reject_orphan_tool_result():
+    with pytest.raises(VLLMValidationError, match="tool_call_id"):
+        validate_responses_tool_call_ids(
+            input_items=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "call_chat"}],
+                },
+                {"role": "tool", "tool_call_id": "call_unknown"},
+            ]
+        )
+
+
 @pytest.mark.asyncio
 async def test_chat_renderer_rejects_orphan_result_before_preprocessing():
     renderer = OnlineRenderer.__new__(OnlineRenderer)

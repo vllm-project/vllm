@@ -696,14 +696,14 @@ class AnthropicServingMessages(OpenAIServingChat):
             if isinstance(message.content, str):
                 continue
             for block in message.content:
-                if block.type == "tool_use":
+                if message.role == "assistant" and block.type == "tool_use":
                     messages.append(
                         {
                             "role": "assistant",
                             "tool_calls": [{"id": block.id}],
                         }
                     )
-                elif block.type == "tool_result":
+                elif message.role == "user" and block.type == "tool_result":
                     messages.append(
                         {
                             "role": "tool",

@@ -2113,6 +2113,24 @@ async def test_messages_accepts_matching_tool_results_across_turns():
 
 
 @pytest.mark.asyncio
+async def test_messages_treats_assistant_tool_result_as_text():
+    handler, create_chat_completion = _messages_validation_handler()
+    result = await handler.create_messages(
+        _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_result", "tool_use_id": "not_a_call"}],
+                }
+            ]
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    create_chat_completion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_count_tokens_rejects_orphan_tool_use_id():
     handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
     result = await handler.count_tokens(
