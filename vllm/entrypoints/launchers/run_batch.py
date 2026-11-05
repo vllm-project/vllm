@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import json
 import os
 import shutil
 import stat
@@ -26,7 +25,7 @@ from prometheus_client import start_http_server
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
-from starlette.responses import JSONResponse
+from starlette.responses import Response, StreamingResponse
 from tqdm import tqdm
 from urllib3.util import parse_url
 
@@ -637,9 +636,13 @@ async def run_request(
     except Exception as e:
         response = create_error_response(e)
 
-    if isinstance(response, JSONResponse):
+    if (
+        isinstance(response, Response)
+        and not isinstance(response, StreamingResponse)
+        and response.media_type == "application/json"
+    ):
         with contextlib.suppress(pydantic.ValidationError):
-            response = _ALL_RESPONSE_ADAPTER.validate_python(json.loads(response.body))
+            response = _ALL_RESPONSE_ADAPTER.validate_json(response.body)
 
     if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(

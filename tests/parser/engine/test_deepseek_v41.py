@@ -27,7 +27,7 @@ CALLS = (
 
 
 def tokenizer_for(text, special_calls):
-    vocab = {"<think>": 50, "</think>": 51}
+    vocab = {"<think>": 50, "</think>": 51, "<｜User｜>": 54, "<｜Assistant｜>": 55}
     if special_calls:
         vocab |= {"<｜DSML｜ calls>": 52, "</｜DSML｜ calls>": 53}
     tokens: list[tuple[int, str]] = []
@@ -130,6 +130,54 @@ def test_reasoning_adapter_controls_and_usage(
     )
     assert parser.is_reasoning_end([50, 100, 51])
     assert not parser.is_reasoning_end([51, 100, 50])
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    ("prompt_token_ids", "text", "expected_reasoning", "expected_content"),
+    [
+        # continue_final_message: the current turn already closed reasoning.
+        ([54, 100, 55, 50, 101, 51, 102], "12", "", "12"),
+        # A closed block in an earlier turn does not end this turn's reasoning.
+        (
+            [54, 100, 55, 50, 101, 51, 102, 54, 103, 55, 50],
+            "Plan.</think>12",
+            "Plan.",
+            "12",
+        ),
+    ],
+)
+def test_prompt_closed_reasoning_is_scoped_to_current_turn(
+    streaming,
+    prompt_token_ids,
+    text,
+    expected_reasoning,
+    expected_content,
+):
+    tokenizer, tokens = tokenizer_for(text, False)
+    parser = parser_for(tokenizer, {"thinking": True})
+    output_ids = [tid for tid, _ in tokens]
+    if streaming:
+        output = collect_output(
+            replay_streaming(
+                parser,
+                tokens,
+                chunk_size=1,
+                finished_on_last=True,
+                prompt_token_ids=prompt_token_ids,
+            )
+        )
+        reasoning, content = output.reasoning, output.content
+    else:
+        parser.set_prompt_token_ids(prompt_token_ids)
+        reasoning, content, _ = parser.parse(
+            text, _test_request(), model_output_token_ids=output_ids
+        )
+    assert (reasoning or "") == expected_reasoning
+    assert content == expected_content
+    assert (parser.reasoning_parser.count_reasoning_tokens(output_ids) == 0) == (
+        not expected_reasoning
+    )
 
 
 def test_python_argument_conversion_and_partial_values():
