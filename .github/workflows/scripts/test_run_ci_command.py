@@ -15,6 +15,8 @@ from run_ci_command import (
     COMMAND_CANCEL_CI,
     COMMAND_RETRY_AMD_FAILED,
     COMMAND_RETRY_FAILED,
+    COMMAND_ROCM_CACHE,
+    COMMAND_ROCM_NOCACHE,
     COMMAND_RUN_AMD_CI,
     COMMAND_RUN_AMD_CI_ALL,
     COMMAND_RUN_AMD_CI_NIGHTLY,
@@ -22,6 +24,7 @@ from run_ci_command import (
     COMMAND_RUN_CI_ALL,
     COMMAND_RUN_CI_NIGHTLY,
     RETRY_STATES,
+    ROCM_CACHE_MARKER,
     RUN_CI_COMMAND_ENV,
     ApiError,
     BuildkiteClient,
@@ -90,8 +93,12 @@ class FakeGitHub:
         pulls_for_commit: list[dict[str, Any]] | None = None,
         prs: dict[int, dict[str, Any]] | None = None,
         behind: int = 0,
+        files: list[str] | None = None,
     ) -> None:
         self.comments = comments or []
+        self.files = files or []
+        # (path, ref) -> blob; main and the PR head share every blob by default.
+        self.file_shas: dict[tuple[str, str], str] = {}
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -142,6 +149,12 @@ class FakeGitHub:
 
     def add_comment(self, issue_number: int, body: str) -> None:
         self.comments.append(body)
+
+    def list_pr_files(self, number: int) -> list[str]:
+        return self.files
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        return self.file_shas.get((path, ref), "blob")
 
 
 class FakeBranchUpdater:
@@ -1618,6 +1631,104 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("state%5B%5D=failed", transport.calls[0]["url"])
         self.assertIn("include_retried_jobs=false", transport.calls[0]["url"])
         self.assertEqual(transport.calls[1]["url"], next_url)
+
+
+STACK_PR_FILES = ["docker/Dockerfile.rocm_base"]
+STACK_IMAGES = {"rocm-rocm-stack": "s@d1", "rocm-rocm-stack-wheels": "w@d2"}
+
+
+def ci_build(**overrides: Any) -> dict[str, Any]:
+    return {
+        "created_at": "1",
+        "meta_data": STACK_IMAGES,
+        "pull_request": {"id": 42},
+        "web_url": "https://buildkite.example/ci/builds/2",
+        **overrides,
+    }
+
+
+class RocmCacheTest(unittest.TestCase):
+    def comment(
+        self,
+        github: FakeGitHub,
+        command: str = COMMAND_ROCM_CACHE,
+        ci_builds: list[dict[str, Any]] | None = None,
+        actor: str = "reviewer",
+    ) -> FakeBuildkite:
+        amd = FakeBuildkite([[]])
+        ci = FakeBuildkite([ci_builds or []])
+        run(make_event(command, actor), github, amd, ci_buildkite=ci)
+        return amd
+
+    def test_commands_are_rocm_ci_commands_on_amd_ci(self) -> None:
+        for command in (COMMAND_ROCM_CACHE, COMMAND_ROCM_NOCACHE):
+            self.assertEqual(parse_command(command), command)
+            self.assertEqual(pipeline_for_command(command), "amd-ci")
+
+    def test_cache_copies_the_images_this_prs_ci_recorded(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+        builds = [
+            ci_build(meta_data={key: "old" for key in STACK_IMAGES}, created_at="0"),
+            ci_build(),
+            ci_build(created_at="2", pull_request={"id": 7}),  # another PR
+            ci_build(created_at="3", meta_data={"rocm-rocm-stack": "s"}),  # partial
+        ]
+
+        amd = self.comment(github, ci_builds=builds)
+
+        (build,) = amd.created_builds
+        self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
+        self.assertEqual(
+            build["env"],
+            {
+                "ROCM_PROMOTE_PR": "42",
+                "ROCM_PROMOTE_SHA": "0123456789abcdef",
+                "ROCM_PROMOTE_IMAGES": "w@d2 s@d1",
+            },
+        )
+        self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
+        self.assertIn("ci/builds/2", github.comments[0])
+
+    def test_nocache_records_the_decision_without_a_build(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        amd = self.comment(github, COMMAND_ROCM_NOCACHE)
+
+        self.assertEqual(amd.created_builds, [])
+        self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
+        self.assertIn("@reviewer chose not to cache", github.comments[0])
+
+    def test_refusals_leave_the_gate_failing(self) -> None:
+        other_recipe = FakeGitHub(files=STACK_PR_FILES)
+        other_recipe.file_shas = {("docker/docker-bake-rocm.hcl", "main"): "newer"}
+        # The author, with CI delegated to them by an approval.
+        author = FakeGitHub(
+            files=STACK_PR_FILES,
+            permissions={"author": "read"},
+            review_decision="APPROVED",
+            reviews=[{"user": {"login": "reviewer"}, "state": "APPROVED"}],
+        )
+        cases = [
+            (other_recipe, [ci_build()], "reviewer", "differs from main's"),
+            (FakeGitHub(files=STACK_PR_FILES), [], "reviewer", "hasn't built"),
+            (author, [ci_build()], "author", "Only maintainers with write access"),
+        ]
+        for github, builds, actor, text in cases:
+            with self.subTest(text=text):
+                amd = self.comment(github, ci_builds=builds, actor=actor)
+
+                self.assertEqual(amd.created_builds, [])
+                self.assertIn(text, github.comments[0])
+                self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
+
+    def test_prs_that_keep_the_base_image_have_nothing_to_do(self) -> None:
+        github = FakeGitHub(files=["vllm/foo.py"])
+
+        amd = self.comment(github)
+
+        self.assertEqual(amd.created_builds, [])
+        self.assertIn("nothing to do", github.comments[0])
+        self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
 
 if __name__ == "__main__":
