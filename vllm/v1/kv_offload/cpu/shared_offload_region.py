@@ -139,7 +139,6 @@ class SharedOffloadRegion:
             for i, row in enumerate(range(0, max(num_chunks, 1), rows))
         ]
         self._mmap_identities: dict[str, tuple[int, int]] = {}
-        self._mmap_identity: tuple[int, int] | None = None
         self.rank = rank
         self.fd: int | None = None
         self.mmap_obj: mmap.mmap | None = None
@@ -175,7 +174,6 @@ class SharedOffloadRegion:
                 created_path = True
                 stat = os.fstat(self.fd)
                 self._mmap_identities[self.mmap_path] = (stat.st_dev, stat.st_ino)
-                self._mmap_identity = self._mmap_identities[self.mmap_path]
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(
@@ -201,7 +199,6 @@ class SharedOffloadRegion:
             for path, _, _ in self._segments:
                 stat = os.stat(path)
                 self._mmap_identities[path] = (stat.st_dev, stat.st_ino)
-            self._mmap_identity = self._mmap_identities[self.mmap_path]
 
             single = len(self._segments) == 1
             self.mmap_obj = mmap.mmap(
