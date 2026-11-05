@@ -30,6 +30,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_token_sequences
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -55,34 +56,6 @@ def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     for i in range(len(haystack) - n, -1, -1):
         if haystack[i] == first and _match_at(haystack, i, needle):
             return i
-    return -1
-
-
-def _newest_marker_kind(
-    haystack: Sequence[int], markers: Sequence[Sequence[int]]
-) -> int:
-    """Report which of *markers* occurs last in *haystack*, as its index into
-    *markers*, or -1 when none occur.
-
-    Single backward pass that stops at the first hit instead of one scan per
-    marker. Several markers may share a first token, so candidates under one
-    first token are all tried before moving on.
-    """
-    first_tokens: dict[int, list[int]] = {}
-    for kind, marker in enumerate(markers):
-        if marker:
-            first_tokens.setdefault(marker[0], []).append(kind)
-    if not first_tokens:
-        return -1
-    min_len = min(len(m) for m in markers if m)
-    for i in range(len(haystack) - min_len, -1, -1):
-        kinds = first_tokens.get(haystack[i])
-        if kinds is None:
-            continue
-        for kind in kinds:
-            marker = markers[kind]
-            if i + len(marker) <= len(haystack) and _match_at(haystack, i, marker):
-                return kind
     return -1
 
 
@@ -185,10 +158,10 @@ class KimiK3ReasoningParser(ReasoningParser):
         # Single backward pass: reasoning ends iff the newest marker is the
         # think close or the response opener (kind 0 is the think open).
         return (
-            _newest_marker_kind(
+            rfind_token_sequences(
                 input_ids,
                 (self._think_open_ids, self._think_close_ids, self._response_open_ids),
-            )
+            )[1]
             > 0
         )
 
@@ -224,10 +197,10 @@ class KimiK3ReasoningParser(ReasoningParser):
         # Same end rule as is_reasoning_end, on the step window: a response
         # opener with no newer think marker ends reasoning (#57714).
         return (
-            _newest_marker_kind(
+            rfind_token_sequences(
                 window,
                 (self._think_open_ids, self._think_close_ids, self._response_open_ids),
-            )
+            )[1]
             > 0
         )
 
@@ -247,6 +220,43 @@ class KimiK3ReasoningParser(ReasoningParser):
         if cached_delta_ids == tuple(input_ids) and cached_content_ids is not None:
             return cached_content_ids
         return self._extract_content_ids(input_ids)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if not self._thinking_enabled:
+            return 0
+        think_open = self._think_open_ids
+        think_close = self._think_close_ids
+        response_open = self._response_open_ids
+        first_ids = {m[0] for m in (think_open, think_close, response_open) if m}
+        n = len(token_ids)
+        count = 0
+        in_reasoning = True
+        seen_open = False
+        i = 0
+        while i < n:
+            head = token_ids[i]
+            if head in first_ids:
+                if i + len(think_open) <= n and _match_at(token_ids, i, think_open):
+                    in_reasoning = True
+                    seen_open = True
+                    i += len(think_open)
+                    continue
+                if i + len(think_close) <= n and _match_at(token_ids, i, think_close):
+                    in_reasoning = False
+                    i += len(think_close)
+                    continue
+                if (
+                    not seen_open
+                    and i + len(response_open) <= n
+                    and _match_at(token_ids, i, response_open)
+                ):
+                    in_reasoning = False
+                    i += len(response_open)
+                    continue
+            if in_reasoning:
+                count += 1
+            i += 1
+        return count
 
     def _strip_content_wrapper(self, text: str) -> str:
         """Strip ``<|open|>response<|sep|>…<|close|>response<|sep|>`` wrapper and

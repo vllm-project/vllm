@@ -63,8 +63,20 @@ def _fused_post_conv_kernel(
 
     HK: tl.constexpr = H * K
 
-    offs_t = i_tb * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
-    mask_t = offs_t < L
+    # Move every pointer to the block's first token in int64, so that
+    # token * stride does not overflow int32 for large batches.
+    t_start = i_tb.to(tl.int64) * BLOCK_T
+    mixed_qkv_ptr += t_start * stride_x_tok
+    a_ptr += t_start * stride_a_tok
+    b_ptr += t_start * stride_b_tok
+    q_ptr += t_start * stride_q_tok
+    k_ptr += t_start * stride_k_tok
+    v_ptr += t_start * stride_v_tok
+    g_ptr += t_start * HV
+    beta_ptr += t_start * HV
+
+    offs_t = tl.arange(0, BLOCK_T)  # [BLOCK_T], relative to t_start
+    mask_t = t_start + offs_t < L
 
     if i_head < H:
         # ============ Q/K head processing ============

@@ -50,7 +50,7 @@ def unpack_tensor(
     unpacked_tensors = packed_tensor.split(tensor_sizes)
 
     return [
-        (name, tensor.contiguous().view(dtype).view(*shape))
+        (name, tensor.contiguous().view(dtype).view(shape))
         for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
     ]
 
@@ -105,7 +105,7 @@ def pack_tensors(
 
         name, orig_tensor = item
         # Apply post processing and convert to linearized uint8 tensor
-        tensor = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
+        tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
 
         if tensor.numel() > buffer_size_bytes:
             import warnings
@@ -227,13 +227,46 @@ def packed_nccl_broadcast_consumer(
         [] for _ in range(num_buffers)
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
-    packed_tensors: list[torch.Tensor] = [
-        torch.empty(0, dtype=torch.uint8, device=device) for _ in range(num_buffers)
-    ]
+    caller_stream = torch.accelerator.current_stream()
+    prev_received: torch.Event | None = None
+    slot_done: list[torch.Event | None] = [None] * num_buffers
+
+    def receive_and_load(buffer_idx: int) -> None:
+        nonlocal prev_received
+        packed = torch.empty(
+            packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device=device
+        )
+        group.broadcast(packed, src=src)
+
+        # post_unpack_func may keep the unpacked views and read them from a later
+        # pack's callback, on another slot stream. Chaining the ready events
+        # orders every callback after all earlier receives, and record_stream
+        # keeps the allocator from reissuing this buffer once it is freed while
+        # the broadcast or such a read is still pending.
+        if prev_received is not None:
+            streams[buffer_idx].wait_event(prev_received)
+        prev_received = torch.Event()
+        prev_received.record(streams[buffer_idx])
+        for stream in (*streams, caller_stream):
+            packed.record_stream(stream)
+
+        names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
+        post_unpack_func(
+            unpack_tensor(
+                packed, list(names), list(shapes), list(dtypes), list(tensor_sizes)
+            )
+        )
+        event = torch.Event()
+        event.record(streams[buffer_idx])
+        slot_done[buffer_idx] = event
 
     while True:
-        # Synchronize the current stream
-        streams[buffer_idx].synchronize()
+        # Wait for this slot's previous pack. Not streams[buffer_idx].synchronize():
+        # on ROCm, streams can share a hardware queue, and synchronizing one
+        # stream then also waits for work queued later on the others.
+        done = slot_done[buffer_idx]
+        if done is not None:
+            done.synchronize()
         with torch.cuda.stream(streams[buffer_idx]):
             # Initialize the packing tensor meta data
             packing_tensor_meta_data[buffer_idx] = []
@@ -249,49 +282,13 @@ def packed_nccl_broadcast_consumer(
                     packing_tensor_sizes[buffer_idx] += tensor_size
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
                         break
-                # Create a packed tensor and broadcast it
-                packed_tensors[buffer_idx] = torch.empty(
-                    packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device=device
-                )
-                group.broadcast(packed_tensors[buffer_idx], src=src)
-                # Load the packed tensor into the model
-                names, shapes, dtypes, tensor_sizes = zip(
-                    *packing_tensor_meta_data[buffer_idx]
-                )
-                post_unpack_func(
-                    unpack_tensor(
-                        packed_tensors[buffer_idx],
-                        list(names),
-                        list(shapes),
-                        list(dtypes),
-                        list(tensor_sizes),
-                    )
-                )
+                receive_and_load(buffer_idx)
                 # Move to the next buffer
                 buffer_idx = (buffer_idx + 1) % num_buffers
             except StopIteration:
                 # Do the last broadcast if there are remaining tensors
                 if len(packing_tensor_meta_data[buffer_idx]) > 0:
-                    # Create a packed tensor and broadcast it
-                    packed_tensors[buffer_idx] = torch.empty(
-                        packing_tensor_sizes[buffer_idx],
-                        dtype=torch.uint8,
-                        device=device,
-                    )
-                    group.broadcast(packed_tensors[buffer_idx], src=src)
-                    # Load the packed tensor into the model
-                    names, shapes, dtypes, tensor_sizes = zip(
-                        *packing_tensor_meta_data[buffer_idx]
-                    )
-                    post_unpack_func(
-                        unpack_tensor(
-                            packed_tensors[buffer_idx],
-                            list(names),
-                            list(shapes),
-                            list(dtypes),
-                            list(tensor_sizes),
-                        )
-                    )
+                    receive_and_load(buffer_idx)
                 break
 
     # Drain every slot before returning.
@@ -350,7 +347,7 @@ def packed_ipc_producer(
 
     for name, orig_tensor in iterator:
         flat = (
-            post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
+            post_iter_func((name, orig_tensor)).contiguous().view(-1).view(torch.uint8)
         )
 
         if flat.numel() > buffer_size_bytes:
@@ -362,7 +359,7 @@ def packed_ipc_producer(
 
         if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
             # Drain queued copies so the consumer sees a fully-written buffer.
-            torch.cuda.current_stream().synchronize()
+            torch.accelerator.current_stream().synchronize()
             yield PackedIpcChunk(
                 names=names,
                 shapes=shapes,
@@ -383,7 +380,7 @@ def packed_ipc_producer(
         total_bytes += flat.numel()
 
     if total_bytes:
-        torch.cuda.current_stream().synchronize()
+        torch.accelerator.current_stream().synchronize()
         yield PackedIpcChunk(
             names=names,
             shapes=shapes,

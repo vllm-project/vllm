@@ -15,11 +15,13 @@ from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
     MAX_TOKENS,
-    MODEL_NAME,
     TEMP_GREEDY,
     prompts,
     setup_fake_entrypoint,
 )
+
+# The Rust frontend needs a tokenizer.json, which facebook/opt-125m lacks.
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def _server_with_logitproc_entrypoint(
@@ -79,6 +81,9 @@ def server(default_server_args, request, monkeypatch):
     """
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    # These tests exercise the V1-interface logits processor; Model Runner V2
+    # rejects V1-interface processors at load time by design.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
     if request.param:
         # Launch server, append FQCN argument, inject dummy logitproc module

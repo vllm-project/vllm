@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.config.pooler import SequencePoolingType, TokenPoolingType
@@ -414,6 +414,9 @@ class RerankModelInfo(ModelInfo):
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
+    pixel_factor: int = 0
+    extra_kwargs: dict | None = None
+    image_token_id: int | None = None
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
@@ -446,12 +449,12 @@ def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
 
 
 def dummy_hf_overrides(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     *,
     model_arch: str = "",
     exist_overrides: dict[str, Any] | None = None,
     use_original_num_layers: bool = False,
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     """Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
     """
@@ -561,6 +564,13 @@ def dummy_hf_overrides(
     if indexer_types := getattr(text_config, "indexer_types", None):
         text_config.update({"indexer_types": indexer_types[:num_hidden_layers]})
 
+    if (
+        sparse := getattr(hf_config, "sparse_attention_config", None)
+    ) and "sparse_attention_freq" in sparse:
+        sparse["sparse_attention_freq"] = sparse["sparse_attention_freq"][
+            :num_hidden_layers
+        ]
+
     # Update n_layers and moe configs for Moondream3 model
     if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
         text_config.update(
@@ -580,6 +590,9 @@ def dummy_hf_overrides(
                 "num_hidden_layers": 1,
             }
         )
+
+        if model_arch == "Step5ForConditionalGeneration":
+            vision_config.update({"layers": 1})
 
         # Keep per-layer metadata consistent with the reduced layer count.
         if layer_types := getattr(vision_config, "layer_types", None):
@@ -609,17 +622,3 @@ def dummy_hf_overrides(
         )
 
     return hf_config
-
-
-def check_transformers_version(
-    model: str,
-    min_transformers_version: str | None = None,
-    max_transformers_version: str | None = None,
-):
-    from .registry import _HfExamplesInfo
-
-    return _HfExamplesInfo(
-        model,
-        min_transformers_version=min_transformers_version,
-        max_transformers_version=max_transformers_version,
-    ).check_transformers_version(on_fail="skip")
