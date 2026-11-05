@@ -372,6 +372,7 @@ _CHAIN = SpecCapabilities.from_limits(
         (_TreeConfig(), _TREE, "declared", []),
         (_speculative_config().speculator_config, _CHAIN, "declared", []),
         (_TreeConfig(max_branching=2), _CHAIN, "plan_kind 'tree' is above", []),
+        (_TreeConfig(max_branching=3), _TREE, "max_branching 3 is above", []),
         # Dropping the widest graph verifies fewer rows, and says so.
         (
             _TreeConfig(max_branching=1, capture_rows=(1,)),
@@ -391,6 +392,7 @@ _CHAIN = SpecCapabilities.from_limits(
         "tree-kept",
         "chain-kept",
         "bad-kind",
+        "bad-branching",
         "narrowed",
         "bad-rows",
     ],

@@ -231,6 +231,11 @@ def validate_effective_resources(
             f"plan_kind {effective.plan_kind!r} is above the declared "
             f"{declared.plan_kind!r} or the model's {caps.plan_kind!r}"
         )
+    if effective.max_branching > declared.max_branching:
+        problems.append(
+            f"max_branching {effective.max_branching} is above the declared "
+            f"{declared.max_branching}"
+        )
     extra_rows = set(effective.capture_rows) - set(declared.capture_rows)
     if extra_rows:
         problems.append(f"capture_rows {sorted(extra_rows)} not declared")

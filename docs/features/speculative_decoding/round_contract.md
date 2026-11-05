@@ -75,7 +75,8 @@ the model verifies the lowest plan kind of any layer on any rank.
 
 The engine core calls `SpeculatorConfig.adapt_resources(declared, caps) ->
 SpecResources` with the reduced capabilities. The result may only take less than
-`declared`, and its plan kind must be one the model verifies
+`declared` (no larger `max_branching`, no undeclared `capture_rows`), and its plan
+kind must be one the model verifies
 (`validate_effective_resources` in `capabilities.py`). By default, a speculator
 that branches runs as a chain of the same length.
 
