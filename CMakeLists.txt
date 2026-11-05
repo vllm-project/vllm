@@ -1357,11 +1357,28 @@ endif()
 # _moe_C_stable_libtorch extension
 #
 
+#
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt.cu"
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1521,6 +1538,35 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+
+  # The kernel is specialized on the wavefront size, but ROCm only exposes that
+  # value at runtime, so both arms are instantiated unless the build says which
+  # one the targeted archs can select (gfx9xx is wave64, every other supported
+  # arch is wave32 - that is what Utils::get_warp_size() returns). Keep the
+  # ^gfx9 predicate below in sync with the __GFX9__ branch of
+  # Utils::get_warp_size() in csrc/core/cuda_compat.h.
+  set(TOPK_WAVE_ONLY_DEFINE "")
+  set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
+  set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
+  if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave64 only (gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave32 only (non-gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  else()
+    message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # Set on the whole extension rather than per source: the dispatch unit also
+    # sees the launcher template body, and one definition for the target keeps
+    # every unit consistent (the dispatch does not instantiate it, see the
+    # extern declarations in the header).
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      ${TOPK_WAVE_ONLY_DEFINE})
+  endif()
 endif()
 
 # On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
@@ -1546,6 +1592,19 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The int4 skinny GEMM is instantiated one unit per N_in (a template over
+  # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
+  # build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
+  # with extern template keeping the device code in the five units.
+  set(VLLM_SKINNY_INT4_SRC
+    "csrc/rocm/skinny_gemms_int4_api.cu"
+    "csrc/rocm/skinny_gemms_int4_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_n5.cu")
+
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
   # single file serialized ~10 min of device code generation onto one core. The
@@ -1637,7 +1696,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/skinny_gemms_int4.cu"
+    ${VLLM_SKINNY_INT4_SRC}
     "csrc/rocm/attention_dispatch.cu"
     ${VLLM_ATTENTION_PAGED_ATTN_SRC})
 
@@ -1655,14 +1714,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
   list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_INT4_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
     set(VLLM_SKINNY_SRC
       "csrc/rocm/skinny_gemms.cu"
-      "csrc/rocm/skinny_gemms_int4.cu")
+      ${VLLM_SKINNY_INT4_SRC})
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
