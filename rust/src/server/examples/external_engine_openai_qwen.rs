@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         max_logprobs: None,
         stream_interval: NonZeroU32::MIN,
         api_server_options: ApiServerOptions::default(),
+        fingerprint_mode: Default::default(),
         cors: CorsConfig::default(),
         access_log: AccessLogConfig::default(),
         tls: None,
