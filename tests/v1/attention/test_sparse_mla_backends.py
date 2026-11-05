@@ -1396,6 +1396,10 @@ def test_triton_convert_rejects_req_id_longer_than_token_indices():
     torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(90),
+    reason="Native small-head FlashMLA kernels require SM90",
+)
 @pytest.mark.parametrize("query_waves", [1, 3])
 @pytest.mark.parametrize("actual_num_heads", [4, 8, 16, 32, 64, 128])
 @pytest.mark.parametrize("head_size", [512, 576])
