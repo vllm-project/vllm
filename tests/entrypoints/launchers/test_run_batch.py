@@ -12,10 +12,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import StreamingResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -662,23 +663,30 @@ async def test_batch_embedding_json_responses(response_factory):
 
 @pytest.mark.asyncio
 async def test_batch_embedding_json_body_is_written_as_is():
-    # Parsing this body back into EmbeddingResponse would add the usage
-    # defaults and rewrite 1e-06 as 1e-6.
-    body = (
-        b'{"id":"embd-test","object":"list","created":0,"model":"m",'
-        b'"data":[{"index":0,"object":"embedding","embedding":[1e-06]}],'
-        b'"usage":{"prompt_tokens":3,"total_tokens":3}}'
-    )
+    # Built the way EmbeddingServing builds it for encoding_format=float.
+    item = EmbeddingResponseData(index=0, embedding=[]).model_dump()
+    item["embedding"] = np.array([7.177709e-6, -0.5], dtype=np.float32)
+    body = EmbeddingResponse(
+        id="embd-test",
+        model=EMBEDDING_MODEL_NAME,
+        data=[],
+        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+    ).model_dump()
+    body["data"] = [item]
+    response = create_json_response(body)
 
     async def handler(request):
-        return Response(content=body, media_type="application/json")
+        return response
 
     request = run_batch_module.BatchRequestInput.model_validate_json(
         INPUT_EMBEDDING_BATCH.splitlines()[0]
     )
     result = await run_batch_module.run_request(handler, request)
 
-    assert body.decode() in result.to_json_line()
+    # orjson writes the float32 value as 0.000007177709. Parsing the body back
+    # and dumping it again would write 7.177709e-6. If this fails after a change
+    # to the embeddings response, update the "data"/"usage" check in run_request.
+    assert bytes(response.body).decode() in result.to_json_line()
 
 
 @pytest.mark.asyncio
