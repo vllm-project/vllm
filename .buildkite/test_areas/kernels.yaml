@@ -44,9 +44,6 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   - vllm/model_executor/layers/fused_qk_norm_rope.py
-  - vllm/model_executor/layers/rotary_embedding/
-  - vllm/model_executor/models/bailing_moe_v3.py
-  - tests/model_executor/test_bailing_mrope.py
   commands:
     - >-
       pytest -v -s
@@ -54,7 +51,6 @@ steps:
       --ignore=kernels/core/test_minimax_reduce_rms.py
       kernels/test_concat_mla_q.py
       kernels/test_fused_qk_norm_rope_gate.py
-      model_executor/test_bailing_mrope.py
   mirror:
     amd:
       label: ":amd: (MI300) Core Operation Kernels"

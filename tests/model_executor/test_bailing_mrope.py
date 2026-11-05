@@ -34,7 +34,7 @@ def test_bailing_mrope_selects_alternating_spatial_then_temporal():
             mrope_section=[2, 2, 2],
         )
 
-    positions = torch.tensor([[1, 2], [-3, 4], [5, -6]])
+    positions = torch.tensor([[-1, 2], [-3, 4], [5, -6]])
     frequencies = torch.arange(6).expand(8, -1)
     position_values = torch.arange(8).unsqueeze(1) * 10
     cos = position_values + frequencies
@@ -53,7 +53,7 @@ def test_bailing_mrope_selects_alternating_spatial_then_temporal():
         ]
     )
     torch.testing.assert_close(actual_cos, expected_cos)
-    signs = torch.tensor([[-1, 1, -1, 1, 1, 1], [1, -1, 1, -1, 1, 1]])
+    signs = torch.tensor([[-1, 1, -1, 1, -1, -1], [1, -1, 1, -1, 1, 1]])
     torch.testing.assert_close(actual_sin, (expected_cos + 100) * signs)
 
 

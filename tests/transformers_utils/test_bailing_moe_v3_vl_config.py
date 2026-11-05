@@ -99,16 +99,34 @@ def test_bailing_v3_vl_config_preserves_explicit_nested_values():
     assert config.text_config.rope_parameters["mrope_section"] == [8, 12, 12]
 
 
-def test_bailing_v3_vl_config_normalizes_config_instance():
-    text_config = BailingMoeV3TextConfig()
-
-    config = BailingMoeV3VLConfig(
-        text_config=text_config,
-        mrope_section=[8, 12, 12],
-    )
+@pytest.mark.parametrize(
+    ("top_sections", "text_sections"),
+    [([8, 12, 12], None), (None, [8, 12, 12])],
+    ids=["top-level", "inherited"],
+)
+def test_bailing_v3_vl_config_normalizes_config_instance(top_sections, text_sections):
+    text_config = BailingMoeV3TextConfig(mrope_section=text_sections)
+    config = BailingMoeV3VLConfig(text_config=text_config, mrope_section=top_sections)
 
     assert config.text_config is text_config
+    assert config.mrope_section == [8, 12, 12]
     assert text_config.rope_parameters["mrope_section"] == [8, 12, 12]
+
+
+@pytest.mark.parametrize("field", ["mrope_section", "rope_parameters", "rope_scaling"])
+def test_bailing_v3_vl_config_loads_nested_mrope_section(tmp_path: Path, field: str):
+    config_dict = _bailing_v3_vl_config()
+    sections = config_dict.pop("mrope_section")
+    config_dict["text_config"][field] = (
+        sections if field == "mrope_section" else {"mrope_section": sections}
+    )
+    model_path = tmp_path / "model"
+    _write_config(model_path, config_dict)
+
+    config = get_config(model_path, trust_remote_code=False)
+
+    assert config.mrope_section == sections
+    assert config.text_config.rope_parameters["mrope_section"] == sections
 
 
 def test_bailing_v3_text_config_trailing_and_legacy_layers():
@@ -147,13 +165,11 @@ def test_bailing_v3_vl_config_rejects_invalid_values():
             layer_types=["full_attention"] * 8,
         )
 
-    with pytest.raises(ValueError, match="conflicting M-RoPE sections"):
-        BailingMoeV3VLConfig(
-            text_config={
-                "rope_parameters": {
-                    "rope_type": "default",
-                    "mrope_section": [4, 14, 14],
-                }
-            },
-            mrope_section=[8, 12, 12],
-        )
+    for field in ("mrope_section", "rope_parameters", "rope_scaling"):
+        sections = [4, 14, 14]
+        value = sections if field == "mrope_section" else {"mrope_section": sections}
+        with pytest.raises(ValueError, match="conflicting M-RoPE sections"):
+            BailingMoeV3VLConfig(
+                text_config={field: value},
+                mrope_section=[8, 12, 12],
+            )
