@@ -131,6 +131,16 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # The shared RoPE kernels do not support the FoPE cos/sin cache layout.
+        return self.forward_native(positions, query, key, offsets)
+
     def forward_native(
         self,
         positions: torch.Tensor,
