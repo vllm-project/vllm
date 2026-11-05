@@ -553,7 +553,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Alpamayo2Super` | Alpamayo 2 Super (reasoning model) | T + I<sup>E+</sup> | `nvidia/Alpamayo2-Super` | | ✅︎ |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
-| `BailingMoeV3VLForConditionalGeneration` | Ling 3.0 Flash VL | T + I<sup>E+</sup> + V<sup>+</sup> | `inclusionAI/Ling-3.0-flash-VL` | | ✅︎ |
+| `BailingMoeV3VLForConditionalGeneration` | Ling 3.0 Flash VL, Ling 3.2 Flash | T + I<sup>E+</sup> + V<sup>+</sup> | `inclusionAI/Ling-3.0-flash-VL`, `inclusionAI/Ling-3.2-flash` | | ✅︎ |
 | `BeeForConditionalGeneration` | Bee-8B | T + I<sup>E+</sup> | `Open-Bee/Bee-8B-RL`, `Open-Bee/Bee-8B-SFT` | | ✅︎ |
 | `Blip2ForConditionalGeneration` | BLIP-2 | T + I<sup>E</sup> | `Salesforce/blip2-opt-2.7b`, `Salesforce/blip2-opt-6.7b`, etc. | ✅︎ | ✅︎ |
 | `Cohere2VisionForConditionalGeneration` | Command A Vision, Command-A+ | T + I<sup>+</sup> | `CohereLabs/command-a-vision-07-2025`, `CohereLabs/command-a-plus-05-2026`, etc. | | ✅︎ |
