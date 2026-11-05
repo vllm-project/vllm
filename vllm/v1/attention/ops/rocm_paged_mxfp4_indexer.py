@@ -289,6 +289,10 @@ def reserve_rocm_mxfp4_indexer_workspace(
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
 
+def _vllm_topk(rows: int, k: int) -> bool:
+    return rows < 128 and k < 2048
+
+
 def _topk(
     logits: torch.Tensor, lengths: torch.Tensor, out: torch.Tensor, k: int
 ) -> None:
@@ -301,7 +305,7 @@ def _topk(
     rows, width = logits.shape
     if rows == 0:
         return
-    if width >= k and (k >= 2048 or rows >= 128):
+    if width >= k and not _vllm_topk(rows, k):
         _aiter_topk()(
             logits,
             1,
@@ -447,6 +451,19 @@ def _layer(
         block=candidate_block_size,
         full_graph=forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL,
     )
+
+
+def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
+    lengths = layer.metadata.decode_row_lens
+    start = 0
+    if (
+        layer.metadata.decode is not None
+        and lengths is not None
+        and _vllm_topk(lengths.shape[0], layer.topk_tokens)
+    ):
+        start = lengths.shape[0]
+    if start < num_tokens:
+        layer.topk_buffer[start:num_tokens] = -1
 
 
 def _block_scores(layer: _Layer, scores: torch.Tensor | None) -> dict:
@@ -679,7 +696,7 @@ def rocm_mxfp4_sparse_attn_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    _fill_topk_rows(layer, hidden_states.shape[0])
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             _dense_prefill(layer, chunk, plan, candidate_write)
@@ -729,7 +746,7 @@ def rocm_mxfp4_sparse_mqa_indexer(
         candidate_block_size,
     )
     metadata = layer.metadata
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    _fill_topk_rows(layer, hidden_states.shape[0])
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             if not plan.use_gather:
