@@ -277,7 +277,7 @@ class SpecRound:
     def accept_result(
         self, sampler_output: "SamplerOutput", input_batch: "InputBatch"
     ) -> AcceptResult | None:
-        """The accepted path: the speculator's accept chose it, or the chain
+        """The accepted path: the tree sampler chose it, or the chain
         sampler's arange (a view of a constant buffer). None without drafts or
         without a speculator ``plan``."""
         if self.chain_path is None or input_batch.verify_plan is None:
