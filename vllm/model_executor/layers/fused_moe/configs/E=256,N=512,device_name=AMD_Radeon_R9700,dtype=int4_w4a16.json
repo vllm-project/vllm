@@ -70,6 +70,16 @@
         "waves_per_eu": 4,
         "SPLIT_K": 1
     },
+    "512": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 4,
+        "SPLIT_K": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 0
+    },
     "1024": {
         "BLOCK_SIZE_M": 64,
         "BLOCK_SIZE_N": 64,
