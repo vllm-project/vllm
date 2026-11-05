@@ -643,7 +643,8 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy(monkeypatch):
 
 
 @pytest.mark.parametrize("is_host_writer", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+# Restores are one batched driver copy (cuMemcpyBatchAsync), so they need a device.
+@pytest.mark.parametrize("device", ["cuda"])
 def test_hisparse_tail_restore_preserves_imported_rows(
     monkeypatch, request, is_host_writer, device
 ):
