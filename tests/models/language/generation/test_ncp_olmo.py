@@ -39,6 +39,7 @@ def ncp_runner_environment(monkeypatch):
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0")
 
 
 @pytest.fixture(scope="module")
@@ -261,16 +262,19 @@ def test_chunked_prefill_preemption_and_refill_match_sequential(
     assert preemptions_after > preemptions_before
 
 
-def _worker_backends(worker):
-    runner = worker.model_runner
-    return {
-        "attention": [
-            (type(group.kv_cache_spec).__name__, group.backend.get_name())
-            for groups in runner.attn_groups
-            for group in groups
-        ],
-        "flashinfer_sampler": runner.sampler.use_flashinfer,
-    }
+class NCPBackendProbe:
+    """Expose backend selection through a named worker-extension RPC."""
+
+    def ncp_backend_info(self):
+        runner = self.model_runner  # type: ignore[attr-defined]
+        return {
+            "attention": [
+                [type(group.kv_cache_spec).__name__, group.backend.get_name()]
+                for groups in runner.attn_groups
+                for group in groups
+            ],
+            "flashinfer_sampler": runner.sampler.use_flashinfer,
+        }
 
 
 @pytest.mark.parametrize("mode", ["flashinfer-sampler", "mixed-attention"])
@@ -310,13 +314,14 @@ def test_flashinfer_matches_flash_attention(
         "torch_profiler_with_stack": False,
         "torch_profiler_record_shapes": False,
     }
+    kwargs["worker_extension_cls"] = f"{__name__}.NCPBackendProbe"
     with vllm_runner(ncp_model_path, **kwargs) as candidate:
-        backends = candidate.llm.collective_rpc(_worker_backends)
+        backends = candidate.llm.collective_rpc("ncp_backend_info")
         assert len(backends) == 1
         selected = backends[0]
         if mode == "mixed-attention":
-            assert ("FullAttentionSpec", "FLASHINFER") in selected["attention"]
-            assert ("SlidingWindowSpec", "FLASH_ATTN") in selected["attention"]
+            assert ["FullAttentionSpec", "FLASHINFER"] in selected["attention"]
+            assert ["SlidingWindowSpec", "FLASH_ATTN"] in selected["attention"]
         else:
             assert selected["flashinfer_sampler"]
         candidate.llm.start_profile()
