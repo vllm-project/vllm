@@ -15,7 +15,7 @@ TEST_COMMAND=$2
 # Install zentorch directly in Dockerfile.zen instead of `uv pip install
 # "vllm[zen]"`, which makes uv re-resolve vLLM and fail on its transitive
 # triton-cpu URL dependency. Keep in sync with the `zen` extra in setup.py.
-ZENTORCH_VERSION="${ZENTORCH_VERSION:-2.14.0.1}"
+ZENTORCH_VERSION="${ZENTORCH_VERSION:-2.14.0.2}"
 
 CLEANUP_IMAGES=()
 cleanup() {
