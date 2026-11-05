@@ -351,7 +351,7 @@ def _plausible_dummy_weights():
         plausible = param.is_floating_point() or param.dtype == torch.uint8
         if plausible and param.is_contiguous():
             with torch.no_grad():
-                param.view(torch.uint8).fill_(0x3C)
+                param.reshape(-1).view(torch.uint8).fill_(0x3C)
         else:
             orig(param, *args, **kwargs)
 
