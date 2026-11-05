@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -174,6 +176,55 @@ pytest.importorskip("torch.cuda")
 @pytest.fixture(autouse=True)
 def setup_cuda():
     torch.set_default_device("cuda")
+
+
+@pytest.mark.skipif(
+    "H200" not in torch.cuda.get_device_name(),
+    reason="The sorted-A TMA path is tuned for H200",
+)
+def test_sorted_a_tma_moe_matches_route_major(workspace_init):
+    """The H200 sorted path preserves routed FP8 block outputs exactly."""
+    torch.manual_seed(123)
+    m, experts, hidden, intermediate, topk = 1024, 256, 4096, 256, 8
+    x = (torch.randn((m, hidden)) / 10).to(torch.bfloat16)
+    w1, w2, quant_config = make_test_quant_config(
+        experts,
+        intermediate,
+        hidden,
+        torch.bfloat16,
+        torch.float8_e4m3fn,
+        block_shape=[128, 128],
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        max_num_tokens=m,
+    )
+    kernel = modular_triton_fused_moe(moe_config, quant_config)
+    triton_experts = kernel.fused_experts
+    assert isinstance(triton_experts, triton_moe.TritonExperts)
+    topk_ids = torch.randint(experts, (m, topk))
+    topk_weights = torch.softmax(torch.randn((m, topk)), dim=-1)
+    kwargs = dict(
+        activation=MoEActivation.SILU,
+        global_num_experts=experts,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+    )
+    with set_current_vllm_config(vllm_config):
+        triton_experts._enable_sorted_a_tma = False
+        expected = kernel.apply(x, w1, w2, topk_weights, topk_ids, **kwargs)
+        triton_experts._enable_sorted_a_tma = True
+        with patch.object(
+            triton_moe,
+            "invoke_fused_moe_triton_kernel",
+            wraps=triton_moe.invoke_fused_moe_triton_kernel,
+        ) as calls:
+            actual = kernel.apply(x, w1, w2, topk_weights, topk_ids, **kwargs)
+    assert any(call.kwargs.get("A_is_sorted") for call in calls.call_args_list)
+    assert torch.equal(expected, actual)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS)
