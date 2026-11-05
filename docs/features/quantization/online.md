@@ -69,6 +69,8 @@ quantization_config:
   moe:
     weight: <name>
     activation: <name>
+  lm_head:
+    weight: <name>      # weight-only; see "Quantizing the lm_head"
   ignore: [<layer-name-or-regex-or-fnmatch-pattern>, ...]
 ```
 
@@ -167,6 +169,28 @@ adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where o
 
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
+
+### Quantizing the lm_head
+
+`lm_head` quantizes an fp16/bf16 `ParallelLMHead` at load time, weight-only.
+Decode reads the whole lm_head every step, so on bandwidth-bound GPUs a
+full-precision head can be one of the largest per-token costs, even when a
+checkpoint quantizes every other linear layer. Supported weights:
+
+| Name | Recipe | Kernel |
+| ---- | ------ | ------ |
+| `int4_per_group_32_asym` | uint4 data, one scale and zero point per 32 input channels | The platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12 |
+
+```bash
+# Quark int4 checkpoint whose lm_head is left in bf16
+vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
+    --quantization-config '{"lm_head": "int4_per_group_32_asym"}'
+```
+
+- The lm_head must be unquantized in the checkpoint; `lm_head` composes with
+  `linear`, `moe` and `targets`, and `targets` patterns never select the lm_head.
+- A head tied to the input embeddings keeps the embeddings' fp16/bf16 weight
+  and adds the int4 copy, so it costs memory instead of saving it.
 
 ### Separate Schemes for Dense and MoE Layers
 

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static32,
+    kInt4Static32Asym,
     kInt8Dynamic32Sym,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
@@ -48,6 +49,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "int8_per_group_32": kInt8Dynamic32Sym,
     # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
     "int4_per_group_32": kInt4Static32,
+    # Asymmetric uint4 with a scale and zero point per 32 input channels.
+    "int4_per_group_32_asym": kInt4Static32Asym,
 }
 
 
@@ -79,7 +82,7 @@ QuantKeyField = Annotated[
 
 @config
 class QuantSpec:
-    """Quantization spec for one layer kind (linear or MoE).
+    """Quantization spec for one layer kind (linear, MoE or lm_head).
 
     `None` on either side means the method class falls back to its own default
     (typically inherited from the checkpoint, or unquantized for online).
@@ -138,6 +141,12 @@ class QuantizationConfigArgs:
     moe: QuantSpec | None = None
     """Spec applied to ``FusedMoEFactory`` layers."""
 
+    lm_head: QuantSpec | None = None
+    """Spec applied to the ``ParallelLMHead`` (weight-only). Only an
+    unquantized fp16/bf16 lm_head can be quantized online; on a pre-quantized
+    checkpoint this applies when the checkpoint leaves the lm_head
+    unquantized. Not affected by `targets`."""
+
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for. Online quantization also supports
     fnmatch-style patterns."""
@@ -150,7 +159,7 @@ class QuantizationConfigArgs:
     Mutually exclusive with `linear` and `moe`.
     """
 
-    @field_validator("linear", "moe", mode="before")
+    @field_validator("linear", "moe", "lm_head", mode="before")
     @classmethod
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
         if not isinstance(v, str):
@@ -303,6 +312,7 @@ def resolve_quantization_config(
     return QuantizationConfigArgs(
         linear=quantization_config.linear or base.linear,
         moe=quantization_config.moe or base.moe,
+        lm_head=quantization_config.lm_head or base.lm_head,
         ignore=quantization_config.ignore or base.ignore,
         targets=quantization_config.targets or base.targets,
     )

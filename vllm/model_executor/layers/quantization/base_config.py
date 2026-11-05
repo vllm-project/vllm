@@ -327,11 +327,18 @@ def resolve_quant_method(
     from vllm.model_executor.layers.quantization.online.requantization import (
         requantization_source_scope,
     )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        UnquantizedEmbeddingMethod,
+    )
 
     online_config = quant_config.online_quantization_config
-    # Online quantization currently supports only LinearBase and RoutedExperts.
-    # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-    is_online_supported_layer = isinstance(layer, (LinearBase, RoutedExperts))
+    # Online quantization supports LinearBase, RoutedExperts and (through
+    # `quantization_config.lm_head`) ParallelLMHead. Input embeddings retain
+    # their checkpoint quantization method.
+    is_online_supported_layer = isinstance(
+        layer, (LinearBase, RoutedExperts, ParallelLMHead)
+    )
 
     online_target = None
     if online_config is not None and is_online_supported_layer:
@@ -353,13 +360,24 @@ def resolve_quant_method(
         return base_quant_method
 
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
-        base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
+        base_quant_method,
+        (
+            UnquantizedLinearMethod,
+            UnquantizedFusedMoEMethod,
+            UnquantizedEmbeddingMethod,
+        ),
     )
 
     if checkpoint_is_quantized:
         if online_target is None:
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
+        if isinstance(layer, ParallelLMHead):
+            raise NotImplementedError(
+                f"{prefix}: quantization_config.lm_head needs an unquantized "
+                f"lm_head, but the checkpoint quantizes it with "
+                f"{type(base_quant_method).__name__}."
+            )
         if online_target[3].hadamard_size is not None:
             raise NotImplementedError(
                 f"{prefix}: online hadamard_size on an already quantized layer "
