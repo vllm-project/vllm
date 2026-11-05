@@ -31,6 +31,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -214,6 +215,7 @@ class DiffusionGemmaForConditionalGeneration(
 
             with self._mark_tower_model(vllm_config, {"image", "video"}):
                 self.vision_tower = AutoModel.from_config(config=vision_config)
+                self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
                 self.embed_vision = Gemma4MultimodalEmbedder(
                     vision_config,
                     text_config,
@@ -287,6 +289,7 @@ class DiffusionGemmaForConditionalGeneration(
     )
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
     _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
+    _embed_patches = Gemma4ForConditionalGeneration._embed_patches
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
