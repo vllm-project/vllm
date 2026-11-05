@@ -3,9 +3,11 @@
 """MiniMax-M3 specialized decode on NVIDIA Blackwell GPUs, enabled with
 ``additional_config={"decode_backend": "latency_specialized"}``.
 
-Its first step is the low-batch FFN half of the MoE layers (``moe/``): FULL
-CUDA graph captures of pure decode steps run it for batches of 1-8 rows;
-every other forward runs the stock layers.
+The executor (``runtime/decode.py``) runs the decoder layers of FULL CUDA
+graph captures of pure decode steps of 1-32 rows (up to four requests with
+the seven-token DSpark draft, whose verify steps are 8 rows a request), with
+the low-batch FFN half of the MoE layers (``moe/``); every other forward
+runs the stock layers.
 """
 
 import torch
@@ -120,6 +122,6 @@ def specialized_decode_config(vllm_config: VllmConfig) -> bool:
     logger.info_once(
         "MiniMax-M3 specialized decode on: MoE layers that leave their finalize "
         "to the next layer run the low-batch FFN in FULL-graph decode steps of "
-        "1-8 rows."
+        "1-32 rows."
     )
     return True

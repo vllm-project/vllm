@@ -3,11 +3,11 @@
 """The specialized decode executor.
 
 ``SpecializedDecode`` runs the decoder layers of ``MiniMaxM3Model`` for FULL
-CUDA graph captures of pure decode steps of 1-8 rows. ``plan`` decides per
-forward whether it runs; the backbone then hands its layers to
-``DecodeStep.run`` after the embedding and keeps its final norm. Every other
-forward (prefill, mixed, eager, PIECEWISE, larger batches) runs the stock
-layers, which the executor leaves unchanged.
+CUDA graph captures of pure decode steps of 1-32 rows (``moe.MAX_ROWS``).
+``plan`` decides per forward whether it runs; the backbone then hands its
+layers to ``DecodeStep.run`` after the embedding and keeps its final norm.
+Every other forward (prefill, mixed, eager, PIECEWISE, larger batches) runs
+the stock layers, which the executor leaves unchanged.
 
 Per layer the executor runs the stock modules through its own steps:
 

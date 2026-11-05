@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-batch FFN half of a MiniMax-M3 MoE layer (1-8 decode rows).
+"""Low-batch FFN half of a MiniMax-M3 MoE layer (1-32 decode rows).
 
 From the post-attention norm's output to the ``MoEOutput`` the fused
 finalize + all-reduce + norm kernel (``ops/finalize_allreduce_norm.py``)
 takes, the stock chain runs about eleven small kernels. Here::
 
-    x ─► gate (stock) ─► front ─► FC1 ─► FC2 input ─► FC2 ─► gemm2_permuted
-    │                    (top-4, NVFP4 x, record)
+    x ─► gate (stock) ─► front ─► FC1 ──────────► FC2 ─► gemm2_permuted
+    │                    (top-4, NVFP4 x, record)  (h to NVFP4 per tile)
     └─(aux stream)─► MXFP8 x ─► FC1 (split K) ─► SwiGLU, MXFP8 h ─► FC2
                                                          └─► shared_output
 
 * ``front_cute.py``: the routing (top-4 of ``sigmoid(logit) + bias``, the
   weights from the recovered scores), the routed input's per-token NVFP4 and
-  the routing record of ``routed_expert_route_cute.py`` in one launch, and the
-  per-token NVFP4 of FC1's BF16 output;
-* ``gemm_cute.py``: FC1 (with SwiGLU-OAI) and FC2, persistent ``tcgen05``
-  NVFP4 GEMMs over the record's (weight tile, token tile) items;
-* ``shared_cute.py``: the MXFP8 shared expert on the same GEMM.
+  the routing record of ``routed_expert_route_cute.py`` in one launch, built
+  for calls of up to 8, 16 or 32 rows;
+* ``gemm_cute.py``: FC1 (with SwiGLU-OAI; the last item of each token tile
+  quantizes the tile's BF16 output to per-token NVFP4) and FC2, persistent
+  ``tcgen05`` NVFP4 GEMMs over the record's (weight tile, token tile)
+  items; above 8 rows FC2 starts on each token tile as FC1 completes it;
+* ``shared_cute.py``: the MXFP8 shared expert on the same GEMM, up to four
+  8-row tiles.
 
 The kernels read the weights vLLM prepares for the TRT-LLM-gen NVFP4 experts
 and the FlashInfer MXFP8 linears in place, are compiled once per device when a
@@ -86,7 +89,10 @@ SWIGLU_BETA = 1.0
 # FC1's stages (36 KB per stage). Measured on B300 and B200 (four real layers,
 # 1, 4 and 8 rows) against FC1 4/6 stages, FC2 3/6/8, shared FC1 3-5 and 96-128
 # routed CTAs: FC2 at 4 stages gains 6% at one row; no other setting moves a
-# row count by 3% or more, and fewer routed CTAs slow eight rows.
+# row count by 3% or more, and fewer routed CTAs slow eight rows. At 1-32 rows
+# (B300, 12 real layers), FC1 at K tile 512 (4-5 stages) is within 1%, FC2 at
+# K tile 384 or 768 is 5-6% slower, and the stage pairs that let an FC1 and an
+# FC2 CTA share an SM (6/4, 5/5, 6/3, 8/2) are 1-16% slower.
 ROUTED_FC1_CTA_K = 256
 ROUTED_FC2_CTA_K = 256
 ROUTED_FC1_STAGES = 8
@@ -97,9 +103,10 @@ ROUTED_CTAS: int | None = None
 # faster at 12-32 rows and 1.1-1.3 us slower at 1-3 rows (even at 8).
 OVERLAP_ROWS = 8
 SHARED_FC1_STAGES = 6
-# Persistent CTAs of the shared expert's GEMMs (144 and 48 work items), which
-# leave SMs to the routed GEMMs beside them (the critical path). On B300 at
-# 1, 4 and 8 rows, within 3% of the best of 144/48, 72/48, 48/24 and 24/16.
+# Persistent CTAs of the shared expert's GEMMs (144 and 48 work items per row
+# tile), which leave SMs to the routed GEMMs beside them (the critical path).
+# On B300 at 1, 4 and 8 rows, within 3% of the best of 144/48, 72/48, 48/24
+# and 24/16; at 1-32 rows within 2% of 48/32 and 72/48 (24/16: 2-5% slower).
 SHARED_FC1_CTAS = 36
 SHARED_FC2_CTAS = 24
 # The shared expert's 8-row tiles, and its records' table widths.

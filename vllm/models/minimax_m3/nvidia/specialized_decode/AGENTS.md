@@ -3,9 +3,10 @@
 Kernels for small decode batches of MiniMax-M3.1-Flash on B200 and B300,
 enabled with `--additional-config '{"decode_backend": "latency_specialized"}'`
 (the default, `auto`, keeps the stock decode). With it off, the model runs
-exactly as without this package. Its first step covers the FFN half of the MoE
-layers; the attention, the all-reduce, the dense layers and the MTP draft keep
-their stock paths.
+exactly as without this package. A decode executor runs the decoder layers of
+FULL-graph decode steps of 1-32 rows (up to four requests with the seven-token
+DSpark draft) with a low-batch FFN half of the MoE layers; the attention, the
+all-reduce, the dense layers and the MTP draft keep their stock modules.
 
 ## Scope
 
@@ -46,14 +47,19 @@ configuration decides both:
 
 | Path | Contents |
 | --- | --- |
-| `__init__.py` | The setting, the startup checks, the per-call capture gate |
-| `moe/__init__.py` | `build_low_batch_ffn`, `LowBatchFfn` (`accepts`, `run`), `unsupported_reason` |
-| `moe/front_cute.py` | Routing + per-token NVFP4 input + routing record in one launch; FC2's input quantization |
-| `moe/gemm_cute.py` | Routed FC1 (SwiGLU-OAI epilogue) and FC2 on persistent `tcgen05` NVFP4 GEMMs |
-| `moe/shared_cute.py` | The MXFP8 shared expert: input quantization, split-K FC1, SwiGLU-OAI + MXFP8, FC2 on the same GEMM |
+| `__init__.py` | The setting, the startup checks, the capture gate |
+| `runtime/decode.py` | `SpecializedDecode` (`plan`, the layer loop) and `DecodeStep` |
+| `moe/__init__.py` | `build_low_batch_ffn`, `LowBatchFfn` (`accepts`, `run`), `unsupported_reason`, `MAX_ROWS` |
+| `moe/front_cute.py` | Routing + per-token NVFP4 input + routing record in one launch, one build per width (8, 16, 32 rows) |
+| `moe/gemm_cute.py` | Routed FC1 (SwiGLU-OAI epilogue, FC2's input quantized per token tile) and FC2 on persistent `tcgen05` NVFP4 GEMMs |
+| `moe/shared_cute.py` | The MXFP8 shared expert: input quantization, split-K FC1, SwiGLU-OAI + MXFP8, FC2 on the same GEMM, up to four 8-row tiles |
 
-The routing record and the persistent GEMM skeleton are imported from the
-DeepSeek-V4.1 low-batch MoE (`deepseek_v41/nvidia/specialized_decode/moe/`).
+The routing record (`build_record` and its helpers, the ready words), the
+persistent GEMM skeleton (`RoutedExpertGemm`: `gather_b_warp`,
+`signal_ready`, `ready_target`) and the front's widths (`WIDTHS`, `width`)
+are imported from the DeepSeek-V4.1 low-batch MoE
+(`deepseek_v41/nvidia/specialized_decode/moe/`); `test_kernels.py` builds every
+kernel against them, so a change there that breaks these fails it.
 `MiniMaxM3MoE.process_weights_after_loading` builds one `LowBatchFfn` per MoE
 layer once the weights are processed; it compiles the kernels then, outside any
 CUDA graph capture, and binds the routed and shared expert weights in place (no
@@ -64,17 +70,22 @@ copies).
 | Path | Rows |
 | --- | --- |
 | Gate: stock `GateLinear` (FP32 logits) | all |
-| Front: top-4 of `sigmoid(logit) + bias`, BF16 weights from the recovered scores, per-token NVFP4 of the input, routing record | 1-8 |
-| Routed FC1 and FC2 on the record's work items, FC2's input quantized per token from FC1's BF16 output | 1-8 |
-| Shared expert on the aux stream, joined before `run` returns: MXFP8 input, FC1 split over K into 12 slices (144 work items), BF16 gate_up and SwiGLU-OAI to MXFP8 `h`, FC2 | 1-8 |
+| Front: top-4 of `sigmoid(logit) + bias`, BF16 weights from the recovered scores, per-token NVFP4 of the input, routing record | 1-32 |
+| Routed FC1 and FC2 on the record's work items; the last FC1 item of each token tile quantizes its BF16 output per token for FC2 | 1-32 |
+| FC2 waits for the FC1 grid | 1-8 |
+| FC2 starts on each token tile once FC1's items of it are counted (the record's ready words) | 9-32 |
+| Shared expert on the aux stream, joined before `run` returns: MXFP8 input, FC1 split over K into 12 slices (144 work items per 8-row tile), BF16 gate_up and SwiGLU-OAI to MXFP8 `h`, FC2 | 1-32 |
 | Top-k finalize, all-reduce, next input norm: the fused boundary kernel | up to 32 |
 
 ## Dispatch
 
-`MiniMaxM3MoE.forward_unfinalized` runs the low-batch FFN only when it holds
-one (the layers above), `accepts(x)` (1-8 contiguous BF16 rows, the bound
-weights) and the forward is being captured into a FULL CUDA graph
-(`captures_pure_decode`); every eager forward, PIECEWISE capture, prefill and
-larger batch runs the stock code. The
-gate reads host state only, nothing is read back from the GPU, and it is the
-same on every TP rank.
+`MiniMaxM3Model.forward` asks `SpecializedDecode.plan` for a `DecodeStep`;
+it gets one only for 1-32 rows (`moe.MAX_ROWS`) without intermediate tensors
+while the forward is being captured into a FULL CUDA graph
+(`captures_pure_decode`), and then hands its layers to `DecodeStep.run`.
+There, a MoE layer runs its `LowBatchFfn` when it defers its finalize for the
+step's rows (`defers_finalize`) and `accepts(x)` (1-32 contiguous BF16 rows,
+the bound weights); the other MoE layers run their stock modules. Every eager
+forward, PIECEWISE capture, prefill and larger batch runs the stock layers.
+The decisions read host state only, nothing is read back from the GPU, and
+they are the same on every TP rank.
