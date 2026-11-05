@@ -71,6 +71,8 @@ def test_image_embeddings_without_chunked_prefill(
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     images = [Image.new("RGB", (512, 512), color=color) for color in ("red", "blue")]
     prompts = [f"{PASSAGE_PREFIX}<image>"] * len(images)
+    # ROCM_ENGINE_KWARGS also sets max_num_seqs, which this test needs at 2.
+    engine_kwargs = {**ROCM_ENGINE_KWARGS, "max_num_seqs": 2}
     # The 384-token encoder cache fits one 256-token image, but not both.
     with vllm_runner(
         model,
@@ -78,7 +80,6 @@ def test_image_embeddings_without_chunked_prefill(
         dtype="half",
         max_model_len=384,
         max_num_batched_tokens=384,
-        max_num_seqs=2,
         async_scheduling=async_scheduling,
         long_prefill_token_threshold=long_prefill_token_threshold,
         enable_chunked_prefill=False,
@@ -86,7 +87,7 @@ def test_image_embeddings_without_chunked_prefill(
         trust_remote_code=True,
         limit_mm_per_prompt={"image": 1},
         mm_processor_kwargs={"max_dynamic_patch": 1, "use_thumbnail": False},
-        **ROCM_ENGINE_KWARGS,
+        **engine_kwargs,
     ) as vllm_model:
         batched = vllm_model.embed(prompts, images=images)
         individual = [
