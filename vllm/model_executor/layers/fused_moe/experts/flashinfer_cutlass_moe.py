@@ -132,6 +132,20 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         return self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """FlashInferExperts unconditionally threads `gemm1_clamp_limit` on
+        the SILU path (`apply` line ~298 sets `swiglu_limit =
+        self.gemm1_clamp_limit` for SILU). For SWIGLUOAI the clamp is only
+        threaded when the runtime mxfp4 branch overrides `swiglu_limit`
+        (line ~349); non-mxfp4 SWIGLUOAI configs would silently null the
+        clamp at line ~298. To keep the static contract conservative and
+        sound across quant configs we declare True only for SILU. If a
+        SWIGLUOAI+mxfp4-only workload needs this declared, split the
+        backend or refine the contract per-quant-config in a follow-up.
+        """
+        return activation == MoEActivation.SILU
+
+    @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
         return (
