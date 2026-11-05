@@ -921,3 +921,9 @@ VLLM_TOPK_SOFTPLUS_SQRT_EXTERN_PAIR(int64_t, __nv_bfloat16)
 
 }  // namespace moe
 }  // namespace vllm
+
+// MAX/MIN only serve the code above. This header is included by ten translation
+// units now, so do not leak them into the units or into whatever they include
+// after it.
+#undef MAX
+#undef MIN

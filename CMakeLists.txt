@@ -1582,7 +1582,9 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
   # The kernel is specialized on the wavefront size, but ROCm only exposes that
   # value at runtime, so both arms are instantiated unless the build says which
   # one the targeted archs can select (gfx9xx is wave64, every other supported
-  # arch is wave32 - that is what Utils::get_warp_size() returns).
+  # arch is wave32 - that is what Utils::get_warp_size() returns). Keep the
+  # ^gfx9 predicate below in sync with the __GFX9__ branch of
+  # Utils::get_warp_size() in csrc/core/cuda_compat.h.
   set(TOPK_WAVE_ONLY_DEFINE "")
   set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
