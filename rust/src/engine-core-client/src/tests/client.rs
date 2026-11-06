@@ -3836,14 +3836,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
     let inplace_lora_request_hex =
         lines.next().expect("missing in-place LoRA request fixture line");
-    let simple_cpu_offload_hex = lines.next().expect("missing SimpleCPU stats fixture line");
-    let multi_simple_cpu_offload_hex = lines.next().expect("missing Multi SimpleCPU fixture line");
-    let partial_simple_cpu_offload_hex =
-        lines.next().expect("missing partial SimpleCPU fixture line");
-    let empty_connector_hex = lines.next().expect("missing empty connector fixture line");
-    let unknown_connector_hex = lines.next().expect("missing unknown connector fixture line");
-    let empty_simple_cpu_child_hex =
-        lines.next().expect("missing empty SimpleCPU child fixture line");
+    let simple_cpu_offload_stats_hex =
+        lines.next().expect("missing SimpleCPUOffload stats fixture line");
+    let kv_offload_stats_hex = lines.next().expect("missing kv offload stats fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -4094,6 +4089,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.mooncake_transfer.is_some());
     assert!(multi_connector_stats.mooncake.is_some());
     assert!(multi_connector_stats.umbp.is_some());
+    assert!(multi_connector_stats.simple_cpu_offload.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
@@ -4144,66 +4140,55 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\
          operation=\"load\"} 8192"
     ));
+    assert!(rendered_metrics.contains(
+        "vllm:simple_kv_offload_save_outcomes_total{model_name=\"test-model\",engine=\"0\",\
+         outcome=\"stored\"} 3"
+    ));
 
-    let simple_cpu_offload: KvConnectorStats =
-        rmp_serde::from_slice(&hex::decode(simple_cpu_offload_hex).unwrap()).unwrap();
-    let KvConnectorStats::SimpleCPUOffload(simple_cpu_offload) = simple_cpu_offload else {
-        panic!("flat Python SimpleCPU payload did not decode as typed stats");
+    let simple_cpu_offload_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(simple_cpu_offload_stats_hex).unwrap()).unwrap();
+    let KvConnectorStats::SimpleCpuOffload(simple_cpu_offload_stats) = simple_cpu_offload_stats
+    else {
+        panic!("Python SimpleCPUOffload stats should decode as SimpleCpuOffload");
     };
-    assert_eq!(simple_cpu_offload.data.load_blocks[&[]], 4.5);
-    assert_eq!(simple_cpu_offload.data.used_blocks[&[]], 9.0);
-    assert_eq!(simple_cpu_offload.data.pending_store_blocks[&[]], 2.0);
-    assert_eq!(simple_cpu_offload.data.save_outcomes.len(), 7);
-    assert_eq!(
-        simple_cpu_offload.data.save_outcomes[&["stored".to_string()]],
-        1.0
-    );
-    assert_eq!(
-        simple_cpu_offload.data.info[&[
-            "cpu".to_string(),
-            "false".to_string(),
-            "true".to_string(),
-            "64".to_string()
-        ]],
-        1.0
-    );
-    let multi: KvConnectorStats =
-        rmp_serde::from_slice(&hex::decode(multi_simple_cpu_offload_hex).unwrap()).unwrap();
-    let KvConnectorStats::Multi(multi) = multi else {
-        panic!("Python MultiConnector payload did not decode as typed stats");
-    };
-    assert_eq!(multi.simple_cpu_offload.as_ref(), Some(&simple_cpu_offload));
-    assert!(multi.nixl.is_some());
-    assert!(multi.mooncake.is_some());
-    assert!(multi.other.contains_key("UnsupportedConnector"));
+    expect_test::expect![[r#"
+        SimpleCpuOffloadData {
+            save_outcomes: {
+                [
+                    "skipped_in_flight",
+                ]: 1,
+                [
+                    "stored",
+                ]: 3,
+            },
+            load_blocks: {
+                []: 4,
+            },
+            used_blocks: {
+                []: 9,
+            },
+            pending_store_blocks: {
+                []: 2,
+            },
+            info: {
+                [
+                    "cpu",
+                    "false",
+                    "true",
+                    "64",
+                ]: 1,
+            },
+        }
+    "#]]
+    .assert_debug_eq(&simple_cpu_offload_stats.data);
 
-    let partial: KvConnectorStats =
-        rmp_serde::from_slice(&hex::decode(partial_simple_cpu_offload_hex).unwrap()).unwrap();
-    let KvConnectorStats::SimpleCPUOffload(partial) = partial else {
-        panic!("partial SimpleCPU interval did not decode as typed stats");
-    };
-    assert_eq!(partial.data.used_blocks[&[]], 3.0);
-    assert!(partial.data.save_outcomes.is_empty());
-    assert!(partial.data.load_blocks.is_empty());
-    assert!(partial.data.pending_store_blocks.is_empty());
-    assert!(partial.data.info.is_empty());
-    for payload in [empty_connector_hex, unknown_connector_hex] {
-        let stats: KvConnectorStats =
-            rmp_serde::from_slice(&hex::decode(payload).unwrap()).unwrap();
-        let KvConnectorStats::Multi(stats) = stats else {
-            panic!("unknown types/data envelope did not retain native opaque path");
-        };
-        assert!(stats.simple_cpu_offload.is_none());
-        assert!(stats.other.contains_key("types"));
-        assert!(stats.other.contains_key("data"));
-    }
-    let empty_child: KvConnectorStats =
-        rmp_serde::from_slice(&hex::decode(empty_simple_cpu_child_hex).unwrap()).unwrap();
-    let KvConnectorStats::Multi(empty_child) = empty_child else {
-        panic!("explicit empty SimpleCPU child did not retain MultiConnector");
-    };
-    assert!(empty_child.nixl.is_some());
-    assert!(empty_child.simple_cpu_offload.unwrap().types.is_empty());
+    // Another connector's `types`/`data` payload is not taken for SimpleCPUOffload.
+    let kv_offload_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(kv_offload_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        kv_offload_stats,
+        KvConnectorStats::Multi(stats) if stats.simple_cpu_offload.is_none()
+    ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {

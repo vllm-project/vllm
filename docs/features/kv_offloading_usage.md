@@ -505,42 +505,6 @@ end at an attention-chunk boundary for every chunked-local cache group. Otherwis
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
 
-## SimpleCPUOffload Metrics on the Rust Frontend
-
-The Rust frontend exports the same five `SimpleCPUOffloadConnector` metric
-families as the Python frontend, including when it is a `MultiConnector` child:
-
-| Metric | Additional labels |
-| --- | --- |
-| `vllm:simple_kv_offload_save_outcomes_total` | `outcome` |
-| `vllm:simple_kv_offload_load_blocks_total` | None |
-| `vllm:simple_kv_offload_used_blocks` | None |
-| `vllm:simple_kv_offload_pending_store_blocks` | None |
-| `vllm:simple_kv_offload_info` | `backend`, `page_cache`, `lazy_offload`, `capacity_blocks` |
-
-All samples also carry `model_name` and `engine`. The engine label identifies
-the engine, not each TP worker; scheduler samples must not be multiplied by TP
-size. Outcome and configuration series appear when their samples arrive.
-Counters accumulate interval deltas, while gauges retain the latest sample.
-Used blocks count pinned blocks, not all evictable cached blocks or physical RAM.
-
-The typed Rust adapter accepts integer and floating-point MessagePack samples
-as `f64`, matching Prometheus's floating-point numeric representation; it does
-not truncate fractional samples to integers. Counter increments must be finite
-and nonnegative. An invalid counter increment or inconsistent metric-type
-metadata causes the SimpleCPU stats update to be dropped with a warning.
-
-The Python wire fixtures in
-`rust/src/engine-core-client/src/tests/python_compat.py` mirror the `types/data`
-payload produced by `SimpleCPUOffloadStats.to_dict()` in
-`vllm/v1/simple_kv_offload/metrics.py` and the observations emitted by
-`SimpleCPUOffloadScheduler.get_stats()` in `vllm/v1/simple_kv_offload/manager.py`.
-They use Python tuple keys encoded by `msgspec.msgpack`, including the empty
-tuple for unlabeled samples, rather than JSON. Partial intervals need only
-their observed metric fields. Flat payloads must identify a known SimpleCPU
-metric in `types`; empty or unknown `types/data` envelopes retain the existing
-opaque path. Explicitly named SimpleCPU children may emit empty intervals.
-
 ## Further Reading
 
 - [vLLM blog: KV Offloading Connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) — motivation, architecture (DMA-based async transfer), and benchmarks (TTFT and throughput).

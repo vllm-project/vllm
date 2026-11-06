@@ -118,26 +118,6 @@ pub struct MooncakeOperationLabels {
     pub status: String,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SimpleCPUOffloadOutcomeLabels {
-    pub model_name: String,
-    pub engine: u32,
-    pub outcome: String,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SimpleCPUOffloadInfoLabels {
-    pub model_name: String,
-    pub engine: u32,
-    pub backend: String,
-    pub page_cache: String,
-    pub lazy_offload: String,
-    pub capacity_blocks: String,
-}
-
-pub type SimpleCPUOffloadCounter =
-    prometheus_client::metrics::counter::Counter<f64, std::sync::atomic::AtomicU64>;
-
 /// Family type aliases for the Mooncake connector telemetry, exposed so
 /// `engine-core-client` can hold onto the `Family` directly (rather than a
 /// pre-resolved handle) since `operation`/`status` vary per record.
@@ -157,6 +137,26 @@ pub struct UmbpOperationLabels {
 /// `engine-core-client` can hold onto the `Family` directly, since an
 /// operation's series appears once the connector first reports it.
 pub type UmbpOperationCounterFamily = Family<UmbpOperationLabels, U64Counter>;
+
+/// Labels for `vllm:simple_kv_offload_save_outcomes`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SimpleCpuOffloadOutcomeLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub outcome: String,
+}
+
+/// Labels for `vllm:simple_kv_offload_info`, whose label values are the
+/// connector's deployment facts.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SimpleCpuOffloadInfoLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub backend: String,
+    pub page_cache: String,
+    pub lazy_offload: String,
+    pub capacity_blocks: String,
+}
 
 /// Adapter names encoded as a deterministic comma-joined Prometheus label value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -264,12 +264,6 @@ impl SchedulerLogStatsAccumulator {
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
 pub struct SchedulerMetrics {
-    pub simple_cpu_offload_save_outcomes:
-        Family<SimpleCPUOffloadOutcomeLabels, SimpleCPUOffloadCounter>,
-    pub simple_cpu_offload_load_blocks: Family<EngineLabels, SimpleCPUOffloadCounter>,
-    pub simple_cpu_offload_used_blocks: Family<EngineLabels, F64Gauge>,
-    pub simple_cpu_offload_pending_store_blocks: Family<EngineLabels, F64Gauge>,
-    pub simple_cpu_offload_info: Family<SimpleCPUOffloadInfoLabels, F64Gauge>,
     // Scheduler state gauges.
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
@@ -343,6 +337,13 @@ pub struct SchedulerMetrics {
     pub umbp_transfer_failed_total: UmbpOperationCounterFamily,
     pub umbp_transfer_bytes_total: UmbpOperationCounterFamily,
 
+    // SimpleCPUOffload connector telemetry. Mirrors `SimpleCPUOffloadPromMetrics`.
+    pub simple_kv_offload_save_outcomes_total: Family<SimpleCpuOffloadOutcomeLabels, U64Counter>,
+    pub simple_kv_offload_load_blocks_total: Family<EngineLabels, U64Counter>,
+    pub simple_kv_offload_used_blocks: Family<EngineLabels, U64Gauge>,
+    pub simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
+    pub simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
+
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
 }
@@ -351,36 +352,6 @@ impl SchedulerMetrics {
     /// Register the scheduler-oriented metric families into the shared
     /// registry.
     pub(crate) fn register(registry: &mut Registry, buckets: &Arc<BucketConfig>) -> Self {
-        let simple_cpu_offload_save_outcomes = Family::default();
-        registry.register(
-            "vllm:simple_kv_offload_save_outcomes",
-            "Store admission decisions in SimpleCPUOffloadConnector, by outcome. Outcomes classify eager-mode boundary hand-off stores; lazy-mode stores are not classified",
-            simple_cpu_offload_save_outcomes.clone(),
-        );
-        let simple_cpu_offload_load_blocks = Family::default();
-        registry.register(
-            "vllm:simple_kv_offload_load_blocks",
-            "KV blocks restored to GPU from the offload pool, counted when a load finishes. This is prefill work avoided through offload cache hits",
-            simple_cpu_offload_load_blocks.clone(),
-        );
-        let simple_cpu_offload_used_blocks = Family::default();
-        registry.register(
-            "vllm:simple_kv_offload_used_blocks",
-            "Offload-pool blocks currently pinned by in-flight transfers or cache hits (capacity minus free). Evictable cached blocks are not counted; capacity_blocks is on vllm:simple_kv_offload_info",
-            simple_cpu_offload_used_blocks.clone(),
-        );
-        let simple_cpu_offload_pending_store_blocks = Family::default();
-        registry.register(
-            "vllm:simple_kv_offload_pending_store_blocks",
-            "Offload blocks in pending stores: queued for dispatch, issued to workers, or awaiting release after a cache reset. A persistently growing value indicates a stuck transfer",
-            simple_cpu_offload_pending_store_blocks.clone(),
-        );
-        let simple_cpu_offload_info = Family::default();
-        registry.register(
-            "vllm:simple_kv_offload_info",
-            "SimpleCPUOffloadConnector deployment facts. Value is always 1. backend is cpu or disk; page_cache and lazy_offload are true/false; capacity_blocks is the offload pool size",
-            simple_cpu_offload_info.clone(),
-        );
         // Scheduler state gauges.
         let scheduler_running = Family::default();
         registry.register(
@@ -750,13 +721,52 @@ impl SchedulerMetrics {
             umbp_transfer_bytes_total.clone(),
         );
 
+        // SimpleCPUOffload connector telemetry.
+        let simple_kv_offload_save_outcomes_total = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_save_outcomes",
+            "Store admission decisions in SimpleCPUOffloadConnector, by outcome. Outcomes \
+             classify eager-mode boundary hand-off stores; lazy-mode stores are not classified",
+            simple_kv_offload_save_outcomes_total.clone(),
+        );
+
+        let simple_kv_offload_load_blocks_total = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_load_blocks",
+            "KV blocks restored to GPU from the offload pool, counted when a load finishes. This \
+             is prefill work avoided through offload cache hits",
+            simple_kv_offload_load_blocks_total.clone(),
+        );
+
+        let simple_kv_offload_used_blocks = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_used_blocks",
+            "Offload-pool blocks currently pinned by in-flight transfers or cache hits (capacity \
+             minus free). Evictable cached blocks are not counted; capacity_blocks is on \
+             vllm:simple_kv_offload_info",
+            simple_kv_offload_used_blocks.clone(),
+        );
+
+        let simple_kv_offload_pending_store_blocks = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_pending_store_blocks",
+            "Offload blocks in pending stores: queued for dispatch, issued to workers, or \
+             awaiting release after a cache reset. A persistently growing value indicates a stuck \
+             transfer",
+            simple_kv_offload_pending_store_blocks.clone(),
+        );
+
+        let simple_kv_offload_info = Family::default();
+        registry.register(
+            "vllm:simple_kv_offload_info",
+            "SimpleCPUOffloadConnector deployment facts. Value is always 1. backend is cpu or \
+             disk; page_cache and lazy_offload are true/false; capacity_blocks is the offload \
+             pool size",
+            simple_kv_offload_info.clone(),
+        );
+
         Self {
             scheduler_running,
-            simple_cpu_offload_save_outcomes,
-            simple_cpu_offload_load_blocks,
-            simple_cpu_offload_used_blocks,
-            simple_cpu_offload_pending_store_blocks,
-            simple_cpu_offload_info,
             scheduler_waiting,
             scheduler_waiting_by_reason,
             scheduler_kv_fetch_by_stage,
@@ -802,6 +812,11 @@ impl SchedulerMetrics {
             umbp_transfer_completed_total,
             umbp_transfer_failed_total,
             umbp_transfer_bytes_total,
+            simple_kv_offload_save_outcomes_total,
+            simple_kv_offload_load_blocks_total,
+            simple_kv_offload_used_blocks,
+            simple_kv_offload_pending_store_blocks,
+            simple_kv_offload_info,
             log_stats: Family::default(),
         }
     }
