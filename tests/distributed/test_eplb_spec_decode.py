@@ -279,7 +279,7 @@ def test_eplb_skips_dspark_registration_with_dummy_weights(
             (
                 "eagle",
                 "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                "vllm-project/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
                 0.92,
                 1,

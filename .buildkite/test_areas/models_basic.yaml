@@ -13,11 +13,15 @@ steps:
   - tests/models/test_initialization.py
   - tests/models/registry.py
   - tests/models/test_beam_construction.py
+  - tests/models/test_beam_numerics.py
+  - tests/models/test_beam_weight_mapping.py
+  - tests/v1/spec_decode/test_dflash2.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
-    # Exercise Beam construction and generation without a checkpoint download.
-    - pytest -v -s models/test_beam_construction.py
+    # Exercise the active Beam backend without downloading a checkpoint.
+    - pytest -v -s models/test_beam_construction.py models/test_beam_weight_mapping.py models/test_beam_numerics.py
+    - pytest -v -s v1/spec_decode/test_dflash2.py -k "beam_conv_residual_norm or grouped_conv_triton_matches_reference or beam_fused_candidate_edges"
   mirror:
     amd:
       automatic_shard: true
@@ -179,10 +183,12 @@ steps:
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_index_cache_overrides.py
+  - tests/models/minimax_m3/test_dspark_drafter.py
   - vllm/model_executor/models/config.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
+  - pytest -v -s models/minimax_m3/test_dspark_drafter.py
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -403,6 +409,19 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":nvidia: (B200) Qwen4 Exp HC Kernels"
+  key: qwen4-exp-hc-kernels-b200
+  automatic_shard: true
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/qwen4_exp/
+  - vllm/models/qwen4_exp/nvidia/hyperconnection.py
+  - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - tests/models/qwen4_exp/test_hc_ops.py
+  commands:
+    - pytest -v -s models/qwen4_exp/test_hc_ops.py
+
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
   automatic_shard: true
@@ -597,6 +616,7 @@ steps:
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels"
   key: dsv41-nvidia-kernels-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 50

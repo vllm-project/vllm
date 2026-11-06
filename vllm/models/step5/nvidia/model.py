@@ -11,7 +11,6 @@ import regex as re
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -477,6 +476,7 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     """
 
     INDEXER_SHARD_IDS = ("index_q", "index_k", "index_z", "index_g")
+    shard_ids = ("q", "k", "v", *INDEXER_SHARD_IDS)
 
     def __init__(
         self,
@@ -574,7 +574,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         )
         self.register_parameter("weight", weight)
         self.update_param_tp_status()
-        self._loaded_shards: set[str] = set()
 
     @property
     def local_index_q_size(self) -> int:
@@ -587,11 +586,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     @property
     def local_index_z_size(self) -> int:
         return self.local_index_kv_heads * self.proxy_dim
-
-    def validate_shard_id(self, loaded_shard_id: Any) -> TypeIs[str | None]:
-        if loaded_shard_id in self.INDEXER_SHARD_IDS:
-            return True
-        return super().validate_shard_id(loaded_shard_id)
 
     def _indexer_source_offset(self, shard_id: str) -> tuple[int, int]:
         if shard_id == "index_q":
@@ -634,16 +628,13 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
                 "tensors; a pre-fused qkv_indexer_proj weight is not supported."
             )
         if loaded_shard_id in self.INDEXER_SHARD_IDS:
+            self.validate_shard_id(loaded_shard_id, param)
             src_offset, shard_size = self._indexer_source_offset(loaded_shard_id)
             dst_offset = self._indexer_dest_offset(loaded_shard_id)
             shard = loaded_weight.narrow(0, src_offset, shard_size)
             param.data.narrow(0, dst_offset, shard_size).copy_(shard)
         else:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        self._loaded_shards.add(loaded_shard_id)
-
-    def required_shard_ids(self) -> set[str]:
-        return {"q", "k", "v", "index_q", "index_k", "index_z", "index_g"}
 
     def assert_fully_loaded(self, prefix: str) -> None:
         """Fail unless this load covered every shard, then forget the record.
@@ -653,17 +644,17 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         storage for the whole parameter, so a shard the new weight stream omits
         would otherwise silently become garbage.
         """
-        required = self.required_shard_ids()
-        missing = sorted(required - self._loaded_shards)
+        loaded = self.loaded_shard_ids.pop("weight", set())
+        self.loaded_shard_ids.clear()
+        missing = [shard for shard in self.shard_ids if shard not in loaded]
         if missing:
             raise ValueError(
                 f"Incomplete fused qkv+indexer weight for {prefix}: "
                 f"missing shards {missing}."
             )
-        self._loaded_shards.clear()
 
     def reset_load_state(self) -> None:
-        self._loaded_shards.clear()
+        self.loaded_shard_ids.clear()
 
     def forward(  # type: ignore[override]
         self,
