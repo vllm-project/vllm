@@ -48,7 +48,7 @@ def test_precomputed_vision_embeddings_preserve_items(model_version, modality):
     torch.nn.Module.__init__(model)
     model.visual = Mock(dtype=torch.float32, spatial_merge_size=2)
     embeds = torch.arange(80, dtype=torch.float64).reshape(10, 8)
-    outputs = model.embed_multimodal(
+    outputs = getattr(model, "embed_multimodal")(  # noqa: B009
         **{
             f"{modality}_embeds": embeds,
             f"{modality}_grid_thw": torch.tensor([[1, 2, 4], [2, 4, 4]]),

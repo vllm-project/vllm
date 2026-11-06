@@ -253,3 +253,94 @@ def publish(put, a, i, v, who):
     gpu.barrier()
     if who:
         put(a, i, v)
+
+
+# ---------------------------------------------------------------- sentinel all-reduce
+# (``layer.OPT_SENTS``)
+# Push: plain bf16 pair words into the receiver's region, which holds the
+# sentinel (all ones, a -NaN pair; a pushed word equal to it is remapped).
+# Read: poll off the sentinel, sum, re-arm. Regions alternate by layer parity
+# (``layer.sent_layout``), so a word is re-pushed only after its reader ended.
+SENT = -1
+SENT_NAN = -4128832  # 0xFFC0FFC0
+
+
+def sent_word(w):
+    """A pushed bf16-pair word (an f32-typed ``bf16_pair``), never the
+    sentinel."""
+    w = w.bitcast(fx.Int32) if isinstance(w, fx.Float32) else fx.Int32(w)
+    return (w == fx.Int32(SENT)).select(fx.Int32(SENT_NAN), w)
+
+
+def put_sent(a, i, word):
+    """Word ``i`` of the peer sentinel region ``a`` := ``word`` (``sent_word``),
+    system scope."""
+    bo.buffer_store(
+        fx.Int32(word), rsrc(_noted(a, "put")), i, cache_modifier=_SCOPE_CM[a.space]
+    )
+
+
+def poll_sent(mb, a, idxs, lives=None, rearm=True):
+    """Poll words ``idxs`` of this rank's sentinel region ``a`` until none is
+    the sentinel (with fail-stop), then re-arm them. ``lives``: dead indices
+    are not waited for or re-armed. A read is destructive: one thread a word.
+    ``rearm=False``: the caller re-arms later (``rearm_sent``)."""
+    base = _noted(a, "poll")
+    cm = _SCOPE_CM[a.space]
+    n = len(idxs)
+    if const_expr(n == 1):
+        idxs = [idxs[0], idxs[0]]  # _spin's record reads v[1]
+        if const_expr(lives is not None):
+            lives = [lives[0], lives[0]]
+
+    def load_all():
+        return fx.Vector.from_elements(
+            [
+                fx.Int32(
+                    bo.buffer_load(
+                        rsrc(base),
+                        fx.Int32(i),
+                        vec_width=1,
+                        dtype=T.i32,
+                        cache_modifier=cm,
+                    )
+                )
+                for i in idxs
+            ],
+            fx.Int32,
+        )
+
+    def pending(v):
+        bad = None
+        for e in range_constexpr(len(idxs)):
+            b = v[e] == fx.Int32(SENT)
+            if const_expr(lives is not None):
+                b = b & lives[e]
+            bad = b if bad is None else bad | b
+        return bad
+
+    rid = mb.region_ids.get(a.region, -1)
+    v = _spin(load_all, pending, mb.health, mb.alarm, rid, fx.Int32(idxs[0]), SENT)
+    if const_expr(rearm):
+        rearm_sent(a, idxs[:n], None if lives is None else lives[:n], noted=False)
+    return [v[e] for e in range(n)]
+
+
+def rearm_sent(a, idxs, lives=None, noted=True):
+    """Words ``idxs`` of this rank's sentinel region ``a`` := the sentinel (a
+    dead index skipped), after this thread read them (``poll_sent``)."""
+    base = _noted(a, "put") if noted else a.value
+    cm = _SCOPE_CM[a.space]
+    for e in range_constexpr(len(idxs)):
+        if const_expr(lives is None):
+            bo.buffer_store(
+                fx.Int32(SENT), rsrc(base), fx.Int32(idxs[e]), cache_modifier=cm
+            )
+        else:
+            _rearm(base, idxs[e], lives[e], cm)
+
+
+@traced
+def _rearm(base, i, live, cm):
+    if live:
+        bo.buffer_store(fx.Int32(SENT), rsrc(base), fx.Int32(i), cache_modifier=cm)
