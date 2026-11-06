@@ -8,7 +8,7 @@ without modifying core code:
     from vllm.triton_utils.dispatcher import register_kernels
 
     register_kernels({
-        "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": my_memcpy_impl,
+        "vllm.v1.worker.gpu.input_batch._prepare_pos_seq_lens_kernel": my_impl,
     })
 
 The same call covers Triton *device functions* (``@triton.jit`` helpers
@@ -226,7 +226,7 @@ def register_kernels(overrides: Mapping[str, Callable[..., Any]]) -> None:
     Args:
         overrides: Mapping from fully qualified kernel name to the
             platform implementation. Kernel names look like
-            "vllm.v1.worker.mamba_utils.batch_memcpy_kernel"; for kernels
+            "vllm.v1.worker.gpu.input_batch._prepare_pos_seq_lens_kernel"; for kernels
             owned by a JIT warmup class, include the attribute path, e.g.
             "module.KernelClass.kernel".
 
