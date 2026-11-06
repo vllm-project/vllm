@@ -776,8 +776,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # we need to create qkvz_proj adaptively here.
         # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
         # in_proj_qkv and in_proj_z are created separately instead.
+        output_gate_type = getattr(config, "output_gate_type", "silu")
+        if output_gate_type == "swish":
+            output_gate_type = "silu"
+        assert output_gate_type in ["silu", "swish", "sigmoid"], (
+            f"unsupported {output_gate_type=}"
+        )
+
         self.fuse_in_proj_qkvzba = (
-            fuse_in_proj_qkvzba and self._can_fuse_in_proj_qkvzba(vllm_config)
+            fuse_in_proj_qkvzba
+            and self._can_fuse_in_proj_qkvzba(vllm_config, output_gate_type)
         )
         if self.fuse_in_proj_qkvzba:
             self.in_proj_qkvzba = MergedColumnParallelLinear(
@@ -853,13 +861,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        output_gate_type = getattr(config, "output_gate_type", "silu")
-        if output_gate_type == "swish":
-            output_gate_type = "silu"
-        assert output_gate_type in ["silu", "swish", "sigmoid"], (
-            f"unsupported {output_gate_type=}"
-        )
-
         self.norm = RMSNormGated(
             self.head_v_dim,
             eps=self.layer_norm_epsilon,
@@ -884,7 +885,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = False
         self.use_aiter_fused_gdn_decode = False
         if GDN_AITER_FUSED_DECODE_AVAILABLE:
-            reason = self._aiter_fused_gdn_decode_unsupported_reason(vllm_config)
+            reason = self._aiter_fused_gdn_decode_unsupported_reason(
+                vllm_config, self.norm.activation
+            )
             if reason is None:
                 self.use_aiter_fused_gdn_decode = True
             else:
@@ -945,7 +948,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     def _aiter_fused_gdn_decode_unsupported_reason(
-        self, vllm_config: VllmConfig
+        self, vllm_config: VllmConfig, gate_activation: str
     ) -> str | None:
         conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         if (
@@ -955,12 +958,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or self.num_v_heads // self.num_k_heads not in (2, 3)
             or self.conv_kernel_size != 4
             or self.activation != "silu"
-            or self.norm.activation != "silu"
+            or gate_activation != "silu"
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
             # The kernel emits the normed output, so out_proj cannot quantize it.
-            or not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
+            # Without a quant_config out_proj is unquantized (and may not exist yet).
+            or (
+                self.quant_config is not None
+                and not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
+            )
         ):
             return (
                 "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
@@ -1037,14 +1044,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
 
-    def _can_fuse_in_proj_qkvzba(self, vllm_config: VllmConfig) -> bool:
+    def _can_fuse_in_proj_qkvzba(
+        self, vllm_config: VllmConfig, gate_activation: str
+    ) -> bool:
+        # The ba partials are only summed by the fused decode kernel.
         return (
             current_platform.is_rocm()
             and GDN_AITER_IN_PROJ_DUAL_SPLITK_AVAILABLE
+            and GDN_AITER_FUSED_DECODE_AVAILABLE
             and not self.gqa_interleaved_layout
             and self.quant_config is None
             and vllm_config.lora_config is None
             and self.speculative_config is None
+            and self._aiter_fused_gdn_decode_unsupported_reason(
+                vllm_config, gate_activation
+            )
+            is None
         )
 
     def _project_qkvz_ba_rocm(
