@@ -91,7 +91,9 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
         ),
     )
 
-    video, _metadata = data["video"][0]
+    videos = data["video"]
+    assert isinstance(videos, list)
+    video, _metadata = videos[0]
     assert video.shape[0] == expected_frames
 
 

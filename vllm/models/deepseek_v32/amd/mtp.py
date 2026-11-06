@@ -8,18 +8,19 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -34,6 +35,8 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     get_pp_missing_layer_names,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
@@ -183,10 +186,10 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.model.layers.values(),
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mtp_block.mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
     def set_moe_parameters(self):
@@ -266,17 +269,15 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        fused_shared_expert_layers = self.fused_shared_expert_layers
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if fused_shared_expert_layers else 0),
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -303,8 +304,11 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                 continue
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in fused_shared_expert_layers
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
@@ -422,7 +426,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."

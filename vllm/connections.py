@@ -204,6 +204,7 @@ def _is_retryable(exc: Exception) -> bool:
     Retryable:
       - Timeouts (aiohttp, requests, stdlib)
       - Connection-level failures (refused, reset, DNS)
+      - Response-body transfer failures (incomplete or malformed payloads)
       - Server errors (5xx) -- includes S3 503 SlowDown
     Not retryable:
       - Client errors (4xx) -- bad URL, auth, not-found
@@ -228,6 +229,12 @@ def _is_retryable(exc: Exception) -> bool:
             aiohttp.ClientConnectionError,
             requests.exceptions.ConnectionError,
         ),
+    ):
+        return True
+    # A connection closed during a body read can raise a payload error.
+    if isinstance(
+        exc,
+        (aiohttp.ClientPayloadError, requests.exceptions.ChunkedEncodingError),
     ):
         return True
     # aiohttp server-side disconnects

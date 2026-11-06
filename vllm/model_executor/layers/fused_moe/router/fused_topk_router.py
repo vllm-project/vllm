@@ -5,22 +5,16 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-
-
-def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
-    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-        is_padding = get_forward_context().is_padding
-        return is_padding[:num_tokens] if is_padding is not None else None
-    return None
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    BaseRouter,
+    get_moe_padding_mask,
+)
 
 
 def vllm_topk_softmax(
@@ -36,7 +30,7 @@ def vllm_topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
+        is_padding=get_moe_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -55,14 +49,15 @@ def vllm_topk_sigmoid(
         token_expert_indices,
         gating_output,
         renormalize,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
+        is_padding=get_moe_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
 
 
-# At E=512 / top-10, AITER's topk_gating is faster than the legacy launcher
-# through this many tokens; its one-row generic prefill path regresses above it.
+# At E=512 / top-10, AITER's topk_gating is faster than the legacy softmax
+# launcher through this many tokens; its one-row generic prefill path regresses
+# above it. Sigmoid launches share the cap.
 _AITER_TOPK_GATING_MAX_TOKENS = 4096
 
 
@@ -73,7 +68,7 @@ def _aiter_topk_gating_supported(
     num_shared_experts: int,
     shared_expert_scoring_func: str,
 ) -> bool:
-    """Whether AITER's ``topk_gating`` can serve this softmax top-k launch.
+    """Whether AITER's ``topk_gating`` can serve this softmax or sigmoid launch.
 
     It needs contiguous gating rows and at most ``_AITER_TOPK_GATING_MAX_TOKENS``
     tokens. Fused shared experts are scored with sigmoid after the routed
@@ -134,9 +129,31 @@ def dispatch_topk_softmax_func(
 
 def dispatch_topk_sigmoid_func(
     use_rocm_aiter: bool = False,
+    *,
+    topk_weights: torch.Tensor | None = None,
+    topk_indices: torch.Tensor | None = None,
+    gating_output: torch.Tensor | None = None,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
-    if use_rocm_aiter:
-        return rocm_aiter_ops.topk_sigmoid
+    """Pick the sigmoid top-k implementation for one launch.
+
+    On ROCm with AITER, ``topk_gating`` is chosen on gfx942 and gfx950 when it
+    supports the launch described by the tensors; every other launch uses
+    ``vllm_topk_sigmoid``.
+    """
+    if use_rocm_aiter and (
+        rocm_aiter_ops.is_topk_gating_enabled()
+        and topk_weights is not None
+        and topk_indices is not None
+        and gating_output is not None
+        and _aiter_topk_gating_supported(
+            topk_weights,
+            topk_indices,
+            gating_output,
+            num_shared_experts=0,
+            shared_expert_scoring_func="",
+        )
+    ):
+        return rocm_aiter_ops.topk_sigmoid_gating
     return vllm_topk_sigmoid
 
 
@@ -179,7 +196,10 @@ def fused_topk(
         return topk_weights, topk_ids, token_expert_indices
     elif scoring_func == "sigmoid":
         topk_func = dispatch_topk_sigmoid_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
+            topk_weights=topk_weights,
+            topk_indices=topk_ids,
+            gating_output=gating_output,
         )
         topk_weights, topk_ids = topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize

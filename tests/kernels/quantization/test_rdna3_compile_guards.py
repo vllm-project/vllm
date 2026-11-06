@@ -65,6 +65,9 @@ RDNA3_CU_FILES = [
     "moe_q_gemm_rdna3.cu",
     "mxfp4_w4a8_gemv_rdna3.cu",
 ]
+# torch_bindings.cpp guards that keep RDNA ops out of CDNA builds: gfx1100
+# for the W4A16 kernels above, gfx115x for the RDNA3.5-only ones.
+RDNA_GUARDS = ("#ifdef VLLM_ROCM_GFX1100", "#ifdef VLLM_ROCM_GFX115X")
 
 
 def _find_repo_root() -> Path | None:
@@ -274,9 +277,10 @@ class TestTorchBindingsGuards:
         return _read_source_or_skip("csrc", "rocm", "torch_bindings.cpp")
 
     def test_all_rdna3_ops_inside_ifdef(self):
-        """Every rdna3 op def/impl must be between #ifdef VLLM_ROCM_GFX1100
-        and #endif. If any is outside, a CDNA build would try to register
-        the op and link a symbol that doesn't exist.
+        """Every rdna3 op def/impl must be between an RDNA guard
+        (#ifdef VLLM_ROCM_GFX1100 or VLLM_ROCM_GFX115X) and #endif. If any is
+        outside, a CDNA build would try to register the op and link a symbol
+        that doesn't exist.
         """
         src = self._read_bindings()
         lines = src.splitlines()
@@ -285,7 +289,7 @@ class TestTorchBindingsGuards:
         rdna3_lines_outside = []
 
         for i, line in enumerate(lines, 1):
-            if "#ifdef VLLM_ROCM_GFX1100" in line:
+            if any(guard in line for guard in RDNA_GUARDS):
                 inside_guard = True
             elif line.strip() == "#endif" and inside_guard:
                 inside_guard = False
@@ -298,8 +302,9 @@ class TestTorchBindingsGuards:
                 rdna3_lines_outside.append((i, line.strip()))
 
         assert not rdna3_lines_outside, (
-            "RDNA3 op references found OUTSIDE #ifdef VLLM_ROCM_GFX1100 "
-            "in torch_bindings.cpp — these would break CDNA builds:\n"
+            "RDNA3 op references found OUTSIDE the RDNA guards "
+            f"({', '.join(RDNA_GUARDS)}) in torch_bindings.cpp — these would "
+            "break CDNA builds:\n"
             + "\n".join(f"  L{n}: {s}" for n, s in rdna3_lines_outside)
         )
 
@@ -310,14 +315,14 @@ class TestTorchBindingsGuards:
 
         inside_guard = False
         for i, line in enumerate(lines, 1):
-            if "#ifdef VLLM_ROCM_GFX1100" in line:
+            if any(guard in line for guard in RDNA_GUARDS):
                 inside_guard = True
             elif line.strip() == "#endif" and inside_guard:
                 inside_guard = False
 
             if "#include" in line and "rdna3" in line.lower():
                 assert inside_guard, (
-                    f"L{i}: RDNA3 include outside gfx1100 guard: {line.strip()}"
+                    f"L{i}: RDNA3 include outside the RDNA guards: {line.strip()}"
                 )
 
 

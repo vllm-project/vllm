@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
     prepare_megamoe_nvfp4_inputs,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp8Dynamic,
@@ -38,7 +35,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -253,6 +249,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         weight_format: Routed-expert precision, a row of the feature matrix.
         shared_experts: Shared MLP to fuse if it is unsharded and in one of
             the ``weight_format.shared`` precisions; ``None`` never fuses.
+        max_num_tokens: Most tokens one rank passes to ``forward``; the
+            symmetric buffer is sized for it. Defaults to
+            ``max_num_batched_tokens``. A caller that hands this layer only its
+            sequence-parallel shard of the batch can pass the shard size.
 
     """
 
@@ -274,6 +274,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         shared_experts: nn.Module | None = None,
         num_logical_experts: int | None = None,
         fast_math: bool = True,
+        max_num_tokens: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -301,7 +302,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = (
+            max_num_tokens
+            if max_num_tokens is not None
+            else vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.weight_format = weight_format
         self.activation = activation
         self.fast_math = fast_math
@@ -759,29 +764,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             if is_padding is not None:
                 is_padding = is_padding[:num_tokens]
 
+        # Capture logical ids; staging maps them to EPLB physical replicas.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
-
-        # EPLB: map logical expert IDs to physical replicas and record load.
-        eplb_state = self.eplb_state
-        if eplb_state.logical_to_physical_map is not None:
-            assert eplb_state.expert_load_view is not None
-            assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
-            if is_padding is not None:
-                topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-            topk_ids = eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=eplb_state.expert_load_view,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
-                if eplb_state.num_unpadded_tokens_tensors is not None
-                else None,
-            )
 
         from vllm.utils.deep_gemm import _import_deep_gemm
 
@@ -814,6 +799,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 w2_global_scale=self.w2_weight_scale_2,
                 l2_alpha=self._l2_alpha,
                 l2_activation_scale=l2_activation_scale,
+                eplb_state=self.eplb_state,
             )
             kwargs.update(
                 l1_alpha=self.w13_weight_scale_2,
@@ -835,6 +821,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 shared_x_sf=shared_x_sf,
                 shared_block_m=shared_block_m,
                 hidden_quant=fmt.hidden_quant,
+                eplb_state=self.eplb_state,
             )
 
         if self.has_fused_shared_experts:

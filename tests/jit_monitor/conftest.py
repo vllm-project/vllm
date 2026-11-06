@@ -19,6 +19,7 @@ def _reset_monitor():
         jit_monitor._mode = "warn"
         jit_monitor._verbose = False
         jit_monitor._cutedsl_hook_installed = False
+        jit_monitor._flydsl_hook_installed = False
         jit_monitor._tilelang_hook_installed = False
         jit_monitor._tilelang_jitimpl_compile_depth = 0
 

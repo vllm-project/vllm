@@ -22,6 +22,7 @@ class LayerReloadingInfo:
     # track how many elements are ready for loading, used by `online_process_loader`
     load_numel: int = 0
     load_numel_total: int | None = None
+    defer_processing: bool = False
 
     # used by `online_process_loader` to buffer args and tensors until ready to load
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)

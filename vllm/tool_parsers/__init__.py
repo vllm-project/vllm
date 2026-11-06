@@ -82,6 +82,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "granite4_tool_parser",
         "Granite4ToolParser",
     ),
+    "granite_toolcall_parser": (
+        "granite_toolcall_parser",
+        "GraniteToolCallToolParser",
+    ),
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
@@ -135,12 +139,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "K2HorizonToolParser",
     ),
     "llama3_json": (
-        "llama_tool_parser",
-        "Llama3JsonToolParser",
+        "llama_json_engine_tool_parser",
+        "LlamaJsonEngineToolParser",
     ),
     "llama4_json": (
-        "llama_tool_parser",
-        "Llama3JsonToolParser",
+        "llama_json_engine_tool_parser",
+        "LlamaJsonEngineToolParser",
     ),
     "llama4_pythonic": (
         "llama4_pythonic_tool_parser",
@@ -218,6 +222,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
     ),
+    "ripple": (
+        "ripple_engine_tool_parser",
+        "RippleEngineToolParser",
+    ),
     "seed_oss": (
         "seed_oss_engine_tool_parser",
         "SeedOssEngineToolParser",
@@ -257,6 +265,15 @@ _TOOL_PARSERS_TO_REGISTER = {
     "apertus": (
         "apertus_tool_parser",
         "ApertusToolParser",
+    ),
+    "zaya": (
+        "zaya_engine_tool_parser",
+        "ZayaEngineToolParser",
+    ),
+    # Alias of "zaya", the name Zyphra's model cards use.
+    "zaya_xml": (
+        "zaya_engine_tool_parser",
+        "ZayaEngineToolParser",
     ),
 }
 

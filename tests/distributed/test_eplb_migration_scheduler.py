@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import numpy as np
 import pytest
 import torch
@@ -32,7 +34,12 @@ class _MockEplbCommunicator(EplbCommunicator):
     ) -> None:
         self.recv_calls.append((tensors, src_rank, expert_id))
 
-    def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+    def set_transfer_context(
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
+    ) -> None:
         self.context_calls += 1
 
     def execute(self) -> None:
@@ -276,3 +283,85 @@ def _placements_for_transfers(
         old_counts[src_rank] += 1
         new_counts[dst_rank] += 1
     return num_local_experts, old_indices, new_indices
+
+
+class _PushRecordingCommunicator(_MockEplbCommunicator):
+    """Records each push's target row and each receive's buffer row."""
+
+    def __init__(self, buffer: torch.Tensor) -> None:
+        super().__init__()
+        self.buffer = buffer
+        self.recv_rows: Sequence[dict[int, int]] | None = None
+        self.pushes: list[tuple[int, int, int]] = []
+        self.landings: list[tuple[int, int]] = []
+
+    @property
+    def needs_recv_rows(self) -> bool:
+        return True
+
+    def set_transfer_context(
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
+    ) -> None:
+        assert recv_rows is not None
+        self.recv_rows = recv_rows
+
+    def add_send(
+        self, tensors: list[torch.Tensor], dst_rank: int, expert_id: int
+    ) -> None:
+        assert self.recv_rows is not None
+        row = self.recv_rows[dst_rank][expert_id]
+        self.pushes.append((dst_rank, expert_id, row))
+
+    def add_recv(
+        self, tensors: list[torch.Tensor], src_rank: int, expert_id: int
+    ) -> None:
+        row_bytes = self.buffer[0].nbytes
+        row = (tensors[0].data_ptr() - self.buffer.data_ptr()) // row_bytes
+        self.landings.append((expert_id, row))
+
+
+@pytest.mark.parametrize("enable_migration_batching", [False, True])
+@pytest.mark.parametrize("seed", range(8))
+def test_push_recv_rows_match_receiver_rows(
+    enable_migration_batching: bool, seed: int
+) -> None:
+    """A push backend writes each expert into exactly the buffer row its
+    receiver reads it from, for both the default and the batched path."""
+    rng = np.random.default_rng(seed)
+    ep_size, num_local, num_logical = 4, 5, 12
+    num_physical = ep_size * num_local
+
+    def placement() -> np.ndarray:
+        # Every logical expert has a replica; the rest are random redundants.
+        experts = np.concatenate(
+            [
+                np.arange(num_logical),
+                rng.integers(0, num_logical, num_physical - num_logical),
+            ]
+        )
+        return rng.permutation(experts).astype(np.int64)
+
+    old_indices, new_indices = placement(), placement()
+    pushes: set[tuple[int, int, int]] = set()
+    landings: set[tuple[int, int, int]] = set()
+    for rank in range(ep_size):
+        buffer = torch.zeros(num_local, 3)
+        communicator = _PushRecordingCommunicator(buffer)
+        move_to_buffer(
+            num_local_experts=num_local,
+            old_indices=old_indices,
+            new_indices=new_indices,
+            expert_weights=[torch.zeros(num_local, 3)],
+            expert_weights_buffers=[buffer],
+            stream=None,
+            ep_rank=rank,
+            communicator=communicator,
+            enable_migration_batching=enable_migration_batching,
+        )
+        pushes.update(communicator.pushes)
+        landings.update((rank, expert, row) for expert, row in communicator.landings)
+
+    assert pushes == landings

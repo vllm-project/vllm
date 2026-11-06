@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
@@ -21,7 +23,7 @@ from vllm.entrypoints.serve.lora.protocol import (
 from vllm.exceptions import VLLMNotFoundError
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = "Success: LoRA adapter '{lora_name}' added successfully."
 LORA_UNLOADING_SUCCESS_MESSAGE = (
@@ -216,3 +218,21 @@ def test_pooling_maybe_get_adapters_unknown_model_raises():
 
     with pytest.raises(VLLMNotFoundError):
         _make_pooling_ctx("unknown-model", serving)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "part"),
+    [
+        ("audio_url", {"audio_url": {"url": "http://example.com/a.wav"}}),
+        ("input_audio", {"input_audio": {"data": "abc", "format": "wav"}}),
+    ],
+)
+def test_get_message_types_maps_audio_parts_to_audio(content_type, part):
+    """Both "audio_url" and OpenAI-style "input_audio" parts must resolve to the
+    "audio" modality so a default multimodal LoRA keyed on "audio" can match."""
+    serving = object.__new__(BaseServing)
+    request = SimpleNamespace(
+        messages=[{"role": "user", "content": [{"type": content_type, **part}]}]
+    )
+
+    assert serving._get_message_types(request) == {"audio"}

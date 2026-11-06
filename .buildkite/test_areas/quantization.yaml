@@ -56,6 +56,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
   key: quantized-fusions
+  automatic_shard: true
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/fusion
@@ -67,6 +68,7 @@ steps:
     - pytest -v -s fusion/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) Quantized Fusions"
       dind: false
       device: mi300_1
@@ -90,6 +92,11 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
+  - tests/quantization/test_keep_param_objects.py
+  - tests/model_executor/model_loader/test_reload_moe_kernels.py
+  - tests/benchmarks/test_forward_cli.py
+  - vllm/benchmarks/forward/
+  - vllm/models/muse_spark/
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/models/llama4.py
@@ -97,11 +104,24 @@ steps:
   - vllm/model_executor/layers/quantization/compressed_tensors
   - vllm/model_executor/layers/quantization/modelopt.py
   - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/fp8.py
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/online/
+  - vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py
+  - vllm/model_executor/utils.py
+  - vllm/model_executor/model_loader/reload/
+  - vllm/distributed/localization.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:
-    - pytest -s -v tests/quantization/test_blackwell_moe.py
+    - >-
+      pytest -v -s
+      tests/quantization/test_blackwell_moe.py
+      tests/quantization/test_keep_param_objects.py
+      tests/model_executor/model_loader/test_reload_moe_kernels.py
+      tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Quantized MoE"
       dind: false
       device: mi355_1

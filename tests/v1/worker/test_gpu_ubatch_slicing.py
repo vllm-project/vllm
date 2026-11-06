@@ -9,6 +9,7 @@ the same microbatches, so the main test here pins V2's slicing against V1's
 threaded execution of the microbatches.
 """
 
+import os
 import threading
 from contextlib import nullcontext
 from dataclasses import replace
@@ -48,6 +49,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    merge_ubatch_outputs,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -623,6 +625,7 @@ def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCaptur
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     capturer.dp_rank = 0
     capturer.tp_size = 1
+    capturer.restore_rows = capturer._restore_local_topk_ids
     capturer.device_buffer = torch.full(
         (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
     )
@@ -660,6 +663,19 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     torch.testing.assert_close(
         capturer.device_buffer[:, 0, 0], model_inputs["input_ids"].int()
     )
+
+
+def test_merge_keeps_aux_hidden_states_per_layer():
+    # EAGLE3 and DFlash targets return (hidden_states, [aux per layer]).
+    hidden = torch.arange(6.0).view(6, 1)
+    aux = [torch.arange(6.0).view(6, 1) + 10 * i for i in range(3)]
+    merged_hidden, merged_aux = merge_ubatch_outputs(
+        [(hidden[:2], [x[:2] for x in aux]), (hidden[2:], [x[2:] for x in aux])]
+    )
+    torch.testing.assert_close(merged_hidden, hidden)
+    assert len(merged_aux) == len(aux)
+    for merged, expected in zip(merged_aux, aux):
+        torch.testing.assert_close(merged, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
@@ -933,19 +949,23 @@ def test_captured_split_survives_a_replay_with_enough_requests():
 
 
 def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True,
-            all2all_backend="deepep_low_latency",
-            dbo_decode_token_threshold=DECODE_THRESHOLD,
-            dbo_prefill_token_threshold=PREFILL_THRESHOLD,
-        ),
-        compilation_config=CompilationConfig(
-            cudagraph_mode=CUDAGraphMode.FULL,
-            cudagraph_capture_sizes=capture_sizes,
-        ),
-    )
+    # The manager under test is model runner V2's, so resolve the config for it.
+    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}):
+        vllm_config = VllmConfig(
+            model_config=ModelConfig(
+                model="facebook/opt-125m", dtype="float16", seed=0
+            ),
+            parallel_config=ParallelConfig(
+                enable_dbo=True,
+                all2all_backend="deepep_low_latency",
+                dbo_decode_token_threshold=DECODE_THRESHOLD,
+                dbo_prefill_token_threshold=PREFILL_THRESHOLD,
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.FULL,
+                cudagraph_capture_sizes=capture_sizes,
+            ),
+        )
     with patch.object(
         cudagraph_utils,
         "get_pp_group",
@@ -955,7 +975,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
             vllm_config,
             torch.device("cuda:0"),
             CUDAGraphMode.FULL,
-            decode_query_len=1,
+            decode_query_lens={1: vllm_config.scheduler_config.max_num_seqs},
             ubatch_runner=cast(UBatchRunner, object()),
         )
     manager._graphs_captured = True
@@ -1002,3 +1022,36 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+@pytest.mark.parametrize("num_reqs", [3, 4, 5])
+def test_uniform_spec_decode_batches_split_on_request_boundaries(num_reqs: int):
+    # Verifying 2 drafts per request: 3 tokens each. A midpoint split would cut
+    # a request in two whenever num_reqs is odd, leaving neither microbatch a
+    # uniform decode.
+    query_len = 3
+    input_batch = _make_input_batch(
+        [query_len] * num_reqs, [64] * num_reqs, _make_buffers()
+    )
+    slices = create_ubatch_slices(input_batch, 2, uniform_token_count=query_len)
+    first, second = slices
+    assert first.token_slice.stop % query_len == 0
+    assert first.request_slice.stop == second.request_slice.start
+    assert first.num_tokens == query_len * (num_reqs // 2)
+    assert second.token_slice.stop == query_len * num_reqs
+
+
+def test_single_token_or_unknown_uniform_count_keeps_midpoint_split():
+    input_batch = _make_input_batch([3] * 5, [64] * 5, _make_buffers())
+    for uniform_token_count in (None, 1):
+        first, _ = create_ubatch_slices(
+            input_batch, 2, uniform_token_count=uniform_token_count
+        )
+        assert first.token_slice.stop == 15 // 2
+
+
+def test_too_few_requests_to_align_keeps_midpoint_split():
+    # One request cannot be split on a request boundary.
+    input_batch = _make_input_batch([4], [64], _make_buffers())
+    first, _ = create_ubatch_slices(input_batch, 2, uniform_token_count=4)
+    assert first.token_slice.stop == 2

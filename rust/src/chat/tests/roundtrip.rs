@@ -1126,6 +1126,8 @@ fn decoded_completion_stream(
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 })),
             }
@@ -1139,6 +1141,8 @@ fn decoded_completion_stream(
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                spec_decode_metrics: None,
+                weight_versions: None,
                 timestamps: Default::default(),
             });
             events.push(DecodedTextEvent::TextDelta {

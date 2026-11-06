@@ -258,6 +258,15 @@ class DecodeBenchConnectorScheduler:
         self._startup_fill_group_ids = (
             _get_startup_fill_group_ids(kv_cache_config) if self.startup_fill else set()
         )
+        # Groups that opted out of external KV transfer (e.g. the HiSparse
+        # hot/resident tiers) are ephemeral per-request replicas rebuilt from
+        # their transferable source group after a connector load; there is
+        # nothing for this connector to fill in them.
+        self._non_transfer_group_ids = {
+            group_idx
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            if not group.enable_kv_transfer
+        }
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
@@ -336,7 +345,10 @@ class DecodeBenchConnectorScheduler:
                 strict=True,
             )
         ):
-            if group_idx in self._startup_fill_group_ids:
+            if (
+                group_idx in self._startup_fill_group_ids
+                or group_idx in self._non_transfer_group_ids
+            ):
                 block_ids_per_group_list.append([])
                 continue
             is_circular_buffer = all(

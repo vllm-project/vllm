@@ -81,6 +81,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         block_stride_rows: int
         block_n: int
         has_prefill_workspace: bool
+        has_idx_mapping: bool
         count_valid: bool
         single_tile: bool
         compact_to_front: bool
@@ -99,6 +100,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
         out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
         valid_count_ptr,  # int32 [num_tokens] - output valid count per row
+        idx_mapping_ptr,  # int32 [num_requests] - block table row per request
         prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
         workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
         workspace_rank_stride,  # rows per DCP rank of a gathered prefill workspace
@@ -109,6 +111,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         BLOCK_N: tl.constexpr,  # tile width along columns
         NUM_TOPK_TOKENS: tl.constexpr,
         HAS_PREFILL: tl.constexpr,
+        HAS_IDX_MAPPING: tl.constexpr,
         COUNT_VALID: tl.constexpr,  # whether to count valid indices
         # BLOCK_N >= NUM_TOPK_TOKENS: one program owns the query, so its count
         # is an in-register reduction and needs no atomic.
@@ -141,6 +144,8 @@ class ConvertReqIndexToGlobalIndexKernel(
 
         # Load request id for this token (no mask: grid is exact)
         req = tl.load(req_id_ptr + token_id)
+        if HAS_IDX_MAPPING:
+            req = tl.maximum(tl.load(idx_mapping_ptr + req), 0)
 
         # Load token indices for this tile
         ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
@@ -239,6 +244,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         BLOCK_N: int,
         NUM_TOPK_TOKENS: int,
         HAS_PREFILL_WORKSPACE: bool,
+        HAS_IDX_MAPPING: bool,
         COUNT_VALID: bool,
         COMPACT_TO_FRONT: bool,
         DCP_SIZE: int,
@@ -252,6 +258,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             block_stride_rows=BLOCK_STRIDE_ROWS,
             block_n=tiling[1],
             has_prefill_workspace=HAS_PREFILL_WORKSPACE,
+            has_idx_mapping=HAS_IDX_MAPPING,
             count_valid=COUNT_VALID,
             single_tile=tiling[0],
             compact_to_front=COMPACT_TO_FRONT,
@@ -279,6 +286,20 @@ class ConvertReqIndexToGlobalIndexKernel(
             block_size * dcp_size,
         )
         max_num_blocks_per_req = get_block_table_width(max_num_blocks, block_size)
+        hisparse_combos: list[dict[str, Any]] = []
+        if vllm_config.attention_config.hisparse_config is not None:
+            hisparse_combos.extend(
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=True,
+                    COUNT_VALID=count_valid,
+                    COMPACT_TO_FRONT=count_valid,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                )
+                for count_valid in (False, True)
+            )
         pcp_dcp_combos = []
         if (
             vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -288,6 +309,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             pcp_dcp_combos.append(
                 dict(
                     HAS_PREFILL_WORKSPACE=True,
+                    HAS_IDX_MAPPING=False,
                     COUNT_VALID=True,
                     COMPACT_TO_FRONT=True,
                     DCP_SIZE=dcp_size,
@@ -299,6 +321,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             zip_inputs(
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=False,
                     COUNT_VALID=False,
                     COMPACT_TO_FRONT=False,
                     DCP_SIZE=1,
@@ -307,6 +330,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 ),
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=False,
                     COUNT_VALID=True,
                     COMPACT_TO_FRONT=True,
                     DCP_SIZE=1,
@@ -315,6 +339,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 ),
                 dict(
                     HAS_PREFILL_WORKSPACE=True,
+                    HAS_IDX_MAPPING=False,
                     COUNT_VALID=True,
                     COMPACT_TO_FRONT=True,
                     DCP_SIZE=1,
@@ -323,6 +348,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 ),
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=False,
                     COUNT_VALID=True,
                     COMPACT_TO_FRONT=False,
                     DCP_SIZE=dcp_size,
@@ -331,6 +357,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 ),
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=False,
                     COUNT_VALID=True,
                     COMPACT_TO_FRONT=dcp_size > 1,
                     DCP_SIZE=dcp_size,
@@ -338,6 +365,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                     DCP_INTERLEAVE=dcp_interleave,
                 ),
                 *pcp_dcp_combos,
+                *hisparse_combos,
             ),
             BLOCK_SIZE=block_size,
             BLOCK_STRIDE_ROWS=block_stride_rows,
@@ -373,6 +401,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             prefill_workspace_starts=(
                 int32_ptr if compile_key.has_prefill_workspace else None
             ),
+            idx_mapping=(int32_ptr if compile_key.has_idx_mapping else None),
             max_num_blocks_per_req=1,
             workspace_rank_stride=1,
             BLOCK_SIZE=compile_key.block_size,
@@ -380,6 +409,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             BLOCK_N=compile_key.block_n,
             NUM_TOPK_TOKENS=compile_key.num_topk_tokens,
             HAS_PREFILL_WORKSPACE=compile_key.has_prefill_workspace,
+            HAS_IDX_MAPPING=compile_key.has_idx_mapping,
             COUNT_VALID=compile_key.count_valid,
             COMPACT_TO_FRONT=compile_key.compact_to_front,
             DCP_SIZE=compile_key.dcp_size,
@@ -397,6 +427,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         valid_counts: torch.Tensor | None,
         prefill_workspace_request_ids: torch.Tensor | None,
         prefill_workspace_starts: torch.Tensor | None,
+        idx_mapping: torch.Tensor | None,
         *,
         workspace_rank_stride: int,
         max_num_blocks_per_req: int,
@@ -405,6 +436,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         BLOCK_N: int,
         NUM_TOPK_TOKENS: int,
         HAS_PREFILL_WORKSPACE: bool,
+        HAS_IDX_MAPPING: bool,
         COUNT_VALID: bool,
         COMPACT_TO_FRONT: bool,
         DCP_SIZE: int,
@@ -419,6 +451,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             valid_count_ptr=valid_counts,
             prefill_request_id_ptr=prefill_workspace_request_ids,
             workspace_starts_ptr=prefill_workspace_starts,
+            idx_mapping_ptr=idx_mapping,
             BLOCK_N=block_n,
             HAS_PREFILL=HAS_PREFILL_WORKSPACE,
             SINGLE_TILE=single_tile,
@@ -475,6 +508,7 @@ def triton_convert_req_index_to_global_index(
     return_valid_counts: bool = False,
     out: torch.Tensor | None = None,
     valid_counts_out: torch.Tensor | None = None,
+    idx_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """out[token_id, indice_id] =
         block_table[req_id[token_id],
@@ -494,11 +528,17 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_starts: int32 [num_prefills], 0-indexed workspace
         starts for each prefill request
 
+    When idx_mapping (int32 [num_requests]) is given, block_table is
+    indexed by idx_mapping[req_id[token_id]] instead of req_id[token_id].
+
     When return_valid_counts is True, also returns the count of valid (non -1)
     indices per row, computed during the same kernel pass (no extra overhead).
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
+    assert idx_mapping is None or (
+        idx_mapping.dtype == torch.int32 and idx_mapping.is_contiguous()
+    )
     assert token_indices.dtype == torch.int32
     assert req_id.shape[0] == token_indices.shape[0], (
         f"req_id ({req_id.shape[0]}) and token_indices ({token_indices.shape[0]}) "
@@ -572,6 +612,7 @@ def triton_convert_req_index_to_global_index(
         valid_counts,
         prefill_workspace_request_ids,
         prefill_workspace_starts,
+        idx_mapping,
         # shapes / constexprs
         workspace_rank_stride=prefill_workspace_rank_stride or 0,
         max_num_blocks_per_req=max_num_blocks_per_req,
@@ -582,6 +623,7 @@ def triton_convert_req_index_to_global_index(
         BLOCK_N=BLOCK_N,
         NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
         HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
+        HAS_IDX_MAPPING=idx_mapping is not None,
         COUNT_VALID=return_valid_counts,
         COMPACT_TO_FRONT=return_valid_counts,
         DCP_SIZE=dcp_size,
@@ -680,6 +722,7 @@ def triton_filter_and_convert_dcp_index(
         # No prefill workspace on the DCP decode path.
         None,
         None,
+        None,
         workspace_rank_stride=0,
         max_num_blocks_per_req=max_num_blocks_per_req,
         BLOCK_SIZE=BLOCK_SIZE,
@@ -689,6 +732,7 @@ def triton_filter_and_convert_dcp_index(
         BLOCK_N=BLOCK_N,
         NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
         HAS_PREFILL_WORKSPACE=False,
+        HAS_IDX_MAPPING=False,
         COUNT_VALID=count_valid,
         COMPACT_TO_FRONT=compact_valid_to_front,
         DCP_SIZE=dcp_size,

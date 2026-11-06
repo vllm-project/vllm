@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -736,7 +737,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
-    lora_manager: "LoRAModelManager | None"
+    lora_manager: "LoRAModelManager | None" = None
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1535,6 +1536,20 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
+
+@runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """The interface of a speculative decoding draft model which declares the
+    speculator it's for. This is read through the model registry, so that it's
+    available without importing the model.
+    """
+
+    speculator_config_class: ClassVar[type["SpeculatorConfig"]]
+    """The config class of the speculator that this is a draft model of.
+    Unless a speculative method is configured that the checkpoint can't
+    override, a draft checkpoint with this model's architecture uses this
+    speculator."""
 
 
 @runtime_checkable

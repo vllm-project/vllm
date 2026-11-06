@@ -413,6 +413,8 @@ def extend_all_queries_by_N(
     new_cad = cad.replace(
         query_start_loc=new_query_start_loc,
         query_start_loc_cpu=new_query_start_loc_cpu,
+        _num_computed_tokens_cache=None,
+        _token_to_req_indices_cache=None,
         seq_lens=cad.seq_lens + N,
         # each request is extended by N tokens -> batch_size * N tokens are added
         num_actual_tokens=cad.num_actual_tokens + cad.batch_size() * N,

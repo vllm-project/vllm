@@ -198,6 +198,21 @@ class LogitsProcessor(PluggableLayer):
             logits = logits[..., : self.org_vocab_size]
         return logits
 
+    def _mask_outside_vocab(
+        self, logits: torch.Tensor, lm_head: VocabParallelEmbedding
+    ) -> None:
+        """Mask this shard's padding and any head rows past ``org_vocab_size``.
+
+        A head shared with another model can have rows past this processor's
+        vocabulary, as ``_get_logits`` drops them.
+        """
+        shard_indices = lm_head.shard_indices
+        if shard_indices.num_org_vocab_padding > 0:
+            logits[..., -shard_indices.num_org_vocab_padding :] = -float("inf")
+        cutoff = self.org_vocab_size - shard_indices.org_vocab_start_index
+        if cutoff < logits.shape[-1]:
+            logits[..., max(cutoff, 0) :] = -float("inf")
+
     def get_top_tokens(
         self,
         lm_head: VocabParallelEmbedding,
@@ -223,10 +238,7 @@ class LogitsProcessor(PluggableLayer):
         if self.scale != 1.0:
             logits = logits * self.scale
 
-        # Mask out padding entries beyond org_vocab_size on this shard.
-        num_pad = lm_head.shard_indices.num_org_vocab_padding
-        if num_pad > 0:
-            logits[..., -num_pad:] = -float("inf")
+        self._mask_outside_vocab(logits, lm_head)
 
         local_max_vals, local_max_indices = logits.max(dim=-1)
 
@@ -284,10 +296,7 @@ class LogitsProcessor(PluggableLayer):
             if self.scale != 1.0:
                 logits = logits * self.scale
 
-        # Mask out padding entries beyond org_vocab_size on this shard.
-        num_pad = lm_head.shard_indices.num_org_vocab_padding
-        if num_pad > 0:
-            logits[..., -num_pad:] = -float("inf")
+        self._mask_outside_vocab(logits, lm_head)
 
         if return_log_probs:
             log_partition = torch.logsumexp(logits.float(), dim=-1, keepdim=True)

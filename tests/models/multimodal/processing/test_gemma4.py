@@ -10,15 +10,21 @@ import torch
 from PIL import Image as PILImage
 
 from vllm.exceptions import VLLMValidationError
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
+    Gemma4ProcessingInfo,
 )
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
 
@@ -98,6 +104,7 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
 
     num_soft_tokens = processor.info._compute_num_soft_tokens(
         image_width=image_width,
@@ -190,6 +197,7 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
     image = PILImage.new("RGB", (1000, 1000), color="white")
     image_size = image.size
     mm_items = processor.info.parse_mm_data({"image": image})
@@ -261,8 +269,14 @@ def test_video_cache_is_independent_of_image_kwargs(
     depend on cache warmth.
     """
     request_kwargs = {"images_kwargs": image_kwargs}
+    # A rescale_factor override only changes pixels when the processor
+    # rescales, so test it with device-side normalization off.
+    model_config_kwargs = (
+        {"mm_device_do_normalize": False} if "rescale_factor" in image_kwargs else None
+    )
     ctx = build_model_context(
         model_id,
+        model_config_kwargs=model_config_kwargs,
         limit_mm_per_prompt={"image": 1, "video": 1},
         mm_processor_cache_gb=1,
     )
@@ -305,6 +319,74 @@ def test_video_cache_is_independent_of_image_kwargs(
         pixels(baseline, "image", "pixel_values"),
         pixels(fresh, "image", "pixel_values"),
     )
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mm_device_do_normalize():
+    device = current_platform.device_type
+    ctx = build_model_context(
+        GEMMA4_MODEL_ID, limit_mm_per_prompt={"image": 2, "video": 1}
+    )
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
+
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    rng = np.random.default_rng(0)
+    images = [
+        PILImage.fromarray(rng.integers(0, 256, (470, 310, 3), dtype=np.uint8)),
+        PILImage.fromarray(rng.integers(0, 256, (320, 480, 3), dtype=np.uint8)),
+    ]
+    frames = rng.integers(0, 256, (2, 240, 320, 3), dtype=np.uint8)
+    mm_items = processor.info.parse_mm_data(
+        {"image": images, "video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
+    )
+    prompt = hf_processor.image_token * len(images) + hf_processor.video_token
+
+    def pixels(mm_device_do_normalize: bool) -> list[torch.Tensor]:
+        ctx.model_config.multimodal_config.mm_device_do_normalize = (
+            mm_device_do_normalize
+        )
+        data = processor(prompt, mm_items=mm_items)["mm_kwargs"].get_data()
+        return [*data["pixel_values"], *data["pixel_values_videos"]]
+
+    normalized = pixels(False)
+    raw = pixels(True)
+
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+    for raw_values, normalized_values in zip(raw, normalized, strict=True):
+        assert raw_values.dtype == torch.uint8
+        output = input_norm(raw_values.to(device), normalized_values.dtype)
+        torch.testing.assert_close(output, normalized_values.to(device))
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_embed_patches_normalizes_channel_last_patches():
+    """Gemma 4 patches are (patch, patch, channel); per-channel parameters must
+    reach the right pixels even when they differ across channels."""
+    mean, std = [0.1, 0.4, 0.7], [0.5, 0.25, 0.125]
+    model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
+    torch.nn.Module.__init__(model)
+    model.vision_input_norm = FusedMMInputNorm(
+        image_mean=mean, image_std=std, rescale_factor=1 / 255
+    )
+    model.vision_tower = SimpleNamespace(
+        config=SimpleNamespace(num_channels=3),
+        patch_embedder=SimpleNamespace(
+            input_proj=lambda pixel_values: pixel_values,
+            _position_embeddings=lambda *_: 0.0,
+        ),
+    )
+    model.model_dtype = torch.float32
+
+    pixel_values = torch.randint(0, 256, (2, 6, 16 * 16 * 3), dtype=torch.uint8)
+    output = model._embed_patches(pixel_values, None, None)
+
+    # `_embed_patches` also applies the embedder's [0, 1] -> [-1, 1] rescale.
+    expected = (
+        pixel_values.view(2, 6, -1, 3) / 255 - torch.tensor(mean)
+    ) / torch.tensor(std)
+    expected = 2 * (expected - 0.5)
+    torch.testing.assert_close(output, expected.view(pixel_values.shape))
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
@@ -397,11 +479,12 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
 
 
 def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
-    model = object.__new__(Gemma4ForConditionalGeneration)
+    model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
     vision_config = SimpleNamespace(
         patch_size=16, pooling_kernel_size=3, default_output_length=280
     )
     model.vision_tower = SimpleNamespace(config=vision_config)
+    model.vision_input_norm = SimpleNamespace(input_dtype=None)
     model.config = SimpleNamespace(vision_config=vision_config)
     return model
 

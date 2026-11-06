@@ -217,6 +217,17 @@ kNvfp4DynamicToken = QuantKey(
     FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTokenScale
 )
 
+
+def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:
+    """Whether ``key``'s second-level scale is computed per token at runtime."""
+    return (
+        key is not None
+        and key.scale2 is not None
+        and not key.scale2.static
+        and key.scale2.group_shape == GroupShape.PER_TOKEN
+    )
+
+
 kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
 kNvfp4Static = QuantKey(
     FP4_DTYPE, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
@@ -299,6 +310,10 @@ kInt8StaticTensorAsym = QuantKey(torch.int8, kStaticTensorScale, symmetric=False
 kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=False)
 kDynamic32Scale = ScaleDesc(torch.float32, False, GroupShape(1, 32))
 kInt8Dynamic32Sym = QuantKey(torch.int8, kDynamic32Scale, symmetric=True)
+
+# LUT-B: 3-bit indices into an E4M3 codebook per 8x64 weight tile (Rubin).
+kLutBStaticCodebook = ScaleDesc(torch.float8_e4m3fn, True, GroupShape(8, 64))
+kLutBStatic = QuantKey(torch.uint8, kLutBStaticCodebook, symmetric=True)
 
 # INT4 W4A8 quantization keys
 

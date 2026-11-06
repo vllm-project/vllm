@@ -379,6 +379,11 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
+You can also pass a one-dimensional `torch.Tensor` directly. vLLM detaches
+the tensor, moves it to CPU, and converts it to a NumPy array before audio
+processing, so tensors on CUDA devices and tensors with `requires_grad=True`
+are supported.
+
 Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
 #### Chunking Long Audio for Transcription
@@ -643,6 +648,13 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
+
+### Media Download Cache
+
+Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.
+This cache is disabled by default. If another request evicts an entry while it
+is being read, vLLM downloads the media again. The source URL must still be
+accessible when this happens.
 
 ### Image Inputs
 

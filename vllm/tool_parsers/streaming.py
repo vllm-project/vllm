@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -111,145 +111,158 @@ _IN_SCALAR_VALUE = 5
 _AFTER_VALUE = 6
 
 
-def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
-    """Locate every tool call of a (possibly partial) required-tool-call array.
+@dataclass
+class RequiredToolCallScanner:
+    """Incremental scanner owning the text of one required-tool-call stream."""
 
-    A single string- and nesting-aware pass over ``text`` that records, for
-    each top-level array element, its ``name`` (once complete) and the
-    character span of its ``parameters`` value. Text after the closing ``]``
-    of the array is ignored. Only the element level of the array is
-    interpreted, so braces, brackets and quotes inside nested values and
-    strings cannot confuse it.
-    """
-    spans: list[_RequiredToolCallSpan] = []
-    depth = 0  # nesting depth of ``{}`` and ``[]``; element objects sit at 2
-    in_string = False
-    escaped = False
-    string_start = 0
+    spans: list[_RequiredToolCallSpan] = field(default_factory=list)
+    text: str = ""
+    depth: int = 0
+    in_string: bool = False
+    escaped: bool = False
+    string_start: int = 0
     cur: _RequiredToolCallSpan | None = None
-    expect = _EXPECT_KEY
+    expect: int = _EXPECT_KEY
     key: str | None = None
-    value_start = 0
+    value_start: int = 0
+    done: bool = False
 
-    def end_value(pos: int) -> None:
-        nonlocal expect
-        assert cur is not None
-        if key == "parameters":
-            cur.args_end = pos
-        elif key == "name" and expect == _IN_STRING_VALUE:
-            try:
-                cur.name = json.loads(text[value_start:pos])
-                cur.name_end = pos
-            except json.JSONDecodeError:
-                # Not a valid JSON string: the call can never become ready,
-                # which matches the non-streaming path rejecting the array.
-                cur.name = None
-        expect = _AFTER_VALUE
+    def scan(self, delta_text: str) -> list[_RequiredToolCallSpan]:
+        """Append and scan new text, retaining lexical state across deltas."""
+        start = len(self.text)
+        self.text += delta_text
+        text = self.text
+        if self.done:
+            return self.spans
 
-    def start_value(pos: int, state: int) -> None:
-        nonlocal expect, value_start
-        assert cur is not None
-        value_start = pos
-        if key == "parameters":
-            cur.args_start = pos
-        expect = state
+        def end_value(pos: int) -> None:
+            assert self.cur is not None
+            if self.key == "parameters":
+                self.cur.args_end = pos
+            elif self.key == "name" and self.expect == _IN_STRING_VALUE:
+                try:
+                    self.cur.name = json.loads(text[self.value_start : pos])
+                    self.cur.name_end = pos
+                except json.JSONDecodeError:
+                    # Not a valid JSON string: the call can never become ready,
+                    # which matches the non-streaming path rejecting the array.
+                    self.cur.name = None
+            self.expect = _AFTER_VALUE
 
-    for i, ch in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-                if depth == 2 and cur is not None:
-                    if expect == _EXPECT_KEY:
-                        key = text[string_start + 1 : i]
-                        expect = _EXPECT_COLON
-                    elif expect == _IN_STRING_VALUE:
-                        end_value(i + 1)
-            continue
+        def start_value(pos: int, value_state: int) -> None:
+            assert self.cur is not None
+            self.value_start = pos
+            if self.key == "parameters":
+                self.cur.args_start = pos
+            self.expect = value_state
 
-        if ch == '"':
-            in_string = True
-            string_start = i
-            if depth == 2 and cur is not None and expect == _EXPECT_VALUE:
-                start_value(i, _IN_STRING_VALUE)
-            continue
+        for i in range(start, len(text)):
+            ch = text[i]
+            if self.in_string:
+                if self.escaped:
+                    self.escaped = False
+                elif ch == "\\":
+                    self.escaped = True
+                elif ch == '"':
+                    self.in_string = False
+                    if self.depth == 2 and self.cur is not None:
+                        if self.expect == _EXPECT_KEY:
+                            self.key = text[self.string_start + 1 : i]
+                            self.expect = _EXPECT_COLON
+                        elif self.expect == _IN_STRING_VALUE:
+                            end_value(i + 1)
+                continue
 
-        if ch in "{[":
-            if depth == 0:
-                if ch != "[":
-                    return spans
-            elif depth == 1:
-                if ch != "{":
-                    return spans
-                cur = _RequiredToolCallSpan()
-                spans.append(cur)
-                expect = _EXPECT_KEY
-                key = None
-            elif depth == 2 and cur is not None and expect == _EXPECT_VALUE:
-                start_value(i, _IN_CONTAINER_VALUE)
-            depth += 1
-            continue
+            if ch == '"':
+                self.in_string = True
+                self.string_start = i
+                if (
+                    self.depth == 2
+                    and self.cur is not None
+                    and self.expect == _EXPECT_VALUE
+                ):
+                    start_value(i, _IN_STRING_VALUE)
+                continue
 
-        if ch in "}]":
-            if depth == 2 and cur is not None and expect == _IN_SCALAR_VALUE:
-                end_value(i)
-            depth -= 1
-            if depth == 2 and cur is not None and expect == _IN_CONTAINER_VALUE:
-                end_value(i + 1)
-            elif depth == 1:
-                cur = None
-            elif depth <= 0:
-                return spans
-            continue
+            if ch in "{[":
+                if self.depth == 0:
+                    if ch != "[":
+                        self.done = True
+                        return self.spans
+                elif self.depth == 1:
+                    if ch != "{":
+                        self.done = True
+                        return self.spans
+                    self.cur = _RequiredToolCallSpan()
+                    self.spans.append(self.cur)
+                    self.expect = _EXPECT_KEY
+                    self.key = None
+                elif (
+                    self.depth == 2
+                    and self.cur is not None
+                    and self.expect == _EXPECT_VALUE
+                ):
+                    start_value(i, _IN_CONTAINER_VALUE)
+                self.depth += 1
+                continue
 
-        if depth != 2 or cur is None:
-            continue
+            if ch in "}]":
+                if (
+                    self.depth == 2
+                    and self.cur is not None
+                    and self.expect == _IN_SCALAR_VALUE
+                ):
+                    end_value(i)
+                self.depth -= 1
+                if (
+                    self.depth == 2
+                    and self.cur is not None
+                    and self.expect == _IN_CONTAINER_VALUE
+                ):
+                    end_value(i + 1)
+                elif self.depth == 1:
+                    self.cur = None
+                elif self.depth <= 0:
+                    self.done = True
+                    return self.spans
+                continue
 
-        if ch == ":":
-            if expect == _EXPECT_COLON:
-                expect = _EXPECT_VALUE
-        elif ch == ",":
-            if expect == _IN_SCALAR_VALUE:
-                end_value(i)
-            expect = _EXPECT_KEY
-            key = None
-        elif ch.isspace():
-            if expect == _IN_SCALAR_VALUE:
-                end_value(i)
-        elif expect == _EXPECT_VALUE:
-            start_value(i, _IN_SCALAR_VALUE)
+            if self.depth != 2 or self.cur is None:
+                continue
 
-    return spans
+            if ch == ":":
+                if self.expect == _EXPECT_COLON:
+                    self.expect = _EXPECT_VALUE
+            elif ch == ",":
+                if self.expect == _IN_SCALAR_VALUE:
+                    end_value(i)
+                self.expect = _EXPECT_KEY
+                self.key = None
+            elif ch.isspace():
+                if self.expect == _IN_SCALAR_VALUE:
+                    end_value(i)
+            elif self.expect == _EXPECT_VALUE:
+                start_value(i, _IN_SCALAR_VALUE)
+
+        return self.spans
 
 
 def extract_required_tool_call_streaming(
     *,
-    previous_text: str,
-    current_text: str | None,
+    delta_text: str,
+    scanner: RequiredToolCallScanner,
     tool_call_idx: int | None,
     tool_call_id_type: str,
 ) -> tuple[DeltaMessage | None, bool]:
-    """Stream the tool calls of a ``tool_choice="required"`` JSON array.
+    """Stream required tool calls from new text using a per-stream scanner.
 
-    ``previous_text`` must be a prefix of ``current_text`` (the accumulated
-    text before and after this delta). Every array element that has something
-    not yet sent is emitted, in array order, so a delta may carry several
-    ``DeltaToolCall`` entries: the first chunk of a call carries its id, name
-    and the arguments generated so far; later chunks carry only new argument
-    text. What was already sent is read off the same scan, since the spans
-    are prefix-stable, so no state is needed beyond the two texts.
-
-    Returns the delta (``None`` when nothing is new) and whether at least one
-    call has been announced so far.
+    The first chunk of each call carries its id, name and available arguments;
+    subsequent chunks carry only new argument text. A delta may start several
+    calls. The scanner owns accumulated text and lexical state.
     """
-    if not current_text:
-        return None, False
-
-    spans = _scan_required_tool_calls(current_text)
-    sent_len = len(previous_text)
+    sent_len = len(scanner.text)
+    spans = scanner.scan(delta_text)
+    current_text = scanner.text
 
     tool_calls: list[DeltaToolCall] = []
     started = 0

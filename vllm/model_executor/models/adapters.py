@@ -29,6 +29,24 @@ _T = TypeVar("_T", bound=nn.Module)
 
 logger = init_logger(__name__)
 
+# Load formats whose weight iterators yield tensors that are never reused
+_OWNED_TENSOR_LOAD_FORMATS = frozenset(
+    {
+        "auto",
+        "hf",
+        "safetensors",
+        "mistral",
+        "pt",
+        "npcache",
+        "instanttensor",
+        "tensorizer",
+        "sharded_state",
+        "modelexpress",
+        "runai_streamer",
+        "runai_streamer_sharded",
+    }
+)
+
 _GENERATE_SUFFIXES = [
     "ForCausalLM",
     "ForConditionalGeneration",
@@ -190,9 +208,14 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             target_prefix = ""
 
             seen_weights = list[tuple[str, torch.Tensor]]()
+            owned = (
+                self.vllm_config.load_config.load_format in _OWNED_TENSOR_LOAD_FORMATS
+            )
             for name, loaded_weight in weights:
                 # Clone because the iterator may reuse the tensor buffer
-                seen_weights.append((name, loaded_weight.clone()))
+                seen_weights.append(
+                    (name, loaded_weight if owned else loaded_weight.clone())
+                )
 
                 lookup_name = name
                 if hf_to_vllm_mapper is not None:
@@ -226,8 +249,8 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
                     self._get_name(),
                 )
 
-            # Lazy chain so buffer-reusing weight iterators (e.g.
-            # runai_streamer) are consumed one tensor at a time.
+            # Lazy chain so buffer-reusing weight iterators are consumed
+            # one tensor at a time.
             mapped_weights = (
                 (target_prefix + name, weight)
                 for name, weight in itertools.chain(seen_weights, weights)

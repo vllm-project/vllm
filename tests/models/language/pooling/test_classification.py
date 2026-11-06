@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
     "model",
     [
         pytest.param(
-            "jason9693/Qwen2.5-1.5B-apeach",
+            "vllm-project/Qwen2.5-1.5B-apeach",
             marks=[
                 pytest.mark.core_model,
                 pytest.mark.cpu_model,

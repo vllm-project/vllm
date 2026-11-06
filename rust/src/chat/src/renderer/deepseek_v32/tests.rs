@@ -248,6 +248,37 @@ fn tool_results_after_last_user_resume_thinking() {
 }
 
 #[test]
+fn coerces_tool_call_arguments_that_are_not_an_object_to_empty() {
+    let render_arguments = |arguments: &str| {
+        render_request(&thinking_request(vec![
+            ChatMessage::user("Check the weather."),
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                AssistantToolCall {
+                    id: "call-weather".to_string(),
+                    name: "weather".to_string(),
+                    arguments: arguments.to_string(),
+                },
+            )]),
+            ChatMessage::tool_response("{\"ok\":true}", "call-weather"),
+        ]))
+    };
+
+    let empty = render_arguments("{}");
+    assert!(empty.contains("<｜DSML｜invoke name=\"weather\">\n\n</｜DSML｜invoke>"));
+    for arguments in [
+        r#"{"city": "Hang"#,
+        "   ",
+        "[]",
+        "42",
+        "true",
+        r#""hello""#,
+        "null",
+    ] {
+        assert_eq!(render_arguments(arguments), empty, "{arguments:?}");
+    }
+}
+
+#[test]
 fn tool_results_follow_assistant_tool_call_id_order() {
     let request = thinking_request(vec![
         ChatMessage::user("Check two cities."),

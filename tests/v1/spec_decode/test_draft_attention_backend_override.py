@@ -12,13 +12,15 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.config import LoadConfig, SpeculativeConfig
+from vllm.config import CacheConfig, LoadConfig, SpeculativeConfig
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
 @dataclass
 class _AttentionConfig:
     backend: str | None = None
+    use_non_causal: bool = False
 
 
 @dataclass
@@ -98,3 +100,32 @@ def test_override_does_not_mutate_the_target_config():
     cfg = _config("FLASHINFER", "TRITON_ATTN")
     _capture_draft_config(cfg)
     assert cfg.attention_config.backend == "FLASHINFER"
+
+
+def test_draft_attn_builders_get_overrides_and_keep_resolved_cache_state():
+    """The draft's metadata builders read the same kernel overrides as its
+    layers, without losing state the engine core resolved on the target, e.g.
+    an fp8 draft next to an NVFP4 target with a resolved KV cache layout."""
+    cache_config = CacheConfig(cache_dtype="nvfp4")
+    cache_config.kv_cache_layout = "HND"
+    cfg = _VllmConfig(
+        attention_config=_AttentionConfig(backend="FLASHINFER"),
+        kernel_config=_KernelConfig(),
+        cache_config=cache_config,
+        speculative_config=_SpeculativeConfig(
+            attention_backend="TRITON_ATTN", kv_cache_dtype="fp8"
+        ),
+    )
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.vllm_config = cfg
+    speculator.speculative_config = cfg.speculative_config
+    speculator.requires_non_causal = True
+
+    used = speculator.attn_vllm_config
+
+    assert used.attention_config.backend == "TRITON_ATTN"
+    assert used.attention_config.use_non_causal
+    assert used.cache_config.cache_dtype == "fp8"
+    assert used.cache_config.kv_cache_layout == "HND"
+    assert cfg.attention_config.backend == "FLASHINFER"
+    assert cfg.cache_config.cache_dtype == "nvfp4"

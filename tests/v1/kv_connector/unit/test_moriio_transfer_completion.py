@@ -131,7 +131,7 @@ def test_wait_blocks_until_terminal():
         timer.cancel()
 
 
-@pytest.mark.parametrize("timeout,expected_ms", [(0.05, 50), (0.0001, 1)])
+@pytest.mark.parametrize("timeout,expected_ms", [(0.05, 10), (0.004, 4), (0.0001, 1)])
 def test_native_wait_receives_all_statuses_and_a_positive_deadline(
     timeout, expected_ms
 ):
@@ -186,5 +186,44 @@ def test_native_wait_drains_only_the_unscoped_status_snapshot():
     wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
     wrapper.transfer_status.extend(statuses)
     wrapper.waiting_for_transfer_complete()
-    engine.wait_all.assert_called_once_with(statuses, timeout_ms=50)
+    engine.wait_all.assert_called_once_with(statuses, timeout_ms=10)
     assert wrapper.transfer_status == []
+
+
+def _wait_all_that_completes(status, on_call, result="IN_PROGRESS"):
+    def wait_all(statuses, timeout_ms):
+        if wait_all_mock.call_count >= on_call:
+            status.state = "success"
+        return getattr(moriio_engine.StatusCode, result)
+
+    wait_all_mock = Mock(side_effect=wait_all)
+    return wait_all_mock
+
+
+@pytest.mark.parametrize("on_call", [1, 3])
+def test_native_wait_returns_once_the_statuses_succeed(on_call):
+    """MoRI's xgmi wait_all can return IN_PROGRESS at its deadline although
+    every status has succeeded."""
+    late = _pending()
+    wait_all = _wait_all_that_completes(late, on_call)
+    wrapper = MoRIIOWrapper(
+        moriio_engine=SimpleNamespace(wait_all=wait_all), transfer_timeout=30.0
+    )
+    wrapper.waiting_for_transfer_complete([_ok(), late])
+    assert wait_all.call_count == on_call
+    assert all(c.kwargs["timeout_ms"] == 10 for c in wait_all.call_args_list)
+
+
+@pytest.mark.parametrize("fail_fast", [True, False])
+def test_native_wait_after_a_failure_waits_for_in_flight_statuses_unless_fail_fast(
+    fail_fast,
+):
+    late = _pending()
+    wait_all = _wait_all_that_completes(late, on_call=3, result="ERR_RDMA_OP")
+    wrapper = MoRIIOWrapper(
+        moriio_engine=SimpleNamespace(wait_all=wait_all), transfer_timeout=30.0
+    )
+    with pytest.raises(TransferError, match="SQ full"):
+        wrapper.waiting_for_transfer_complete([_bad(), late], fail_fast=fail_fast)
+    assert wait_all.call_count == (1 if fail_fast else 3)
+    assert late.Succeeded() is not fail_fast

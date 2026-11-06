@@ -19,6 +19,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -32,6 +33,9 @@ logger = init_logger(__name__)
 
 _BLOCK_T = 256
 _MIN_BLOCK_N = 128
+
+# block_m of the fused prefill conv1d in kda.py; shared GDN builder prebuilds only 8
+PREFILL_CONV_BLOCK_M = 128
 
 
 @triton.jit(do_not_specialize=["N"])
@@ -95,6 +99,33 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
+def _to_device(t: torch.Tensor, device: torch.device) -> torch.Tensor:
+    if PIN_MEMORY:
+        t = t.pin_memory()
+    return t.to(device, non_blocking=True)
+
+
+def build_conv1d_chunk_schedule(
+    query_start_loc_cpu: torch.Tensor, block_m: int, device: torch.device
+) -> dict[str, int | torch.Tensor]:
+    """Host-built AITER conv1d chunk schedule: no D2H sync, own buffers."""
+    assert query_start_loc_cpu.device.type == "cpu"
+    nums = (-(-query_start_loc_cpu.diff() // block_m)).to(torch.int64)
+    tot = int(nums.sum())
+    batch_ptr = torch.repeat_interleave(
+        torch.arange(nums.numel(), dtype=torch.int32), nums
+    )
+    starts = torch.repeat_interleave(nums.cumsum(0) - nums, nums)
+    token_chunk_offset_ptr = (torch.arange(tot, dtype=torch.int64) - starts).to(
+        torch.int32
+    )
+    return {
+        "tot": tot,
+        "batch_ptr": _to_device(batch_ptr, device),
+        "token_chunk_offset_ptr": _to_device(token_chunk_offset_ptr, device),
+    }
+
+
 def _adaptive_verification_enabled(vllm_config: VllmConfig) -> bool:
     speculative_config = vllm_config.speculative_config
     return speculative_config is not None and bool(
@@ -128,6 +159,22 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             num_decode_draft_tokens_cpu,
             fast_build,
         )
+        if attn_metadata.nums_dict is not None:
+            # Same non-spec query_start_loc the base builder schedules over.
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            if attn_metadata.spec_sequence_masks_cpu is not None:
+                query_lens_cpu = query_start_loc_cpu.diff()[
+                    ~attn_metadata.spec_sequence_masks_cpu
+                ]
+                query_start_loc_cpu = torch.zeros(
+                    query_lens_cpu.numel() + 1, dtype=torch.int32
+                )
+                torch.cumsum(query_lens_cpu, dim=0, out=query_start_loc_cpu[1:])
+            attn_metadata.nums_dict[PREFILL_CONV_BLOCK_M] = build_conv1d_chunk_schedule(
+                query_start_loc_cpu,
+                PREFILL_CONV_BLOCK_M,
+                common_attn_metadata.query_start_loc.device,
+            )
         if (
             attn_metadata.uniform_spec_sequence_length is not None
             and _adaptive_verification_enabled(self.vllm_config)

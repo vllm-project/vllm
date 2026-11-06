@@ -15,14 +15,14 @@ MODEL_ARG_EXPTYPES = [
     # AUTOGPTQ
     # compat: autogptq <=0.7.1 is_marlin_format: bool
     # Model Serialized in Exllama Format.
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", None, "auto_gptq"),
+    ("vllm-project/Llama-2-7B-Chat-GPTQ", None, "auto_gptq"),
     (
-        "TheBloke/Llama-2-7B-Chat-GPTQ",
+        "vllm-project/Llama-2-7B-Chat-GPTQ",
         "marlin",
         "auto_gptq" if current_platform.is_cuda_alike() else "ERROR",
     ),
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", "gptq", "auto_gptq"),
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", "awq", "ERROR"),
+    ("vllm-project/Llama-2-7B-Chat-GPTQ", "gptq", "auto_gptq"),
+    ("vllm-project/Llama-2-7B-Chat-GPTQ", "awq", "ERROR"),
     # compat: autogptq >=0.8.0 use checkpoint_format: str
     # Model Serialized in Exllama Format.
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", None, "auto_gptq"),
@@ -37,17 +37,17 @@ MODEL_ARG_EXPTYPES = [
     # AutoAWQConfig.override_quantization_method() returns "auto_awq" for AWQ models
     # when user_quant is None, "awq", "awq_marlin", "marlin", or "auto_awq"
     (
-        "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
+        "vllm-project/OpenHermes-2.5-Mistral-7B-AWQ",
         None,
         "auto_awq",
     ),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "auto_awq"),
+    ("vllm-project/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "auto_awq"),
     (
-        "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
+        "vllm-project/OpenHermes-2.5-Mistral-7B-AWQ",
         "marlin",
         "auto_awq" if current_platform.is_cuda_alike() else "ERROR",
     ),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
+    ("vllm-project/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 
 

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import torch
 
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
+
 from .common.plan import BLOCKS
 from .dims import (
     EXPERTS,
@@ -359,7 +361,8 @@ class MonoRunner:
                 comp_block_table.stride(0),
                 topk_indices,
             )
-        k1(
+        _run_compiled(
+            k1,
             residual.data_ptr(),
             x.data_ptr(),
             post_mix.data_ptr(),
@@ -400,10 +403,11 @@ class MonoRunner:
             scratch.data_ptr(),
             self.epoch.data_ptr(),
             self.tl[0].data_ptr() if self.tl is not None else 0,
-            stream=st,
+            st,
         )
         select(self.normed[:M], self.qr[:M])
-        k2(
+        _run_compiled(
+            k2,
             self.q.data_ptr(),
             swa_cache.data_ptr(),
             swa_cache.stride(0),
@@ -458,6 +462,6 @@ class MonoRunner:
             self.rank,
             self.epoch.data_ptr(),
             self.tl[1].data_ptr() if self.tl is not None else 0,
-            stream=st,
+            st,
         )
         return outs

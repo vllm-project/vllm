@@ -19,6 +19,7 @@ from vllm.parser.engine.incremental_lexer import (
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
+    ToolCallBodyCollection,
     Transition,
 )
 from vllm.parser.engine.token_id_scanner import (
@@ -190,11 +191,12 @@ class StreamingParserEngine:
         self._args_in_string: bool = False
         self._args_escape_next: bool = False
 
-    def _reset_array_state(self) -> None:
-        # State for ``tool_call_body_array``: whether the opening ``[`` has been
-        # seen, and whether a ``{...}`` element is currently being streamed.
-        self._array_started: bool = False
-        self._array_in_element: bool = False
+    def _reset_json_collection_state(self) -> None:
+        # State shared by JSON-array and semicolon-separated tool bodies.
+        self._json_collection_started: bool = False
+        self._json_collection_in_element: bool = False
+        self._json_collection_had_element: bool = False
+        self._json_collection_separator_seen: bool = False
 
     def reset(self, initial_state: ParserState | None = None) -> None:
         """Reset mutable state for reuse across requests.
@@ -219,7 +221,7 @@ class StreamingParserEngine:
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
         self._reset_args_state()
-        self._reset_array_state()
+        self._reset_json_collection_state()
 
     def feed(
         self,
@@ -313,10 +315,12 @@ class StreamingParserEngine:
             ParserState.TOOL_NAME,
             ParserState.TOOL_BETWEEN,
         ):
-            # In array mode a closed element has already emitted its
+            # In collection mode a closed element has already emitted its
             # TOOL_CALL_END; only a truncated (still-open) element needs one.
             end_open_call = (
-                self._array_in_element if self.config.tool_call_body_array else True
+                self._json_collection_in_element
+                if self.config.tool_call_body_collection is not None
+                else True
             )
             if end_open_call and self.tool_index >= 0:
                 events.append(
@@ -486,8 +490,8 @@ class StreamingParserEngine:
             self._message_header_token_count += token_count
             return []
         if self.state == ParserState.TOOL_ARGS:
-            if self.config.tool_call_body_array:
-                return self._feed_array_text(text)
+            if self.config.tool_call_body_collection is not None:
+                return self._feed_json_collection_text(text)
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
             return [
@@ -578,8 +582,8 @@ class StreamingParserEngine:
             self._args_in_string = False
             self._args_escape_next = False
             self._args_safe_end = 0
-            if self.config.tool_call_body_array:
-                self._reset_array_state()
+            if self.config.tool_call_body_collection is not None:
+                self._reset_json_collection_state()
 
         return events
 
@@ -651,28 +655,21 @@ class StreamingParserEngine:
             )
         ]
 
-    # ── JSON-array tool body (tool_call_body_array) ─────────────────────
+    # ── Multi-object JSON tool bodies ───────────────────────────────────
 
-    def _feed_array_text(self, text: str) -> list[SemanticEvent]:
-        """Split a JSON-array tool body into one tool call per element.
-
-        Granite emits ``[{"name":..,"arguments":{..}}, ...]`` after the tool
-        marker. Element interiors are streamed through the string/brace-aware
-        :meth:`_feed_args_char`, so each element behaves exactly like a
-        single-object tool body; the array's ``]`` ends the region and any
-        trailing text becomes content.
-        """
+    def _feed_json_collection_text(self, text: str) -> list[SemanticEvent]:
+        """Split a framed sequence of JSON objects into individual tool calls."""
         events: list[SemanticEvent] = []
         for i, ch in enumerate(text):
             if self.state != ParserState.TOOL_ARGS:
-                # The array closed mid-chunk; the rest of the text is content.
+                # The collection closed or parsing bailed out mid-chunk.
                 events.extend(self._emit_for_state(text[i:]))
                 break
-            events.extend(self._feed_array_char(ch))
+            events.extend(self._feed_json_collection_char(ch))
         return events
 
-    def _feed_array_char(self, ch: str) -> list[SemanticEvent]:
-        if self._array_in_element:
+    def _feed_json_collection_char(self, ch: str) -> list[SemanticEvent]:
+        if self._json_collection_in_element:
             events = self._feed_args_char(ch)
             # Element object closed: top-level '}' with all braces balanced.
             if (
@@ -681,37 +678,68 @@ class StreamingParserEngine:
                 and not self._args_escape_next
                 and self._args_brace_depth == 0
             ):
-                events.extend(self._end_array_element())
+                events.extend(self._end_json_element())
             return events
 
-        # Between elements only structural array characters are expected.
+        # Delimiters are interpreted only between complete JSON objects, never
+        # inside strings or nested values.
         if ch in " \t\r\n":
             return []
-        if not self._array_started:
+
+        mode = self.config.tool_call_body_collection
+        if mode is ToolCallBodyCollection.JSON_ARRAY:
+            return self._feed_json_array_delimiter(ch)
+        if mode is ToolCallBodyCollection.SEMICOLON_SEQUENCE:
+            return self._feed_semicolon_sequence_delimiter(ch)
+        raise AssertionError("JSON collection parser used without a collection mode")
+
+    def _feed_json_array_delimiter(self, ch: str) -> list[SemanticEvent]:
+        if not self._json_collection_started:
             if ch == "[":
-                self._array_started = True
+                self._json_collection_started = True
                 return []
-            return self._bail_array_to_content(ch)
+            return self._bail_json_collection_to_content(ch)
         if ch == ",":
             return []
         if ch == "{":
-            return self._start_array_element(ch)
+            return self._start_json_element(ch)
         if ch == "]":
             self.state = ParserState.CONTENT
-            self._reset_array_state()
+            self._reset_json_collection_state()
             return []
-        return self._bail_array_to_content(ch)
+        return self._bail_json_collection_to_content(ch)
 
-    def _start_array_element(self, ch: str) -> list[SemanticEvent]:
+    def _feed_semicolon_sequence_delimiter(self, ch: str) -> list[SemanticEvent]:
+        if ch == ";":
+            if (
+                self._json_collection_had_element
+                and not self._json_collection_separator_seen
+            ):
+                self._json_collection_separator_seen = True
+                return []
+            return self._bail_json_collection_to_content(ch)
+        if ch == "{":
+            if (
+                self._json_collection_had_element
+                and not self._json_collection_separator_seen
+            ):
+                return self._bail_json_collection_to_content(ch)
+            self._json_collection_started = True
+            self._json_collection_separator_seen = False
+            return self._start_json_element(ch)
+        return self._bail_json_collection_to_content(ch)
+
+    def _start_json_element(self, ch: str) -> list[SemanticEvent]:
         self.tool_index += 1
         self._reset_args_state()
-        self._array_in_element = True
+        self._json_collection_in_element = True
         events = [SemanticEvent(EventType.TOOL_CALL_START, tool_index=self.tool_index)]
         events.extend(self._feed_args_char(ch))
         return events
 
-    def _end_array_element(self) -> list[SemanticEvent]:
-        self._array_in_element = False
+    def _end_json_element(self) -> list[SemanticEvent]:
+        self._json_collection_in_element = False
+        self._json_collection_had_element = True
         events: list[SemanticEvent] = []
         # Flush the held closing '}' so the slot body is the full element.
         if self._args_buffer:
@@ -729,9 +757,8 @@ class StreamingParserEngine:
         )
         return events
 
-    def _bail_array_to_content(self, ch: str) -> list[SemanticEvent]:
-        # Marker not followed by a JSON array (malformed) — revert to content
-        # so the remaining tokens are emitted as plain text, no tool call.
+    def _bail_json_collection_to_content(self, ch: str) -> list[SemanticEvent]:
+        # A malformed outer frame returns the remaining text to normal content.
         self.state = ParserState.CONTENT
-        self._reset_array_state()
+        self._reset_json_collection_state()
         return self._emit_for_state(ch)

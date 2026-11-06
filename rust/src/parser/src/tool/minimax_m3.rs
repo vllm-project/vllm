@@ -11,7 +11,7 @@ use winnow::token::{literal, rest, take_until};
 
 use super::parameters::{ParamElement, ParamInput, ToolSchemas};
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 use crate::utils::recursion::ParserRecursionGuard;
 
@@ -167,7 +167,9 @@ impl ToolParser for MinimaxM3ToolParser {
             }
             MinimaxM3Mode::ToolBlock { .. } => {
                 if !self.buffer.trim_start().is_empty() {
-                    return Err(parsing_failed!("incomplete MiniMax M3 tool call"));
+                    return Err(ToolParserError::IncompleteToolCall {
+                        parser: "MiniMax M3",
+                    });
                 }
             }
             MinimaxM3Mode::Done => {}

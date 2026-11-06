@@ -193,6 +193,7 @@ class Glm5NextVisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x, _ = self.qkv(x)
         q, k, v = self.split_qkv(x)
@@ -211,7 +212,9 @@ class Glm5NextVisionAttention(nn.Module):
         q = q.view(q_shape)
         k = k.view(k_shape)
 
-        q, k, v = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k, v))
+        q, k = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k))
+        # Keep v a view into qkv, as FlashInfer's cu_seqlens expect.
+        v = rearrange(v, "s b ... -> b s ...")
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
@@ -227,6 +230,7 @@ class Glm5NextVisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -273,6 +277,7 @@ class Glm5NextVisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: int | None = None,
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -280,6 +285,7 @@ class Glm5NextVisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -574,6 +580,17 @@ class Glm5NextVisionTransformer(nn.Module):
         x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
+        if (
+            encoder_metadata is None
+            and self.attn_backend == AttentionBackendEnum.FLASHINFER
+        ):
+            # FlashInfer needs the backend-specific cu_seqlens and
+            # sequence_lengths.
+            if not isinstance(grid_thw, list):
+                grid_thw = grid_thw.tolist()
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+
+        sequence_lengths = None
         if encoder_metadata is not None:
             # Encoder CUDA-graph path (PR #49852): rotary/cu_seqlens/max_seqlen are
             # precomputed by prepare_encoder_metadata (which uses rot_pos_emb exactly
@@ -583,6 +600,7 @@ class Glm5NextVisionTransformer(nn.Module):
             rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
             cu_seqlens = encoder_metadata["cu_seqlens"]
             max_seqlen = encoder_metadata["max_seqlen"]
+            sequence_lengths = encoder_metadata["sequence_lengths"]
         else:
             if isinstance(grid_thw, list):
                 grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
@@ -603,6 +621,7 @@ class Glm5NextVisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
 
         # adapter
@@ -713,13 +732,15 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             getattr(video_processor, "temporal_patch_size", 1) or 1
         )
         video_fps = float(metadata["fps"])
+        do_sample_frames = metadata.get("do_sample_frames", True)
 
-        if not metadata.get("do_sample_frames", True):
-            # The loader already picked the frames and the processor keeps them
-            # as they are, so the frame count is what was handed in and
-            # ``frames_indices`` only supplies the timestamp values.
+        if not do_sample_frames:
+            # Loader or HF write-back already picked the frames; use those
+            # indices for timestamps. After HF write-back, do_sample_frames is
+            # cleared so the count is len(frames_indices); a pre-sampled loader
+            # hands in frames whose count matches frames_indices.
             frame_indices = [int(idx) for idx in metadata["frames_indices"]]
-            num_frames = int(total_frames)
+            num_frames = len(frame_indices)
         else:
             frame_indices = [
                 int(idx)
@@ -820,10 +841,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
     """``Glm5NextProcessor`` extracts image/video features
     only and passes the prompt text through unchanged, so prompt expansion
-    (image token repeat, video frame/timestamp structure) is owned by vLLM's
-    prompt-update machinery — the inherited ``_get_prompt_updates`` builds
-    the replacement content and the placeholder scan validates against
-    exactly that."""
+    is owned by the inherited GLM-4V prompt-update machinery."""
 
     def _hf_processor_applies_updates(
         self,

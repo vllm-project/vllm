@@ -1416,6 +1416,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
+        # A request can exceed the cache capacity. Retain local payloads before
+        # inserting misses can evict hits that occur later in this request.
+        cached_items = {
+            item_hash: cache.get_cached_item(item_hash)
+            for hashes in mm_hashes.values()
+            for item_hash in hashes
+        }
+
         # Need to touch all mm hashes before update to avoid hash in updated
         # list evict during update
         for hashes in mm_hashes.values():
@@ -1433,6 +1441,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
+                item = cached_items.get(item_hash)
                 if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     missing_kwargs_item = missing_kwargs[missing_next_idx]
@@ -1441,8 +1450,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     mm_missing_next_idx[modality] += 1
 
                     item = missing_kwargs_item, missing_updates_item
-                else:
-                    item = None
 
                 kwargs, updates = cache.get_and_update_item(item, item_hash)
 

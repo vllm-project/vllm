@@ -309,7 +309,8 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path):
     # token. Layer 0 sees the same inputs on both paths, but its FFN input and
     # output differ by up to test_dsv4_mono_numerics' 2% / 3% (MXFP8
     # activations against vLLM's FP8 a 128), which random weights amplify
-    # through the MoE: 5%. Each later layer takes the previous one's slightly
+    # through the MoE, on top of each path's own run to run noise (up to 4.3%
+    # measured on MI350X): 7%. Each later layer takes the previous one's slightly
     # different output: 10%. The hash layers' (0-2) experts are fixed by the
     # token; a bias-routed layer's token (3, 4: past the hash layers, its input
     # carries their differences) whose top-6 routing is a near-tie on vLLM's
@@ -348,7 +349,7 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path):
                     assert err < 0.1, (rank, i, k, name, err)
                 tie = 2e-2 + 2 * res_err
                 err = _rel(x, x_ref)
-                if err >= (0.05 if i == 0 else 0.10):
+                if err >= (0.07 if i == 0 else 0.10):
                     gap = gaps.get((i, *k), float("inf"))  # none: hash-routed
                     assert gap < tie, (rank, i, k, "x", err, gap, tie)
                     flipped.add(k)

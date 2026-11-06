@@ -48,7 +48,6 @@ tests/lora/test_deepseekv2_tp.py  # --ignore'd from sharded LoRA run; no dedicat
 tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated *_tp job
 
 # tests/v1/ - the v1 subtree is otherwise covered by many `pytest v1/...` jobs.
-tests/v1/ec_connector/integration/test_epd_correctness.py  # run_epd_correctness_test.sh exists but no Buildkite job invokes it
 tests/v1/ec_connector/integration/test_nixl_failure.py  # 2-GPU + NIXL E/PD integration test (#55290); no Buildkite job collects ec_connector/integration/
 tests/v1/kv_connector/nixl_integration/test_disagg_accuracy.py  # run by intel_jobs/misc_intel.yaml's run_xpu_disagg_accuracy_test.sh, which names it via $EXP_ROOT (the script's own dir) - not statically resolvable
 
@@ -85,8 +84,8 @@ tests/quantization/test_gptq_dynamic.py  # CI jobs disabled pending locked torch
 tests/quantization/test_humming_compile.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_ignore.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_mxfp4_block_fp8.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_input_hadamard.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_int8_moe_oracle.py  # CI jobs disabled pending locked torchao transitive dependencies
-tests/quantization/test_keep_param_objects.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_lm_head.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_mixed_precision.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_modelopt.py  # CI jobs disabled pending locked torchao transitive dependencies
@@ -104,7 +103,6 @@ tests/rocm/test_moe_weight_replay.py  # CI jobs disabled pending locked torchao 
 
 # Temporary gaps from disabling jobs with unpinned install environments.
 tests/device_allocator/test_alloc_conf.py  # CI jobs disabled pending locked cmake installation
-tests/distributed/test_elastic_ep.py  # CI jobs disabled pending locked KV connectors installation
 tests/models/flint/test_decode_attention.py  # CI jobs disabled pending locked gguf installation
 tests/models/flint/test_flint_moe.py  # CI jobs disabled pending locked gguf installation
 tests/models/flint/test_flint_ops.py  # CI jobs disabled pending locked gguf installation
@@ -124,6 +122,7 @@ tests/parser/engine/test_gemma4_streaming_reasoning.py  # CI jobs disabled pendi
 tests/parser/engine/test_glm47_moe.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_granite.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_inkling.py  # CI jobs disabled pending locked cmake installation
+tests/parser/engine/test_llama_json.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_ling3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minicpmv_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minimax_m2.py  # CI jobs disabled pending locked cmake installation
@@ -134,6 +133,7 @@ tests/parser/engine/test_plamo3.py  # CI jobs disabled pending locked cmake inst
 tests/parser/engine/test_qwen3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_qwen3_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_replay.py  # CI jobs disabled pending locked cmake installation
+tests/parser/engine/test_ripple.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_seed_oss.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_step3p5.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_token_id_scanner.py  # CI jobs disabled pending locked cmake installation
@@ -184,7 +184,6 @@ tests/tokenizers_/test_detokenize.py  # CI jobs disabled pending locked cmake in
 tests/tokenizers_/test_hf.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_mistral.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_registry.py  # CI jobs disabled pending locked cmake installation
-tests/tracing/test_loading_tracing.py  # CI jobs disabled pending locked tracing packages installation
 tests/transformers_utils/processors/test_pixtral.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/processors/test_voxtral.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_bailing_moe_v3_vl_config.py  # CI jobs disabled pending locked cmake installation
@@ -201,23 +200,3 @@ tests/transformers_utils/test_repo_utils.py  # CI jobs disabled pending locked c
 tests/transformers_utils/test_speculators_dspark_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_speculators_override.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_utils.py  # CI jobs disabled pending locked cmake installation
-tests/v1/determinism/test_batch_invariance_vlm.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_cutlass_batch_invariance.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_lora_shrink_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_matmul_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_mx_linear_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_nvfp4_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_rms_norm_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/fault_tolerance/test_engine_core_sentinel.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/fault_tolerance/test_fault_tolerance_e2e.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/mooncake_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/mooncake_integration/test_accuracy_rocm.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/mooncake_integration/test_mooncake_imports.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_accuracy_rocm.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_edge_cases.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_mamba_prefix_cache.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_multi_connector_edge_cases.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_nixl_imports.py  # CI jobs disabled pending locked KV connectors installation
-tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py  # CI jobs disabled pending locked KV connectors installation

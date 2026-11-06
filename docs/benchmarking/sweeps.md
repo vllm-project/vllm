@@ -94,6 +94,11 @@ You can use `--continue-on-error` to record a failed warmup, benchmark run, or s
 
 Both options are also supported by `vllm bench sweep serve_workload`.
 
+When a sweep stops its server, it terminates workers in the same process group,
+even if the server process has already exited, and waits for the server process
+to be reaped. Workers that detach into a separate process group are outside this
+cleanup scope.
+
 !!! important
     If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
     You can use `--dry-run` to preview the commands to be run.

@@ -36,10 +36,25 @@ class MooncakeStoreConfig:
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
     enable_offload: bool = False
     tenant_id: str = DEFAULT_TENANT_ID
+    # ``device_name`` of each physical GPU's store client, indexed by
+    # physical GPU ID. Replaces ``device_name`` when set.
+    device_name_per_gpu: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("embedded", "standalone-store"):
             raise ValueError(f"unknown Mooncake mode: {self.mode!r}")
+        names = self.device_name_per_gpu
+        if names is not None:
+            if self.device_name:
+                raise ValueError("set device_name or device_name_per_gpu, not both")
+            if not (
+                isinstance(names, list)
+                and names
+                and all(isinstance(name, str) and name.strip() for name in names)
+            ):
+                raise ValueError(
+                    "device_name_per_gpu must be a non-empty list of device names"
+                )
         if self.local_buffer_size <= 0:
             raise ValueError("local_buffer_size must be > 0")
         if self.mode == "embedded" and self.global_segment_size == 0:
@@ -65,6 +80,7 @@ class MooncakeStoreConfig:
             ),
             enable_offload=bool(config.get("enable_offload", False)),
             tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
+            device_name_per_gpu=config.get("device_name_per_gpu"),
         )
 
     @staticmethod
@@ -123,6 +139,21 @@ def _parse_size(value: Any) -> int:
     return int(numeric_value * multiplier)
 
 
+def _device_name_for_current_gpu(config: MooncakeStoreConfig) -> str:
+    if config.device_name_per_gpu is None:
+        return config.device_name
+    import torch
+
+    from vllm.platforms import current_platform
+
+    gpu = current_platform.visible_device_id_to_physical_device_id(
+        torch.accelerator.current_device_index()
+    )
+    if gpu >= len(config.device_name_per_gpu):
+        raise ValueError(f"device_name_per_gpu has no entry for physical GPU {gpu}")
+    return config.device_name_per_gpu[gpu]
+
+
 def setup_mooncake_store(
     store: Any, config: MooncakeStoreConfig, local_hostname: str
 ) -> None:
@@ -136,7 +167,7 @@ def setup_mooncake_store(
         config.global_segment_size,
         config.local_buffer_size,
         config.protocol,
-        config.device_name,
+        _device_name_for_current_gpu(config),
         config.master_server_address,
         **setup_kwargs,
     )

@@ -97,7 +97,8 @@ void get_cutlass_moe_mm_data_caller(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated);
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& sorted_expert_ids);
 
 void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
     const torch::stable::Tensor& expert_first_token_offset,
@@ -337,17 +338,18 @@ void get_cutlass_moe_mm_data(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated) {
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& sorted_expert_ids) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
-  get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
-                                 problem_sizes2, input_permutation,
-                                 output_permutation, num_experts, n, k,
-                                 blockscale_offsets, is_gated);
+  get_cutlass_moe_mm_data_caller(
+      topk_ids, expert_offsets, problem_sizes1, problem_sizes2,
+      input_permutation, output_permutation, num_experts, n, k,
+      blockscale_offsets, is_gated, sorted_expert_ids);
   return;
 #endif
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
