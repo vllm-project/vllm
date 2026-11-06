@@ -248,7 +248,7 @@ def mamba_v2_sharded_weight_loader(
                     loaded_start_idx : (
                         loaded_start_idx + take
                     )  # type: ignore[misc]
-                ].view_as(target_slice)
+                ].view(target_slice.shape)
             )
 
             # move indexing boundaries
