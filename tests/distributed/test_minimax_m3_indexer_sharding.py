@@ -226,10 +226,11 @@ def _check_indexer_forwards(config, device, rank, comm):
             ]
         )
     builders = []
+    default_prefill = config.attention_config.indexer_prefill_cp
+    assert default_prefill == "local_score"
     for impls, prefill_mode in (
-        (layers[0], "gather"),
-        (layers[1], "gather"),
-        (layers[1], "local_score"),
+        (layers[0], default_prefill),
+        (layers[1], default_prefill),
         (layers[1], "local_score_unified"),
     ):
         with pytest.MonkeyPatch.context() as patch:
@@ -242,14 +243,14 @@ def _check_indexer_forwards(config, device, rank, comm):
                     device,
                 )
             )
-    assert all(builder.unified_scores_buffer is not None for builder in builders[:2])
-    assert all(builder.unified_scores_buffer is None for builder in builders[2:])
+    assert builders[0].unified_scores_buffer is not None
+    assert all(builder.unified_scores_buffer is None for builder in builders[1:])
     prefill_storage = [
         (
             builder.prefill_candidate_pool.data_ptr(),
             builder.prefill_candidates_buffer.data_ptr(),
         )
-        for builder in builders[2:]
+        for builder in builders[1:]
     ]
 
     active_layers = 5
@@ -273,17 +274,6 @@ def _check_indexer_forwards(config, device, rank, comm):
             torch.testing.assert_close(
                 sharded.topk_indices_buffer[:num_tokens].sort(dim=-1).values,
                 reference.topk_indices_buffer[:num_tokens].sort(dim=-1).values,
-                rtol=0,
-                atol=0,
-            )
-        if (
-            metadata[1].prefill_msa is not None
-            and metadata[1].prefill_msa.local_chunks is None
-        ):
-            nd = metadata[1].num_decode_tokens
-            torch.testing.assert_close(
-                metadata[1].unified_scores[nd:],
-                metadata[0].unified_scores[nd:],
                 rtol=0,
                 atol=0,
             )
@@ -382,7 +372,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             queries.append(query.to(torch.float8_e4m3fn))
         _roundtrip_index_caches(config, layers[1])
         metadata = [builder.build(0, common) for builder in builders]
-        for md, storage in zip(metadata[2:], prefill_storage, strict=True):
+        for md, storage in zip(metadata[1:], prefill_storage, strict=True):
             assert md.unified_scores is None
             if md.prefill_msa is not None:
                 prefill = md.prefill_msa
@@ -425,7 +415,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                     graph.replay()
                 check(metadata, queries, num_tokens)
         else:
-            for local_metadata in metadata[2:]:
+            for local_metadata in metadata[1:]:
                 metadata[1] = local_metadata
                 prefill = local_metadata.prefill_msa
                 assert prefill.candidate_pool.dtype == torch.uint8
@@ -450,7 +440,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                 )
                 check(metadata, queries, num_tokens)
                 if active_layers == 1:
-                    builder = builders[3 if prefill.unified else 2]
+                    builder = builders[2 if prefill.unified else 1]
                     graphs = builder.prefill_graphs
                     before = graphs.stats["replayed_layers"]
                     for _ in range(3):
@@ -460,14 +450,6 @@ def _check_indexer_forwards(config, device, rank, comm):
                         run(True, metadata, queries)
                         check(metadata, queries, num_tokens)
                     assert graphs.stats["replayed_layers"] > before
-            pages = torch.tensor([num_pages - 1, 0, 7, 0], device=device)
-            gathered = [
-                msa.gather_prefill_pages(impl.index_cache.kv_cache, pages, comm)
-                for impl in layers[1]
-            ]
-            for actual, cache in zip(gathered, caches):
-                expected = cache.view(torch.uint8).index_select(0, pages)
-                assert torch.equal(actual.view(torch.uint8), expected)
 
 
 @pytest.mark.timeout(600)

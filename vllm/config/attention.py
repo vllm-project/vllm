@@ -124,11 +124,9 @@ class AttentionConfig:
     Layout is fixed at startup. MSA supports FP8 index K on single-node
     NVLink TP2/TP4; unsupported configurations retain replicated storage."""
 
-    indexer_prefill_cp: Literal["gather", "local_score", "local_score_unified"] = (
-        "gather"
-    )
+    indexer_prefill_cp: Literal["local_score", "local_score_unified"] = "local_score"
     """MiniMax M3 MSA prefill execution with a TP-sharded index cache.
-    "gather" reconstructs K; "local_score" scores local K and exchanges Top16.
+    "local_score" scores local K and exchanges Top16.
     Experimental "local_score_unified" includes mixed-batch decode queries.
     Pure decode and the startup cache layout are unchanged."""
 

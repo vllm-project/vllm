@@ -109,15 +109,13 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
 
 @dataclass
 class MiniMaxM3IndexerMSAPrefillMetadata:
-    """MSA gather plan or bounded local-score chunks for eager prefill."""
+    """MSA plan or bounded local-score chunks for eager prefill."""
 
     plan: dict | None  # fmha_sm100 PlanInfo
     cu_seqlens_q: torch.Tensor  # [num_prefills + 1] int32, rebased to 0
     prefix_lens: torch.Tensor  # [num_prefills] int32, context tokens
     max_query_len: int
-    page_table: torch.Tensor | None  # flat physical pages for gathered prefill
-    # Physical pages to gather; page_table indexes the gathered result.
-    gather_pages: torch.Tensor | None = None
+    page_table: torch.Tensor | None  # flat physical pages for replicated prefill
     local_chunks: list[tuple[int, int, torch.Tensor, "MSAIcpScorePlan"]] | None = None
     candidate_pool: torch.Tensor | None = None
     graphs: "MSAIcpLayerGraphs | None" = None
@@ -174,13 +172,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         full = kv_cache_spec.head_size * kv_cache_spec.dtype.itemsize
         self.page_size = kv_cache_spec.block_size
         self.index_k_tp = 1 if content is None else full // content
-        self.prefill_local_score = (
-            self.index_k_tp > 1
-            and vllm_config.attention_config.indexer_prefill_cp
-            in ("local_score", "local_score_unified")
-        )
         self.prefill_unified = (
-            self.prefill_local_score
+            self.index_k_tp > 1
             and vllm_config.attention_config.indexer_prefill_cp == "local_score_unified"
         )
         self.index_k_rank = 0
@@ -209,7 +202,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         self.prefill_candidate_pool: torch.Tensor | None = None
         self.prefill_window_metadata: torch.Tensor | None = None
         self.prefill_graphs: MSAIcpLayerGraphs | None = None
-        if self.prefill_local_score:
+        if self.index_k_tp > 1:
             from flashinfer.experimental.cake_msa_icp_indexer.cake_indexer import (
                 MSAIcpIndexerPlan,
             )
@@ -343,8 +336,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             side_qo = qo_lens_cpu[lo:hi]
             plan = None
             page_table = None
-            gather_pages = None
-            if not self.prefill_local_score:
+            if self.index_k_tp == 1:
                 from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
 
                 kv_lens_cpu = seq_lens[:num_reqs].cpu().to(torch.int32)
@@ -369,14 +361,9 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 cols = torch.arange(block_table.shape[1], device=block_table.device)
                 valid = cols[None, :] < nvp[lo:hi].to(block_table.device)[:, None]
                 page_table = block_table[lo:hi][valid].to(torch.int32)
-                if self.index_k_tp > 1:
-                    gather_pages = page_table.to(torch.int64)
-                    page_table = torch.arange(
-                        page_table.numel(), dtype=torch.int32, device=page_table.device
-                    )
             local_chunks = None
             candidate_buffers = None
-            if self.prefill_local_score:
+            if self.index_k_tp > 1:
                 from vllm.models.minimax_m3.nvidia.ops.index_prefill import (
                     prepare_prefill_window,
                 )
@@ -428,7 +415,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 prefix_lens=context_lens[lo:hi],
                 max_query_len=int(side_qo.max()),
                 page_table=page_table,
-                gather_pages=gather_pages,
                 local_chunks=local_chunks,
                 candidate_pool=self.prefill_candidate_pool,
                 graphs=self.prefill_graphs,
@@ -595,11 +581,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                     score_out=unified_scores[:nd].transpose(0, 1),
                 )
 
-        local_prefill = (
-            md.prefill_msa is not None and md.prefill_msa.local_chunks is not None
-        )
-        if local_prefill:
-            assert md.prefill_msa is not None and self.index_k_comm is not None
+        if sharded and md.prefill_msa is not None:
+            assert self.index_k_comm is not None
             start = 0 if unified_prefill else nd
             prefill_local_score(
                 index_q[start:],
@@ -614,20 +597,13 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
             assert unified_scores is not None
             p = md.prefill_msa
-            prefill_q = index_q[nd:]
-            if p.gather_pages is not None:
-                assert self.index_k_comm is not None
-                kv = gather_prefill_pages(kv, p.gather_pages, self.index_k_comm)
-                h = self.num_index_heads
-                head = self.index_k_comm.rank * h
-                prefill_q = prefill_q[:, head : head + h].contiguous()
             # Index-K cache (num_blocks, 128, D) -> paged MQA (num_blocks,1,128,D).
             k_pages = kv.view(kv.shape[0], 1, PAGE_SIZE, self.index_head_dim)
             # fmha writes its max_score natively as [nnz_p, H, max_k_tiles] into
             # the prefill region (stride-aware; plan max_k_tiles forced to
             # md.max_k_tiles so the shape matches exactly -> no copy).
             _fmha_sm100(
-                prefill_q,
+                index_q[nd:],
                 k_pages,
                 k_pages,  # V placeholder; not read in OnlyScore
                 p.plan,
@@ -638,16 +614,15 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 max_score=unified_scores[nd:],
             )
 
-        start = nd if sharded else 0
-        if start < num_tokens and not local_prefill:
+        if not sharded and num_tokens > 0:
             assert unified_scores is not None
             sparse_topk_select(
-                unified_scores[start:],
+                unified_scores,
                 self.topk_blocks,
-                num_valid_pages=num_valid_pages[start:],
+                num_valid_pages=num_valid_pages,
                 force_begin_blocks=self.init_blocks,
                 force_end_blocks=self.local_blocks,
-                output=buf[start:num_tokens],
+                output=buf[:num_tokens],
                 max_score_layout="THK",
             )
 
@@ -983,22 +958,3 @@ class IndexKShardComm:
         if n % 3 == 0:
             return ordinal % 3
         return 2 if ordinal == n - 1 else ordinal % 2
-
-
-def gather_prefill_pages(
-    kv_shard: torch.Tensor, pages: torch.Tensor, comm: IndexKShardComm
-) -> torch.Tensor:
-    """Full ``[P, 128, D]`` index-K pages of ``pages`` from every rank's shard
-    (token ``i * tp + r`` of a block comes from rank ``r``'s row ``i``)."""
-    group = comm.group
-    tp = group.world_size
-    num_pages = pages.numel()
-    _, rows, dim = kv_shard.shape
-    local = kv_shard.view(torch.uint8).index_select(0, pages)
-    gathered = group.all_gather(local, dim=0)
-    full = (
-        gathered.view(tp, num_pages, rows, dim)
-        .permute(1, 2, 0, 3)
-        .reshape(num_pages, rows * tp, dim)
-    )
-    return full.view(kv_shard.dtype)
