@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -219,12 +218,9 @@ def eplb_dist_init(tmp_path):
     cleanup_dist_env_and_memory()
 
 
-def _start_ft_async_eplb_with_failing_worker(
-    monkeypatch, reset_during_transfer: bool = False, start: bool = True
-):
+def _start_ft_async_eplb_with_failing_worker(monkeypatch):
     """Start single-rank async EPLB under fault tolerance whose worker fails
     every layer transfer. On one rank the EP group stands in for the EPLB group.
-    With ``reset_during_transfer``, an FT reset lands before each failure.
     """
     num_layers, num_experts, interval = 2, 4, 2
     device = torch.device(current_platform.device_type)
@@ -237,8 +233,6 @@ def _start_ft_async_eplb_with_failing_worker(
     failures: list[Exception] = []
 
     def failing_transfer_layer(**kwargs):
-        if reset_during_transfer:
-            state.ft_reset_epoch += 1
         failures.append(RuntimeError(f"injected transfer failure {len(failures)}"))
         raise failures[-1]
 
@@ -271,8 +265,7 @@ def _start_ft_async_eplb_with_failing_worker(
     state.expert_rearrangement_step_interval = interval
     state.expert_rearrangement_step = interval - 1
     state.model_states = {"m": model_state}
-    if start:
-        state.start_async_loop()
+    state.start_async_loop()
     return state, model_state, failures
 
 
@@ -301,9 +294,7 @@ def test_async_worker_failure_raises_under_fault_tolerance(eplb_dist_init, monke
 
 
 def test_fault_tolerance_reset_rearms_async_eplb(eplb_dist_init, monkeypatch):
-    """After an FT reset, the old failure is ignored and the surviving worker
-    runs the next rearrangement.
-    """
+    """After an FT reset, the surviving worker runs the next rearrangement."""
     state, model_state, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
     assert _step_until_raise(state) is not None
 
@@ -316,67 +307,3 @@ def test_fault_tolerance_reset_rearms_async_eplb(eplb_dist_init, monkeypatch):
 
     assert exc is not None
     assert exc.__cause__ is failures[1]
-
-
-def test_fault_tolerance_drops_failure_from_abandoned_cycle(
-    eplb_dist_init, monkeypatch
-):
-    """A failure from a cycle that an FT reset abandoned is stale, so it must
-    not fail the rearrangement that runs after recovery.
-    """
-    handled = threading.Event()
-    monkeypatch.setattr(
-        async_worker.logger, "exception", lambda *args, **kwargs: handled.set()
-    )
-    state, _, failures = _start_ft_async_eplb_with_failing_worker(
-        monkeypatch, reset_during_transfer=True
-    )
-
-    for _ in range(1000):
-        state.step()
-        if handled.wait(timeout=0.01):
-            break
-
-    assert failures, "the injected transfer failure never ran"
-    assert _step_until_raise(state, max_steps=20) is None
-
-
-def test_fault_tolerance_drops_rearrangement_signalled_before_reset(
-    eplb_dist_init, monkeypatch
-):
-    """A rearrangement signalled before an FT reset, but picked up by the
-    worker after it, belongs to the abandoned epoch and must not run.
-    """
-    state, _, _ = _start_ft_async_eplb_with_failing_worker(monkeypatch, start=False)
-    cycle_started, release = threading.Event(), threading.Event()
-    cycle_epochs: list[int] = []
-
-    def blocking_cycle(state, stream, is_profile, reset_epoch):
-        cycle_epochs.append(reset_epoch)
-        cycle_started.set()
-        release.wait(timeout=30)
-
-    monkeypatch.setattr(async_worker, "_transfer_cycle", blocking_cycle)
-    num_waits = 0
-    real_wait = state.rearrange_event.wait
-
-    def counting_wait(*args, **kwargs):
-        nonlocal num_waits
-        num_waits += 1
-        real_wait(*args, **kwargs)
-
-    monkeypatch.setattr(state.rearrange_event, "wait", counting_wait)
-    state.start_async_loop()
-
-    state.rearrange_event.record()
-    assert cycle_started.wait(timeout=30)
-    # Queued while the worker is busy, then an FT reset lands before pickup.
-    state.rearrange_event.record()
-    state.ft_reset_epoch += 1
-    release.set()
-
-    deadline = time.monotonic() + 30
-    while num_waits < 3 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert num_waits == 3, "the worker never went back to waiting"
-    assert cycle_epochs == [0]

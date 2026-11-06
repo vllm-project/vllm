@@ -40,7 +40,7 @@ def start_async_worker(
                 is_profile=is_profile,
             )
         except Exception as exc:
-            state.async_worker_error = (state.ft_reset_epoch, exc)
+            state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
     thread = threading.Thread(target=thread_target, daemon=True)
@@ -81,22 +81,15 @@ def transfer_run_periodically(
 ) -> None:
     rank = get_eplb_group().device_group.rank()
     while True:
-        # Snapshot before the wait too, in case the wait itself raises.
-        reset_epoch = state.ft_reset_epoch
         try:
             state.rearrange_event.wait(stream=stream)
-            # A signal recorded before an FT reset belongs to the abandoned
-            # epoch, even if this thread only picks it up afterwards.
-            reset_epoch = state.rearrange_epoch
-            if reset_epoch != state.ft_reset_epoch:
-                continue
-            _transfer_cycle(state, stream, is_profile, reset_epoch)
+            _transfer_cycle(state, stream, is_profile)
         except Exception as exc:
             if not state.parallel_config.enable_fault_tolerance:
                 raise
             # Report the failure so step() raises on every rank and FT takes
             # over; keep the thread alive so EPLB can resume after a retry.
-            state.async_worker_error = (reset_epoch, exc)
+            state.async_worker_error = exc
             logger.exception(
                 "async loop error (Rank %d); continuing under fault tolerance",
                 rank,
@@ -107,13 +100,12 @@ def _transfer_cycle(
     state: "EplbState",
     stream: torch.Stream,
     is_profile: bool,
-    reset_epoch: int,
 ) -> None:
-    """Run one rebalance pass over all model states and layers.
+    """Run one rebalance pass over all model states and layers."""
+    # Snapshot the FT reset epoch. A change in this value means a fault
+    # recovery happened, and the in-flight rebalance must be abandoned.
+    reset_epoch = state.ft_reset_epoch
 
-    ``reset_epoch`` is the FT reset epoch when the pass started. A change in
-    this value means a fault recovery happened, and the pass is abandoned.
-    """
     eplb_group = get_eplb_group().device_group
     eplb_cpu_group = get_eplb_group().cpu_group
     ep_rank = eplb_group.rank()
