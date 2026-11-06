@@ -149,6 +149,9 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     muse_spark_audio="MuseSparkAudioConfig",
     muse_spark="MuseSparkConfig",
     kimi_k3="KimiK3Config",
+    lfm3="Lfm3Config",
+    lfm3_audio="Lfm3AudioConfig",
+    lfm3_vl="Lfm3VlConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     midashenglm="MiDashengLMConfig",
@@ -168,7 +171,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
     step5="Step5Config",
     step5_vl="Step5VLConfig",
-    qwen3_asr="Qwen3ASRConfig",
+    ricursive="RicursiveConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
@@ -410,6 +413,21 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
+            from transformers import Qwen3ASRConfig
+
+            # Original checkpoints nest their fields in `thinker_config`
+            thinker_config = config_dict.pop("thinker_config")
+            audio_config = thinker_config["audio_config"]
+            audio_config["model_type"] = "qwen3_asr_encoder"
+            config_dict = {**thinker_config, **config_dict}
+            if thinker_config["model_type"] == "qwen3_forced_aligner":
+                config_dict["architectures"] = [
+                    "Qwen3ASRForcedAlignerForTokenClassification"
+                ]
+                config_dict["num_labels"] = config_dict.pop("classify_num")
+            kwargs.setdefault("name_or_path", str(model))
+            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
 
@@ -844,6 +862,9 @@ def maybe_override_with_speculators(
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        get_custom_speculator_config_class,
+    )
 
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
@@ -854,8 +875,17 @@ def maybe_override_with_speculators(
     if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
-    # Lock fields dictated by the speculators format
-    speculative_config["method"] = speculators_method
+    # Lock fields dictated by the speculators format, except for a custom
+    # method based on the checkpoint's.
+    custom_config_cls = get_custom_speculator_config_class(speculative_config["method"])
+    if custom_config_cls is None:
+        speculative_config["method"] = speculators_method
+    elif custom_config_cls.base_method != speculators_method:
+        raise ValueError(
+            f"Speculative method '{speculative_config['method']}' is based on "
+            f"'{custom_config_cls.base_method}', but the speculators "
+            f"checkpoint {model} is for '{speculators_method}'."
+        )
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
@@ -1316,7 +1346,10 @@ def try_get_safetensors_metadata(
         return with_retry(
             get_safetensors_metadata_partial,
             "Error retrieving safetensors",
-            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
+            fatal_errors=(
+                huggingface_hub.errors.NotASafetensorsRepoError,
+                huggingface_hub.errors.OfflineModeIsEnabled,
+            ),
         )
     except Exception:
         return None
