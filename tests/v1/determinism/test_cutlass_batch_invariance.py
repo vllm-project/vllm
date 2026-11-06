@@ -206,6 +206,33 @@ def test_online_fp8_linear_batch_invariant(
 
 
 @requires_fp8
+@_NVFP4_REQUIRES_SM100
+@torch.inference_mode()
+def test_flashinfer_fp8_mm_batch_invariant_after_autotune(monkeypatch):
+    """Under "auto", autotune may pick a different bmm_fp8 backend per M bucket."""
+    from vllm.utils import flashinfer as fi
+
+    if not fi.has_flashinfer():
+        pytest.skip("FlashInfer is not installed.")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    fp8 = current_platform.fp8_dtype()
+    x = (0.5 * torch.randn(2048, 4096)).to(fp8)
+    b = (0.5 * torch.randn(4096, 4096)).to(fp8).t()
+    scale_a, scale_b = torch.tensor(0.02), torch.tensor(0.03)
+
+    def run(m):
+        return fi.flashinfer_scaled_fp8_mm(x[:m], b, scale_a, scale_b, torch.bfloat16)
+
+    buckets = fi.flashinfer_get_hybrid_num_tokens_buckets(2048)
+    with fi.autotune(tuning_buckets=buckets, round_up=True):
+        run(2048)
+    ref = run(2048)
+    for m in (1, 7, 64, 128, 512):
+        assert torch.equal(run(m), ref[:m])
+
+
+@requires_fp8
 @torch.inference_mode()
 def test_block_fp8_batch_invariant_across_tuned_block_size_k(monkeypatch):
     """The block-FP8 kernel applies the block scales once per K tile, so a tuned
