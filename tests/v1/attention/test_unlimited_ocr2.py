@@ -12,11 +12,11 @@ from vllm.model_executor.layers.dash_attention import (
 )
 from vllm.platforms import current_platform
 
-
 # Should be fixed by https://github.com/vllm-project/vllm/pull/66031
 requires_cuda_dash = pytest.mark.skipif(
     current_platform.is_rocm(), reason="Unlimited-OCR-2 DASH attention is CUDA-only"
 )
+
 
 def test_page_coordinates_continue_across_prompt_and_response():
     roles = torch.tensor([0, 2, 1, 1, 2, 1, 1, 1, 0, 2, 0, 0, 2, 0])
