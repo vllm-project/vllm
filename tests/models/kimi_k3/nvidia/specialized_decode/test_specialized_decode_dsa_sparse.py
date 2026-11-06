@@ -194,7 +194,10 @@ def test_sparse_matches_emulation(counts):
 
 @pytest.mark.parametrize("counts", [[256, 255, 1, 31, 200], [300, 2048, 257, 513, 7]])
 def test_sparse_error_within_flashinfer(counts):
-    pytest.importorskip("flashinfer.attention.prims_ts")
+    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
+
+    if not has_flashinfer_prims_ts_sparse_mla():
+        pytest.skip("FlashInfer has no prims_ts sparse MLA")
     query, kv, rows, valid = _inputs(counts, seed=1)
     exact, exact_lse = _reference(query, kv, rows, valid, quantize_p=False)
     ours, ours_lse = _run_sparse(query, kv, rows, valid)

@@ -501,7 +501,7 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 @functools.cache
 def has_flashinfer_prims_ts_sparse_mla() -> bool:
     """Return ``True`` if FlashInfer ships the task-scheduled (prims_ts) sparse
-    MLA decode wrapper. Its quantized formats are probed separately by
+    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are probed separately by
     ``prims_ts_sparse_mla_format_error`` once a device is available."""
     if not has_flashinfer():
         return False
@@ -512,9 +512,12 @@ def has_flashinfer_prims_ts_sparse_mla() -> bool:
         )
     except ImportError:
         return False
-    return callable(BatchSparseMLADecodePagedTSWrapper) and callable(
-        get_prims_ts_sparse_mla_decode_workspace_size
-    )
+    if not callable(get_prims_ts_sparse_mla_decode_workspace_size):
+        return False
+    # vLLM passes the plan arguments of FlashInfer after 0.7.3 (max_q_len,
+    # q_dtype); 0.7.3's prims_ts still names them max_seq_len_q, q_data_type.
+    plan_args = inspect.signature(BatchSparseMLADecodePagedTSWrapper.plan).parameters
+    return "max_q_len" in plan_args
 
 
 @functools.cache
