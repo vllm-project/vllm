@@ -4,9 +4,6 @@
 
 import torch
 
-from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-    rope_store_plain_kv_row,
-)
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import _fp32x2_to_fp4x2
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -370,7 +367,6 @@ def rope_quant_insert(
         CACHE_BLOCK=kv_cache.shape[1],
         COMPRESS_RATIO=compress_ratio,
         STORE_FP8=store_fp8,
-        FP8_MAX=torch.finfo(kv_cache.dtype).max,
         num_warps=4,
         **launch_kwargs,
     )
@@ -548,7 +544,6 @@ def _rope_plain_insert_kernel(
     CACHE_BLOCK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     STORE_FP8: tl.constexpr,
-    FP8_MAX: tl.constexpr,
 ):
     t = tl.program_id(0)
     slot = tl.load(cache_slots + t)
@@ -559,19 +554,22 @@ def _rope_plain_insert_kernel(
         return
     d = tl.arange(0, 512)
     normed = tl.load(latent + t.to(tl.int64) * 512 + d).to(tl.float32)
+
+    # NoPE pairs load (cos, sin) = (1, 0), so the rotation is the identity there.
+    even, odd = tl.split(tl.reshape(normed, (256, 2)))
+    pair = tl.arange(0, 256) - 224
+    cs = cos_sin + (position // COMPRESS_RATIO * COMPRESS_RATIO) * COS_STRIDE
+    c = tl.load(cs + tl.maximum(pair, 0), pair >= 0, other=1.0).to(tl.float32)
+    s = tl.load(cs + 32 + tl.maximum(pair, 0), pair >= 0, other=0.0).to(tl.float32)
+    row = tl.interleave(even * c - odd * s, odd * c + even * s).to(tl.bfloat16)
+
     dst = (
         cache
         + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
         + (slot % CACHE_BLOCK) * ROW_STRIDE
     )
-    rope_store_plain_kv_row(
-        normed,
-        position,
-        cos_sin,
-        COS_STRIDE,
-        dst,
-        fp8_scale,
-        COMPRESS_RATIO,
-        STORE_FP8,
-        FP8_MAX,
-    )
+    if STORE_FP8:
+        scaled = row.to(tl.float32) * (1.0 / tl.load(fp8_scale))
+        tl.store(dst + d, tl.clamp(scaled, -448.0, 448.0).to(tl.float8e4nv))
+    else:
+        tl.store(dst + d, row)
