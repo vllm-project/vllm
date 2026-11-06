@@ -435,7 +435,7 @@ def select_fp8_moe_backend(
     if runner_backend != "auto":
         requested_backend = map_fp8_backend(runner_backend)
         # For batched activation format, use batched variants if available.
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             if requested_backend == Fp8MoeBackend.DEEPGEMM:
                 requested_backend = Fp8MoeBackend.BATCHED_DEEPGEMM
             elif requested_backend == Fp8MoeBackend.TRITON:
@@ -464,9 +464,9 @@ def select_fp8_moe_backend(
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
         else:
             backend = (
-                Fp8MoeBackend.DEEPGEMM
-                if activation_format == mk.FusedMoEActivationFormat.Standard
-                else Fp8MoeBackend.BATCHED_DEEPGEMM
+                Fp8MoeBackend.BATCHED_DEEPGEMM
+                if activation_format.is_batched
+                else Fp8MoeBackend.DEEPGEMM
             )
             return oracle.return_or_raise(backend, AVAILABLE_BACKENDS)
     elif (model_config := get_current_vllm_config().model_config) is not None and (

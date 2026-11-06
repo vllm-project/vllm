@@ -232,6 +232,21 @@ def select_unquantized_moe_backend(
         return UnquantizedMoeBackend.OOT, None
 
     if moe_config.is_lora_enabled:
+        # The Punica path is token-major: it re-aligns `topk_ids` per adapter
+        # and needs the token->LoRA mapping for the tokens this rank owns,
+        # which only the Standard-format DP/EP prepare/finalize forwards after
+        # dispatch (NaiveDPEPPrepareAndFinalize.set_lora_context). No
+        # BatchedExperts implementation supports LoRA at all.
+        if moe_config.activation_format != mk.FusedMoEActivationFormat.Standard:
+            raise ValueError(
+                "MoE LoRA requires a Standard activation layout, but this "
+                "deployment produces "
+                f"'{moe_config.activation_format.value[0]}' "
+                "(all2all_backend="
+                f"'{moe_config.moe_parallel_config.all2all_backend}', "
+                f"moe_backend='{moe_config.moe_backend}'). Disable LoRA or "
+                "select a backend that produces the Standard layout."
+            )
         if _trtllm_bf16_lora_supported(moe_config):
             from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
                 TrtLlmBf16LoRAExperts,
@@ -242,10 +257,13 @@ def select_unquantized_moe_backend(
                 "(TrtLlmBf16LoRAExperts)."
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
-        logger.info_once("Using TRITON Unquantized MoE LoRA backend")
-        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
-            UnquantizedMoeBackend.TRITON
-        )[0]
+
+        return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
+            UnquantizedMoeBackend.TRITON,
+            [UnquantizedMoeBackend.TRITON],
+            activation_format=mk.FusedMoEActivationFormat.Standard,
+            is_lora=True,
+        )
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
@@ -267,7 +285,7 @@ def select_unquantized_moe_backend(
     if runner_backend not in ["auto", "humming", "marlin"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
-            oracle.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            moe_config.activation_format.is_batched
             and requested_backend == UnquantizedMoeBackend.TRITON
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
@@ -492,13 +510,6 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     """
 
     name = "Unquantized"
-
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
-        # Unquantized also runs batched when a batched_triton backend is asked for.
-        if self.moe_config.moe_backend == "batched_triton":
-            return mk.FusedMoEActivationFormat.BatchedExperts
-        return super().activation_format
 
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend

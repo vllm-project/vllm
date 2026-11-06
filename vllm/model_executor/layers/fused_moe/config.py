@@ -321,6 +321,28 @@ class FusedMoEQuantConfig:
     def is_block_quantized(self) -> bool:
         return self.block_shape is not None
 
+    def act_scale_is_tensor_wide(self, scale: torch.Tensor | None) -> bool:
+        """Whether ``scale`` is a runtime-reduced, tensor-wide act scale.
+
+        Only native fp8/int8 per-tensor quantization derives its scale from
+        every element of the activation, so only that scheme is affected by
+        rows that hold no route (e.g. ``PaddedStandard`` padding) and must be
+        masked out of the reduction. Per-token and block scales are row-local,
+        and a static scale does not depend on the data at all.
+
+        Args:
+            scale: Configured a1 or a2 activation scale.
+
+        Returns:
+            True if the scale has to be computed over routed rows only.
+
+        """
+        return (
+            scale is None
+            and self.is_per_tensor
+            and (self.use_fp8_w8a8 or self.use_int8_w8a8)
+        )
+
     @property
     def a1_scale(self) -> torch.Tensor | None:
         assert self._a1.scale is None or isinstance(self._a1.scale, torch.Tensor)
@@ -1072,10 +1094,6 @@ class FusedMoEParallelConfig:
         )
 
     @property
-    def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
-
-    @property
     def needs_round_robin_routing_tables(self):
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
@@ -1443,22 +1461,31 @@ class FusedMoEConfig:
             )
 
     @property
-    def is_act_and_mul(self) -> bool:
-        return self.activation.is_gated
+    def use_batched_activation_format(self):
+        return self.activation_format.is_batched
 
     @property
     def activation_format(self) -> "FusedMoEActivationFormat":
-        """Activation layout a modular prepare/finalize uses for this config."""
-        # `modular_kernel` imports this module, so the enum is imported lazily.
+        """The all2all activation format."""
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEActivationFormat,
         )
 
-        return (
-            FusedMoEActivationFormat.BatchedExperts
-            if self.moe_parallel_config.use_batched_activation_format
-            else FusedMoEActivationFormat.Standard
-        )
+        conf = self.moe_parallel_config
+        if (
+            conf.use_deepep_ll_kernels
+            or conf.use_nixl_ep_kernels
+            or self.moe_backend == "batched_triton"
+        ):
+            return FusedMoEActivationFormat.BatchedExperts
+        elif conf.use_deepep_v2_kernels:
+            return FusedMoEActivationFormat.PaddedStandard
+        else:
+            return FusedMoEActivationFormat.Standard
+
+    @property
+    def is_act_and_mul(self) -> bool:
+        return self.activation.is_gated
 
     @property
     def w13_num_shards(self) -> int:

@@ -56,15 +56,6 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         self.weight_key = weight_key
         self.activation_key = activation_key
 
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
-        """Activation layout of the prepare/finalize this config will use.
-
-        Derived from `moe_config` rather than stored, so the instance does not
-        hold a second copy of it.
-        """
-        return self.moe_config.activation_format
-
     def backend_enum_cls(self) -> type[BackendT]:
         """Return the concrete `Enum` class enumerating this oracle's
         backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`)."""
@@ -163,6 +154,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         self,
         backend: BackendT,
         available_backends: list[BackendT] | None = None,
+        is_lora: bool = False,
     ) -> str:
         """Message for the backend a select loop settled on."""
         available = (
@@ -170,7 +162,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             if available_backends is not None
             else ""
         )
-        return f"Using {backend.value} {self.name} MoE backend{available}."
+        lora = "LoRA " if is_lora else ""
+        return f"Using {backend.value} {self.name} MoE {lora}backend{available}."
 
     def make_log_unsupported(self, backend: BackendT, reason: str | None) -> str:
         """Message for a backend that does not support the configuration."""
@@ -185,12 +178,15 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backend: BackendT,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
+        activation_format: mk.FusedMoEActivationFormat | None = None,
     ) -> tuple[type[mk.FusedMoEExperts] | None, list[Rejection]]:
         """Probe `backend`'s candidate kernel classes, first supported wins.
 
         A miss logs a DEBUG line and yields to the next candidate; whether that
         is fatal stays with the caller. `activation_key` overrides this oracle's
-        own key for oracles whose activation key varies per backend.
+        own key for oracles whose activation key varies per backend, and
+        `activation_format` overrides the predicted prepare/finalize layout (the
+        unquantized LoRA path forces `Standard`).
 
         Returns:
             `(kernel_cls, rejected)`: the winning class, or `None`, plus every
@@ -200,6 +196,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
         """
         rejected: list[Rejection] = []
+        act_format = activation_format or self.moe_config.activation_format
         act_quant_key = (
             self.activation_key if activation_key is _UNSET else activation_key
         )
@@ -211,7 +208,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 self.moe_config,
                 self.weight_key,
                 act_quant_key,
-                self.activation_format,
+                act_format,
             )
             if supported:
                 return kernel_cls, rejected
@@ -225,6 +222,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         available_backends: list[BackendT] | None = None,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
+        activation_format: mk.FusedMoEActivationFormat | None = None,
+        is_lora: bool = False,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts]]:
         """Return `backend` with its first supported kernel class, or raise.
 
@@ -233,11 +232,13 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 configuration; the message carries the last rejection reason.
 
         """
-        kernel_cls, rejected = self.try_backend(backend, kernel_classes, activation_key)
+        kernel_cls, rejected = self.try_backend(
+            backend, kernel_classes, activation_key, activation_format
+        )
         if kernel_cls is None:
             reason = rejected[-1][1] if rejected else None
             raise ValueError(self.make_log_unsupported(backend, reason))
-        logger.info_once(self.make_log_backend(backend, available_backends))
+        logger.info_once(self.make_log_backend(backend, available_backends, is_lora))
         return backend, kernel_cls
 
 
@@ -277,7 +278,9 @@ def make_moe_kernel(
         **(prepare_finalize_kwargs or {}),
     )
     assert prepare_finalize is not None
-    if experts_cls.activation_format() != prepare_finalize.activation_format:
+    if not experts_cls.activation_format().is_superset(
+        prepare_finalize.activation_format
+    ):
         raise ValueError(
             f"{experts_cls.__name__} expects "
             f"{experts_cls.activation_format().value} activations but the selected "
@@ -289,7 +292,7 @@ def make_moe_kernel(
         logger.info_once(experts_log, experts_cls.__name__)
 
     extra_kwargs = dict(experts_kwargs or {})
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         extra_kwargs["max_num_tokens"] = max_num_tokens

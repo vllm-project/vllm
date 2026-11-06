@@ -279,7 +279,7 @@ def select_nvfp4_moe_backend(
     if requested_backend is not None:
         # For batched activation format, use batched variant if available.
         if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            activation_format.is_batched
             and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         ):
             requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
