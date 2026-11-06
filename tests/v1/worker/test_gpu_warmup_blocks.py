@@ -19,6 +19,7 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -26,8 +27,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
+    run_context_prefill_warmup,
     run_mixed_prefill_decode_warmup,
     warmup_kernels,
 )
@@ -88,7 +91,11 @@ def _make_runner(
     """Stub model runner exposing only what the warmup entry points read."""
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
-        speculative_config=SimpleNamespace() if num_spec_steps else None,
+        speculative_config=(
+            SimpleNamespace(max_num_new_slots_for_drafting=0)
+            if num_spec_steps
+            else None
+        ),
         adaptive_verification=None,
         speculator=None,
         rejection_sampler=None,
@@ -97,6 +104,7 @@ def _make_runner(
         is_encoder_decoder=False,
         is_last_pp_rank=True,
         max_num_reqs=4,
+        max_num_tokens=2048,
         max_model_len=MAX_MODEL_LEN,
         model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         model_state=SimpleNamespace(max_encoder_len=0),
@@ -105,10 +113,14 @@ def _make_runner(
             kv_cache_groups=kv_cache_groups, num_blocks=1024
         ),
         vllm_config=SimpleNamespace(
-            num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
+            num_lookahead_tokens=num_lookahead_tokens,
+            is_mm_encoder_only=False,
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+        extensible_kv_cache=None,
     )
 
 
@@ -198,6 +210,140 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     assert set(recorder.num_spec_tokens_to_schedule) == {NUM_SPEC_STEPS}
 
 
+def test_warmup_kernels_reserves_drafting_slots(monkeypatch):
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    runner.speculative_config.max_num_new_slots_for_drafting = 1
+    runner.scheduler_config.max_num_seqs = 1000
+    runner.kv_cache_config.num_blocks = 100_000
+    outputs: list[SchedulerOutput] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    warmup._warmup_kernels(runner, outputs.append, lambda grammar_output: None)
+
+    prefill_output = outputs[0]
+    num_reqs = len(prefill_output.scheduled_new_reqs)
+    assert num_reqs == 2048 // (runner.decode_query_len + 1 + 1)
+    assert prefill_output.total_num_scheduled_tokens + num_reqs <= runner.max_num_tokens
+
+
+class _StubExtensibleCache:
+    def __init__(self, warmup_committable_blocks: int) -> None:
+        self.warmup_committable_blocks = warmup_committable_blocks
+        self.commits: list[int] = []
+
+    def commit(self, num_blocks: int) -> None:
+        self.commits.append(num_blocks)
+
+
+def test_warmup_sizes_batches_by_the_rank_agreed_committable_count():
+    """Each rank measures its own free memory; the warmup batch and what it
+    commits must follow the smallest count across ranks, or ranks run
+    different shapes and can skip steps the others wait on."""
+    runner = _make_runner(
+        [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
+    )
+    # The engine agreed on 3 blocks, whatever this rank alone could commit.
+    cache = _StubExtensibleCache(3)
+    runner.extensible_kv_cache = cache
+    recorder = _StepRecorder()
+
+    warmup_kernels(runner, recorder.execute_model, recorder.sample_tokens)
+
+    # One block per request at this length: 3 blocks less the null block fit
+    # two requests, not the four `max_num_seqs` allows.
+    assert len(recorder._held) == 2
+    assert cache.commits[0] == 3
+
+
+def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks():
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    cache = _StubExtensibleCache(9)
+    runner.extensible_kv_cache = cache
+    recorder = _StepRecorder()
+
+    # 128 tokens need 9 blocks (8 prefill + 1 decode) beyond the null block.
+    assert not run_mixed_prefill_decode_warmup(
+        runner, recorder.execute_model, recorder.sample_tokens, num_tokens=128
+    )
+    assert cache.commits == []
+    assert recorder.steps == []
+
+
+def test_context_prefill_warmup_attends_to_the_requested_context():
+    """Full-length requests resume from a prefix hit until their cached
+    context covers the requested tokens, holding what the scheduler would."""
+    num_lookahead_tokens = NUM_SPEC_STEPS + 1
+    runner = _make_runner([_attention_group()], num_lookahead_tokens)
+    runner.extensible_kv_cache = cache = _StubExtensibleCache(1024)
+    recorder = _StepRecorder()
+
+    assert run_context_prefill_warmup(
+        runner,
+        recorder.execute_model,
+        recorder.sample_tokens,
+        num_context_tokens=2 * MAX_MODEL_LEN,
+    )
+
+    _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    # Each request fills the model length, so three cover twice the context.
+    assert len(recorder.steps) == 3
+    assert sum(num_computed for _, num_computed, _ in recorder.steps) >= (
+        2 * MAX_MODEL_LEN
+    )
+    for _, num_computed, num_scheduled in recorder.steps:
+        assert num_computed + num_scheduled < MAX_MODEL_LEN
+        assert num_scheduled == runner.decode_query_len + 1
+    assert cache.commits == [1 + 3 * cdiv(MAX_MODEL_LEN, BLOCK_SIZE)]
+
+
+def test_context_prefill_warmup_stays_within_the_context_and_vocabulary():
+    """A long model length must not inflate the context past what the step
+    needs, nor its prompt ids past the vocabulary they embed from."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.extensible_kv_cache = _StubExtensibleCache(1024)
+    outputs: list[SchedulerOutput] = []
+
+    assert run_context_prefill_warmup(
+        runner, outputs.append, lambda grammar_output: None, num_context_tokens=100
+    )
+
+    (request,) = outputs[0].scheduled_new_reqs
+    assert request.num_computed_tokens == 100
+    vocab_size = runner.model_config.get_vocab_size()
+    assert max(request.prompt_token_ids) < vocab_size < len(request.prompt_token_ids)
+
+
+def test_context_prefill_warmup_reserves_drafting_slots():
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    runner.speculative_config.max_num_new_slots_for_drafting = 1
+    runner.max_num_reqs = 1000
+    runner.max_model_len = 16
+    runner.kv_cache_config.num_blocks = 1024
+    outputs: list[SchedulerOutput] = []
+
+    assert run_context_prefill_warmup(
+        runner, outputs.append, lambda grammar_output: None, num_context_tokens=10_000
+    )
+
+    prefill_output = outputs[0]
+    num_reqs = len(prefill_output.scheduled_new_reqs)
+    assert num_reqs == runner.max_num_tokens // (runner.decode_query_len + 2)
+    assert prefill_output.total_num_scheduled_tokens + num_reqs <= runner.max_num_tokens
+
+
+def test_context_prefill_warmup_is_capped_by_the_committable_blocks():
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    blocks_per_req = cdiv(MAX_MODEL_LEN, BLOCK_SIZE)
+    runner.extensible_kv_cache = _StubExtensibleCache(blocks_per_req)
+    recorder = _StepRecorder()
+
+    # The null block leaves one block short of a single full-length request.
+    assert not run_context_prefill_warmup(
+        runner, recorder.execute_model, recorder.sample_tokens, MAX_MODEL_LEN
+    )
+    assert recorder.steps == []
+
+
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
     """Mamba groups hold the running-state block plus the speculative tail.
@@ -246,6 +392,15 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
             _mamba_group("none"),
             _mamba_group("align"),
         ],
+    )
+
+
+def _row_length_config(dcp_world_size: int = 1) -> SimpleNamespace:
+    """What `max_num_blocks_per_req` reads; align-mode Mamba specs return
+    before the row clamp."""
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
     )
 
 
@@ -299,6 +454,7 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
             expected = _reserved_block_count(
                 num_tokens,
                 spec,
+                vllm_config=_row_length_config(),
                 num_lookahead_tokens=num_lookahead_tokens,
                 max_model_len=MAX_MODEL_LEN,
                 max_encoder_len=0,
@@ -319,6 +475,45 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     _step(1)
     _step(decode_query_len)
 
+    manager.free(request)
+
+
+def test_reserved_block_count_scales_dcp_sharded_blocks():
+    """Under DCP the scheduler's block of a sharded group spans every rank, so
+    a long prompt holds `dcp_world_size` times fewer blocks than locally."""
+    dcp_world_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=256, kv_cache_tensors=[], kv_cache_groups=[_attention_group()]
+    )
+    (spec,) = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=MAX_MODEL_LEN,
+        hash_block_size=BLOCK_SIZE,
+        enable_caching=False,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=BLOCK_SIZE * dcp_world_size,
+    )
+    num_tokens = MAX_MODEL_LEN - 1
+    (request,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, block_size=BLOCK_SIZE
+    )
+    computed_blocks, num_new_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(
+        request, num_tokens, num_new_computed, computed_blocks
+    )
+    (held,) = manager.get_block_ids(request.request_id)
+
+    assert len(held) == _reserved_block_count(
+        num_tokens,
+        spec,
+        vllm_config=_row_length_config(dcp_world_size),
+        num_lookahead_tokens=0,
+        max_model_len=MAX_MODEL_LEN,
+        max_encoder_len=0,
+        dcp_world_size=dcp_world_size,
+    )
+    assert len(held) == cdiv(num_tokens, BLOCK_SIZE * dcp_world_size)
     manager.free(request)
 
 
@@ -382,3 +577,29 @@ def test_num_lookahead_tokens_without_speculation():
     config = _config_without_post_init(None)
 
     assert config.num_lookahead_tokens == 0
+
+
+@pytest.mark.parametrize("max_logprobs", [0, 5, -1])
+def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
+    """Prompt logprobs materialize full-vocab logits a chunk at a time, which
+    no other step reaches. The sizing step requests them on its real prefill,
+    so the runtime path computes them from the model's own hidden states."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=max_logprobs, use_mla=False
+    )
+    recorder = _StepRecorder()
+    requested: dict[str, int | None] = {}
+
+    def execute_model(scheduler_output) -> None:
+        for new_req in scheduler_output.scheduled_new_reqs:
+            requested[new_req.req_id] = new_req.sampling_params.prompt_logprobs
+        recorder.execute_model(scheduler_output)
+
+    warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
+
+    expected = None if max_logprobs == 0 else max_logprobs
+    assert {
+        "prefill" if "_prefill_" in req_id else "decode": value
+        for req_id, value in requested.items()
+    } == {"prefill": expected, "decode": None}

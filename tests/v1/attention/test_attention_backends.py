@@ -784,6 +784,27 @@ def test_flashinfer_cross_layer_layout(
     )
 
 
+@pytest.mark.parametrize("capability", [(8, 0), (9, 0), (10, 0), (12, 0)])
+def test_flashinfer_declares_only_layouts_it_can_address(monkeypatch, capability):
+    """Layout resolution must not hand FlashInfer a layout it asserts on (LHBNC)."""
+    pytest.importorskip("flashinfer")
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.v1.attention.backends.utils import get_flashinfer_layout_string
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(*capability),
+    )
+    layouts = FlashInferBackend.supported_kv_cache_layouts()
+
+    assert layouts, "FlashInfer must declare the KV cache layouts it can address"
+    assert KVCacheLayout.LHBNC not in layouts
+    for layout in layouts:
+        get_flashinfer_layout_string(layout)
+
+
 @pytest.mark.parametrize(
     "batch_spec_name",
     [
@@ -862,6 +883,79 @@ def test_causal_backend_correctness(
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FA4 takes FP8 Q/K/V with descales on Blackwell.",
+)
+def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
+    """FlashAttentionImpl passes FA4 no descale for a per-tensor scale of 1.0,
+    which FA4 reads as exactly 1.0; calibrated scales keep their descale."""
+    from vllm.v1.attention.backends.fa_utils import (
+        flash_attn_varlen_func,
+        is_fa_version_supported,
+    )
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+    if not is_fa_version_supported(4):
+        pytest.skip("FA4 is not supported.")
+    set_random_seed(0)
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    fp8 = current_platform.fp8_dtype()
+    seq_lens, q_len = [1328, 523, 2011], 3
+    num_heads, num_kv_heads, head_size = 64, 4, 128
+    impl = FlashAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="fp8",
+    )
+    assert impl.vllm_flash_attn_version == 4
+
+    q = torch.randn(len(seq_lens) * q_len, num_heads, head_size, device=device)
+    k_cache, v_cache = (
+        torch.randn(64, 128, num_kv_heads, head_size, device=device).to(fp8)
+        for _ in range(2)
+    )
+    block_table = torch.randperm(64, dtype=torch.int32, device=device)[:48]
+
+    def run(descale: torch.Tensor | None) -> torch.Tensor:
+        return flash_attn_varlen_func(
+            q=q.to(fp8),
+            k=k_cache,
+            v=v_cache,
+            cu_seqlens_q=torch.arange(
+                0, q.shape[0] + 1, q_len, dtype=torch.int32, device=device
+            ),
+            seqused_k=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+            max_seqlen_q=q_len,
+            max_seqlen_k=max(seq_lens),
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            block_table=block_table.view(len(seq_lens), -1),
+            fa_version=4,
+            q_descale=descale,
+            k_descale=descale,
+            v_descale=descale,
+        )
+
+    shape = (len(seq_lens), num_kv_heads)
+    unit = torch.ones(1, device=device)
+    assert impl._descale(unit, 1.0, shape) is None
+    expanded = unit.expand(shape)  # What FA4 got for a unit scale before.
+    output = run(impl._descale(unit, 1.0, shape))
+    torch.testing.assert_close(output, run(expanded), atol=0, rtol=0)
+    # Descales are applied when given, so the comparison above is not vacuous.
+    assert not torch.equal(output, run(2 * expanded))
+    # Calibrated and per-head scales (whose float holds the max) keep theirs.
+    calibrated = impl._descale(0.5 * unit, 0.5, shape)
+    assert calibrated is not None and torch.equal(calibrated, 0.5 * expanded)
+    per_head = torch.tensor([1.0, 0.5, 1.0, 0.25], device=device)
+    assert impl._descale(per_head, 1.0, shape) is not None
 
 
 @pytest.mark.skipif(
@@ -1308,6 +1402,7 @@ def test_flashinfer_varlen_cudagraph_capability(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=7,
             parallel_drafting=True,
+            max_num_new_slots_for_drafting=0,
         )
         if adaptive is not None
         else None,
@@ -1344,19 +1439,25 @@ def test_flashinfer_varlen_cudagraph_capability(
 
 
 @pytest.mark.parametrize(
-    "use_v2_model_runner,parallel_drafting,expected",
+    "use_v2_model_runner,parallel_drafting,drafting_slots,expected",
     [
-        (True, None, 1),
-        (True, False, 8),
-        (True, True, 8),
-        (False, False, 8),
-        (False, True, 15),
+        (True, None, 0, 1),
+        (True, False, 0, 8),
+        (True, True, 0, 8),
+        (False, False, 0, 8),
+        (False, True, 0, 15),
+        # Standalone draft model: its prefill adds a correction token.
+        (True, False, 1, 9),
+        (False, False, 1, 8),
+        # V1 parallel drafting does not also add the drafting slots.
+        (False, True, 7, 15),
     ],
 )
 def test_spec_as_decode_width_follows_model_runner(
-    use_v2_model_runner, parallel_drafting, expected
+    use_v2_model_runner, parallel_drafting, drafting_slots, expected
 ):
-    """Only model runner V1's parallel drafter widens decode requests."""
+    """V2 widens decode requests by the drafter's extra slots; V1 only for its
+    parallel drafter."""
 
     class Builder(AttentionMetadataBuilder):
         def __init__(self, vllm_config):
@@ -1369,7 +1470,9 @@ def test_spec_as_decode_width_follows_model_runner(
         speculative_config=None
         if parallel_drafting is None
         else SimpleNamespace(
-            num_speculative_tokens=7, parallel_drafting=parallel_drafting
+            num_speculative_tokens=7,
+            parallel_drafting=parallel_drafting,
+            max_num_new_slots_for_drafting=drafting_slots,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         use_v2_model_runner=use_v2_model_runner,
@@ -1457,6 +1560,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
         num_speculative_tokens=7,
         enable_adaptive_verification=True,
         parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
     )
     spec = create_standard_kv_cache_spec(config)
     scale = head_size**-0.5

@@ -43,7 +43,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
+                ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
             )
 
     if keywords is None:
@@ -144,7 +144,7 @@ def test_custom_compile_config(
     run_model(compilation_config, model, **model_kwargs)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_depyf_integration(disable_vllm_compile_cache):
     """Compile with depyf's debugging hooks installed.
 
@@ -190,7 +190,10 @@ def run_model(
     # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
     wait_for_memory_to_settle(
         threshold_ratio=1.0
-        - model_kwargs.get("gpu_memory_utilization", CacheConfig.gpu_memory_utilization)
+        - (
+            model_kwargs.get("gpu_memory_utilization")
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+        )
     )
 
     llm = LLM(

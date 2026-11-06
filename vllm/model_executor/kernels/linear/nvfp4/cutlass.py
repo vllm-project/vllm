@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
@@ -23,6 +24,11 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
 
     supports_partial_sum_dtype = True
+
+    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
+        super().__init__(config)
+        # The SM120 GEMM can add the bias in its epilogue.
+        self.bias_epilogue = current_platform.is_device_capability_family(120)
 
     @classmethod
     def is_supported(
@@ -70,6 +76,17 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
         if output_dtype != x.dtype and partial_sum_scale != 1.0:
             alpha = alpha * partial_sum_scale
+            if bias is not None:
+                bias = bias * partial_sum_scale
+        if bias is not None:
+            bias = bias.to(output_dtype)
+
+        # A padded N leaves the bias shorter than the GEMM output.
+        fuse_bias = (
+            bias is not None
+            and self.bias_epilogue
+            and layer.weight.shape[0] == output_size
+        )
         out = cutlass_scaled_fp4_mm(
             x_fp4,
             layer.weight,
@@ -77,12 +94,11 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight_scale,
             alpha,
             output_dtype,
+            bias=bias if fuse_bias else None,
         )
 
         out = slice_nvfp4_output(out, output_size)
 
-        if bias is not None:
-            if output_dtype != x.dtype and partial_sum_scale != 1.0:
-                bias = bias * partial_sum_scale
-            out = out + bias.to(out.dtype)
+        if bias is not None and not fuse_bias:
+            out = out + bias
         return out.view(*output_shape)

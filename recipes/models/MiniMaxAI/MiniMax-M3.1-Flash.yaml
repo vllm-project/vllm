@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-10-30
+  date_updated: 2026-11-02
   tasks:
     - text
     - multimodal
@@ -122,6 +122,24 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+  parallel_topk:
+    label: "Parallel index top-k"
+    description: "AMD MI355X: parallel decode top-16 selection for the NVFP4 indexer. Disabled by default; requires an image containing VLLM_ROCM_PARALLEL_INDEX_TOPK. FP8 indexers, including mono decode, bypass this path. Benchmark/CI jobs must explicitly enable this feature or set the environment variable to 1."
+    strategies: [single_node_tp]
+    modes:
+      nvfp4:
+        variants: [default, mxfp4]
+        args: []
+        env:
+          VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+      none:
+        variants: [fp8]
+        args: []
   mono_decode:
     label: "Mono decode"
     description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
@@ -163,6 +181,7 @@ opt_in_features:
   - text_only
   - prefill_dbo_sp
   - mono_decode
+  - parallel_topk
 
 variants:
   default:
@@ -661,7 +680,7 @@ presets:
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
     description: "One TP4 engine on a 4-GPU GB300 tray with the seven-token DSpark draft on FLASHINFER_TS; GPU-resident KV, with per-concurrency scheduling and CUDA graph settings."
-    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 0733706344df53aa9a48b22af0e2e7070d68a298 }
     image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
     tp: 4
     select:
@@ -939,7 +958,7 @@ presets:
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
     description: "One data-parallel, expert-parallel engine across the four GPUs of a GB300 tray behind vllm-router with session affinity. Three-token DSpark draft on FLASHINFER_TS."
-    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 0733706344df53aa9a48b22af0e2e7070d68a298 }
     image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
     select:
       features: { text_only: true }
@@ -956,10 +975,8 @@ presets:
       "--speculative-config": { num_speculative_tokens: 3 }
     points:
       c64: { label: "64", concurrency: 64, args: ["--max-num-seqs", "32"] }
-      c96: { label: "96", concurrency: 96, args: ["--max-num-seqs", "48"] }
-      c128: { label: "128", concurrency: 128, args: ["--max-num-seqs", "64"] }
     runbook: |
-      The DEP4 points of the GB300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) run one engine with `--data-parallel-size 4` and `--enable-expert-parallel`; `--max-num-seqs` is the per-rank limit.
+      The DEP4 point of the GB300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) runs one engine with `--data-parallel-size 4` and `--enable-expert-parallel`; `--max-num-seqs` is the per-rank limit.
 
       The router uses the `consistent_hash` policy so a conversation stays on the rank that holds its prefix. The lane also runs it with `--request-timeout-secs 14400` and `--disable-retries`.
 
@@ -970,7 +987,7 @@ presets:
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
     description: "One TP2 engine on two of the tray's four GB300 GPUs with the seven-token DSpark draft on FLASHINFER_TS and host-DRAM KV offload (482 GB per engine)."
-    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 0733706344df53aa9a48b22af0e2e7070d68a298 }
     image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
     tp: 2
     select:
@@ -1397,6 +1414,9 @@ presets:
       - "--enable-prefix-caching"
     env:
       VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      # the DSpark drafter kernels (seven-token drafts; c64's three-token draft keeps
+      # the stock draft layers)
+      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
     json_args:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
     # The DBO points pass the DBO flags directly: the DBO / SP prefill feature's
@@ -1534,6 +1554,18 @@ guide: |
     by context instead of by index head.
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
+  - With a seven-token DSpark draft (`num_speculative_tokens: 7`),
+    `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs draft steps of up to 10 requests
+    as fused FlyDSL kernels.
+
+  ### Parallel index top-k (AMD MI355X)
+
+  `parallel_topk` enables parallel decode top-16 selection for the NVFP4
+  indexer. It is disabled by default. Use a build containing the selector and
+  set `VLLM_ROCM_PARALLEL_INDEX_TOPK=1`, or enable the recipe feature.
+  FP8 indexers, including mono decode, bypass this path. Benchmark and CI
+  lanes must explicitly enable it in an image containing the patch; adding
+  the kernel or running correctness CI alone does not enable it for serving.
 
   ### DBO and SP prefill (TP4, AMD MI355X)
 
