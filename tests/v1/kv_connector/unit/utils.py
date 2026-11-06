@@ -76,13 +76,16 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.kv_holding_waiting) == 0
+    assert len(scheduler.async_kv_waiting) == 0
     assert not scheduler.deferred_waiting
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._parked_reservations
     assert not scheduler._kv_fetch_stages
     assert not any(scheduler._kv_fetch_counts.values())
+    assert not scheduler._aborted_kv_loads
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -182,6 +185,26 @@ def create_vllm_config(
         attention_config=attention_config,
         speculative_config=speculative_config,
     )
+
+
+def set_mtp_config(
+    config: VllmConfig,
+    num_lookahead: int = 1,
+    *,
+    disable_lookahead_block_hashes: bool = False,
+) -> None:
+    """Configure test MTP without loading a separate draft model."""
+    assert config.model_config is not None
+    config.model_config.hf_config.n_predict = num_lookahead
+    spec = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=num_lookahead,
+        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
+    )
+    spec.method = "mtp"
+    spec.draft_model_config = config.model_config
+    config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
 
 
 def create_scheduler(
@@ -573,7 +596,14 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
-    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
+    sched.kv_cache_config.hash_block_size = 16
+    sched.vllm_config = SimpleNamespace(
+        num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -640,12 +670,16 @@ def make_nixl_push_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.kv_cache_config.hash_block_size = 16
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
     # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.

@@ -627,6 +627,8 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
 #ifndef USE_ROCM
+    // Pre-SM90 cannot use PDL, but the attribute still adds a programmatic edge to captured CUDA graphs.
+    static const bool use_pdl = get_device_prop()->major >= 9;
     cudaLaunchConfig_t config{};
     config.gridDim = dim3(num_blocks);
     config.blockDim = block_dim;
@@ -635,7 +637,7 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attr.val.programmaticStreamSerializationAllowed = 1;
     config.attrs = &attr;
-    config.numAttrs = 1;
+    config.numAttrs = use_pdl ? 1 : 0;
     auto err = cudaLaunchKernelEx(
         &config,
         topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF>,
