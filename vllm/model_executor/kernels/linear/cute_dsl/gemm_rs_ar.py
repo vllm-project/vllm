@@ -1130,7 +1130,10 @@ def maybe_init_gemm_rs_ar(
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
     parallel_config = vllm_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size
-    if parallel_config.use_ubatching:
+    if vllm_config.model_config.enable_sleep_mode:
+        # Level-2 sleep discards the weights pool, which holds the multicast buffers.
+        reason = "sleep mode is enabled"
+    elif parallel_config.use_ubatching:
         reason = "ubatching is enabled"
     elif vllm_config.model_config.dtype != torch.bfloat16:
         reason = "the model dtype is not BF16"

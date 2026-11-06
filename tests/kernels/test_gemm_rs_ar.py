@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -333,3 +335,16 @@ def test_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
         )
     finally:
         cleanup_dist_env_and_memory()
+
+
+def test_sleep_mode_disables_gemm_rs_ar() -> None:
+    """Level-2 sleep discards the multicast buffers, so they must never be built."""
+    gemm_rs_ar = pytest.importorskip(
+        "vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar"
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_sleep_mode=True),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2, use_ubatching=False),
+    )
+    assert not gemm_rs_ar.maybe_init_gemm_rs_ar(config, N=_N, all_reduce=True)
+    assert gemm_rs_ar._gemm_rs_ar is None
