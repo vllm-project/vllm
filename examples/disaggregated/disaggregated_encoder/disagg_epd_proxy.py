@@ -86,9 +86,13 @@ def get_grpc_backend():
     return grpc_backend
 
 
-async def post_chat(session, url: str, data: dict, headers: dict):
+async def post_chat(
+    session, url: str, data: dict, headers: dict, *, prompt_cache: dict | None = None
+):
     if url.startswith("grpc://"):
-        return await get_grpc_backend().request(url, data, headers)
+        return await get_grpc_backend().request(
+            url, data, headers, prompt_cache=prompt_cache
+        )
     return await session.post(
         f"{url}/v1/chat/completions",
         data=msgspec.json.encode(data),
@@ -870,6 +874,8 @@ async def maybe_prefill(
     p_url: str,
     req_id: str,
     dp_rank: int | None = None,
+    *,
+    prompt_cache: dict | None = None,
 ) -> dict:
     """- Do prefill-only task if p_url exist;
     - Return a new body carrying kv transfer params (for nixl connector)
@@ -881,7 +887,10 @@ async def maybe_prefill(
     if p_url:
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
 
-        prefill_response = await process_prefill_stage(req_data, p_url, req_id, dp_rank)
+        options = {"prompt_cache": prompt_cache} if prompt_cache is not None else {}
+        prefill_response = await process_prefill_stage(
+            req_data, p_url, req_id, dp_rank, **options
+        )
         # for nixl connector to facilitate kv transfer...
         prefill_response_json = msgspec.json.decode(await prefill_response.read())
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
@@ -902,6 +911,8 @@ async def process_prefill_stage(
     p_url: str,
     req_id: str,
     dp_rank: int | None = None,
+    *,
+    prompt_cache: dict | None = None,
 ) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
     logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
@@ -927,7 +938,7 @@ async def process_prefill_stage(
         headers["X-data-parallel-rank"] = str(dp_rank)
     try:
         prefill_response = await post_chat(
-            prefill_session, p_url, prefill_request, headers
+            prefill_session, p_url, prefill_request, headers, prompt_cache=prompt_cache
         )
         prefill_response.raise_for_status()
 
@@ -1055,6 +1066,8 @@ async def prepare_for_decode(
     p_url: str,
     consumer_zmq: str | None,
     prefill_dp_rank: int | None = None,
+    *,
+    prompt_cache: dict | None = None,
 ) -> tuple[dict, float, float]:
     """Encode, rewrite and prefill, returning the body to send to decode.
 
@@ -1075,7 +1088,8 @@ async def prepare_for_decode(
         handles.update(ec_params)
         prepared = {**prepared, "ec_transfer_params": handles}
     _t2 = time.perf_counter()
-    prepared = await maybe_prefill(prepared, p_url, req_id, prefill_dp_rank)
+    options = {"prompt_cache": prompt_cache} if prompt_cache is not None else {}
+    prepared = await maybe_prefill(prepared, p_url, req_id, prefill_dp_rank, **options)
     return prepared, _t1 - _t0, _t2 - _t1
 
 
@@ -1092,8 +1106,19 @@ async def forward_non_stream(
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
+            options = (
+                {"prompt_cache": {}}
+                if p_url and p_url.startswith("grpc://") and d_url.startswith("grpc://")
+                else {}
+            )
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+                req_data,
+                req_id,
+                e_urls,
+                p_url,
+                consumer_zmq,
+                prefill_dp_rank,
+                **options,
             )
             _t2 = time.perf_counter()
 
@@ -1103,7 +1128,7 @@ async def forward_non_stream(
                 headers["X-data-parallel-rank"] = str(dp_rank)
 
             async with await post_chat(
-                decode_session, d_url, prepared, headers
+                decode_session, d_url, prepared, headers, **options
             ) as resp:
                 if resp.status >= 400:
                     detail = await resp.text()
@@ -1239,13 +1264,14 @@ async def grpc_stream_response(
     prefill_dp_rank=None,
 ):
     """Validate/render and finish E/P before committing the SSE response."""
+    options = {"prompt_cache": {}} if p_url and p_url.startswith("grpc://") else {}
     prepared, _, _ = await prepare_for_decode(
-        req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+        req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank, **options
     )
     headers = {"x-request-id": req_id}
     if dp_rank is not None:
         headers["X-data-parallel-rank"] = str(dp_rank)
-    response = await post_chat(decode_session, d_url, prepared, headers)
+    response = await post_chat(decode_session, d_url, prepared, headers, **options)
 
     async def chunks():
         try:

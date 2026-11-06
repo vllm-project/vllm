@@ -147,6 +147,9 @@ gRPC, then preprocesses it and expands its prompt placeholders. After encoding,
 the proxy reuses the existing metadata-only rewrite: P and D receive placeholder
 metadata rather than pixels when available. The proxy prepares these small
 metadata-only features using vLLM's Python renderer; it loads no model weights.
+The adapter loads sampling defaults once per model and reuses identical P/D
+prompt rendering within one request attempt when no request-adjusting parser
+is involved. Sampling limits and transfer handles remain stage-specific.
 EC and KV tensors still move through their configured connectors, not gRPC.
 P's EC handles are not forwarded to D. Cancellation and RPC errors trigger a
 best-effort `Control.Abort` for the affected engine request.

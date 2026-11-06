@@ -38,6 +38,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.renderers import renderer_from_config
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import MsgpackEncoder
 
 
@@ -135,7 +136,7 @@ class GrpcBackend:
 
     async def close(self):
         await asyncio.gather(*(channel.close() for channel in self.channels.values()))
-        for render, _ in self.frontends.values():
+        for render, _, _ in self.frontends.values():
             render.renderer.shutdown()
         self.channels.clear()
         self.frontends.clear()
@@ -196,6 +197,7 @@ class GrpcBackend:
                 **options,
             ),
             OnlineDerenderer(model_config, renderer, **options),
+            model_config.get_diff_sampling_param(),
         )
 
     async def render_prompt(self, render, request):
@@ -278,7 +280,9 @@ class GrpcBackend:
         )
         return prompts[0], media
 
-    async def prepare(self, data: dict, request_id: str):
+    async def prepare(
+        self, data: dict, request_id: str, prompt_cache: dict | None = None
+    ):
         request = ChatCompletionRequest.model_validate(data)
         if (request.n or 1) != 1:
             raise HTTPException(400, "The gRPC EPD proxy currently requires n=1")
@@ -292,10 +296,41 @@ class GrpcBackend:
             raise HTTPException(
                 400, "gRPC does not support prompt logprobs, echo or beams"
             )
-        render, derender = await self.frontend(request.model)
-        engine_input, raw_media = await self.render_prompt(render, request)
+        render, derender, defaults = await self.frontend(request.model)
+        cache_key = None
+        if (
+            prompt_cache is not None
+            and render.parser is None
+            and not render.use_harmony
+            and not is_mistral_tokenizer(render.renderer.tokenizer)
+            and "prompt_token_ids" not in (request.kv_transfer_params or {})
+            and not any(
+                part.get("type")
+                in ("image_url", "audio_url", "video_url", "input_audio")
+                for message in request.messages
+                if isinstance(message.get("content"), list)
+                for part in message["content"]
+            )
+        ):
+            # P and D differ in sampling and transfer handles, not prompt inputs.
+            cache_key = request.model_dump_json(
+                exclude={
+                    "stream",
+                    "stream_options",
+                    "request_id",
+                    "max_tokens",
+                    "max_completion_tokens",
+                    "ec_transfer_params",
+                    "kv_transfer_params",
+                }
+            )
+        if cache_key is not None and cache_key in prompt_cache:
+            engine_input, raw_media = prompt_cache[cache_key]
+        else:
+            engine_input, raw_media = await self.render_prompt(render, request)
+            if cache_key is not None:
+                prompt_cache[cache_key] = engine_input, raw_media
         ids = engine_input["prompt_token_ids"]
-        defaults = render.model_config.get_diff_sampling_param()
         max_tokens = get_max_tokens(
             render.model_config.max_model_len,
             request.max_completion_tokens
@@ -483,11 +518,15 @@ class GrpcBackend:
             logprobs=logprobs,
         )
 
-    async def request(self, url: str, data: dict, headers: dict):
+    async def request(
+        self, url: str, data: dict, headers: dict, *, prompt_cache: dict | None = None
+    ):
         # A retry must not share its engine id with an earlier timed-out attempt.
         request_id = f"{headers.get('x-request-id', 'epd')}-{uuid.uuid4().hex}"
         try:
-            request, proto, derender = await self.prepare(data, request_id)
+            request, proto, derender = await self.prepare(
+                data, request_id, prompt_cache
+            )
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
         response = GrpcResponse(self, url, request, proto, derender, headers)
