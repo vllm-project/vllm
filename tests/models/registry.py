@@ -1091,6 +1091,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Lfm2VlForConditionalGeneration": _HfExamplesInfo(
         "LiquidAI/LFM2-VL-450M",
     ),
+    "Lfm3AudioForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-Audio-2B"),
+    "Lfm3VlForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-VL-2B"),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         max_model_len=10240,

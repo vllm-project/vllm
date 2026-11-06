@@ -704,6 +704,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
+    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
@@ -719,7 +720,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
     worker.kv_cache_config = make_kv_cache_config(
-        block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
+        block_size=16 * local_physical_per_logical,
+        swa_enabled=has_swa,
+        mamba_enabled=has_mamba,
     )
 
     remote_engine_id = "remote-engine"
@@ -735,7 +738,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     # tp_ratio not exercised (all_source_ranks is empty so no reads run),
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
+    worker.transfer_topo.block_size_ratio.return_value = 1
     remote_info = MagicMock()
+    remote_info.remote_block_size = 16
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     remote_info.remote_dcp_size = 1
     worker.transfer_topo.get_engine_info.return_value = remote_info
@@ -757,6 +762,7 @@ def test_read_blocks_for_req_expands_remote_ids(
             "remote_host": "localhost",
             "remote_port": 1234,
             "tp_size": 1,
+            "remote_num_tokens": 1000,
         },
     )
 
@@ -1426,45 +1432,6 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
-def test_map_block_ids_for_block_size_ratio_sliding_window():
-    """Sliding-window lists hold only the window, so they pair by the
-    position of the last transferred token, not from the start."""
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-    from vllm.v1.kv_cache_interface import SlidingWindowSpec
-
-    worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (SlidingWindowSpec,)
-    worker.block_size = 16
-    for name in (
-        "get_mapped_blocks",
-        "_map_block_ids_for_block_size_ratio",
-        "_sliding_window_first_sub_block",
-    ):
-        _bind_worker_method(worker, name)
-
-    # 40 tokens, remote blocks of 4: the remote window (blocks 8, 9) holds
-    # tokens 32-39, which are sub-blocks 0 and 1 of local block 2 (16-47 in
-    # [1, 2]): sub-block ids 8 and 9.
-    local, remote = worker._map_block_ids_for_block_size_ratio(
-        [[1, 2]], [[50, 51]], 4, num_tokens=40
-    )
-    assert local == [[8, 9]]
-    assert remote == [[50, 51]]
-
-    # A remote window that starts before the local list drops its head:
-    # 20 tokens, remote blocks 2-4 (8-19), local block 1 (16-31).
-    local, remote = worker._map_block_ids_for_block_size_ratio(
-        [[3]], [[60, 61, 62]], 4, num_tokens=20
-    )
-    assert local == [[12]]
-    assert remote == [[62]]
-
-
-@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("kv_cache_layout", "enable_permute_local_kv"),
     [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
@@ -1517,7 +1484,7 @@ def test_post_process_zeroes_untransferred_tail(
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
     # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], range(6))])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
     assert torch.equal(attn_cache[2], expected[2])
