@@ -1357,11 +1357,28 @@ endif()
 # _moe_C_stable_libtorch extension
 #
 
+#
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt.cu"
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1404,6 +1421,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+
+  # Rubin LUT-B MoE GEMM; tcgen05 decompress::lut::b needs CUDA 13.4.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+    cuda_archs_loose_intersection(LUT_B_MOE_ARCHS "10.7f" "${CUDA_ARCHS}")
+  endif()
+  if(LUT_B_MOE_ARCHS)
+    set(LUT_B_MOE_SRC "csrc/moe/lut_b_moe_sm107.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LUT_B_MOE_SRC}"
+      CUDA_ARCHS "${LUT_B_MOE_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${LUT_B_MOE_SRC}")
+    message(STATUS "Building LUT-B MoE for archs: ${LUT_B_MOE_ARCHS}")
+  endif()
   # moe marlin arches
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   # moe marlin has limited support for turing
@@ -1516,11 +1546,44 @@ target_compile_definitions(_moe_C_stable_libtorch PRIVATE
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
+  if(LUT_B_MOE_ARCHS)
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      VLLM_ENABLE_LUT_B_MOE=1)
+  endif()
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+
+  # The kernel is specialized on the wavefront size, but ROCm only exposes that
+  # value at runtime, so both arms are instantiated unless the build says which
+  # one the targeted archs can select (gfx9xx is wave64, every other supported
+  # arch is wave32 - that is what Utils::get_warp_size() returns). Keep the
+  # ^gfx9 predicate below in sync with the __GFX9__ branch of
+  # Utils::get_warp_size() in csrc/core/cuda_compat.h.
+  set(TOPK_WAVE_ONLY_DEFINE "")
+  set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
+  set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
+  if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave64 only (gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave32 only (non-gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  else()
+    message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # Set on the whole extension rather than per source: the dispatch unit also
+    # sees the launcher template body, and one definition for the target keeps
+    # every unit consistent (the dispatch does not instantiate it, see the
+    # extern declarations in the header).
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      ${TOPK_WAVE_ONLY_DEFINE})
+  endif()
 endif()
 
 # On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in

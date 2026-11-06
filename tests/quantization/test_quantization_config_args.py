@@ -15,6 +15,7 @@ from vllm.config.quantization import (
     merge_quantization_config,
     resolve_quantization_config,
 )
+from vllm.config.utils import hash_config
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.online.base import (
@@ -31,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -163,6 +165,7 @@ def test_resolve_colliding_shorthand_is_deferred(quantization: str):
     [
         ("int8_per_channel_weight_only", kInt8StaticChannelSym),
         ("nvfp4_per_token", kNvfp4Static),
+        ("lut_b_moe", kLutBStatic),
     ],
 )
 def test_resolve_moe_only_shorthand_leaves_linear_unset(shorthand, weight):
@@ -365,12 +368,12 @@ def test_mxfp8_shorthand_keeps_weight_with_phase():
 
 
 def test_phase_enters_model_config_hash():
-    """ModelConfig.compute_hash keys the compile cache, so it must change with
-    the phase."""
+    """ModelConfig's compile factors key the compile cache, so they must change
+    with the phase."""
 
     def config_hash(linear):
         args = None if linear is None else quant_config_args(linear=linear)
-        return ModelConfig("facebook/opt-125m", quantization_config=args).compute_hash()
+        return hash_config(ModelConfig("facebook/opt-125m", quantization_config=args))
 
     base = config_hash({"phase": _PHASE})
     assert base == config_hash({"phase": dict(_PHASE)})
