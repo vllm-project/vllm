@@ -416,6 +416,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def _configure_v2(vllm_config: "VllmConfig") -> None:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         if not vllm_config.use_v2_model_runner:
@@ -467,14 +468,19 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             if enabled:
                 raise ValueError(f"Unlimited-OCR-2 does not support {feature}")
         vllm_config.cache_config.enable_prefix_caching = False
-        backend = (
-            vllm_config.attention_config.backend or AttentionBackendEnum.FLASH_ATTN
+        backend = vllm_config.attention_config.backend or (
+            AttentionBackendEnum.ROCM_AITER_FA
+            if current_platform.is_rocm()
+            else AttentionBackendEnum.FLASH_ATTN
         )
         if backend not in (
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.ROCM_AITER_FA,
         ):
-            raise ValueError("Unlimited-OCR-2 supports FLASH_ATTN or FLASHINFER")
+            raise ValueError(
+                "Unlimited-OCR-2 supports FLASH_ATTN, FLASHINFER or ROCM_AITER_FA"
+            )
         text_config = vllm_config.model_config.hf_config.text_config
         text_config.unlimited_ocr2_attention_backend = backend.name
         if backend == AttentionBackendEnum.FLASHINFER:
@@ -482,9 +488,16 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 1, compilation.cudagraph_num_of_warmups
             )
         # DASH owns sparse selection and compute. Reuse Triton's paged-cache
-        # metadata, including R-SWA reclamation, for both compute backends.
+        # metadata, including R-SWA reclamation, for all compute backends.
         vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         logger.info("Unlimited-OCR-2 DASH compute backend: %s", backend.name)
+        mm_config = vllm_config.model_config.multimodal_config
+        if (
+            current_platform.is_rocm()
+            and mm_config is not None
+            and mm_config.mm_encoder_attn_backend is None
+        ):
+            mm_config.mm_encoder_attn_backend = AttentionBackendEnum.ROCM_AITER_FA
         UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
         logger.info(
             "Unlimited-OCR-2: output KV window=%s; input KV is retained for DASH.",

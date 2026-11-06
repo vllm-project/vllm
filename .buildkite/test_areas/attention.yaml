@@ -29,6 +29,7 @@ steps:
       source_file_dependencies:
       - vllm/config/attention.py
       - vllm/model_executor/layers/attention
+      - vllm/model_executor/layers/dash_attention.py
       - vllm/v1/attention
       - tests/v1/attention
       - vllm/_aiter_ops.py
@@ -41,6 +42,9 @@ steps:
         v1/attention
         --ignore=v1/attention/test_sparse_mla_backends.py
         --ignore=v1/attention/test_unlimited_ocr2.py
+      - >-
+        pytest -v -s v1/attention/test_unlimited_ocr2.py
+        -k 'rocm_aiter_ck or decode_rope'
       - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (B200) V1 Attention"
@@ -69,6 +73,7 @@ steps:
       source_file_dependencies:
       - vllm/config/attention.py
       - vllm/model_executor/layers/attention
+      - vllm/model_executor/layers/dash_attention.py
       - vllm/v1/attention
       - tests/v1/attention
       - vllm/_aiter_ops.py
@@ -82,6 +87,9 @@ steps:
         --ignore=v1/attention/test_mla_backends.py
         --ignore=v1/attention/test_sparse_mla_backends.py
         --ignore=v1/attention/test_unlimited_ocr2.py
+      - >-
+        pytest -v -s v1/attention/test_unlimited_ocr2.py
+        -k 'rocm_aiter_ck or decode_rope'
       - >-
         VLLM_ROCM_USE_AITER=1 pytest -v -s
         v1/attention/test_mla_backends.py
