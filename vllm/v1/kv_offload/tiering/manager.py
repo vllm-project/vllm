@@ -950,12 +950,30 @@ class TieringOffloadingManager(OffloadingManager):
         # Cascading of these newly-stored chunks to ALL secondary tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
+        if hasattr(self, "_put_max_inflight"):
+            keys = list(dict.fromkeys(keys))
+            budget = self.get_put_admission_budget()
+            state = self._req_state[req_context.req_id]
+            # Existing keys also need credits if request-level cascades will
+            # newly pin them. Already charged keys consume no extra credit.
+            needed = sum(
+                key not in self._put_staging_keys
+                and (
+                    self.primary_tier._policy.get(key) is None
+                    or bool(state.request_level_tiers)
+                )
+                for key in keys
+            )
+            if needed > budget:
+                return None
         primary_result = self.primary_tier.prepare_store(keys, req_context)
 
         if primary_result is None:
             return None
 
         if primary_result.keys_to_store:
+            if hasattr(self, "_put_max_inflight"):
+                self._put_staging_keys.update(primary_result.keys_to_store)
             state = self._req_state[req_context.req_id]
             state.pending_primary_stores += 1
 
@@ -967,6 +985,8 @@ class TieringOffloadingManager(OffloadingManager):
                 k for k in keys if k not in keys_to_store_set
             )
             if keys_already_in_primary:
+                if hasattr(self, "_put_max_inflight"):
+                    self._put_staging_keys.update(keys_already_in_primary)
                 self._cascade_existing_chunks_to_request_level_tiers(
                     keys_already_in_primary, req_context, request_level_tiers
                 )
@@ -1094,6 +1114,8 @@ class TieringOffloadingManager(OffloadingManager):
         reporting completion via get_finished_jobs().
         """
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
+        if hasattr(self, "_put_max_inflight"):
+            self._put_staging_keys.update(keys)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
         job_metadata = TransferJob(
@@ -1296,6 +1318,8 @@ class TieringOffloadingManager(OffloadingManager):
             finished_req_ids.append(req_id)
 
         self.primary_tier.reset_cache()
+        if hasattr(self, "_put_max_inflight"):
+            self._put_staging_keys.clear()
 
         for req_id in finished_req_ids:
             del self._req_state[req_id]
@@ -1412,3 +1436,62 @@ class TieringOffloadingManager(OffloadingManager):
             raise shutdown_error
 
         self.primary_tier.shutdown()
+
+    def configure_put_batching(
+        self, batch_chunks: int, max_inflight_chunks: int, get_reserve_chunks: int
+    ) -> None:
+        """Enable scheduler-owned PUT admission on the existing primary pool."""
+        if (
+            type(batch_chunks) is not int
+            or batch_chunks <= 0
+            or type(max_inflight_chunks) is not int
+            or max_inflight_chunks < batch_chunks
+            or type(get_reserve_chunks) is not int
+            or get_reserve_chunks < 0
+        ):
+            raise ValueError("Invalid PUT batching limits")
+        self._put_max_inflight = max_inflight_chunks
+        self._put_get_reserve = get_reserve_chunks
+        self._put_staging_keys: set[OffloadKey] = set()
+
+    def get_put_admission_budget(self) -> int:
+        """Conservative credit bound; the atomic allocator remains authoritative.
+
+        A D2H write has ref_cnt=-1. Cascade and load readers have ref_cnt>0.
+        Keep its credit until ALL such references are gone, including after
+        request finalization. Never return it at GPU->primary completion alone.
+        """
+        self._maybe_process_finished_jobs()
+        primary = self.primary_tier
+        parked_keys = {
+            key
+            for state in self._req_state.values()
+            for key in state.pending_cascade_keys
+        }
+        self._put_staging_keys = {
+            key
+            for key in self._put_staging_keys
+            if (chunk := primary._policy.get(key)) is not None
+            and (chunk.ref_cnt != 0 or key in parked_keys)
+        }
+        admissible = (
+            primary._get_num_free_chunks() + primary._num_evictable_cache_chunks
+        )
+        return max(
+            0,
+            min(
+                self._put_max_inflight - len(self._put_staging_keys),
+                admissible - self._put_get_reserve,
+            ),
+        )
+
+    def get_put_admission_state(self) -> tuple[int, ...]:
+        """Cheap capacity/completion signature for scheduler retry gating."""
+        primary = self.primary_tier
+        return (
+            self.get_put_admission_budget(),
+            primary._num_write_pending_chunks,
+            primary._num_evictable_cache_chunks,
+            self._job_id_counter,
+            len(self._jobs),
+        )

@@ -1991,3 +1991,93 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_put_credits_cover_d2h_cascades_and_load_readers(success):
+    primary = CPUPrimaryTierOffloadingManager(8, _mock_mmap_region(8))
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="test",
+    )
+    manager = TieringOffloadingManager(primary, [tier])
+    manager.configure_put_batching(2, 4, 2)
+    manager.on_new_request(_CTX)
+    keys = to_keys(range(4))
+    assert manager.get_put_admission_budget() == 4
+    assert manager.prepare_store(keys, _CTX) is not None
+    assert manager.get_put_admission_budget() == 0
+    assert manager.prepare_store(to_keys([10]), _CTX) is None
+    manager.complete_store(keys, _CTX, success=success)
+    if success:
+        manager.prepare_load(keys, _CTX)
+        manager.on_request_finished(_CTX)
+        assert manager.get_put_admission_budget() == 0
+        tier.finished_jobs = [
+            JobResult(job.job_id, success=True) for job in tier.submitted_stores
+        ]
+        manager.on_schedule_end(ScheduleEndContext([], ()))
+        assert manager.get_put_admission_budget() == 0
+        manager.complete_load(keys, _CTX)
+    assert manager.get_put_admission_budget() == 4
+    # Independent GET readers reduce real allocator capacity below the cap.
+    if success:
+        manager.prepare_load(keys[:3], _CTX)
+        assert manager.get_put_admission_budget() == 3
+        manager.complete_load(keys[:3], _CTX)
+
+
+def test_put_credits_cover_parked_request_cascades():
+    primary = CPUPrimaryTierOffloadingManager(8, _mock_mmap_region(8))
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="test",
+    )
+    tier.on_new_request = lambda ctx: RequestOffloadingContext(
+        policy=OffloadPolicy.REQUEST_LEVEL
+    )
+    manager = TieringOffloadingManager(primary, [tier])
+    manager.configure_put_batching(2, 4, 2)
+    other = ReqContext("other")
+    manager.on_new_request(_CTX)
+    manager.on_new_request(other)
+    keys = to_keys(range(4))
+    assert manager.prepare_store(keys, _CTX) is not None
+    assert manager.prepare_store(keys, other) is not None
+    manager.complete_store(keys, _CTX)
+    tier.finished_jobs = [
+        JobResult(job.job_id, success=True) for job in tier.submitted_stores
+    ]
+    # Even after the first cascade, parked work still owns these credits.
+    assert manager.get_put_admission_budget() == 0
+    manager.on_schedule_end(ScheduleEndContext([], ()))
+    assert manager.get_put_admission_budget() == 0
+    tier.finished_jobs = [JobResult(tier.submitted_stores[-1].job_id, success=True)]
+    manager.on_schedule_end(ScheduleEndContext([], ()))
+    assert manager.get_put_admission_budget() == 4
+
+
+def test_put_advisory_budget_reuses_step_poll_before_authoritative_store():
+    class CountingTier(MetricsSecondaryTierManager):
+        polls = 0
+
+        def get_finished_jobs(self):
+            self.polls += 1
+            return super().get_finished_jobs()
+
+    primary = CPUPrimaryTierOffloadingManager(8, _mock_mmap_region(8))
+    tier = CountingTier(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="test",
+    )
+    manager = TieringOffloadingManager(primary, [tier])
+    manager.configure_put_batching(2, 4, 2)
+    manager.on_new_request(_CTX)
+    assert manager.get_put_admission_budget() == 4
+    assert manager.get_put_admission_budget() == 4
+    assert tier.polls == 1
+    assert manager.prepare_store(to_keys([1, 2]), _CTX) is not None
+    assert tier.polls == 2
