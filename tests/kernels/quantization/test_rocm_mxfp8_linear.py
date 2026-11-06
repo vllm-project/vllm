@@ -195,6 +195,7 @@ V41_BLOCK32_SHAPES = [
     ("shared_gate_up_tp2", 2 * 2304 // 2, 5120),
     ("shared_down_tp2", 5120, 2304 // 2),
     ("shared_down_tp4", 5120, 2304 // 4),
+    ("dspark_main_proj", 5120, 3 * 5120),
 ]
 
 
