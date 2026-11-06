@@ -98,6 +98,13 @@ FlashInfer 0.7.3. The STP API is not included in either release, so BF16 standar
 decoding requires a compatible provider build. This integration does not install
 missing kernels or change FlashInfer.
 
+FlashInfer 0.7.3 specializes the BF16 speculative decoder for batch and pool sizes.
+Avoiding those recompilations requires a patched provider that declares
+`SUPPORTS_DYNAMIC_STRIDED_SHAPES = True`. With that provider, startup also warms the
+reachable input layouts and launch tactics. The extra warmup stays disabled for
+providers without this capability. The prefix materializer has separate
+pool-size specialization, which this decoder fix does not remove.
+
 Set `SGLANG_GDN_WY_STRIDED_QKV=1` before process startup. FlashInfer reads this
 setting when its kernel module is imported; setting it later is insufficient.
 

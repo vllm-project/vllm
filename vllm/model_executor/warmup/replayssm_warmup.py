@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -298,8 +299,96 @@ def _warm_gdn_replayssm_materializer(
         )
 
 
+def _warm_gdn_replayssm_mixed_decode(
+    runner: "GPUModelRunner", executed_query_width: int
+) -> None:
+    """Warm BF16 MTP layouts and launch tactics reachable outside full graphs."""
+    if executed_query_width == 1:
+        return
+    from flashinfer.gdn_kernels.device_target import gdn_device_target
+
+    from vllm.model_executor.layers.mamba.gdn.replayssm import run_gdn_replayssm
+
+    max_num_reqs = min(runner.scheduler_config.max_num_seqs, runner.max_num_tokens)
+    warmed: set[tuple[Any, ...]] = set()
+    for module in runner.get_model().modules():
+        if (
+            not getattr(module, "use_flashinfer_replayssm", False)
+            or getattr(module, "replayssm_executed_query_width", None)
+            != executed_query_width
+        ):
+            continue
+        state, u_cache, k_cache, g_cache = module.kv_cache[1:5]
+        if state.dtype != torch.bfloat16:
+            continue
+        from flashinfer.gdn_kernels import gdn_decode_bf16_wy_ucache_flush as provider
+
+        if not getattr(provider, "SUPPORTS_DYNAMIC_STRIDED_SHAPES", False):
+            return
+        signature = tuple(
+            (t.device, t.dtype, t.shape[1:], t.stride())
+            for t in (state, u_cache, k_cache, g_cache)
+        )
+        if signature in warmed:
+            continue
+        warmed.add(signature)
+        _, num_v_heads, head_v_dim, head_k_dim = state.shape
+        num_k_heads = k_cache.shape[1]
+        qkv_width = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
+        strides = [qkv_width]  # Mixed requests and ragged rows produce compact QKV.
+        if runner.vllm_config.num_speculative_tokens + 1 == executed_query_width:
+            strides.append(qkv_width + num_v_heads * head_v_dim)  # QKVZ view.
+        batches = {1}
+        if int(os.environ.get("GDN_WY_MBP") or 0) <= 0:
+            # FlashInfer 0.7.3 HMMA policy: min(ceil(HV * B / SM) + 1, 7).
+            # No provider selector exposes it. Warm one batch per reachable tactic.
+            num_sms = gdn_device_target(state.device).num_sms
+            batches.update(i * num_sms // num_v_heads + 1 for i in range(1, 6))
+        for num_reqs in sorted(b for b in batches if b <= max_num_reqs):
+            num_tokens = num_reqs * executed_query_width
+            inactive = torch.zeros(num_reqs, dtype=torch.int32, device=state.device)
+            query_start = torch.arange(
+                0,
+                num_tokens + 1,
+                executed_query_width,
+                dtype=torch.int32,
+                device=state.device,
+            )
+            gates = torch.zeros(
+                num_tokens, num_v_heads, dtype=torch.bfloat16, device=state.device
+            )
+            for stride in strides:
+                qkv = torch.zeros(
+                    num_tokens, stride, dtype=torch.bfloat16, device=state.device
+                )[:, :qkv_width]
+                # Null slots become -1 in the adapter. The provider exits before
+                # reading or writing state, including uncommitted cache pages.
+                run_gdn_replayssm(
+                    mixed_qkv=qkv,
+                    a=gates,
+                    b=gates,
+                    A_log=module.A_log,
+                    dt_bias=module.dt_bias,
+                    checkpoint_state=state,
+                    replayssm_cache=(u_cache, k_cache, g_cache),
+                    ring_start=module._replayssm_ring_start,
+                    num_committed=module._replayssm_prev_num_accepted,
+                    query_start_loc=query_start,
+                    state_indices=inactive,
+                    output_indices=torch.empty(
+                        0, dtype=torch.long, device=state.device
+                    ),
+                    executed_query_width=executed_query_width,
+                    num_k_heads=num_k_heads,
+                    num_v_heads=num_v_heads,
+                    head_k_dim=head_k_dim,
+                    head_v_dim=head_v_dim,
+                    uniform_query_length=executed_query_width,
+                )
+
+
 def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
-    """Compile GDN replay for every intended uniform-decode graph bucket."""
+    """Compile GDN replay graph buckets and eager layout/tactic combinations."""
     config = runner.vllm_config
     if not config.is_gdn_replayssm_enabled():
         return
@@ -358,4 +447,5 @@ def gdn_replayssm_warmup(runner: "GPUModelRunner") -> None:
     with _temporary_replayssm_autotune_state(runner, max_num_reqs):
         for num_reqs in sorted(capture_reqs):
             runner._dummy_run(num_tokens=num_reqs * query_len, **decode_kwargs)
+        _warm_gdn_replayssm_mixed_decode(runner, executed_query_width)
         _warm_gdn_replayssm_materializer(runner, max_num_reqs)
