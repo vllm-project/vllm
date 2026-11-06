@@ -24,6 +24,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata, max_decode_query_len
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.shardq import (
     ShardQMetadata,
     ShardQSplit,
@@ -76,18 +77,31 @@ class DSV41ShardQ:
         return replay_start.index_select(0, self.run_req)
 
 
-def _replay_batch_guard(
-    cm: CommonAttentionMetadata, vllm_config: "VllmConfig"  # noqa: F821
+def dsv41_shardq_eligible(
+    cm: CommonAttentionMetadata,
+    vllm_config: "VllmConfig",  # noqa: F821
+    split: ShardQSplit,
 ) -> bool:
-    # The SWA bounded-replay batch holds at most ``sliding_window`` rows per
-    # request, so its longest query is no longer than the window.  Its
-    # candidate-source/consumer indexers must keep batch-order rows (the
-    # candidate buffer is row-addressable and ShardQ compacts rows), so the
-    # replay batch never takes the sharded path.
-    window = vllm_config.model_config.hf_config.sliding_window
-    if window is None or window <= 0:
-        return False
-    return cm.max_query_len <= window
+    """Whether every TP rank's V4.1 runs stay prefill requests.
+
+    A run is one zigzag chunk of one request, so its width is that request's
+    chunk width, floor(query_len / (2 * tp)).  The metadata builders read a
+    run no wider than ``max_decode_query_len`` as a decode.  Both inputs are
+    the step's shared query lengths, so every TP rank reaches the same
+    decision and no rank can stay behind while its peers exchange.
+    """
+    max_decode = max_decode_query_len(vllm_config)
+    num_chunks = 2 * int(split.num_tokens_per_rank.size)
+    spec_config = vllm_config.speculative_config
+    num_spec = spec_config.num_speculative_tokens if spec_config else 0
+    num_decodes, _, _, _ = split_decodes_and_prefills(
+        cm, decode_threshold=1 + num_spec
+    )
+    prefill_lens = cm.query_start_loc_cpu.diff().numpy()[num_decodes:]
+    return (
+        prefill_lens.size > 0
+        and int(prefill_lens.min()) >= (max_decode + 1) * num_chunks
+    )
 
 
 def build_dsv41_shardq(
@@ -114,12 +128,12 @@ def _build_dsv41_shardq(
     vllm_config: "VllmConfig",  # noqa: F821
     device: torch.device,
 ) -> DSV41ShardQ | None:
-    split = build_shardq_split(cm, vllm_config)
+    split = build_shardq_split(cm, vllm_config, eligibility=dsv41_shardq_eligible)
     if split is None:
         return None
     num_decode_tokens = split.num_decode_tokens
     local = split.local_token_ids + num_decode_tokens
-    if local.size == 0 or _replay_batch_guard(cm, vllm_config):
+    if local.size == 0:
         return None
 
     qsl_cpu = cm.query_start_loc_cpu.numpy()
@@ -141,16 +155,9 @@ def _build_dsv41_shardq(
     run_req = req[starts]
     run_last = local[ends - 1]
 
-    # A run is a prefill chunk ending at its last token.  ``seq_lens`` is the
-    # uncompressed context length there, which the builders compress
-    # themselves.  The builders reclassify a request of at most
-    # ``max_decode_query_len`` tokens as a decode, while every run of this
-    # batch is a prefill, so such a split stays head-sharded.
-    if int(run_qlen.min()) <= max_decode_query_len(vllm_config):
-        return None
+    # ``seq_lens`` is the uncompressed context length at each run's last token,
+    # which the builders compress themselves.
     run_seq = (seq_cpu[run_req] - qsl_cpu[run_req + 1] + run_last + 1).astype(np.int32)
-    if int(run_seq.max()) <= 0:
-        return None
 
     run_qsl_cpu = np.zeros(starts.size + 1, dtype=np.int32)
     np.cumsum(run_qlen, out=run_qsl_cpu[1:])

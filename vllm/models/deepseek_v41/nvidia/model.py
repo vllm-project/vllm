@@ -280,6 +280,27 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _finalize_shardq(layers: Iterable[nn.Module], enabled: bool) -> None:
+    """Apply the model-level ShardQ decision and allocate one workspace.
+
+    Each layer keeps its static ``shardq_capable`` (which also excludes the
+    candidate source/consumers); this applies the bounded-replay decision on
+    top.  Allocating here, after that decision, keeps a disabled model from
+    reserving the exchange buffers.
+    """
+    workspace_allocator: Callable[[], None] | None = None
+    for layer in layers:
+        attn = getattr(layer, "attn", None)
+        set_enabled = getattr(attn, "set_shardq_enabled", None)
+        if set_enabled is None:
+            continue
+        set_enabled(enabled)
+        if getattr(attn, "use_shardq", False) and workspace_allocator is None:
+            workspace_allocator = attn.allocate_shardq_workspace
+    if workspace_allocator is not None:
+        workspace_allocator()
+
+
 def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
     """Whether large batches shard fused_wqa_wkv by token and all-gather the output."""
     ca_comm = getattr(get_tp_group().device_communicator, "ca_comm", None)
@@ -915,13 +936,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.end_layer - 1,
                 config.sliding_window,
             )
-        elif vllm_config.attention_config.sparse_mla_shard_q:
+        shardq_requested = vllm_config.attention_config.sparse_mla_shard_q
+        shardq_enabled = shardq_requested and self.decoder_replay_layers is not None
+        _finalize_shardq(self.layers, shardq_enabled)
+        if shardq_requested and not shardq_enabled:
             # ShardQ's token-sharded prefill is validated on the replay split
             # only; without bounded replay, fall back to the head-sharded path.
-            for layer in self.layers:
-                attn = getattr(layer, "attn", None)
-                if attn is not None and hasattr(attn, "set_shardq_enabled"):
-                    attn.set_shardq_enabled(False)
             logger.info_once(
                 "ShardQ disabled for DeepSeek-V4.1: SWA bounded replay is off."
             )

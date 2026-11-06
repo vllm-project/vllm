@@ -84,6 +84,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         register_dsv41_o_proj_warmup(self)
         self._prefill_num_heads = self._get_prefill_num_heads()
+        self._shardq_workspace_allocated = False
         self._init_shardq()
 
     def _get_prefill_num_heads(self) -> int:
@@ -123,10 +124,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         replay_cut = (
             max(kv_source_layers) if kv_source_layers else config.num_hidden_layers
         )
-        self.use_shardq = (
-            current_platform.is_cuda()
+        self.shardq_capable = (
+            # Only SM90 is validated; SM100 either takes mega attention (which
+            # is excluded below) or an untested fallback.
+            current_platform.is_device_capability_family(90)
             and attention_config.sparse_mla_shard_q
             and attention_config.hisparse_config is None
+            # The planner's decode split leans on the MRV2 reorder threshold.
+            and vllm_config.use_v2_model_runner
             and parallel_config.tensor_parallel_size > 1
             and parallel_config.decode_context_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
@@ -138,16 +143,27 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and not self.accepts_unnormed_unroped_query
             and is_quantized_kv_cache(self.kv_cache_dtype)
         )
-        if self.use_shardq:
-            allocate_shardq_buffers(
-                vllm_config,
-                self.n_local_heads,
-                self.head_dim,
-                self.head_dim,
-                vllm_config.model_config.dtype,
-                vllm_config.model_config.dtype,
-            )
-        self.set_shardq_enabled(self.use_shardq)
+        # The model finalizes the runtime decision once every layer exists.
+        self.use_shardq = False
+
+    def allocate_shardq_workspace(self) -> None:
+        """Allocate this model's shared ShardQ workspace at most once.
+
+        The model calls this after its bounded-replay decision, so a layer
+        that turns out to be disabled never reserves the buffers.
+        """
+        if not self.use_shardq or self._shardq_workspace_allocated:
+            return
+        vllm_config = self.vllm_config
+        allocate_shardq_buffers(
+            vllm_config,
+            self.n_local_heads,
+            self.head_dim,
+            self.head_dim,
+            vllm_config.model_config.dtype,
+            vllm_config.model_config.dtype,
+        )
+        self._shardq_workspace_allocated = True
 
     def set_shardq_enabled(self, enabled: bool) -> None:
         """Enable/disable the token-sharded prefill path for this layer.
@@ -158,6 +174,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         The model hands every layer the shared candidate buffer, so the layer
         id, not the buffer, decides the role.
         """
+        enabled = bool(enabled and self.shardq_capable)
         if (
             self.candidate_source_layer >= 0
             and self.layer_id >= self.candidate_source_layer
