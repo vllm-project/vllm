@@ -332,6 +332,12 @@ Supported models:
 
     Recommended flags: `--tool-call-parser granite4`
 
+* `ibm-granite/granite-4.2-8b` and other Granite 4.2 models
+
+    Recommended flags: `--tool-call-parser granite_toolcall_parser`
+
+    Granite 4.2 emits tool calls in an XML format (`<tool_call><function=...><parameter=...>`). The chat template from Hugging Face can be used directly. Parallel function calls are supported.
+
 * `ibm-granite/granite-3.0-8b-instruct`
 
     Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
@@ -435,6 +441,18 @@ Supported models:
 * `moonshotai/Kimi-K2-Instruct`
 
 Flags: `--tool-call-parser kimi_k2`
+
+### Kolibri 1 Models (`hf`)
+
+Supported models:
+
+* `Aleph-Alpha/Kolibri-1`
+* `Aleph-Alpha/Kolibri-1-BF16`
+
+Flags: `--tool-call-parser hf --reasoning-parser hf --enable-auto-tool-choice`
+
+The `hf` parsers read Kolibri 1's output format from the [checkpoint response template](#checkpoint-response-templates-hf), so the limits of the `hf` parser apply.
+Kolibri 1 emits Hermes-style tool calls, so `--tool-call-parser hermes --reasoning-parser qwen3` also works, for example for tool choices the `hf` parser rejects.
 
 ### Hunyuan Models (`hunyuan_a13b`)
 
@@ -595,6 +613,33 @@ The Rust frontend also provides a Muse unified parser under `muse` and
 Existing automatic parser selection for Muse Glimmer is unchanged.
 
 Parser availability alone does not enable Muse Spark model execution.
+
+### ZAYA1 Models (`zaya`)
+
+Supported models:
+
+* `Zyphra/ZAYA1-8B`
+* `Zyphra/ZAYA1-74B-preview`
+
+ZAYA1 uses the Qwen3-Coder XML format inside `<zyphra_tool_call>` tags. Pair it
+with `--reasoning-parser zaya`, which also treats a tool call as the end of
+reasoning.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser zaya --reasoning-parser zaya`
+
+`zaya_xml` is an alias of `zaya`.
+
+### Ripple Models (`ripple`)
+
+Supported models:
+
+* `ricursiveAI/Ripple-65B-Preview`
+* `ricursiveAI/Ripple-65B-Preview-NVFP4`
+
+Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
+optional `<think>` block. Pair it with `--reasoning-parser ripple`.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

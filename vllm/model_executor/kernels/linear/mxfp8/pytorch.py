@@ -3,11 +3,19 @@
 
 import torch
 
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
     swizzle_mxfp8_scale,
     xpu_mxfp8_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -37,6 +45,10 @@ class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        # CUDA activations use FlashInfer's F8_128x4 swizzled scale layout.
+        return kMxfp8Dynamic if current_platform.is_cuda() else None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # weight: [N, K] fp8_e4m3; weight_scale: [N, K//32] (E8M0-as-uint8).
         weight = layer.weight.data  # [N, K]
@@ -60,15 +72,20 @@ class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        out_dtype = x.dtype
         weight = layer.weight
         weight_scale = layer.weight_scale
-        input_shape = x.shape
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
+        else:
+            assert isinstance(x, torch.Tensor)
+            out_dtype, input_shape = layer.params_dtype, x.shape
 
         if current_platform.is_xpu():
+            assert isinstance(x, torch.Tensor)
             # weight stored column-major [K, N].
             K, N = weight.shape
             mat_b = weight
@@ -79,8 +96,14 @@ class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
             # weight stored [N, K]; transpose to column-major for _scaled_mm.
             N, K = weight.shape
             mat_b = weight.t()
-            input_2d = x.reshape(-1, K)
-            x_fp8, x_scale = mxfp8_e4m3_quantize(input_2d, is_sf_swizzled_layout=True)
+            if qa is not None:
+                x_fp8, x_scale = qa.data, qa.scale
+            else:
+                assert isinstance(x, torch.Tensor)
+                input_2d = x.reshape(-1, K)
+                x_fp8, x_scale = mxfp8_e4m3_quantize(
+                    input_2d, is_sf_swizzled_layout=True
+                )
             x_scale = x_scale.view(_E8M0)
 
         out = torch._scaled_mm(
