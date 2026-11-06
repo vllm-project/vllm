@@ -175,12 +175,16 @@ class DisabledThinkingEffortResolver:
     async def resolve_for(
         self, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
     ) -> AnthropicDisabledThinkingEffort:
-        if request.thinking is None or request.thinking.type != "disabled":
+        if request.thinking is None or request.thinking.type not in (
+            "disabled",
+            "between_tools",
+        ):
             return "none"
         if self._effort is None:
             self._effort = await self._probe()
             logger.info(
-                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                "Anthropic thinking.type=disabled/between_tools maps to "
+                "reasoning_effort=%r",
                 self._effort,
             )
         return self._effort
@@ -706,6 +710,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            min_tokens=anthropic_request.min_tokens,
             watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
@@ -730,7 +735,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         if thinking is None:
             return
 
-        if thinking.type == "disabled":
+        if thinking.type in ("disabled", "between_tools"):
             # "none" clears enable_thinking for templates that honor it; models
             # that cannot disable thinking are configured with a low effort.
             req.reasoning_effort = disabled_thinking_effort
