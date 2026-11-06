@@ -1643,6 +1643,172 @@ async fn streaming_generate_yields_incremental_responses() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn streaming_generate_parallel_choices_finish_independently() {
+    let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-parallel-choices".to_vec(),
+            default_ready_response(),
+            Arc::new(FakeTextBackend::default()),
+            None,
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    let first = decode_add_request(&recv_engine_message(dealer).await);
+                    let second = decode_add_request(&recv_engine_message(dealer).await);
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &second.request_id,
+                            vec![(vec![b'b' as u32], Some(EngineCoreFinishReason::Length))],
+                        ),
+                    )
+                    .await;
+                    // Choice 1 must be delivered while choice 0 has no engine output.
+                    continue_rx.await.expect("client received choice 1");
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &first.request_id,
+                            vec![(vec![b'a' as u32], Some(EngineCoreFinishReason::Stop))],
+                        ),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    let mut stream = client
+        .generate_stream(pb::GenerateRequest {
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            temperature: Some(1.0),
+            sampling: Some(pb::RandomSampling {
+                num_sequences: 2,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_token_ids: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("start parallel generation")
+        .into_inner();
+    let first = stream.message().await.expect("prompt response").expect("prompt info");
+    let second = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .expect("choice 1 must not wait for choice 0")
+        .expect("choice response")
+        .expect("choice 1 output");
+    assert_eq!(second.outputs.as_ref().expect("output").index, 1);
+    continue_tx.send(()).expect("release choice 0");
+    assert_eq!(first.prompt_info.expect("prompt info").num_prompt_tokens, 5);
+    assert!(first.outputs.is_none());
+    let mut responses = vec![second];
+    while let Some(response) = stream.message().await.expect("stream item") {
+        responses.push(response);
+    }
+    let outputs: Vec<_> = responses
+        .into_iter()
+        .map(|response| {
+            assert!(
+                response.prompt_info.is_none(),
+                "prompt info must be sent once"
+            );
+            let output = response.outputs.expect("choice output");
+            let finish = output.finish_info.expect("choice finished");
+            (
+                output.index,
+                output.text,
+                output.token_ids,
+                finish.num_output_tokens,
+                finish.finish_reason(),
+            )
+        })
+        .collect();
+    expect_test::expect![[r#"
+        [
+            (
+                1,
+                "b",
+                [
+                    98,
+                ],
+                1,
+                Length,
+            ),
+            (
+                0,
+                "",
+                [
+                    97,
+                ],
+                1,
+                Stop,
+            ),
+        ]
+    "#]]
+    .assert_debug_eq(&outputs);
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_unsupported_parallel_sampling() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-parallel-validation",
+        default_stream_output_specs(),
+    )
+    .await;
+    let request = pb::GenerateRequest {
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        temperature: Some(1.0),
+        sampling: Some(pb::RandomSampling {
+            num_sequences: 2,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let status = client.generate(request.clone()).await.expect_err("unary cannot return choices");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("num_sequences"));
+
+    for (n, temperature, expected) in [
+        (2, None, "greedy"),
+        (2, Some(0.0), "greedy"),
+        (16_385, Some(1.0), "16384"),
+    ] {
+        let status = client
+            .generate_stream(pb::GenerateRequest {
+                temperature,
+                sampling: Some(pb::RandomSampling {
+                    num_sequences: n,
+                    ..Default::default()
+                }),
+                ..request.clone()
+            })
+            .await
+            .expect_err("reject unsupported parallel sampling");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains(expected), "{status}");
+    }
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn streaming_generate_missing_prompt_returns_invalid_argument() {
     let (mut client, server_task, _engine_task) = grpc_test_server(
         b"engine-grpc-stream-no-prompt",
@@ -2017,65 +2183,129 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn dropping_generate_stream_aborts_before_engine_output() {
-    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
-    let (inference_service, control_service, engine_health, engine_task) =
-        setup_grpc_service_with_engine_script(
-            b"engine-grpc-cancel-pending-output".to_vec(),
-            default_ready_response(),
-            Arc::new(FakeTextBackend::default()),
-            None,
-            move |dealer, _push| {
-                boxed_test_future(async move {
-                    let add = recv_engine_message(dealer).await;
-                    assert_eq!(add[0].as_ref(), &[0x00]);
-                    let request = decode_add_request(&add);
-                    submitted_tx.send(()).expect("signal submitted request");
+async fn generate_stream_cancels_pending_choices_on_disconnect_or_error() {
+    for (n, finish_reason) in [
+        (0, None),
+        (1, None),
+        (2, None),
+        (2, Some(EngineCoreFinishReason::Length)),
+        (2, Some(EngineCoreFinishReason::Error)),
+    ] {
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_engine_script(
+                b"engine-grpc-cancel-pending-output".to_vec(),
+                default_ready_response(),
+                Arc::new(FakeTextBackend::default()),
+                None,
+                move |dealer, push| {
+                    boxed_test_future(async move {
+                        let mut pending = Vec::new();
+                        for _ in 0..n.max(1) {
+                            let add = recv_engine_message(dealer).await;
+                            assert_eq!(add[0].as_ref(), &[0x00]);
+                            pending.push(decode_add_request(&add).request_id);
+                        }
+                        if let Some(reason) = finish_reason {
+                            let finished_id = pending.remove(0);
+                            send_outputs(
+                                push,
+                                engine_outputs_for_request(
+                                    &finished_id,
+                                    vec![(vec![b'a' as u32], Some(reason))],
+                                ),
+                            )
+                            .await;
+                        }
+                        submitted_tx.send(()).expect("signal submitted requests");
 
-                    // A queued request produces no output before cancellation.
-                    let abort = recv_engine_message(dealer).await;
-                    assert_eq!(abort[0].as_ref(), &[0x01]);
-                    let request_ids: Vec<String> =
-                        rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
-                    assert_eq!(request_ids, vec![request.request_id]);
-                })
-            },
+                        // Pending choices produce no output before cancellation.
+                        while !pending.is_empty() {
+                            let abort = recv_engine_message(dealer).await;
+                            assert_eq!(abort[0].as_ref(), &[0x01]);
+                            let request_ids: Vec<String> =
+                                rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
+                            for id in request_ids {
+                                let index = pending
+                                    .iter()
+                                    .position(|pending_id| pending_id == &id)
+                                    .expect("abort must name a pending choice exactly once");
+                                pending.remove(index);
+                            }
+                        }
+                    })
+                },
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await;
-    let (channel, server_task) = start_grpc_test_server(
-        inference_service,
-        control_service,
-        engine_health,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    let mut client = InferenceClient::new(channel);
-    let stream = client
-        .generate_stream(pb::GenerateRequest {
-            request_id: "test-cancel-pending-output".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-            stopping: Some(pb::StoppingCriteria {
-                max_new_tokens: 10,
+        let mut client = InferenceClient::new(channel);
+        let mut stream = client
+            .generate_stream(pb::GenerateRequest {
+                request_id: "test-cancel-pending-output".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+                temperature: Some(1.0),
+                sampling: Some(pb::RandomSampling {
+                    num_sequences: n,
+                    ..Default::default()
+                }),
+                stopping: Some(pb::StoppingCriteria {
+                    max_new_tokens: 10,
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .expect("start generation")
-        .into_inner();
-    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
-        .await
-        .expect("timed out waiting for engine submission")
-        .expect("engine submission signal");
+            })
+            .await
+            .expect("start generation")
+            .into_inner();
+        tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+            .await
+            .expect("timed out waiting for engine submission")
+            .expect("engine submission signal");
+        if let Some(reason) = finish_reason {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match stream.message().await {
+                        Ok(Some(response)) => {
+                            if let Some(output) = response.outputs {
+                                assert_eq!(reason, EngineCoreFinishReason::Length);
+                                assert_eq!(output.index, 0);
+                                assert!(output.finish_info.is_some());
+                                break;
+                            }
+                        }
+                        Err(status) => {
+                            assert_eq!(reason, EngineCoreFinishReason::Error);
+                            assert_eq!(status.code(), tonic::Code::Internal);
+                            break;
+                        }
+                        Ok(None) => panic!("stream closed before the choice finished"),
+                    }
+                }
+            })
+            .await
+            .expect("choice must finish while the other is pending");
+        }
+        let failed_stream = if finish_reason == Some(EngineCoreFinishReason::Error) {
+            Some(stream)
+        } else {
+            drop(stream);
+            None
+        };
 
-    drop(stream);
-
-    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
-    server_task.abort();
-    result
-        .expect("disconnect must abort without waiting for engine output")
-        .expect("mock engine task");
+        let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
+        drop(failed_stream);
+        server_task.abort();
+        result
+            .expect("disconnect or error must abort pending choices without engine output")
+            .expect("mock engine task");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
