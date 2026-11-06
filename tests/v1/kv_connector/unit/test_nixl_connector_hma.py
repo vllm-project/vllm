@@ -720,7 +720,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
     worker.kv_cache_config = make_kv_cache_config(
-        block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
+        block_size=16 * local_physical_per_logical,
+        swa_enabled=has_swa,
+        mamba_enabled=has_mamba,
     )
 
     remote_engine_id = "remote-engine"
@@ -736,6 +738,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     # tp_ratio not exercised (all_source_ranks is empty so no reads run),
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
+    worker.transfer_topo.block_size_ratio.return_value = 1
     remote_info = MagicMock()
     remote_info.remote_block_size = 16
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
@@ -759,6 +762,7 @@ def test_read_blocks_for_req_expands_remote_ids(
             "remote_host": "localhost",
             "remote_port": 1234,
             "tp_size": 1,
+            "remote_num_tokens": 1000,
         },
     )
 

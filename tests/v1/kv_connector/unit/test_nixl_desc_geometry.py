@@ -967,6 +967,7 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
             "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": 2,
+            "remote_num_tokens": 16,
         },
     )
     meta = metadata.reqs_to_recv["req-b"]
@@ -983,6 +984,48 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     # rank 1 carries only its SSM shard.
     assert len(worker.nixl_wrapper.xfers) == 2
     assert total > 0
+
+
+@pytest.mark.cpu_test
+def test_hetero_ppl_pull_without_remote_num_tokens_fails():
+    """Without remote_num_tokens D cannot pair blocks across block sizes by
+    token, so the pull fails instead of reading mismatched blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=(24, 32),
+    )
+    _register_remote_agents(worker, meta_r, 2)
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req-b",
+        local_block_ids=([2, 5], [1], [7]),
+        kv_transfer_params={
+            "remote_block_ids": [[1, 4], [5], [2]],
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-req-b",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 2,
+        },
+    )
+    meta = metadata.reqs_to_recv["req-b"]
+    worker._recving_metadata["req-b"] = meta
+
+    worker._read_blocks_for_req("req-b", meta)
+
+    assert not worker.nixl_wrapper.xfers
+    assert worker.get_transfer_results().failed_recving == {"req-b"}
 
 
 @pytest.mark.cpu_test
@@ -1404,6 +1447,60 @@ def test_dcp_rejects_different_logical_block_sizes():
         worker.add_remote_agent(
             meta_r, remote_tp_rank=0, remote_tp_size=2, remote_dcp_size=2
         )
+
+
+@pytest.mark.cpu_test
+def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
+    """DCP pairs blocks by position, which needs equal logical block sizes
+    but not equal kernel blocks: with remote kernel blocks half the local
+    ones, every local block is read as remote-sized sub-blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    worker = _make_mla_hybrid_worker(
+        local_block_size=8, kernel_block_size=8, num_logical_blocks=8, mamba=False
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=8,
+        remote_ssm_sizes=(24, 32),
+    )
+    worker._remote_agents[meta_r.engine_id] = {
+        (0, rank): worker.add_remote_agent(
+            meta_r, remote_tp_rank=rank, remote_tp_size=2, remote_dcp_size=2
+        )
+        for rank in range(2)
+    }
+
+    local_ids = ([2, 5],)
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req-b",
+        local_block_ids=local_ids,
+        kv_transfer_params={
+            "remote_block_ids": [[1, 4]],
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-req-b",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 2,
+            "dcp_size": 2,
+        },
+        local_num_computed_blocks=(0,),
+    )
+    meta = metadata.reqs_to_recv["req-b"]
+    meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
+        meta.local_block_ids, worker._physical_blocks_per_logical_kv_block
+    )
+    worker._recving_metadata["req-b"] = meta
+
+    worker._read_blocks_for_req("req-b", meta)
+
+    _assert_local_writes_within(worker, _owned_byte_ranges(worker, local_ids))
+    assert worker.get_transfer_results().failed_recving == set()
 
 
 def _make_csa_linear_ple_worker(
