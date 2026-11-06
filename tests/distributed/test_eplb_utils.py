@@ -12,6 +12,7 @@ import torch.multiprocessing as mp
 import vllm.config.parallel as parallel_config_module
 import vllm.distributed.eplb.eplb_state as eplb_state_module
 from vllm.config.parallel import EPLBConfig, ParallelConfig
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
@@ -249,8 +250,8 @@ class _EplbTestModelConfig:
     def __init__(self, name: str):
         self.model = name
 
-    def compute_hash(self) -> str:
-        return self.model
+    def compile_factors(self) -> dict[str, object]:
+        return {"model": self.model}
 
 
 class _TopologyEncodingPolicy:
@@ -323,19 +324,23 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(eplb_state_module, "PIN_MEMORY", False)
-    models = (
-        (_EplbTestModel(num_experts=4, num_redundant=2), "target"),
-        (_EplbTestModel(num_experts=6, num_redundant=2), "draft"),
+    model_configs = (
+        _EplbTestModelConfig("target"),
+        _EplbTestModelConfig("draft"),
     )
-    for model, name in models:
-        state.add_model(model, _EplbTestModelConfig(name))
+    models = (
+        _EplbTestModel(num_experts=4, num_redundant=2),
+        _EplbTestModel(num_experts=6, num_redundant=2),
+    )
+    for model, model_config in zip(models, model_configs):
+        state.add_model(model, model_config)
     _TopologyEncodingPolicy.calls.clear()
     state.policy = _TopologyEncodingPolicy
 
     state.rearrange()
 
-    target_state = state.model_states["target"]
-    draft_state = state.model_states["draft"]
+    target_state = state.model_states[hash_config_cached(model_configs[0])]
+    draft_state = state.model_states[hash_config_cached(model_configs[1])]
     if use_async:
         assert target_state.eplb_stats is not None
         assert (
