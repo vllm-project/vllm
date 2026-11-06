@@ -11,6 +11,7 @@ prefill longer than top-k regions. Under DP every rank stalls on that rank.
 from typing import TYPE_CHECKING, cast
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.model_warmup import register_model_warmup
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
@@ -32,6 +33,7 @@ def _step5_dsa_impl(worker: "Worker"):
     return None
 
 
+@register_model_warmup("full")
 def step5_dsa_warmup(worker: "Worker") -> None:
     if worker.vllm_config.model_config.hf_text_config.model_type != "step5":
         return

@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
-# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
+# Consumed by vllm/models/kimi_k3/warmup.py during kernel_warmup().
 def get_attn_res_triton_warmup_profiles(
     max_blocks: int,
 ) -> tuple[tuple[int, bool, int, bool], ...]:

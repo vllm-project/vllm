@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm.model_executor.warmup.step5_dsa_warmup import (
+from vllm.models.step5.nvidia.warmup import (
     run_step5_scored_prefill_warmup,
 )
 

@@ -26,9 +26,9 @@ def _worker(context):
 
 
 def test_step5_warmup_dispatches_rocm_csa_topk():
-    from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
     from vllm.models.step5.amd import warmup
     from vllm.models.step5.amd.model import Step5Attention
+    from vllm.models.step5.nvidia.warmup import step5_dsa_warmup
 
     def layer(indexer):
         mock = MagicMock(indexer=indexer)

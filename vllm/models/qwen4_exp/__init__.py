@@ -36,6 +36,7 @@ def __getattr__(name: str) -> Any:
             )
             from .amd.mtp import Qwen4ExpMTP
         else:
+            from .nvidia import warmup  # noqa: F401
             from .nvidia.model import (
                 Qwen4ExpForCausalLM,
                 Qwen4ExpForConditionalGeneration,

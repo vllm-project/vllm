@@ -26,6 +26,10 @@ else:
     )
     from .amd.mtp import MiniMaxM3MTP  # type: ignore[assignment]
 
+if current_platform.is_cuda():
+    # The MSA warmup, and the CuTe DSL its modules import, are CUDA-only.
+    from .nvidia import warmup  # noqa: F401
+
 __all__ = [
     "MiniMaxM3MTP",
     "MiniMaxM3SparseForCausalLM",

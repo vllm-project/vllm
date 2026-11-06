@@ -25,7 +25,7 @@ from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 logger = init_logger(__name__)
 
 
-# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
+# Consumed by vllm/models/kimi_k3/warmup.py during kernel_warmup().
 def get_gluon_chunk_kda_warmup_profiles() -> tuple[tuple[int, int], ...]:
     return ((1, 64), (2, 64), (4, 64), (8, 64), (16, 64), (1, 4096), (2, 2048))
 

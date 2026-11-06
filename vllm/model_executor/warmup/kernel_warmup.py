@@ -31,13 +31,8 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
-from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
-    kimi_k3_triton_warmup,
-)
 from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
-from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
-    qwen4_exp_qsa_triton_warmup,
-)
+from vllm.model_executor.warmup.model_warmup import run_model_warmups
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
@@ -267,8 +262,6 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
 
 
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
-    from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
-
     if not worker.use_v2_model_runner:
         # The KV-block zeroing kernel is driven by the scheduler's
         # `new_block_ids_to_zero`, so no dummy run ever reaches it.
@@ -306,9 +299,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # Run next so input-prep kernels JIT against pristine runner state.
     if enable_jit_warmup:
-        kimi_k3_triton_warmup(worker)
+        run_model_warmups(worker, "jit")
         watermark_sample_warmup(worker)
-        qwen4_exp_qsa_triton_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
@@ -341,7 +333,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
-    step5_dsa_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -354,13 +345,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
-    if current_platform.is_cuda():
-        # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
-        from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-            minimax_m3_msa_warmup,
-        )
-
-        minimax_m3_msa_warmup(worker)
+    run_model_warmups(worker, "full")
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
