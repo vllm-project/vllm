@@ -97,6 +97,20 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## Canonical Offloading for Chunked-Local Attention
+
+Chunked-local attention (including mixed chunked-local/full-attention models)
+supports canonical KV offloading across compatible tensor-parallel sizes. Set
+`canonical_layout: true` in `kv_connector_extra_config` on every instance sharing
+the cache; the option defaults to `false`. For filesystem sharing, add this
+option to the `TieringOffloadingSpec` configuration in [Multi-Tier Setup](#multi-tier-setup)
+and use the same `root_dir` on the producer and consumer.
+
+Only live blocks needed by the current attention chunk are restored. Canonical
+offloading still requires compatible KV head counts and runtime tensor layouts;
+this support does not enable per-token-head KV quantization or pipeline/context
+parallelism.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
@@ -148,7 +162,7 @@ Enable it on **every** instance that shares a secondary tier. The canonical form
 
 Requirements and limitations:
 
-- Supported layers: full and sliding-window attention whose KV heads divide evenly across TP ranks, and MLA attention. Per-token-head KV-cache quantization isn't supported.
+- Supported layers: full, sliding-window, and chunked-local attention with compatible KV head counts, and MLA attention. Mixed chunked-local/full-attention models are supported. Per-token-head KV-cache quantization isn't supported.
 - Tensor parallelism only: pipeline parallelism, prefill context parallelism (PCP), and decode context parallelism (DCP) are not supported, and the offload workers must be exactly the TP group.
 - Packed and cross-layer KV cache layouts are not supported.
 - If a layer can't be mapped to the canonical layout, the engine fails at startup with an error that says to remove `canonical_layout`, rather than silently storing non-portable bytes.

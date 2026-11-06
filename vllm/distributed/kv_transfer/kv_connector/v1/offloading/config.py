@@ -245,7 +245,9 @@ def build_offloading_config(
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False
-            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            if not isinstance(
+                spec, (FullAttentionSpec, SlidingWindowSpec, ChunkedLocalAttentionSpec)
+            ):
                 return False
             return (
                 total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
@@ -266,7 +268,17 @@ def build_offloading_config(
             and parallel_config.world_size == tp_size
         )
 
+    canonical_kv_replicas = 1
     if canonical_layout:
+        total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+        if is_parallelism_agnostic and all(
+            not isinstance(spec, MLAAttentionSpec)
+            for _, group in selected_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            canonical_kv_replicas = max(
+                1, parallel_config.tensor_parallel_size // total_kv_heads
+            )
         replicated_layout = (
             is_parallelism_agnostic
             and all(
@@ -319,5 +331,6 @@ def build_offloading_config(
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
+        canonical_kv_replicas=canonical_kv_replicas,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
     )
