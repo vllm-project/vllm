@@ -12,6 +12,7 @@ from PIL import Image as PILImage
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
+    FusedMMInputNorm,
     build_mm_input_norm,
 )
 from vllm.model_executor.model_loader import get_model_cls
@@ -357,6 +358,39 @@ def test_mm_device_do_normalize():
         assert raw_values.dtype == torch.uint8
         output = input_norm(raw_values.to(device), normalized_values.dtype)
         torch.testing.assert_close(output, normalized_values.to(device))
+
+
+class _IdentityTower(torch.nn.Module):
+    dtype = torch.float32
+
+    def forward(self, pixel_values, encoder_metadata):
+        return pixel_values
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_embed_vision_normalizes_channel_last_patches():
+    """Gemma 4 patches are (patch, patch, channel); per-channel parameters must
+    reach the right pixels even when they differ across channels."""
+    device = current_platform.device_type
+    mean, std = [0.1, 0.4, 0.7], [0.5, 0.25, 0.125]
+    model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
+    torch.nn.Module.__init__(model)
+    model.vision_input_norm = FusedMMInputNorm(
+        image_mean=mean, image_std=std, rescale_factor=1 / 255
+    ).to(device)
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(num_channels=3))
+    model.vision_tower = _IdentityTower()
+    model.embed_vision = torch.nn.Identity()
+
+    pixel_values = torch.randint(
+        0, 256, (12, 16 * 16 * 3), dtype=torch.uint8, device=device
+    )
+    output = model._embed_vision(pixel_values, {})
+
+    expected = (
+        pixel_values.view(12, -1, 3) / 255 - torch.tensor(mean, device=device)
+    ) / torch.tensor(std, device=device)
+    torch.testing.assert_close(output, expected.view(pixel_values.shape))
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])

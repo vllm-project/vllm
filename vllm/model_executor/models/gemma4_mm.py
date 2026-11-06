@@ -1431,6 +1431,13 @@ class Gemma4ForConditionalGeneration(
         pixel_values: torch.Tensor,
         encoder_metadata: Mapping[str, torch.Tensor],
     ) -> torch.Tensor:
+        # With mm_device_do_normalize the processor skips the rescale, so
+        # pixel_values hold raw uint8 patches. Patches are channel-last, so
+        # normalize per pixel.
+        num_channels = getattr(self.config.vision_config, "num_channels", 3)
+        pixel_values = self.vision_input_norm(
+            pixel_values.reshape(-1, num_channels), self.vision_tower.dtype
+        ).view(pixel_values.shape)
         return self.embed_vision(self.vision_tower(pixel_values, encoder_metadata))
 
     def _pack_vision(
@@ -1447,10 +1454,10 @@ class Gemma4ForConditionalGeneration(
         metadata = self.vision_tower.prepare_encoder_metadata(
             [pp[:n].numpy() for pp, n in zip(pixel_position_ids, num_patches)]
         )
-        # In the tower's dtype, like the CUDA graph buffers.
+        # In the CUDA graph buffers' dtype.
         pixel_values = torch.cat(
             [pv[:n] for pv, n in zip(pixel_values, num_patches)]
-        ).to(self.vision_tower.dtype)
+        ).to(self.vision_input_norm.input_dtype or self.vision_tower.dtype)
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
         return pixel_values, metadata, [n // pooling_k2 for n in num_patches]
 
@@ -1734,6 +1741,7 @@ class Gemma4ForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
+        dtype = self.vision_input_norm.input_dtype or dtype
         vision_config = self.config.vision_config
         k = vision_config.pooling_kernel_size
         max_seq_tokens = min(token_budget, self._encoder_cudagraph_max_seq_tokens())
