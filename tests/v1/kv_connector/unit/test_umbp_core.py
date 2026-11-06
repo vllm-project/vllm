@@ -223,16 +223,17 @@ def test_namespace_distinguishes_draft_models():
 
 
 def test_namespace_distinguishes_effective_model_configs():
-    """Overridden RoPE or quantization must not reuse the defaults' KV."""
+    """Overridden RoPE, quantization or dtype must not reuse the defaults' KV."""
     config = _kv_cache_config()
 
-    def namespace(rope_theta=1e6, quantization=None, **hf_fields):
+    def namespace(rope_theta=1e6, quantization=None, dtype=torch.float16, **hf):
         vllm_config = _vllm_config({"mode": "standalone"})
         vllm_config.model_config.hf_config = PreTrainedConfig(
             rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
-            **hf_fields,
+            **hf,
         )
         vllm_config.model_config.quantization = quantization
+        vllm_config.model_config.dtype = dtype
         return UMBPNamespace.from_vllm_config(vllm_config, config).value
 
     default = namespace()
@@ -240,6 +241,7 @@ def test_namespace_distinguishes_effective_model_configs():
     assert namespace(name_or_path="/mnt/another-copy") == default
     assert namespace(rope_theta=1e4) != default
     assert namespace(quantization="fp8") != default
+    assert namespace(dtype=torch.bfloat16) != default
 
 
 def test_layout_planner_sizes_uniform_type_layers_independently():

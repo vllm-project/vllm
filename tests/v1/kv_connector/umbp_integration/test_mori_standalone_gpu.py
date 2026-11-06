@@ -2,21 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """StandaloneRuntime against a real umbp_standalone_server on ROCm GPUs."""
 
-import importlib.util
 import multiprocessing as mp
 import os
-import shutil
 import signal
 import subprocess
-import sys
-import traceback
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import torch
 
 import vllm.envs as envs
-from tests.utils import multi_gpu_marks
 from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
 from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
     BLOCK_SIZE,
@@ -26,7 +23,7 @@ from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
     _prompt,
     _reset_gpu_prefix_cache,
 )
-from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
+from tests.v1.kv_connector.umbp_test_utils import run_in_new_process
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVRange,
@@ -39,32 +36,30 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
 )
 from vllm.platforms import current_platform
 
-pytestmark = [
-    pytest.mark.skipif(
-        not (current_platform.is_rocm() and mori_has_umbp()),
-        reason="requires ROCm and MORI built with UMBP",
-    ),
-    *multi_gpu_marks(num_gpus=2),
-]
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="UMBP requires ROCm"
+)
 
 _LAYER_BYTES = 1 << 20
 _KEYS = ("standalone-block-0", "standalone-block-1")
 
 
-def _server_binary() -> str:
-    found = shutil.which("umbp_standalone_server")
-    if found:
-        return found
-    mori_spec = importlib.util.find_spec("mori")
-    assert mori_spec is not None and mori_spec.origin is not None
-    candidate = Path(mori_spec.origin).parent / "umbp_standalone_server"
-    if not candidate.exists():
-        pytest.skip("umbp_standalone_server is not installed")
-    return str(candidate)
+class _Server:
+    def __init__(self, address: str, process: subprocess.Popen):
+        self.address = address
+        self.process = process
+
+    def kill(self) -> None:
+        self.process.kill()
+        self.process.wait(10)
 
 
 @pytest.fixture
 def server(tmp_path, socket_dir):
+    import mori
+
+    binary = Path(mori.__file__).with_name("umbp_standalone_server")
+    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
     address = f"unix://{socket_dir}/umbp.grpc.sock"
     env = dict(
         os.environ,
@@ -73,11 +68,12 @@ def server(tmp_path, socket_dir):
     )
     with open(tmp_path / "server.log", "w") as log:
         process = subprocess.Popen(
-            [_server_binary()], env=env, stdout=log, stderr=subprocess.STDOUT
+            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
         )
         try:
-            yield SimpleServer(address, process, tmp_path / "server.log")
+            yield _Server(address, process)
         finally:
+            process.send_signal(signal.SIGCONT)
             process.terminate()
             try:
                 process.wait(10)
@@ -86,22 +82,11 @@ def server(tmp_path, socket_dir):
                 process.wait(10)
 
 
-class SimpleServer:
-    def __init__(self, address: str, process: subprocess.Popen, log: Path):
-        self.address = address
-        self.process = process
-        self.log = log
-
-    def kill(self) -> None:
-        self.process.kill()
-        self.process.wait(10)
-
-
-def _runtime(address: str) -> StandaloneRuntime:
+def _runtime(address: str, **options) -> StandaloneRuntime:
     return StandaloneRuntime(
         UMBPRuntimeConfig(
             "standalone",
-            {"endpoint": address, "startup_timeout_ms": 20000, "num_workers": 2},
+            {"endpoint": address, "startup_timeout_ms": 20000, **options},
         )
     )
 
@@ -132,51 +117,98 @@ def _plans(cache: torch.Tensor, block_offset: int = 0) -> list[BlockTransferPlan
     return plans
 
 
-def _producer(address: str, done) -> None:
+def _produce(address: str) -> None:
+    torch.accelerator.set_device_index(0)
+    worker = _runtime(address).create_worker_handle("ns", RankTopology(), None)
     try:
-        torch.accelerator.set_device_index(0)
-        worker = _runtime(address).create_worker_handle("ns", RankTopology(), None)
-        try:
-            source = _pattern("cuda:0")
-            worker.register_buffers({"kv": source})
-            stored = worker.wait(worker.store(_plans(source)))
-            assert stored.status is TransferJobStatus.COMPLETED, stored.error
-            worker.publish(stored)
-        finally:
-            worker.close()
-    except Exception:
-        done.put(traceback.format_exc())
-        raise
-    else:
-        done.put(None)
-
-
-def _store_from_another_process(address: str) -> None:
-    context = mp.get_context("spawn")
-    done = context.Queue()
-    producer = context.Process(target=_producer, args=(address, done))
-    producer.start()
-    try:
-        error = done.get(timeout=120)
-        assert error is None, error
-        producer.join(30)
-        assert producer.exitcode == 0
+        source = _pattern("cuda:0")
+        worker.register_buffers({"kv": source})
+        stored = worker.wait(worker.store(_plans(source)))
+        assert stored.status is TransferJobStatus.COMPLETED, stored.error
+        worker.publish(stored)
     finally:
-        if producer.is_alive():
-            producer.kill()
-            producer.join(10)
-        done.close()
-        done.join_thread()
+        worker.close()
+
+
+_OBJECTS = 16
+
+
+def _fill(writer: int, block: int) -> int:
+    return writer * 64 + block + 1
+
+
+def _block_plans(cache: torch.Tensor, prefix: str) -> list[BlockTransferPlan]:
+    return [
+        BlockTransferPlan(
+            f"{prefix}-{block}",
+            block,
+            ranges=(
+                KVRange(
+                    "kv",
+                    0,
+                    block,
+                    cache[block].data_ptr(),
+                    _LAYER_BYTES,
+                    _LAYER_BYTES,
+                    0,
+                ),
+            ),
+        )
+        for block in range(_OBJECTS)
+    ]
+
+
+def _store_concurrently(address: str, writer: int, start) -> None:
+    torch.accelerator.set_device_index(0)
+    worker = _runtime(address).create_worker_handle("ns", RankTopology(), None)
+    try:
+        own = torch.empty(_OBJECTS, _LAYER_BYTES, dtype=torch.uint8, device="cuda")
+        shared = torch.empty_like(own)
+        for block in range(_OBJECTS):
+            own[block].fill_(_fill(writer, block))
+            shared[block].fill_(_fill(writer, _OBJECTS + block))
+        worker.register_buffers({"own": own, "shared": shared})
+        plans = _block_plans(own, f"writer{writer}") + _block_plans(shared, "shared")
+        assert start.wait(60)
+        stored = worker.wait(worker.store(plans))
+        assert stored.status is TransferJobStatus.COMPLETED, stored.error
+        worker.publish(stored)
+    finally:
+        worker.close()
+
+
+def _close_while_server_stopped(address: str, server_pid: int, scenario: str):
+    torch.accelerator.set_device_index(0)
+    runtime = _runtime(address, timeout_ms=200, lookup_timeout_ms=200)
+    worker = runtime.create_worker_handle("ns", RankTopology(), None)
+    scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
+    source = torch.arange(_LAYER_BYTES, dtype=torch.uint8, device="cuda:0")
+    worker.register_buffers({"kv": source})
+    kv_range = KVRange("kv", 0, 0, source.data_ptr(), _LAYER_BYTES, _LAYER_BYTES, 0)
+    plan = BlockTransferPlan("stuck", 0, ranges=(kv_range,))
+    if scenario == "load":
+        stored = worker.wait(worker.store([plan]))
+        assert stored.status is TransferJobStatus.COMPLETED, stored.error
+        worker.publish(stored)
+
+    os.kill(server_pid, signal.SIGSTOP)
+    if scenario in ("store", "load"):
+        job = getattr(worker, scenario)([plan])
+        time.sleep(0.5)
+        assert worker.poll(job) is None
+    elif scenario == "lookup":
+        started = time.monotonic()
+        assert list(scheduler.lookup(["stuck"])) == [False]
+        assert list(scheduler.lookup(["stuck"])) == [False]
+        assert time.monotonic() - started < 5
+    scheduler.close()
+    worker.close()
 
 
 def test_engine_restores_after_writer_exits(server, vllm_runner, monkeypatch):
-    """A fresh engine restores real KV blocks after the writer shuts down."""
+    """A fresh engine restores the writer's KV and reproduces its outputs."""
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setattr(envs, "VLLM_ENABLE_V1_MULTIPROCESSING", True)
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
-    monkeypatch.setattr(envs, "VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     runner_kwargs = dict(
         model_name=QWEN_MODEL,
         revision=_REVISIONS[QWEN_MODEL],
@@ -213,8 +245,9 @@ def test_engine_restores_after_writer_exits(server, vllm_runner, monkeypatch):
         _assert_same_outputs(computed, restored)
 
 
+@pytest.mark.skipif(current_platform.device_count() < 2, reason="needs 2 GPUs")
 def test_objects_outlive_the_writer_and_restore_on_another_gpu(server):
-    _store_from_another_process(server.address)
+    run_in_new_process(_produce, server.address)
 
     torch.accelerator.set_device_index(1)
     runtime = _runtime(server.address)
@@ -229,16 +262,14 @@ def test_objects_outlive_the_writer_and_restore_on_another_gpu(server):
     assert loaded.status is TransferJobStatus.COMPLETED, loaded.error
     torch.accelerator.synchronize()
 
-    expected = _pattern("cuda:1")
-    assert torch.equal(destination[:, 2:4], expected)
+    assert torch.equal(destination[:, 2:4], _pattern("cuda:1"))
     assert torch.count_nonzero(destination[:, 0:2]) == 0
     worker.close()
     scheduler.close()
 
 
 def test_clear_removes_objects_for_every_client(server):
-    _store_from_another_process(server.address)
-    torch.accelerator.set_device_index(1)
+    run_in_new_process(_produce, server.address)
     scheduler = _runtime(server.address).create_scheduler_handle(
         "ns", RankTopology(), None
     )
@@ -251,12 +282,11 @@ def test_clear_removes_objects_for_every_client(server):
 
 
 def test_server_loss_degrades_to_misses_and_failed_transfers(server):
-    _store_from_another_process(server.address)
-    torch.accelerator.set_device_index(1)
+    run_in_new_process(_produce, server.address)
     runtime = _runtime(server.address)
     scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
     worker = runtime.create_worker_handle("ns", RankTopology(), None)
-    destination = torch.zeros(2, 4, _LAYER_BYTES, dtype=torch.uint8, device="cuda:1")
+    destination = torch.zeros(2, 4, _LAYER_BYTES, dtype=torch.uint8, device="cuda")
     worker.register_buffers({"kv": destination})
 
     server.kill()
@@ -271,80 +301,50 @@ def test_server_loss_degrades_to_misses_and_failed_transfers(server):
     scheduler.close()
 
 
-_STOPPED_SERVER = """
-import os
-import signal
-import sys
-import time
-
-import torch
-
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
-    BlockTransferPlan,
-    KVRange,
-    RankTopology,
-    TransferJobStatus,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
-    StandaloneRuntime,
-    UMBPRuntimeConfig,
-)
-
-address, server_pid, scenario = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-torch.accelerator.set_device_index(0)
-options = {
-    "endpoint": address,
-    "startup_timeout_ms": 20000,
-    "timeout_ms": 200,
-    "lookup_timeout_ms": 200,
-}
-runtime = StandaloneRuntime(UMBPRuntimeConfig("standalone", options))
-worker = runtime.create_worker_handle("ns", RankTopology(), None)
-scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
-source = torch.arange(1 << 20, dtype=torch.uint8, device="cuda:0")
-worker.register_buffers({"kv": source})
-size = source.numel()
-kv_range = KVRange("kv", 0, 0, source.data_ptr(), size, size, 0)
-plan = BlockTransferPlan("stuck", 0, ranges=(kv_range,))
-if scenario == "load":
-    stored = worker.wait(worker.store([plan]))
-    assert stored.status is TransferJobStatus.COMPLETED, stored.error
-    worker.publish(stored)
-os.kill(server_pid, signal.SIGSTOP)
-if scenario in ("store", "load"):
-    job = getattr(worker, scenario)([plan])
-    time.sleep(0.5)
-    assert worker.poll(job) is None
-if scenario == "lookup":
-    started = time.monotonic()
-    assert list(scheduler.lookup(["stuck"])) == [False]
-    assert list(scheduler.lookup(["stuck"])) == [False]
-    assert time.monotonic() - started < 5
-scheduler.close()
-worker.close()
-print("WORKER_CLOSE_RETURNED", flush=True)
-"""
-
-
 @pytest.mark.parametrize("scenario", ["store", "load", "lookup", "idle"])
 def test_process_exits_while_the_server_stays_stopped(server, scenario):
     """A server that never resumes must not hold up close() or process exit."""
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                _STOPPED_SERVER,
-                server.address,
-                str(server.process.pid),
-                scenario,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    finally:
-        os.kill(server.process.pid, signal.SIGCONT)
+    run_in_new_process(
+        _close_while_server_stopped,
+        server.address,
+        server.process.pid,
+        scenario,
+        timeout=180,
+    )
 
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert "WORKER_CLOSE_RETURNED" in result.stdout
+
+def test_concurrent_writers_store_whole_objects(server):
+    """Clients storing at once, even to the same keys, never tear an object."""
+    start = mp.get_context("spawn").Event()
+    with ThreadPoolExecutor(2) as pool:
+        writers = [
+            pool.submit(
+                run_in_new_process, _store_concurrently, server.address, w, start
+            )
+            for w in range(2)
+        ]
+        start.set()
+        for writer in writers:
+            writer.result()
+
+    runtime = _runtime(server.address)
+    worker = runtime.create_worker_handle("ns", RankTopology(), None)
+    restored = torch.zeros(3, _OBJECTS, _LAYER_BYTES, dtype=torch.uint8, device="cuda")
+    worker.register_buffers({"kv": restored})
+    plans = [
+        *_block_plans(restored[0], "writer0"),
+        *_block_plans(restored[1], "writer1"),
+        *_block_plans(restored[2], "shared"),
+    ]
+    loaded = worker.wait(worker.load(plans))
+    assert loaded.status is TransferJobStatus.COMPLETED, loaded.error
+    torch.accelerator.synchronize()
+    worker.close()
+
+    for writer in range(2):
+        for block in range(_OBJECTS):
+            assert bool((restored[writer, block] == _fill(writer, block)).all())
+    for block in range(_OBJECTS):
+        first = restored[2, block, 0].item()
+        assert first in {_fill(w, _OBJECTS + block) for w in range(2)}
+        assert bool((restored[2, block] == first).all())
