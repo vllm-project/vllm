@@ -1277,12 +1277,10 @@ class Worker(WorkerBase):
     def supports_draft_weight_updates(self) -> bool:
         engine = self.weight_transfer_engine
         speculative_config = self.speculative_config
-        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
         return (
             engine is not None
             and engine.supports_draft_weight_update
-            and callable(get_draft_model)
-            and get_draft_model() is not None
+            and self.model_runner.get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
         )

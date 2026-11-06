@@ -1038,7 +1038,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         saved_capture_triggers = compilation_counter.num_gpu_runner_capture_triggers
         all_wrappers: list[Any] = []
         original_pools: dict[int, Any] = {}
-        speculator = getattr(runner, "speculator", None)
+        speculator = runner.speculator
         spec_manager_names: list[str] = []
         try:
             if not runner.needs_cudagraph_capture():

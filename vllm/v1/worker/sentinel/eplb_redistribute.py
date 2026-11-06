@@ -266,7 +266,7 @@ def reload_experts_from_disk(
 
 def reset_eplb_async_state(model_runner: GPUModelRunner) -> None:
     """Clear stale EPLB async state after fault or scale-down."""
-    eplb_state = getattr(model_runner, "eplb_state", None)
+    eplb_state = model_runner.eplb_state
     if eplb_state is None:
         return
 
