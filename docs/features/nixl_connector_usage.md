@@ -65,7 +65,7 @@ vllm serve <MODEL> \
 
 #### NIXL backend threads
 
-`kv_connector_extra_config.num_threads` is passed to NIXL, which forwards it to the configured backends that take a thread count, e.g. UCX (worker threads) and LIBFABRIC (descriptor post thread pool). If it is not set, vLLM passes `4` when UCX is the only backend; otherwise it passes nothing, and each backend keeps its NIXL default (for LIBFABRIC, no post thread pool).
+`kv_connector_extra_config.num_threads` is passed to NIXL, which forwards it to the configured backends that take a thread count, e.g. UCX (worker threads) and LIBFABRIC (descriptor post thread pool). If it is not set, vLLM passes `4` when UCX is the only backend; otherwise it passes `0`, which NIXL treats as unset, so each backend keeps its NIXL default (for LIBFABRIC, no post thread pool).
 
 #### UCX backend parameters
 

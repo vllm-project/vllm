@@ -110,8 +110,15 @@ _SHARED_REGION_GROUP_ID = -1
 _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
 _MAX_HYBRID_BLOCK_SPLIT = 128
-# Default NIXL num_threads when UCX is the only backend; see the UAR note at its use.
-_UCX_DEFAULT_NUM_THREADS = 4
+# Per-backend name for num_threads. NIXL maps it only for agent-config backends,
+# so explicitly created backends (ucx_backend_params) are mapped here.
+_NIXL_THREAD_PARAM = {
+    "UCX": "num_threads",
+    "OBJ": "num_threads",
+    "LIBFABRIC": "num_threads",
+    "GDS_MT": "thread_count",
+    "UCCL": "num_cpus",
+}
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -787,23 +794,18 @@ class NixlBaseConnectorWorker:
         # components like NVSHMEM (used by DeepEP kernels) to fail during RDMA
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
+        # The default is tuned for UCX alone; 0 keeps NIXL's backend defaults.
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", None
+            "num_threads", 0 if non_ucx_backends else 4
         )
-        # The default is tuned for UCX, so it applies only to UCX alone.
-        if num_threads is None and not non_ucx_backends:
-            num_threads = _UCX_DEFAULT_NUM_THREADS
         if nixl_agent_config is None:
             config = None
         else:
-            thread_kwargs = {} if num_threads is None else {"num_threads": num_threads}
             # Enable telemetry by default for NIXL 0.7.1 and above.
-            config = (
-                nixl_agent_config(
-                    backends=self.nixl_backends, capture_telemetry=True, **thread_kwargs
-                )
-                if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
+            config = nixl_agent_config(
+                backends=self.nixl_backends,
+                num_threads=num_threads,
+                capture_telemetry=True,
             )
 
         # Extra UCX backend init params, e.g. {"ucx_error_handling_mode": "none"}.
@@ -822,9 +824,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.create_backend(
                 "UCX",
                 {
-                    "num_threads": str(
-                        _UCX_DEFAULT_NUM_THREADS if num_threads is None else num_threads
-                    ),
+                    "num_threads": str(num_threads),
                     "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
                     **ucx_backend_params,
                 },
@@ -832,8 +832,8 @@ class NixlBaseConnectorWorker:
         elif explicit_backends:
             for backend in self.nixl_backends:
                 nixl_params: dict[str, str] = {}
-                if num_threads is not None:
-                    nixl_params["num_threads"] = str(num_threads)
+                if num_threads and backend in _NIXL_THREAD_PARAM:
+                    nixl_params[_NIXL_THREAD_PARAM[backend]] = str(num_threads)
                 if backend == "UCX":
                     nixl_params.update(ucx_backend_params)
                 self.nixl_wrapper.create_backend(backend, nixl_params)
