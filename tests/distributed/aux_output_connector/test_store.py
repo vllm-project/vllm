@@ -285,7 +285,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     )
     assert pending is not None
     output = async_utils.AsyncOutput(
-        ModelRunnerOutput(["request"], {"request": 0}),
+        ModelRunnerOutput(["request"]),
         SamplerOutput(
             torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
         ),

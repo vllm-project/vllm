@@ -2353,6 +2353,10 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
+        # The worker's output order follows its batch, not num_scheduled_tokens.
+        req_indices = {
+            req_id: i for i, req_id in enumerate(model_runner_output.req_ids)
+        }
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2381,7 +2385,7 @@ class Scheduler(SchedulerInterface):
             if output_is_stale and request.drop_stale_output:
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            req_index = req_indices[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )

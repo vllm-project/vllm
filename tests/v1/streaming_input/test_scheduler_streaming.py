@@ -130,7 +130,6 @@ class TestStreamingScheduler(unittest.TestCase):
                 )
                 runner_output = ModelRunnerOutput(
                     req_ids=[session.request_id],
-                    req_id_to_index={session.request_id: 0},
                     sampled_token_ids=[[STOP_TOKEN]],
                     logprobs=logprobs,
                     prompt_logprobs_dict={},
@@ -528,7 +527,6 @@ class TestStreamingScheduler(unittest.TestCase):
 
         mro_cycle1 = ModelRunnerOutput(
             req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
             sampled_token_ids=[[output_token_1]],
             logprobs=None,
             prompt_logprobs_dict={session.request_id: None},
@@ -603,7 +601,6 @@ class TestStreamingScheduler(unittest.TestCase):
 
         mro_cycle2 = ModelRunnerOutput(
             req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
             sampled_token_ids=[[output_token_2]],
             logprobs=None,
             prompt_logprobs_dict={session.request_id: None},
@@ -700,7 +697,6 @@ class TestStreamingScheduler(unittest.TestCase):
 def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[request_id],
-        req_id_to_index={request_id: 0},
         sampled_token_ids=[token_ids],
         logprobs=None,
         prompt_logprobs_dict={request_id: None},

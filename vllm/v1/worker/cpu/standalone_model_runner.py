@@ -468,7 +468,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
-            num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
 
@@ -1234,7 +1233,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=sampled_token_ids,
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
@@ -1304,7 +1302,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         )
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             pooler_output=[
                 None if output is None or not is_finished else output
                 for output, is_finished in zip(outputs, finished_mask, strict=True)

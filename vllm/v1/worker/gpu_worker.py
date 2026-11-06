@@ -1570,9 +1570,8 @@ class Worker(WorkerBase):
         )
 
     def execute_dummy_batch(self) -> None:
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(
-            num_tokens,
+            self.model_runner.decode_query_len,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )

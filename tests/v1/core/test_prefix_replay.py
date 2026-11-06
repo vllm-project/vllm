@@ -97,7 +97,6 @@ def _step_output(out, requests) -> ModelRunnerOutput:
     scheduled = [r for r in requests if r.request_id in out.num_scheduled_tokens]
     return ModelRunnerOutput(
         req_ids=[r.request_id for r in scheduled],
-        req_id_to_index={r.request_id: i for i, r in enumerate(scheduled)},
         sampled_token_ids=[
             [1000] if r.num_computed_tokens >= r.num_prompt_tokens else []
             for r in scheduled

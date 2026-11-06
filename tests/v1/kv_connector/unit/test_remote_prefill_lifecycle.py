@@ -835,7 +835,6 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # Model returns no tokens for intermediate prefill chunk
     intermediate_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[]],
     )
     scheduler.update_from_output(scheduler_output, intermediate_output)
