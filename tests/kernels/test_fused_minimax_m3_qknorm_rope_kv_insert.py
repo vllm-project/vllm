@@ -675,6 +675,47 @@ def test_sparse_full_fp8_index(
     if index_k_scale > 1:
         assert bool(saturated.any())
 
+    if block_size == 128:
+        from vllm.config import VllmConfig, set_current_vllm_config
+        from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+
+        with set_current_vllm_config(VllmConfig()):
+            cache = MiniMaxM3IndexerCache(
+                HEAD_DIM,
+                prefix="index_cache",
+                indexer_kv_dtype="fp8",
+                tp_shard=tp_shard,
+            )
+        for rank in range(tp_shard):
+            packed = torch.zeros(
+                num_blocks,
+                1,
+                block_size,
+                HEAD_DIM // tp_shard,
+                dtype=fp8_dtype,
+                device=device,
+            )
+            cache.bind_kv_cache(packed)
+            assert cache.kv_cache.data_ptr() == packed.data_ptr()
+            page = index_slot_mapping // block_size
+            offset = index_slot_mapping % block_size
+            index_slots = page * (block_size // tp_shard) + offset // tp_shard
+            index_slots.masked_fill_(
+                (index_slot_mapping < 0) | (offset % tp_shard != rank), -1
+            )
+            qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
+                fp8_dtype, cache.kv_cache, index_slots
+            )
+            # Sharding only changes index-K storage; all query heads and the
+            # main KV insert must be identical to the unsharded run.
+            for actual, expected in zip(
+                (qkv_sh, kvc_sh, qo_sh, iq_sh), (qkv_fp, kvc_fp, qo_fp, iq_fp)
+            ):
+                assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+            assert torch.equal(
+                idxc_sh.view(torch.uint8), idxc_fp[:, rank::tp_shard].view(torch.uint8)
+            )
+
 
 @pytest.mark.skipif(
     not _has_native_fp8(),
@@ -724,47 +765,6 @@ def test_sparse_fp8_index_rejects_foreign_flavour():
                 num_tokens, num_idx_heads * HEAD_DIM, dtype=foreign, device=device
             ),
         )
-
-    if block_size == 128:
-        from vllm.config import VllmConfig, set_current_vllm_config
-        from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
-
-        with set_current_vllm_config(VllmConfig()):
-            cache = MiniMaxM3IndexerCache(
-                HEAD_DIM,
-                prefix="index_cache",
-                indexer_kv_dtype="fp8",
-                tp_shard=tp_shard,
-            )
-        for rank in range(tp_shard):
-            packed = torch.zeros(
-                num_blocks,
-                1,
-                block_size,
-                HEAD_DIM // tp_shard,
-                dtype=torch.float8_e4m3fn,
-                device=device,
-            )
-            cache.bind_kv_cache(packed)
-            assert cache.kv_cache.data_ptr() == packed.data_ptr()
-            page = index_slot_mapping // block_size
-            offset = index_slot_mapping % block_size
-            index_slots = page * (block_size // tp_shard) + offset // tp_shard
-            index_slots.masked_fill_(
-                (index_slot_mapping < 0) | (offset % tp_shard != rank), -1
-            )
-            qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
-                torch.float8_e4m3fn, cache.kv_cache, index_slots
-            )
-            # Sharding only changes index-K storage; all query heads and the
-            # main KV insert must be identical to the unsharded run.
-            for actual, expected in zip(
-                (qkv_sh, kvc_sh, qo_sh, iq_sh), (qkv_fp, kvc_fp, qo_fp, iq_fp)
-            ):
-                assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
-            assert torch.equal(
-                idxc_sh.view(torch.uint8), idxc_fp[:, rank::tp_shard].view(torch.uint8)
-            )
 
 
 # ── Test 5: sparse mode with an NVFP4 main KV cache ──────────────────────────
