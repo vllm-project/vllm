@@ -13,13 +13,34 @@ from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     get_mixture_of_experts_model,
 )
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+
+def eplb_draft_model_name(model_config: ModelConfig) -> str:
+    """Return the EPLB step-log display name for a draft model."""
+    return f"{model_config.model} (draft)"
+
+
+def draft_model_supports_eplb(
+    speculative_config: Any | None,
+    draft_moe_model: MixtureOfExperts | None,
+) -> bool:
+    """Return whether a draft MoE model should register with EPLB."""
+    if draft_moe_model is None:
+        return False
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return False
+    if getattr(speculative_config, "method", None) == "dspark":
+        return dspark_draft_supports_eplb(speculative_config.draft_model_config)
+    return True
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:
@@ -28,10 +49,12 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(self: Any, *args, **kwargs) -> Any:
-            result = fn(self, *args, **kwargs)
             if kwargs.get("skip_eplb", False):
-                return result
+                # The router kernel records load before step() is reached.
+                with self.eplb.suppress():
+                    return fn(self, *args, **kwargs)
 
+            result = fn(self, *args, **kwargs)
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
             self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
             return result
@@ -70,6 +93,24 @@ class EPLBController:
         self.suppressed = False
         self._has_registered_models = False
 
+    @contextmanager
+    def suppress(self) -> Iterator[None]:
+        """Keep warmup forwards from stepping EPLB or recording expert load."""
+        should_record = (
+            self.state.should_record_tensor if self.state is not None else None
+        )
+        was_suppressed = self.suppressed
+        was_recording = should_record.clone() if should_record is not None else None
+        self.suppressed = True
+        if should_record is not None:
+            should_record.fill_(False)
+        try:
+            yield
+        finally:
+            if should_record is not None and was_recording is not None:
+                should_record.copy_(was_recording)
+            self.suppressed = was_suppressed
+
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
@@ -93,16 +134,26 @@ class EPLBController:
 
         draft_model = speculator.model
         draft_moe_model = get_mixture_of_experts_model(draft_model)
-        if draft_moe_model is None:
+        if not draft_model_supports_eplb(speculative_config, draft_moe_model):
             return False
+        assert draft_moe_model is not None
 
         assert not self.parallel_config.enable_elastic_ep, (
             "Elastic EP is not supported with draft model."
         )
         assert speculative_config is not None
-        assert speculative_config.draft_model_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        logger.info_once(
+            "EPLB is enabled for MoE part of drafter model %s.",
+            draft_model_config.model,
+        )
         assert self.state is not None
-        self.state.add_model(draft_moe_model, speculative_config.draft_model_config)
+        self.state.add_model(
+            draft_moe_model,
+            draft_model_config,
+            model_name=eplb_draft_model_name(draft_model_config),
+        )
         speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True

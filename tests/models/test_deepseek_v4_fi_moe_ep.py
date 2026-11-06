@@ -142,6 +142,7 @@ def _megakernel_moe(moe_backend: str, **overrides) -> SimpleNamespace:
         is_act_and_mul=True,
         activation=MoEActivation.SILU,
         has_hash_routing=False,
+        require_decomposed_backend=False,
         routing_method=RoutingMethodType.DeepseekV4,
         router_logits_dtype=torch.float32,
         hidden_dim=256,

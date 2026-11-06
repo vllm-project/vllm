@@ -38,7 +38,6 @@ def ray_init():
 
 class _AsyncLLMActor:
     def start(self, pg, bundle_indices=None, ray_runtime_env=None):
-        os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
         # Needed so collective_rpc can pickle _get_env_var over the
         # AsyncLLM -> EngineCore ZMQ boundary.
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
