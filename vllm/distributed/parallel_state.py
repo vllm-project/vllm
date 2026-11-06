@@ -1723,11 +1723,21 @@ def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None)
         and _aiter_registers_graph_buffers(tp)
         and not _aiter_registers_graph_buffers(dp)
     )
+    # The EP group only owns a custom all-reduce under EVENMOE_EP_CUSTOM_ALLREDUCE;
+    # its buffers must be registered for capture like the TP group's.
+    ep_capture = (
+        _EP.graph_capture(context)
+        if _EP is not None
+        and _EP.device_communicator is not None
+        and getattr(_EP.device_communicator, "ca_comm", None) is not None
+        else nullcontext()
+    )
     with (
         non_expandable_allocations() if non_expandable else nullcontext(),
         tp.graph_capture(context),
         pp.graph_capture(context),
         dp.graph_capture(context),
+        ep_capture,
     ):
         yield context
 

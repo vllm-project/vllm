@@ -91,6 +91,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsMultiModal,
@@ -536,6 +537,36 @@ class MiniMaxM3MoE(nn.Module):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.n_shared_experts = getattr(config, "n_shared_experts", None)
 
+        # EPLB bookkeeping; the model exposes it through ``MixtureOfExperts``.
+        # Redundant replicas live at the end of the physical expert range and
+        # start out as copies of the first logical experts, matching EplbState's
+        # trivial initial placement.
+        parallel_config = get_current_vllm_config().parallel_config
+        ep_group = get_ep_group()
+        self.ep_size = ep_group.world_size
+        self.ep_rank = ep_group.rank_in_group
+        self.enable_eplb = parallel_config.enable_eplb
+        self.n_routed_experts = config.num_local_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = (
+            (parallel_config.eplb_config.num_redundant_experts or 0)
+            if self.enable_eplb
+            else 0
+        )
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        if self.n_physical_experts % self.ep_size != 0:
+            raise ValueError(
+                f"MiniMax M3 needs num_physical_experts={self.n_physical_experts} "
+                f"(logical {self.n_logical_experts} + redundant "
+                f"{self.n_redundant_experts}) divisible by the EP size "
+                f"{self.ep_size}. Adjust num_redundant_experts."
+            )
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
         # Sigmoid routing uses a per-expert score-correction bias for selection.
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
         if self.use_routing_bias:
@@ -578,6 +609,8 @@ class MiniMaxM3MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
@@ -632,19 +665,12 @@ class MiniMaxM3MoE(nn.Module):
             # Only describes the weights: a fused layer allocates its own.
             with torch.device("meta"):
                 shared_experts = replicated_shared_experts()
-        ep_group = get_ep_group()
-        num_experts = config.num_local_experts
-        if num_experts % ep_group.world_size != 0:
-            raise ValueError(
-                f"MiniMax M3 MegaMoE needs num_experts={num_experts} divisible "
-                f"by the EP size {ep_group.world_size}."
-            )
-        num_local_experts = num_experts // ep_group.world_size
         self.experts = DeepGemmMegaMoEExperts(
             get_current_vllm_config(),
-            num_experts=num_experts,
-            num_local_experts=num_local_experts,
-            experts_start_idx=ep_group.rank_in_group * num_local_experts,
+            num_experts=self.n_physical_experts,
+            num_local_experts=self.n_local_physical_experts,
+            experts_start_idx=self.physical_expert_start,
+            num_logical_experts=self.n_logical_experts,
             top_k=self.top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -1678,8 +1704,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
+    def _eplb_redundant_experts(self) -> int:
+        for layer in self.layers:
+            if isinstance(layer, MiniMaxM3DecoderLayer) and layer.is_moe_layer:
+                return layer.block_sparse_moe.n_redundant_experts
+        return 0
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.use_mega_moe:
+            # Logical experts only: the MegaMoE loader writes each one into
+            # every local slot that holds a replica of it.
             return _mega_moe_expert_params_mapping(self.config.num_local_experts)
         # Checkpoint experts use w1=gate, w2=down, w3=up.
         return fused_moe_make_expert_params_mapping(
@@ -1688,6 +1722,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_local_experts,
+            num_redundant_experts=self._eplb_redundant_experts(),
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1805,7 +1840,81 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class MiniMaxM3MixtureOfExperts(MixtureOfExperts):
+    """EPLB bookkeeping shared by the text and VL entry points."""
+
+    moe_mlp_layers: list[MiniMaxM3MoE]
+
+    def extract_moe_parameters(self, example_moe: "MiniMaxM3MoE | None") -> None:
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts or 0
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            update_expert_map = getattr(moe.experts, "update_expert_map", None)
+            if update_expert_map is not None:
+                update_expert_map()
+
+
+def _collect_minimax_moe_layers(
+    moe_model: MiniMaxM3MixtureOfExperts, layers: Iterable[nn.Module]
+) -> None:
+    """Populate the ``MixtureOfExperts`` fields from the decoder layers."""
+    moe_model.num_expert_groups = 1
+    moe_model.moe_layers = []
+    moe_model.moe_mlp_layers = []
+    example_moe = None
+    for layer in layers:
+        if not isinstance(layer, MiniMaxM3DecoderLayer) or not layer.is_moe_layer:
+            continue
+        example_moe = layer.block_sparse_moe
+        moe_model.moe_mlp_layers.append(example_moe)
+        moe_model.moe_layers.append(example_moe.experts)
+    moe_model.num_moe_layers = len(moe_model.moe_layers)
+    moe_model.extract_moe_parameters(example_moe)
+
+
+def _adopt_moe_parameters(
+    moe_model: MiniMaxM3MixtureOfExperts, language_model: nn.Module
+) -> None:
+    """Expose the wrapped text model's EPLB layers on the VL entry point."""
+    moe_model.moe_layers = list(getattr(language_model, "moe_layers", []))
+    moe_model.moe_mlp_layers = list(getattr(language_model, "moe_mlp_layers", []))
+    moe_model.num_expert_groups = getattr(language_model, "num_expert_groups", 0)
+    moe_model.num_moe_layers = len(moe_model.moe_layers)
+    moe_model.extract_moe_parameters(
+        moe_model.moe_mlp_layers[0] if moe_model.moe_mlp_layers else None
+    )
+
+
+class MiniMaxM3SparseForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle3, MiniMaxM3MixtureOfExperts
+):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
     packed_modules_mapping = {
@@ -1835,6 +1944,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+        _collect_minimax_moe_layers(self, self.model.layers)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1874,6 +1984,7 @@ class MiniMaxM3SparseForConditionalGeneration(
     MiniMaxM3EncoderCudaGraphMixin,
     SupportsPP,
     SupportsEagle3,
+    MiniMaxM3MixtureOfExperts,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
@@ -1943,6 +2054,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
+        _adopt_moe_parameters(self, self.language_model)
 
     # Expose language model / lm_head for EAGLE3 spec decode.
     @property
