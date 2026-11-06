@@ -136,26 +136,6 @@ def test_inkling_mapper_maps_compressed_tensors_expert_params(
     assert mapped == [f"model.layers.2.mlp.experts.{projection}_{suffix}"]
 
 
-@pytest.mark.parametrize(("projection", "amax"), [("w13", 4.375), ("w2", 2960.0)])
-def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
-    experts = SimpleNamespace(
-        w13_input_scale=torch.nn.Parameter(torch.empty(3, 2)),
-        w2_input_scale=torch.nn.Parameter(torch.empty(3)),
-    )
-    layer = SimpleNamespace(experts=SimpleNamespace(routed_experts=experts))
-
-    loaded = moe.InklingMoE.load_expert_weight(
-        layer,
-        f"experts.{projection}_weight.input_amax",
-        torch.tensor([amax]),
-    )
-
-    scale = getattr(experts, f"{projection}_input_scale")
-    expected = torch.full_like(scale, amax / (448.0 * 6.0))
-    torch.testing.assert_close(scale, expected)
-    assert loaded == [f"experts.routed_experts.{projection}_input_scale"]
-
-
 @pytest.mark.parametrize("projection", ["w13", "w2"])
 @pytest.mark.parametrize("scale_kind", ["input", "weight"])
 def test_moe_loads_compressed_tensors_global_scale(

@@ -137,6 +137,8 @@ logger = init_logger(__name__)
 # Qwen3.8-Flash-Next checkpoints used ``FP8_BLOCK_SCALES`` for the same tensor
 # layout, so retain it as a checkpoint-compatibility alias.
 _BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
+# NVFP4 input_scale = activation amax / (FP8 E4M3 max * FP4 E2M1 max).
+NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
 
 # Single source of truth for the ModelOpt linear algos.
 #
@@ -1069,6 +1071,23 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
+        # A model whose checkpoint stores activation amax instead of input
+        # scales (Inkling) loads it into `w{13,2}_input_amax`; derive the
+        # scales here on every run. No kernel reads the amax (nor EPLB).
+        for prefix in ("w13", "w2"):
+            amax = getattr(layer, f"{prefix}_input_amax", None)
+            if amax is None:
+                continue
+            retire_parameter(layer, f"{prefix}_input_amax")
+            if is_weights_pre_processed():
+                continue
+            amax = amax.float().max()
+            if not (torch.isfinite(amax) and amax > 0):
+                raise ValueError(f"bad {prefix} input_amax: {amax.item()}")
+            getattr(layer, f"{prefix}_input_scale").fill_(
+                amax / NVFP4_INPUT_SCALE_DENOMINATOR
+            )
+
         if is_weights_pre_processed():
             if self.nvfp4_backend not in (
                 NvFp4MoeBackend.FLASHINFER_TRTLLM,
