@@ -4,9 +4,12 @@
 import weakref
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.exceptions import VLLMValidationError
+
+from ...models.utils import check_logprobs_close
 
 MODEL_NAME = "distilbert/distilgpt2"
 
@@ -131,3 +134,41 @@ def test_log_stats(vllm_runner):
 
         # disable_log_stats is False, every output should have metrics
         assert all(output.metrics is not None for output in outputs)
+
+
+def test_prompt_embeds_singleton_batch_truncation(hf_runner, vllm_runner):
+    """Singleton-batch embeddings must generate from the requested prefix/suffix."""
+    with hf_runner(MODEL_NAME, dtype="half") as hf_model:
+        token_ids = hf_model.tokenizer.encode(PROMPTS[0], return_tensors="pt")
+        with torch.no_grad():
+            embeds = hf_model.model.get_input_embeddings()(
+                token_ids.to(hf_model.model.device)
+            ).cpu()
+
+    with vllm_runner(
+        MODEL_NAME,
+        enable_prompt_embeds=True,
+        max_model_len=64,
+        gpu_memory_utilization=0.10,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+    ) as runner:
+        for side in ("left", "right"):
+            expected = embeds[0, -3:] if side == "left" else embeds[0, :3]
+            reference = runner.generate_greedy_logprobs([expected], 4, 5)
+            actual = runner.generate_greedy_logprobs(
+                [embeds],
+                4,
+                5,
+                tokenization_kwargs={
+                    "truncate_prompt_tokens": 3,
+                    "truncation_side": side,
+                },
+            )
+            check_logprobs_close(
+                outputs_0_lst=reference,
+                outputs_1_lst=actual,
+                name_0=f"pre-truncated-{side}",
+                name_1=f"singleton-batch-{side}",
+                always_check_logprobs=True,
+            )

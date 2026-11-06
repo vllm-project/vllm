@@ -597,9 +597,17 @@ class TokenizeParams:
                 prompt["prompt_token_ids"],
             )
         if "prompt_embeds" in prompt:
+            prompt_embeds = prompt["prompt_embeds"]  # type: ignore[typeddict-item]
+            if prompt_embeds.ndim == 3:
+                prompt_embeds = prompt_embeds.squeeze(0)
+            if prompt_embeds.ndim != 2:
+                raise VLLMValidationError(
+                    "prompt_embeds must be of shape (seq_len, hidden_size).",
+                    parameter="prompt_embeds",
+                )
             prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
                 tokenizer,
-                prompt["prompt_embeds"],  # type: ignore[typeddict-item]
+                prompt_embeds,
             )
         prompt_dict = cast(dict, prompt)
         for key in _PARALLEL_TO_PROMPT_TOKENS:
