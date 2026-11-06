@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.models.config import KimiK3ForConditionalGenerationConfig
+from vllm.models.kimi_k3.common import dsa_cache
 from vllm.models.kimi_k3.nvidia.gqa_draft import GQADraftKVCacheGrouping
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -101,8 +103,6 @@ def test_kimi_k31_accepts_ds_mla_cache_dtypes(cache_dtype):
 def test_kimi_k31_defaults_kv_cache_to_its_sparse_backend(
     monkeypatch, sm100, backend, cache_dtype, expected
 ):
-    from vllm.platforms import current_platform
-
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
         current_platform, "is_device_capability_family", lambda family: sm100
@@ -180,10 +180,6 @@ MLA_BYTES, INDEX_BYTES = 656, 132
 
 
 def _kda_state(tp: int, num_spec: int) -> MambaSpec:
-    from vllm.model_executor.layers.mamba.mamba_utils import (
-        MambaStateShapeCalculator,
-    )
-
     shapes = MambaStateShapeCalculator.kda_state_shape(
         tp, 96, 128, conv_kernel_size=4, num_spec=num_spec
     )
@@ -193,8 +189,6 @@ def _kda_state(tp: int, num_spec: int) -> MambaSpec:
 
 
 def _packed_block_size(monkeypatch, tp, state_bytes, speculative_config=None):
-    from vllm.models.kimi_k3.common import dsa_cache
-
     monkeypatch.setattr(dsa_cache, "kimi_k3_indexer_uses_fp4", lambda _: False)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=K31_PACKED_TEXT_CONFIG),

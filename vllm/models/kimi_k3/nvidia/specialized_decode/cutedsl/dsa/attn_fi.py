@@ -30,6 +30,11 @@ import math
 
 import torch
 
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
+    _kv_counters,
+)
+
 from ..common.policy import batch_table
 
 KERNELS = ("trtllm", "prims_ts")
@@ -86,10 +91,6 @@ FI_KERNEL = {
 def dsa_on_flashinfer(attention) -> bool:
     """Whether a KimiK3DSAAttention runs FLASHINFER_MLA_SPARSE (per-tensor FP8 query;
     per-tensor FP8 or nvfp4_ds_mla cache)."""
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseImpl,
-    )
-
     return isinstance(attention.mla_attn.mla_attn.impl, FlashInferMLASparseImpl)
 
 
@@ -310,8 +311,6 @@ class FlashInferCore:
 
     def trtllm(self, query, kv, stride_rows, slots, valid, latent, lse, block_size):
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
-
-        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import _kv_counters
 
         impl, width = self.impl, slots.shape[1]
         impl._prepare_mqa_kernel(self.layer, query.device)

@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.v1.attention.backends.mla import flashinfer_mla_sparse as fi
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     _DEFAULT_WORKSPACE_BUFFER_SIZE,
     FlashInferMLASparseTRTLLMBackend,
@@ -187,8 +188,6 @@ def test_prims_ts_shardq_reserves_the_rank_slice():
     """A prims_ts ShardQ step attends cdiv(T, tp) + 2 * max_num_seqs tokens
     with every head; the profile reservation covers that slice, not all T
     tokens with every head."""
-    from vllm.v1.attention.backends.mla import flashinfer_mla_sparse as fi
-
     impl = object.__new__(fi.FlashInferMLASparseImpl)
     impl.__dict__.update(
         use_prims_ts=True,
