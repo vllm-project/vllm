@@ -25,8 +25,6 @@ model:
   # the renderer reads "nightly" as 0.0.0 and would offer a `kimi-k31-cu129` tag
   # that doesn't exist.
   min_vllm_version: "0.34.0"
-  platform_builds:
-    zhenwu: "0.32.0"
   nightly_required: true
   # Day-0 images published with the release. NVIDIA's is a CUDA 13 (cu130) build
   # only; AMD's is ROCm 10.0.
@@ -109,14 +107,10 @@ variants:
     supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
-      810e:
+      ppu:
         docker_image: "egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103"
         docker_serve_command: "vllm serve"
-        install: { pip: false }
-      m890:
-        docker_image: "egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103"
-        docker_serve_command: "vllm serve"
-        install: { pip: false }
+        install: { pip: false, docker: { vllm_version: "0.32.0" } }
       # The CUDA 13.4 build of this model's image; the Rubin stack needs CUDA 13.4.
       # This `install` also replaces the profile's note, which names its own
       # nightly image as the only one that runs on Rubin.
@@ -290,6 +284,13 @@ decode_context_parallel:
     b300: [8]
     gb300: [8]
   match_tp: true
+
+notes:
+  - when: { hardware: [810e], strategies: [multi_node_tep] }
+    body: >-
+      On each host, export `NCCL_IB_HCA` with that host's RDMA HCAs (for example,
+      `fic2,vsolar`). Set `IFACE_NAME` to the host's socket interface for
+      `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`.
 
 strategy_overrides:
   multi_node_tep:
