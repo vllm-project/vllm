@@ -86,6 +86,7 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.shardq import ShardQMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -310,8 +311,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv: torch.Tensor,
         positions: torch.Tensor,
         output: torch.Tensor,
+        shardq: "ShardQMetadata | None" = None,
     ) -> None:
-        """Platform-specific sparse MLA forward; writes attention into ``output``."""
+        """Platform-specific sparse MLA forward; writes attention into ``output``.
+
+        ``shardq`` (ShardQ layers only) carries a token-sharded prefill step:
+        the decode prefix is still head-sharded, while the post-decode tokens
+        are laid out and attended per rank in ``shardq.attn_metadata``.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -350,6 +357,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         candidate_block_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -1135,7 +1143,48 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.forward_mqa(q, kv, positions, out)
+        shardq = self._shardq_from_context()
+        if shardq is None:
+            self.forward_mqa(q, kv, positions, out)
+        else:
+            self.forward_mqa(q, kv, positions, out, shardq=shardq)
+
+    def _shardq_from_context(self) -> ShardQMetadata | None:
+        """This step's ShardQ view, when the metadata builders produced one."""
+        if not getattr(self, "use_shardq", False):
+            return None
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return None
+        swa_metadata = attn_metadata.get(self.swa_cache_layer.prefix)
+        shardq = (
+            getattr(swa_metadata, "shardq", None)
+            if swa_metadata is not None
+            else None
+        )
+        compressed = None
+        if self.compressed_cache_prefix is not None:
+            compressed = attn_metadata.get(self.compressed_cache_prefix)
+            if shardq is None and compressed is not None:
+                shardq = getattr(compressed, "shardq", None)
+        if shardq is None:
+            return None
+        sharded: dict[str, AttentionMetadata] = {}
+        if compressed is not None and getattr(compressed, "shardq", None) is not None:
+            sharded[self.compressed_cache_prefix] = compressed.shardq.attn_metadata
+        if (
+            swa_metadata is not None
+            and getattr(swa_metadata, "shardq", None) is not None
+        ):
+            sharded[self.swa_cache_layer.prefix] = swa_metadata.shardq.attn_metadata
+        out = ShardQMetadata(
+            num_decode_tokens=shardq.num_decode_tokens,
+            num_tokens_per_rank=shardq.num_tokens_per_rank,
+            token_ids=shardq.token_ids,
+            rank_offsets=shardq.rank_offsets,
+        )
+        out.attn_metadata = sharded  # type: ignore[assignment]
+        return out
 
     def _fused_qnorm_rope_kv_insert(
         self,

@@ -915,6 +915,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.end_layer - 1,
                 config.sliding_window,
             )
+        elif vllm_config.attention_config.sparse_mla_shard_q:
+            # ShardQ's token-sharded prefill is validated on the replay split
+            # only; without bounded replay, fall back to the head-sharded path.
+            for layer in self.layers:
+                attn = getattr(layer, "attn", None)
+                if attn is not None and hasattr(attn, "set_shardq_enabled"):
+                    attn.set_shardq_enabled(False)
+            logger.info_once(
+                "ShardQ disabled for DeepSeek-V4.1: SWA bounded replay is off."
+            )
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local

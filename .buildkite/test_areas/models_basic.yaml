@@ -81,6 +81,7 @@ steps:
   - tests/models/test_deepseek_v41_replay_batch.py
   - tests/models/test_deepseek_v41_pcp.py
   - tests/models/test_deepseek_v41_pipeline.py
+  - tests/models/test_deepseek_v41_shardq.py
   - tests/models/deepseek_v41/nvidia/test_fused_markov.py
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
@@ -103,6 +104,7 @@ steps:
       models/test_deepseek_v41_replay_batch.py
       models/test_deepseek_v41_pcp.py
       models/test_deepseek_v41_pipeline.py
+      models/test_deepseek_v41_shardq.py
       models/deepseek_v41/nvidia/test_fused_markov.py
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_nvidia_shared_rope.py
@@ -130,6 +132,7 @@ steps:
       - tests/models/test_deepseek_v41_replay_start.py
       - tests/models/test_deepseek_v41_decoder_replay_layers.py
       - tests/models/test_deepseek_v41_replay_batch.py
+      - tests/models/test_deepseek_v41_shardq.py
       - tests/models/test_deepseek_v41_amd_replay_forward.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
@@ -155,6 +158,7 @@ steps:
         models/test_deepseek_v41_replay_start.py
         models/test_deepseek_v41_decoder_replay_layers.py
         models/test_deepseek_v41_replay_batch.py
+        models/test_deepseek_v41_shardq.py
         models/test_deepseek_v41_amd_replay_forward.py
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_v4_rocm_wo_a.py

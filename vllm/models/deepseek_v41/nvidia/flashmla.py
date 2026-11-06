@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -31,7 +32,13 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.attention.ops.shardq import (
+    ShardQMetadata,
+    allocate_shardq_buffers,
+    shard_q,
+    unshard_out,
+)
+from vllm.v1.kv_cache_interface import KVCacheSpec, is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -77,6 +84,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         register_dsv41_o_proj_warmup(self)
         self._prefill_num_heads = self._get_prefill_num_heads()
+        self._init_shardq()
 
     def _get_prefill_num_heads(self) -> int:
         return (
@@ -85,6 +93,91 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and self.n_local_heads in (8, 16, 32)
             else self.padded_heads
         )
+
+    def _shardq_attn_sink(self) -> torch.Tensor:
+        """The all-heads sink in rank-block order for the sharded kernel.
+
+        The layer's ``attn_sink`` holds this rank's heads packed at [0:H/tp]
+        with -inf padding.  ShardQ runs every head on each rank in rank-block
+        order, so gather the per-rank heads (once; the sink is constant).
+        """
+        sink = getattr(self, "_shardq_sink_cache", None)
+        if sink is None:
+            local = self.attn_sink[: self.n_local_heads].detach().contiguous()
+            sink = get_tp_group().all_gather(local, dim=0)
+            self._shardq_sink_cache = sink
+        return sink
+
+    def _init_shardq(self) -> None:
+        vllm_config = self.vllm_config
+        parallel_config = vllm_config.parallel_config
+        attention_config = vllm_config.attention_config
+        cudagraph_mode = (
+            vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+        )
+        config = vllm_config.model_config.hf_config
+        # Layers at and after the last KV source only run on the bounded-replay
+        # batch, whose candidate source/consumers keep batch-order rows.  ShardQ
+        # covers the layers that run on the main prefill batch.
+        kv_source_layers = getattr(config, "kv_source_layer_ids", None) or ()
+        replay_cut = (
+            max(kv_source_layers) if kv_source_layers else config.num_hidden_layers
+        )
+        self.use_shardq = (
+            current_platform.is_cuda()
+            and attention_config.sparse_mla_shard_q
+            and attention_config.hisparse_config is None
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+            and self.layer_id < replay_cut
+            and self.layer_id < config.num_hidden_layers
+            # Mega attention has its own output contract (quantized activation
+            # from the kernel), not the head-sharded Q/out this path exchanges.
+            and not self.accepts_unnormed_unroped_query
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+        )
+        if self.use_shardq:
+            allocate_shardq_buffers(
+                vllm_config,
+                self.n_local_heads,
+                self.head_dim,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                vllm_config.model_config.dtype,
+            )
+        self.set_shardq_enabled(self.use_shardq)
+
+    def set_shardq_enabled(self, enabled: bool) -> None:
+        """Enable/disable the token-sharded prefill path for this layer.
+
+        The model disables it when SWA bounded replay is off.  The candidate
+        source/consumers always stay head-sharded: their block buffer is
+        row-addressable, which ShardQ's compact row layout does not preserve.
+        The model hands every layer the shared candidate buffer, so the layer
+        id, not the buffer, decides the role.
+        """
+        if (
+            self.candidate_source_layer >= 0
+            and self.layer_id >= self.candidate_source_layer
+        ):
+            enabled = False
+        self.use_shardq = enabled
+        self.swa_cache_layer.use_shardq = enabled
+        if self.compressed_cache_prefix is not None:
+            cache = self._static_forward_context.get(self.compressed_cache_prefix)
+            if cache is not None:
+                cache.use_shardq = enabled
+        indexer = getattr(self, "indexer", None)
+        indexer_op = getattr(indexer, "indexer_op", None)
+        if indexer_op is not None:
+            indexer_op.k_cache.use_shardq = enabled
+            context_cache = self._static_forward_context.get(
+                indexer_op.k_cache.prefix
+            )
+            if context_cache is not None:
+                context_cache.use_shardq = enabled
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -105,6 +198,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         kv: torch.Tensor,
         positions: torch.Tensor,
         output: torch.Tensor,
+        shardq: ShardQMetadata | None = None,
     ) -> None:
         assert output.shape == q.shape, (
             f"output buffer shape {output.shape} must match q shape {q.shape}"
@@ -144,6 +238,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             return
 
         assert isinstance(attn_metadata, dict)
+        if shardq is not None:
+            self._forward_shardq(q, positions, output, shardq, attn_metadata)
+            return
         # Compressed-cache metadata lives on the kv-source layer's prefix;
         # consumers share that cache and its block table.
         flashmla_metadata = cast(
@@ -196,6 +293,80 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
             )
+
+    def _forward_shardq(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+        shardq: ShardQMetadata,
+        attn_metadata: dict,
+    ) -> None:
+        """Decode head-sharded in place, prefill token-sharded per TP rank."""
+        sharded = cast(dict, shardq.attn_metadata)
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata", sharded.get(self.swa_cache_layer.prefix)
+        )
+        assert swa_metadata is not None
+        flashmla_metadata = (
+            cast(DeepseekV4FlashMLAMetadata, sharded[self.compressed_cache_prefix])
+            if self.compressed_cache_prefix is not None
+            else None
+        )
+        num_decode_tokens = shardq.num_decode_tokens
+        swa_only = self.compress_ratio == 0
+        swa_kv_cache = self.swa_cache_layer.kv_cache
+        kv_cache = None if swa_only else self._compressed_kv_cache()
+
+        if num_decode_tokens > 0:
+            full_swa = cast(
+                "DeepseekSparseSWAMetadata",
+                attn_metadata[self.swa_cache_layer.prefix],
+            )
+            full_flashmla = (
+                cast(
+                    DeepseekV4FlashMLAMetadata,
+                    attn_metadata[self.compressed_cache_prefix],
+                )
+                if self.compressed_cache_prefix is not None
+                else None
+            )
+            self._forward_decode(
+                q=q[:num_decode_tokens],
+                kv_cache=kv_cache,
+                swa_metadata=full_swa,
+                attn_metadata=full_flashmla,
+                swa_only=swa_only,
+                output=output[:num_decode_tokens],
+            )
+
+        # Re-layout this rank's prefill tokens to [T_local, all heads, D]. The
+        # live heads are a contiguous block of each padded Q row, which the
+        # exchange kernel reads in place (no per-layer copy of Q).
+        q_prefill = q[:, : self.n_local_heads]
+        _, q_local = shard_q(q_prefill, shardq)
+        num_heads = q_local.shape[1]
+        out_local = torch.empty(
+            (q_local.shape[0], num_heads, q_local.shape[-1]),
+            dtype=output.dtype,
+            device=output.device,
+        )
+        self._forward_prefill(
+            q=q_local,
+            positions=positions,
+            compressed_k_cache=kv_cache,
+            swa_k_cache=swa_kv_cache,
+            output=out_local,
+            attn_metadata=flashmla_metadata,
+            swa_metadata=swa_metadata,
+            num_heads=num_heads,
+            attn_sink=self._shardq_attn_sink(),
+        )
+        # [T_local, world * H_local, D] -> [T, H_local, D] in batch order.
+        restored = unshard_out(out_local, shardq, None)
+        output[num_decode_tokens:, : self.n_local_heads].copy_(
+            restored[num_decode_tokens:]
+        )
 
     def _forward_decode(
         self,
@@ -287,12 +458,20 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         output: torch.Tensor,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
+        num_heads: int | None = None,
+        attn_sink: torch.Tensor | None = None,
     ) -> None:
         swa_only = self.compress_ratio == 0
+        num_heads = self._prefill_num_heads if num_heads is None else num_heads
+        attn_sink = self.attn_sink if attn_sink is None else attn_sink
 
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
+        # ShardQ's compact layout starts with the step's decode tokens, which
+        # the sharded metadata does not describe; the builder records where
+        # this rank's prefill rows start.
+        topk_start = getattr(swa_metadata, "topk_start", num_decode_tokens)
 
         # Use pre-computed prefill metadata.
         seq_lens = swa_metadata.prefill_seq_lens
@@ -310,7 +489,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         # Local indices filled by the index source; SWA-only layers pass
         # top_k=0 and never read them.
         assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[num_decode_tokens:]
+        topk_indices = self.topk_indices_buffer[topk_start:]
         topk_indices = topk_indices[:num_prefill_tokens]
         top_k = 0 if swa_only else topk_indices.shape[-1]
         chunk_plan = swa_metadata.get_prefill_chunk_plan(
@@ -382,11 +561,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 out=(combined_indices_out, combined_lens_out),
             )
             flash_mla_sparse_fwd(
-                q=q[query_start:query_end, : self._prefill_num_heads],
+                q=q[query_start:query_end, :num_heads],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=self.scale,
-                attn_sink=self.attn_sink[: self._prefill_num_heads],
+                attn_sink=attn_sink[:num_heads],
                 topk_length=combined_lens,
-                out=output[query_start:query_end, : self._prefill_num_heads],
+                out=output[query_start:query_end, :num_heads],
             )
