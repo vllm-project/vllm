@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight updates of the Inkling NVFP4 routed experts under direct reload."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.model import ModelConfig
 from vllm.distributed.weight_transfer.base import ParamMeta
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.model_loader.reload import (
@@ -33,9 +32,6 @@ _SHAPES = {
     "experts.w2_weight_scale_2": ((E,), torch.float32),
     "experts.w2_weight.input_amax": ((1,), torch.bfloat16),
 }
-_MODEL_CONFIG = SimpleNamespace(
-    word_embeddings_untied_by_checkpoint=False, quantization="modelopt_fp4"
-)
 
 
 class _Model(torch.nn.Module):
@@ -75,7 +71,9 @@ def _checkpoint(seed: int) -> dict[str, torch.Tensor]:
     return weights
 
 
-def _cold_start(weights, *, scales_from_loader: bool = False) -> _Model:
+def _cold_start(
+    weights, model_config: ModelConfig, *, scales_from_loader: bool = False
+) -> _Model:
     model = _Model()
     model.load_weights(weights.items())
     if scales_from_loader:
@@ -84,8 +82,8 @@ def _cold_start(weights, *, scales_from_loader: bool = False) -> _Model:
         for projection in ("w13", "w2"):
             amax = float(weights[f"experts.{projection}_weight.input_amax"].max())
             getattr(experts, f"{projection}_input_scale").fill_(amax / (448.0 * 6.0))
-            del experts._parameters[f"{projection}_input_amax"]
-    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cuda"))
+            delattr(experts, f"{projection}_input_amax")
+    process_weights_after_loading(model, model_config, torch.device("cuda"))
     return model
 
 
@@ -102,11 +100,10 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
     post-load processing rederives the input scales from it on every update,
     leaving the experts as the loader-derived scales did at cold start."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    model = _cold_start(_checkpoint(seed=0))
+    model_config = ModelConfig()
+    model = _cold_start(_checkpoint(seed=0), model_config)
     experts = model.mlp.experts.routed_experts
     ptrs = {n: t.data_ptr() for n, t in experts.state_dict(keep_vars=True).items()}
-    # EPLB views every expert weight as [E, -1]; the [1] amax must not be one.
-    assert all(w.shape[0] == E for w in experts.get_expert_weights())
 
     start_reload(model)
     metadata = [ParamMeta(n, dtype, shape) for n, (shape, dtype) in _SHAPES.items()]
@@ -119,13 +116,13 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
             start_reload(model)
         new = _checkpoint(seed)
         load_planned(model, plan, list(new.items()))
-        finish_reload(model, _MODEL_CONFIG, torch.device("cuda"))
+        finish_reload(model, model_config, torch.device("cuda"))
 
         actual = _state(model)
         assert ptrs == {
             n: t.data_ptr() for n, t in experts.state_dict(keep_vars=True).items()
         }
-        expected = _state(_cold_start(new, scales_from_loader=True))
+        expected = _state(_cold_start(new, model_config, scales_from_loader=True))
         for projection in ("w13", "w2"):
             amax = actual.pop(f"{projection}_input_amax")
             assert torch.equal(
@@ -146,17 +143,18 @@ def test_layerwise_reload_keeps_routed_experts(dist_init, monkeypatch) -> None:
     ``.data``); the amax load must not make it reprocess the layer from
     uninitialized weights."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    model_config = ModelConfig()
     weights = _checkpoint(seed=0)
     model = _Model()
     with torch.device("cuda"):
         record_metadata_for_reloading(model)  # as model init does
     model.load_weights(weights.items())
-    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cuda"))
+    process_weights_after_loading(model, model_config, torch.device("cuda"))
     before = _state(model)
 
     start_reload(model)
     model.load_weights(weights.items())
-    finish_reload(model, _MODEL_CONFIG, torch.device("cuda"))
+    finish_reload(model, model_config, torch.device("cuda"))
 
     after = _state(model)
     assert after.keys() == before.keys()
@@ -164,3 +162,13 @@ def test_layerwise_reload_keeps_routed_experts(dist_init, monkeypatch) -> None:
         assert torch.equal(tensor.view(torch.uint8), before[name].view(torch.uint8)), (
             name
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="NVFP4 MoE needs SM100"
+)
+def test_eplb_skips_input_amax(dist_init) -> None:
+    """EPLB views every expert weight as [E, -1]; the [1] amax is none."""
+    model = _cold_start(_checkpoint(seed=0), ModelConfig())
+    experts = model.mlp.experts.routed_experts
+    assert all(w.shape[0] == E for w in experts.get_expert_weights())
