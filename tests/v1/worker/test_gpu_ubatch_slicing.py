@@ -625,6 +625,7 @@ def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCaptur
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     capturer.dp_rank = 0
     capturer.tp_size = 1
+    capturer.restore_rows = capturer._restore_local_topk_ids
     capturer.device_buffer = torch.full(
         (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
     )
