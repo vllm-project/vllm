@@ -1169,7 +1169,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.attn_groups,
                         self.kv_cache_config,
                         pcp_manager=self.pcp_manager,
-                        has_lora=self.lora_config is not None,
                         use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                         lora_capture_hook=create_lora_capture_hook(
                             self.lora_config, self
@@ -2115,7 +2114,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
-                has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
             )
 
