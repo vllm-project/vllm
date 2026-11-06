@@ -66,7 +66,8 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
-The checkpoint declares `dflash_config.use_thresh_head_two_model=true` and
+The checkpoint's architecture is `DFlashAdaFlashDraftModel`, served by
+`AdaFlashQwen3ForCausalLM`: the DFlash drafter plus the length head, and it declares
 `dflash_config.thresh_head_direct_len=true`. vLLM loads the head with the draft
 backbone and evaluates it on the complete block of normalized hidden states,
 including the anchor. Its predicted ratio is multiplied by the block size,

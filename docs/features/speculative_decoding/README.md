@@ -10,6 +10,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
+- [AdaFlash](https://huggingface.co/AdaFlash/Qwen3-8B-AdaFlash)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)

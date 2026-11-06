@@ -88,8 +88,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         self.sample_from_anchor = False
         self.draft_token_lengths: torch.Tensor | None = None
-        if self.enable_adaptive_verification and dflash_config.get(
-            "use_thresh_head_two_model", False
+        architectures = (
+            getattr(self.draft_model_config.hf_config, "architectures", None) or []
+        )
+        if (
+            self.enable_adaptive_verification
+            and "DFlashAdaFlashDraftModel" in architectures
         ):
             if not dflash_config.get("thresh_head_direct_len", False):
                 raise ValueError("AdaFlash requires thresh_head_direct_len=true")
@@ -374,8 +378,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode,
         )
         if self.draft_token_lengths is not None:
-            head = self.model.model.thresh_head_two_model
-            assert head is not None
+            head = self.model.thresh_head_two_model
             block_hidden = last_hidden_states[: num_reqs * self.num_query_per_req].view(
                 num_reqs, self.num_query_per_req, -1
             )
