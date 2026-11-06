@@ -63,6 +63,7 @@ repos:
         -c, requirements/cuda.txt,
         -c, requirements/test/cuda.txt,
         -o, requirements/test/kv_connectors_cuda.txt,
+        --override, requirements/test/kv_connectors_cuda.overrides,
         --generate-hashes,
         # nixl pulls both CUDA variants; the CUDA 13 image keeps only nixl-cu13.
         --no-emit-package, nixl-cu12,
@@ -73,7 +74,7 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt)$
+      files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt|overrides)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
