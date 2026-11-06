@@ -3091,8 +3091,8 @@ class NixlBaseConnectorWorker:
 
         The transfer only covers ``covered_sub_blocks`` remote-sized
         sub-blocks of each request's local attention blocks; the rest was
-        clipped, either by remote-block pairing (block-size ratio) or by the
-        hetero-ppl front trim in ``_apply_prefix_caching``. Those blocks were
+        clipped when pairing local and remote blocks from the last token
+        (``_pair_blocks_by_last_token``). Those blocks were
         excluded from the scheduler's alloc-time KV zeroing (which would race
         the RDMA write), so everything outside the covered range is zeroed here.
         Stale bytes would otherwise surface as garbage or NaNs once decode
@@ -3317,11 +3317,8 @@ class NixlBaseConnectorWorker:
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
-            # transfer clipped. The latter happens either at remote-block
-            # granularity (block_size_ratio > 1) or at kernel-block
-            # granularity, when equal kernel pages meet differing logical
-            # block sizes and _apply_prefix_caching front-trims to the
-            # minimum count (hybrid heterogeneous TP).
+            # transfer clipped. _pair_blocks_by_last_token records the covered
+            # sub-block range per request in meta.covered_sub_blocks.
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
@@ -3629,6 +3626,10 @@ class NixlBaseConnectorWorker:
     ) -> tuple[BlockIds, BlockIds]:
         """Map attention-group block ids to remote-block granularity.
 
+        Positional pairing, only valid when both lists start at the same
+        token (push, and DCP pulls, which require equal logical block sizes).
+        Other pulls pair from the last token in ``_pair_blocks_by_last_token``.
+
         Each local attention block is split into ``block_size_ratio``
         sub-blocks paired 1:1 with remote blocks. Sub-blocks beyond the
         remote list — the untransferred tail of the last local block — are
@@ -3659,6 +3660,52 @@ class NixlBaseConnectorWorker:
             # Full prefix cache hit is indicated with an empty list.
             return [], mapped_remote
         return mapped_local, mapped_remote
+
+    def _pair_blocks_by_last_token(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        num_tokens: int,
+        block_size_ratio: int,
+        remote_physical_per_logical: int,
+    ) -> tuple[BlockIds, BlockIds, list[range]]:
+        """Pair kernel blocks holding the same tokens across P/D block sizes.
+
+        Local blocks are split into remote-sized sub-blocks. Each side
+        allocates whole logical blocks up to the last of ``num_tokens``, while
+        a local prefix hit or sliding-window clipping can start the lists at
+        different tokens. So drop each side's sub-blocks past that last token
+        and pair the lists from their ends. SSM groups pass through unpaired.
+
+        Returns the paired lists and, per group, the range of local sub-blocks
+        the read covers.
+        """
+        local_per_logical = (
+            self._physical_blocks_per_logical_kv_block * block_size_ratio
+        )
+        paired_local: list[list[int]] = []
+        paired_remote: list[list[int]] = []
+        covered: list[range] = []
+        for g, (local, remote) in enumerate(
+            zip(local_block_ids, remote_block_ids, strict=True)
+        ):
+            if _is_ssm_spec(self._group_spec_types[g]):
+                paired_local.append(list(local))
+                paired_remote.append(list(remote))
+                covered.append(range(len(local)))
+                continue
+            spec = self.kv_cache_config.transfer_groups[g].kv_cache_spec
+            num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_logical)
+            local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
+            local_padding = -num_sub_blocks % local_per_logical
+            remote_padding = -num_sub_blocks % remote_physical_per_logical
+            local = local[: len(local) - local_padding]
+            remote = list(remote)[: len(remote) - remote_padding]
+            num_pairs = min(len(local), len(remote))
+            paired_local.append(local[len(local) - num_pairs :])
+            paired_remote.append(remote[len(remote) - num_pairs :])
+            covered.append(range(len(local) - num_pairs, len(local)))
+        return paired_local, paired_remote, covered
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds, ratio: int) -> BlockIds:
         """Convert block ids to kernel physical block ids.
