@@ -33,10 +33,9 @@ def unpack_tensor(
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a packed uint8 tensor into a list of named tensors.
 
-    The returned tensors are **views** of ``packed_tensor``, except that an
-    entry whose byte offset is not a multiple of its dtype's itemsize (entries
-    are packed without padding, so an odd-sized entry shifts every later one)
-    is copied, since a misaligned byte slice cannot be viewed as a wider dtype.
+    The returned tensors are **views** of ``packed_tensor``, except entries
+    whose byte offset is not a multiple of their dtype's itemsize, which are
+    copied.
     If ``packed_tensor`` lives in storage that may be reused — e.g. a
     reused CUDA IPC buffer — callers must clone the results before the
     underlying storage is overwritten.
