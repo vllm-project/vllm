@@ -258,7 +258,7 @@ def test_basic_lifecycle():
         0
     ].req_to_blocks[request_id]
     for block in blocks:
-        assert block._block_hash is None
+        assert block.block_hash is None
 
     # (1b): forward()
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
@@ -302,7 +302,7 @@ def test_basic_lifecycle():
     ].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
     # Confirm the rest of the prompt is scheduled in this step.
@@ -490,13 +490,13 @@ def test_no_spurious_prefix_caching():
     num_hashed_blocks = 0
     for block in local_blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks > 0
 
     # Remote blocks should not be cached.
     for block in remote_blocks:
         assert block.ref_cnt == 1
-        assert block._block_hash is None
+        assert block.block_hash is None
 
 
 def test_full_block_prompt():
