@@ -585,7 +585,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
             raise ValueError(f"Unsupported expert shard id: {shard_id}")
         rows = dst.shape[0] // (1 if shard_id == "w2" else 2)
         if is_scale:
-            src = self._pack_scale(src, rows, dst.shape[1] * 4)
+            # Byte views of both sides, (rows, K / 4, 4): a load plan replays a copy
+            # between them, not one into an int32 reinterpretation of the scales.
+            src = self._pack_scale(src, rows, dst.shape[1] * 4).unflatten(-1, (-1, 4))
+            dst = dst.unsqueeze(-1).view(torch.uint8)
         else:
             src = src.view(dst.dtype)
             if tuple(src.shape) != (rows, dst.shape[1]):
@@ -598,21 +601,18 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     @staticmethod
     def _pack_scale(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
-        """Expand block scales to the kernel granularity, four per int32 along K."""
+        """Block scales as bytes at the kernel granularity, ``(rows, cols)``."""
         sf = sf.view(torch.uint8)
         if rows % sf.shape[0] or cols % sf.shape[1]:
             raise ValueError(
                 f"Scale shape {tuple(sf.shape)} does not tile ({rows}, {cols})"
             )
-        # Views only, unless the scales are coarser than the kernel's or the bytes
-        # cannot be reinterpreted as int32 (non-contiguous or misaligned).
+        # A view unless the scales are coarser than the kernel's.
         if sf.shape[0] != rows:
             sf = sf.repeat_interleave(rows // sf.shape[0], 0)
         if sf.shape[1] != cols:
             sf = sf.repeat_interleave(cols // sf.shape[1], 1)
-        if not sf.is_contiguous() or sf.storage_offset() % 4:
-            sf = sf.clone(memory_format=torch.contiguous_format)
-        return sf.view(torch.int32)
+        return sf
 
     @staticmethod
     def _kernel_layout_shard(
@@ -621,20 +621,24 @@ class DeepGemmMegaMoEExperts(nn.Module):
         shard_id: str,
         is_scale: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pair a checkpoint shard with its destination in the MegaMoE layout."""
-        k = src.shape[-1]
+        """Pair a checkpoint shard with its destination in the MegaMoE layout.
+
+        Only dim 0 (rows) is rearranged; the trailing dims are carried as is.
+        """
+        k = src.shape[1:]
         if shard_id == "w2":
             if not is_scale:
                 return dst, src
             # UTCCP: scale row 128*b + 32*j + i -> 128*b + 4*i + j.
-            return dst.view(-1, 32, 4, k).transpose(1, 2), src.reshape(-1, 4, 32, k)
+            return dst.view(-1, 32, 4, *k).transpose(1, 2), src.reshape(-1, 4, 32, *k)
         half = 0 if shard_id == "w1" else 1
         if not is_scale:
             # Interleave gate/up by 8 rows: r -> (r // 8) * 16 + 8 * half + r % 8.
-            return dst.view(-1, 2, 8, k)[:, half], src.reshape(-1, 8, k)
+            return dst.view(-1, 2, 8, *k)[:, half], src.reshape(-1, 8, *k)
         # Interleave + UTCCP: 64b + 16j + 8q + m -> 128b + 64q + 32half + 4m + j.
-        dst = dst.view(-1, 2, 2, 8, 4, k)[:, :, half].permute(0, 3, 1, 2, 4)
-        return dst, src.reshape(-1, 4, 2, 8, k)
+        dst = dst.view(-1, 2, 2, 8, 4, *k)[:, :, half]
+        dst = dst.permute(0, 3, 1, 2, *range(4, dst.dim()))
+        return dst, src.reshape(-1, 4, 2, 8, *k)
 
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
