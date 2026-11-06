@@ -29,6 +29,11 @@ def init_entrypoints_middleware(
         allow_headers=args.allowed_headers,
     )
 
+    if envs.VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE:
+        from .unicode_filter import UnicodeFilterMiddleware
+
+        app.add_middleware(UnicodeFilterMiddleware)
+
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
         from .authenticate import AuthenticationMiddleware
