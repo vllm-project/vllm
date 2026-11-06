@@ -211,9 +211,7 @@ class Fp8Config(QuantizationConfig):
         # Regex so these run before the model's `orig_to_new_stacked` rules.
         orig_to_new_regex = {
             re.compile(r"\.([qkv])_proj\.output_scale$"): r".attn.\1_scale",
-            re.compile(r"\.self_attn\.prob_output_scale$"): (
-                ".self_attn.attn.prob_scale"
-            ),
+            re.compile(r"\.prob_output_scale$"): ".attn.prob_scale",
         }
         cache_scale_mapper = WeightsMapper(orig_to_new_regex=orig_to_new_regex)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()

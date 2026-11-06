@@ -5,9 +5,12 @@
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     resolve_mm_encoder_only_lm_prefixes,
@@ -120,6 +123,7 @@ def test_resolve_returns_module_prefixes_without_hf_hardcode():
     """No global Qwen HF nest list — just vLLM module prefixes."""
     prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
     assert prefixes == ("language_model.",)
+    assert resolve_mm_encoder_only_lm_prefixes(["model."]) == ("model.",)
 
 
 def test_resolve_empty_language_model_names_fail_closed():
@@ -255,3 +259,17 @@ def test_dropped_key_under_lm_prefix_keeps_shard_filtering():
             weights_mapper=mapper,
         )
         assert kept == files[1:]
+
+
+def test_default_loader_passes_the_model_mapper_to_the_shard_filter():
+    """The filter can only classify HF keys if it receives the model's mapper."""
+    loader = DefaultModelLoader(LoadConfig())
+    mapper = _molmo_mapper()
+    model = SimpleNamespace(hf_to_vllm_mapper=mapper, _language_model_names=["model"])
+    mm_config = SimpleNamespace(mm_encoder_only=True)
+    model_config = SimpleNamespace(multimodal_config=mm_config)
+
+    loader._init_mm_encoder_only_weight_filter(model, model_config)
+
+    assert loader._encoder_only_lm_prefixes == ("model.",)
+    assert loader._encoder_only_weights_mapper is mapper
