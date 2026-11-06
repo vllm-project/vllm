@@ -875,6 +875,9 @@ steps:
   - tools/use_existing_torch.py
   - tests/tools/test_dependency_pins.py
   - docs/mkdocs/gen_files/generate_argparse.py
+  - .buildkite/scripts/check-hybrid-test-deps.py
+  - tools/build_hybrid_test_wheels.sh
+  - requirements/build/hybrid-test-deps.txt
   - requirements/test/cuda.txt
   - docker/Dockerfile.rocm
   - docker/Dockerfile.rocm_gfx1250

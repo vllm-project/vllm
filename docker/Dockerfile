@@ -95,7 +95,7 @@ ARG INSTALL_KV_CONNECTORS=false
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM ${BUILD_BASE_IMAGE} AS base
+FROM ${BUILD_BASE_IMAGE} AS base-toolchain
 
 ARG TARGETPLATFORM
 ARG INSTALL_RUBIN_PRERELEASE
@@ -190,6 +190,21 @@ RUN gcc --version
 # See: https://docs.nvidia.com/deploy/cuda-compatibility/
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
+# hybrid-test-wheels also starts from base-toolchain, so the requirements
+# installed below do not invalidate it. The ARGs repeat base-toolchain's so the
+# steps below see the same build args as before the split.
+FROM base-toolchain AS base
+ARG TARGETPLATFORM
+ARG INSTALL_RUBIN_PRERELEASE
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
+
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
 # These are the expensive layers that we want to cache
@@ -211,7 +226,7 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
@@ -274,6 +289,47 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
+
+#################### HYBRID TEST WHEELS IMAGE ####################
+# mamba-ssm and causal-conv1d for the hybrid-model tests, built from pinned
+# commits. Its inputs are the torch version (a content-checksummed COPY) and
+# the files below, so it rebuilds only when one of those changes. No arm64 or
+# Rubin job runs these tests, so those builds leave /wheels empty. A failed build
+# fails the image, except on torch nightly: its torch changes every run and its
+# builds have no layer cache, so it warns, and only the hybrid jobs fail (in
+# check-hybrid-test-deps.py) instead of the whole nightly run.
+FROM base-toolchain AS hybrid-test-wheels
+ARG TARGETPLATFORM
+ARG INSTALL_RUBIN_PRERELEASE
+ARG CUDA_VERSION
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PYTORCH_NIGHTLY
+ARG max_jobs=2
+WORKDIR /workspace
+COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY requirements/build/hybrid-test-deps.txt requirements/build/hybrid-test-deps.txt
+COPY tools/build_hybrid_test_wheels.sh tools/build_hybrid_test_wheels.sh
+RUN --mount=type=cache,target=/opt/uv/cache \
+    mkdir -p /wheels \
+    && if [ "$TARGETPLATFORM" = "linux/arm64" ] || [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then exit 0; fi \
+    && CUDA_INDEX=cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && TORCH_REQUIREMENT=$(grep '^torch==' torch_lib_versions.txt) \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        uv pip install --python /opt/venv/bin/python3 --pre "${TORCH_REQUIREMENT}" \
+            --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/${CUDA_INDEX}; \
+    else \
+        uv pip install --python /opt/venv/bin/python3 "${TORCH_REQUIREMENT}" \
+            --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/${CUDA_INDEX} \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-first-match; \
+    fi \
+    && uv pip install --python /opt/venv/bin/python3 --require-hashes --reinstall \
+        -r requirements/build/hybrid-test-deps.txt \
+    && { MAX_JOBS=${max_jobs} bash tools/build_hybrid_test_wheels.sh /wheels \
+         || { [ "${PYTORCH_NIGHTLY}" = "1" ] \
+              && echo "WARNING: mamba-ssm/causal-conv1d failed to build against torch nightly" \
+              && rm -rf /wheels/*; }; }
+#################### HYBRID TEST WHEELS IMAGE ####################
 
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
@@ -905,7 +961,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
@@ -1101,6 +1157,14 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# Prebuilt hybrid-model test extensions. --no-deps --offline: their dependencies
+# come only from the hash-pinned test requirements installed above.
+RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-test-wheels \
+    if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
+        uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
+        && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
+    fi
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
@@ -1200,7 +1264,8 @@ ENV UV_HTTP_TIMEOUT=500
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
+    --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/vllm-requirements/kv_connectors_cu12.txt,ro \
     set -eu; \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
@@ -1246,7 +1311,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install Rubin prerelease dependencies when explicitly requested. Keep this
 # after the public vLLM and KV connector dependency pins installed above.
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \
