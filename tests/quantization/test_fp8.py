@@ -66,7 +66,7 @@ def test_humming_fp8_matches_checkpoint_forward(
     from transformers import LlamaConfig
 
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.quantization.utils.humming import (
+    from vllm.model_executor.layers.fused_moe.oracle.humming import (
         convert_to_humming_moe_kernel_format,
     )
 
