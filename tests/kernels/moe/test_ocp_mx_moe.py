@@ -1719,6 +1719,7 @@ class RocmBackendConfig(TypedDict):
     requires_gfx950: bool
     requires_gfx1250: NotRequired[bool]
     requires_gfx942: NotRequired[bool]
+    supports_gfx1250: NotRequired[bool]
     interleaved_layout: NotRequired[bool]
     act_type: NotRequired[str]
 
@@ -1770,6 +1771,7 @@ ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
         "percent": 0.8,
         "requires_aiter": True,
         "requires_gfx950": True,
+        "supports_gfx1250": True,
     },
     "AITER_TRITON_MXFP4_MXFP4": {
         "activation": "SILU",
@@ -1817,7 +1819,9 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip("triton_kernels required for quantization")
     if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
         pytest.skip(f"Backend {backend_name} requires AITER")
-    if config["requires_gfx950"] and not ROCM_GFX950:
+    if config["requires_gfx950"] and not (
+        ROCM_GFX950 or (config.get("supports_gfx1250") and ROCM_GFX1250)
+    ):
         pytest.skip(f"Backend {backend_name} requires GFX950")
     if config.get("requires_gfx1250") and not ROCM_GFX1250:
         pytest.skip(f"Backend {backend_name} requires GFX1250")
