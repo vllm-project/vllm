@@ -99,6 +99,7 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'not cpu_test' v1/core
+    - pytest -v -s v1/core/test_prefix_caching.py -k test_shared_checkpoint_
   mirror:
     amd:
       automatic_shard: true

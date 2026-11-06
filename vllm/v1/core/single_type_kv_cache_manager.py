@@ -145,7 +145,8 @@ class SingleTypeKVCacheManager(ABC):
         # determining the attention groups.
         self.use_eagle = False
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
-        # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
+        # by ``KVCacheManager``. Full attention also indexes interior hashes
+        # when enabled, so the Mamba manager can discover the shared junction.
         self.shared_prefix_checkpoint = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
@@ -850,6 +851,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
             request,
             num_tokens,
@@ -860,6 +862,46 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         if self.block_size == hash_block_size:
             return
         self._cache_partial_tail_block(request, num_tokens)
+        if self.shared_prefix_checkpoint:
+            self._cache_shared_prefix_hashes(request, num_tokens, num_cached_blocks)
+
+    def _cache_shared_prefix_hashes(
+        self, request: Request, num_tokens: int, num_cached_blocks: int
+    ) -> None:
+        """Index computed attention prefixes so a sibling can learn a junction.
+
+        These are aliases of existing attention blocks, not Mamba snapshots.
+        The coordinator still requires a real Mamba state before reusing them.
+        BlockPool owns alias eviction and copy-on-write lifetime management.
+        """
+        if request.num_computed_tokens >= request.num_prompt_tokens:
+            return
+        hash_size = self.block_pool.hash_block_size
+        end = min(
+            num_tokens, request.num_prompt_tokens, len(request.block_hashes) * hash_size
+        )
+        blocks = self.req_to_blocks[request.request_id]
+        # Promotion removes the old partial aliases. Re-index the newly full
+        # blocks and the current partial block, but never scan completed blocks
+        # again during decode. Descending order keeps the longest primary key:
+        # ascending insertion would promote it and discard earlier aliases.
+        for boundary in range(
+            end // hash_size * hash_size,
+            num_cached_blocks * self.block_size,
+            -hash_size,
+        ):
+            if boundary % self.block_size == 0:
+                continue
+            block_idx = boundary // self.block_size
+            if block_idx >= len(blocks):
+                continue
+            self.block_pool.cache_partial_block(
+                request=request,
+                block=blocks[block_idx],
+                num_tokens=boundary,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+            )
 
     def _cache_partial_tail_block(
         self,
@@ -868,9 +910,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     ) -> None:
         """Cache the prompt tail when it ends inside a cache block.
 
-        Only the final prompt hash boundary is registered as a partial
-        prefix-cache entry; intermediate hash boundaries inside the same cache
-        block are intentionally skipped.
+        This path registers only the final prompt hash boundary. The opt-in
+        shared-checkpoint path separately indexes interior attention prefixes.
         """
         hash_block_size = self.block_pool.hash_block_size
         # A resend matches at most `prompt_len - 1` tokens, but EAGLE lookups
@@ -2037,8 +2078,23 @@ class MambaManager(SingleTypeKVCacheManager):
         retention_interval: int | None,
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
+        is_shared_junction = (
+            self.shared_prefix_checkpoint
+            and num_tokens == request.shared_prefix_boundary
+            and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
+        )
         # Re-key the reserved block at its exported checkpoint boundary.
         checkpoint = self._checkpoints.get(request.request_id)
+        if checkpoint is not None and is_shared_junction:
+            # The internal export is before the chunk end. At a learned
+            # junction we need the running state at the end instead. Remove
+            # the reserved block's provisional full-block key, then register
+            # and preserve the running state through the ordinary CoW path.
+            blocks = self.req_to_blocks[request.request_id]
+            assert 0 <= checkpoint[1] < len(blocks)
+            checkpoint_block = blocks[checkpoint[1]]
+            self.block_pool._maybe_evict_cached_block(checkpoint_block)
+            checkpoint = None
         if checkpoint is not None:
             checkpoint_position, checkpoint_idx = checkpoint
             blocks = self.req_to_blocks[request.request_id]
@@ -2100,11 +2156,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # to the prompt chunk being computed -- during decode the target is the
         # running state block, mutated in place, which equals what its key
         # promises only after that step's forward.
-        if num_tokens != latest_prompt_hash_boundary and not (
-            self.shared_prefix_checkpoint
-            and num_tokens == request.shared_prefix_boundary
-            and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
-        ):
+        if num_tokens != latest_prompt_hash_boundary and not is_shared_junction:
             return None
 
         block_idx = cdiv(num_tokens, self.block_size) - 1

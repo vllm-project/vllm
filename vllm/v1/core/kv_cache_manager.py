@@ -15,7 +15,7 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -187,13 +187,22 @@ class KVCacheManager:
         # manager ``num_computed - num_reprefillable`` rather than the chunk end.
         self.mamba_shared_prefix_checkpoint = (
             enable_mamba_shared_prefix_checkpoint
-            and bool(self.coordinator.eagle_group_ids)
+            and (
+                bool(self.coordinator.eagle_group_ids)
+                # DSpark/DFlash have one-token prefill lookahead but do not
+                # tag EAGLE-drop groups: their draft KV needs no next-token
+                # proof. They can still save the exact shared Mamba state.
+                or num_prefill_lookahead == 1
+            )
             and self.coordinator.enable_partial_hash_hits
             and self.coordinator.num_reprefillable_tokens == 0
         )
         if self.mamba_shared_prefix_checkpoint:
             for manager in self.coordinator.single_type_managers:
-                if isinstance(manager, MambaManager):
+                if (
+                    isinstance(manager, MambaManager)
+                    or type(manager) is FullAttentionManager
+                ):
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -345,6 +354,30 @@ class KVCacheManager:
         shared_prefix_boundary = (
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
+        if shared_prefix_boundary and self.mamba_shared_prefix_checkpoint:
+            # The target can match farther than the EAGLE draft's safe replay
+            # boundary. A Mamba state beyond that boundary cannot be reused by
+            # their intersection, so learn only a junction all attention groups
+            # can reach. This does not advance the current request's cache hit.
+            _, per_group_hits = self.coordinator.find_longest_cache_hit_per_group(
+                request.block_hashes, max_cache_hit_length
+            )
+            attention_boundary = min(
+                (
+                    hit
+                    for hit, group in zip(
+                        per_group_hits,
+                        self.kv_cache_config.kv_cache_groups,
+                        strict=True,
+                    )
+                    if group.kv_cache_spec.prefix_cacheable
+                    and not isinstance(group.kv_cache_spec, MambaSpec)
+                ),
+                default=shared_prefix_boundary,
+            )
+            shared_prefix_boundary = min(shared_prefix_boundary, attention_boundary)
+            if shared_prefix_boundary <= num_new_computed_tokens:
+                shared_prefix_boundary = 0
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
