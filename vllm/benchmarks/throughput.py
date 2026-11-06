@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     BenchmarkDataset,
+    RandomDataset,
     SampleRequest,
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
@@ -523,6 +524,14 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+# --random-* length -> (legacy option it overrides, value when neither is set).
+_RANDOM_LEN_FALLBACKS = {
+    "random_input_len": ("input_len", RandomDataset.DEFAULT_INPUT_LEN),
+    "random_output_len": ("output_len", RandomDataset.DEFAULT_OUTPUT_LEN),
+    "random_prefix_len": ("prefix_len", RandomDataset.DEFAULT_PREFIX_LEN),
+}
+
+
 def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Translate throughput args into a namespace the shared get_samples reads.
 
@@ -539,16 +548,16 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     """
     d = vars(args).copy()
-    # random_*: prefer --random-* over legacy --input/output/prefix-len.
-    # Callers without the legacy flags (e.g. bench mm-processor) omit them, so
-    # read them optionally. Identity checks, not truthiness: an explicit 0
-    # (the default of --random-prefix-len) must not fall through to them.
-    input_len = getattr(args, "input_len", None)
+    # random_*: prefer --random-* over legacy --input/output/prefix-len, then
+    # the RandomDataset defaults. Callers without the legacy flags (e.g. bench
+    # mm-processor) omit them, so read them optionally. Identity checks, not
+    # truthiness: an explicit 0 must not fall through to them.
+    for name, (legacy, default) in _RANDOM_LEN_FALLBACKS.items():
+        value = getattr(args, name, None)
+        if value is None:
+            value = getattr(args, legacy, None)
+        d[name] = default if value is None else value
     output_len = getattr(args, "output_len", None)
-    prefix_len = getattr(args, "prefix_len", None)
-    d["random_input_len"] = getattr(args, "random_input_len", input_len)
-    d["random_output_len"] = getattr(args, "random_output_len", output_len)
-    d["random_prefix_len"] = getattr(args, "random_prefix_len", prefix_len)
     # --output-len maps to the per-dataset output-len entry points get_samples
     # reads. None passes through (each dataset applies its own default),
     # matching prior throughput behaviour of omitting output_len when unset.
@@ -642,12 +651,6 @@ def validate_args(args):
     if not args.dataset_path and args.dataset_name != "prefix_repetition":
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
-        random_input_len = getattr(args, "random_input_len", None)
-        if args.input_len is None and random_input_len is None:
-            raise ValueError(
-                "Either --input-len or --random-input-len must be provided "
-                "for a random dataset"
-            )
 
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
@@ -820,14 +823,18 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--input-len",
         type=int,
         default=None,
-        help="Input prompt length for each request",
+        help="Input prompt length for each request. For random datasets, "
+        "--random-input-len takes precedence; if neither is set, "
+        f"{RandomDataset.DEFAULT_INPUT_LEN}.",
     )
     parser.add_argument(
         "--output-len",
         type=int,
         default=None,
         help="Output length for each request. Overrides the "
-        "output length from the dataset.",
+        "output length from the dataset. For random datasets, "
+        "--random-output-len takes precedence; if neither is set, "
+        f"{RandomDataset.DEFAULT_OUTPUT_LEN}.",
     )
     parser.add_argument(
         "--n", type=int, default=1, help="Number of generated sequences per prompt."
@@ -907,9 +914,10 @@ def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--prefix-len",
         type=int,
-        default=0,
+        default=None,
         help="Number of fixed prefix tokens before the random "
-        "context in a request (default: 0).",
+        "context in a request. --random-prefix-len takes precedence; if "
+        f"neither is set, {RandomDataset.DEFAULT_PREFIX_LEN}.",
     )
 
     # hf dataset
@@ -975,6 +983,16 @@ def add_cli_args(parser: FlexibleArgumentParser):
 
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
+    # Unset unless passed, so the legacy --input-len/--output-len/--prefix-len
+    # apply when given; _to_serve_args falls back to the RandomDataset defaults.
+    for action in parser._actions:
+        if action.dest in _RANDOM_LEN_FALLBACKS:
+            legacy, default = _RANDOM_LEN_FALLBACKS[action.dest]
+            action.default = None
+            action.help = (
+                f"{action.help} Takes precedence over "
+                f"--{legacy.replace('_', '-')}; if neither is set, {default}."
+            )
     add_random_multimodal_dataset_args(parser)
 
     # ASR dataset

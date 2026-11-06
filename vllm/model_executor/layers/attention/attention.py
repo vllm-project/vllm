@@ -104,6 +104,7 @@ def _largest_kernel_block_within(
     page_budget: int,
     fallback: int,
     kv_cache_spec: KVCacheSpec | None = None,
+    divisor_of: int | None = None,
 ) -> int:
     """Largest supported kernel block size whose page fits in ``page_budget``.
 
@@ -112,6 +113,9 @@ def _largest_kernel_block_within(
     block whose natural page still fits under ``page_budget`` minimizes that waste.
     ``MultipleOf`` declarations are expanded to the largest aligned block that fits.
     Falls back to the smallest supported block when nothing fits.
+
+    With ``divisor_of``, prefer the largest fitting block that divides it, so the
+    page can be scaled to ``divisor_of`` by an integer ratio instead of padded.
     """
     from vllm.v1.attention.backend import MultipleOf
 
@@ -127,6 +131,17 @@ def _largest_kernel_block_within(
         return fallback
     smallest = min(candidates)
     fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
+    if divisor_of is not None:
+        dividing = [b for b in fitting if divisor_of % b == 0]
+        dividing.extend(
+            b
+            for s in sizes
+            if isinstance(s, MultipleOf)
+            for b in range(s.base, max_block_size + 1, s.base)
+            if divisor_of % b == 0
+        )
+        if dividing:
+            return max(dividing)
     return max(fitting) if fitting else smallest
 
 
@@ -256,6 +271,7 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        query_pre_quantized: bool = False,
         **extra_impl_args,
     ) -> None:
         """The KV cache is stored inside this class and is accessed via
@@ -277,6 +293,11 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
         else:
             kv_cache_dtype = "auto"
+
+        if quant_config is not None and kv_cache_dtype == "auto":
+            checkpoint_kv_cache_dtype = quant_config.get_kv_cache_dtype(prefix)
+            if checkpoint_kv_cache_dtype is not None:
+                kv_cache_dtype = checkpoint_kv_cache_dtype
 
         # llm-compressor models declare an FP8 KV-cache scheme in their
         # checkpoint config. Honor it only when the user did not explicitly
@@ -346,6 +367,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -452,6 +474,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Set by models that write KV before calling attention with key=None.
+        self.kv_cache_update_bypass = False
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
@@ -467,7 +491,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
-            self.impl.supports_quant_query_input
+            # A model whose fused QK-norm/RoPE kernel already emits the
+            # quantized query (MiniMax-M3's DSpark draft) passes
+            # query_pre_quantized and skips this second quantization.
+            not query_pre_quantized
+            and self.impl.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8")
                 or self.kv_cache_dtype.startswith("nvfp4")
@@ -517,7 +545,10 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input:
+            if (
+                self.impl.supports_quant_query_input
+                and query.dtype != current_platform.fp8_dtype()
+            ):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if output_shape is None:
@@ -586,8 +617,8 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype)
+    def process_weights_after_loading(self) -> None:
+        self.impl.process_weights_after_loading(self.act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -649,12 +680,16 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             sw_per_token = kv_cache_spec.real_page_size_bytes
             page_budget = shared_page or sw_per_token * block_size
+            # Without a shared page, prefer a block that divides the primary
+            # block: ``unify`` pads any other block's page, and a padded page
+            # disables fine-grained prefix-cache hits on this group.
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend,
                 sw_per_token,
                 page_budget,
                 block_size,
                 kv_cache_spec,
+                divisor_of=None if shared_page else block_size,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,

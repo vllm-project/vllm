@@ -290,9 +290,27 @@ def test_scheduler_config_hash_includes_max_num_seqs():
     assert larger_batch_hash != base_hash
 
 
+def test_cache_config_default_block_size():
+    config = CacheConfig()
+    assert config.block_size == CacheConfig.DEFAULT_BLOCK_SIZE
+    assert config.user_specified_block_size is False
+    explicit = CacheConfig(block_size=16)
+    assert explicit.block_size == 16
+    assert explicit.user_specified_block_size is True
+
+
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(prefix_cache_retention_interval=64).compute_hash() == base_hash
+
+
+def test_cache_config_hash_ignores_runtime_offload_sizing():
+    config = CacheConfig()
+    base_hash = config.compute_hash()
+
+    config.simple_cpu_offload_num_blocks = 42
+
+    assert config.compute_hash() == base_hash
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):

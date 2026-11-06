@@ -26,6 +26,7 @@ def compute_mamba_prefill_checkpoints(
     checkpoint_alignment: int | None,
     drop_eagle_block: bool,
     cache_hit_alignment_tokens: int,
+    num_hash_lookahead_tokens: int = 0,
 ) -> tuple[list[int], list[int]]:
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
@@ -44,7 +45,10 @@ def compute_mamba_prefill_checkpoints(
     for seq_len, query_len in zip(seq_lens, query_lens):
         query_start = seq_len - query_len
         position = get_mamba_prefill_checkpoint_position(
-            seq_len, cache_hit_alignment_tokens, drop_eagle_block=drop_eagle_block
+            seq_len,
+            cache_hit_alignment_tokens,
+            drop_eagle_block=drop_eagle_block,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         valid = is_mamba_prefill_checkpoint_valid(
             query_start=query_start,
@@ -99,6 +103,12 @@ class MambaPrefillCheckpointBuilder:
     def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
+        speculative_config = vllm_config.speculative_config
+        self.drop_eagle_block = (
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not vllm_config.num_hash_lookahead_tokens
+        )
 
     def build(
         self,
@@ -120,18 +130,15 @@ class MambaPrefillCheckpointBuilder:
         query_lens = [all_query_lens[row] for row in request_rows]
         seq_lens = m.seq_lens_cpu_upper_bound.tolist()
         block_size = self.kv_cache_spec.block_size
-        speculative_config = self.vllm_config.speculative_config
-        drop_eagle_block = (
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
-        )
         checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
             [seq_lens[row] for row in request_rows],
             query_lens,
             hash_block_size=hash_block_size,
             mamba_block_size=block_size,
             checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
-            drop_eagle_block=drop_eagle_block,
+            drop_eagle_block=self.drop_eagle_block,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
+            num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
         )
         if not any(checkpoint_offsets):
             return None
@@ -186,6 +193,14 @@ class MambaPrefillCheckpointExporter:
         state_len = (
             self.state_len if self.state_len is not None else conv_state.shape[-1]
         )
+        # The block is cached as a checkpoint, so it needs its whole conv window.
+        assert checkpoint.offsets is None or all(
+            offset == 0 or offset >= state_len for offset in checkpoint.offsets
+        )
+        assert (
+            recurrent_rows is None
+            or recurrent_rows.numel() == checkpoint.checkpoint_offsets.numel()
+        )
         width = raw_qkv.shape[-1]
         has_recurrent = recurrent_checkpoint is not None
         if recurrent_checkpoint is None:
@@ -195,7 +210,7 @@ class MambaPrefillCheckpointExporter:
         else:
             assert recurrent_state is not None
             recurrent_row_size = recurrent_checkpoint[0].numel()
-        block_size = 256
+        block_size = 512
         store_cache_checkpoints_kernel[
             (
                 checkpoint.checkpoint_offsets.numel(),
@@ -241,14 +256,14 @@ def store_cache_checkpoints_kernel(
     checkpoint_state_indices_ptr,
     recurrent_rows_ptr,
     token_indices_ptr,
-    x_stride_0: tl.constexpr,
-    x_stride_1: tl.constexpr,
-    state_stride_0: tl.constexpr,
-    state_stride_1: tl.constexpr,
-    state_stride_2: tl.constexpr,
-    checkpoint_stride_0: tl.constexpr,
-    recurrent_state_stride_0: tl.constexpr,
-    checkpoint_offset_stride: tl.constexpr,
+    x_stride_0,
+    x_stride_1,
+    state_stride_0,
+    state_stride_1,
+    state_stride_2,
+    checkpoint_stride_0,
+    recurrent_state_stride_0,
+    checkpoint_offset_stride,
     STATE_LEN: tl.constexpr,
     WIDTH: tl.constexpr,
     RECURRENT_ROW_SIZE: tl.constexpr,
@@ -265,27 +280,31 @@ def store_cache_checkpoints_kernel(
         checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
     )
     valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
-    valid_conv = (
-        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
-    )
-    width_idx = cols // STATE_LEN
-    history_idx = cols % STATE_LEN
-    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
-    token_idx = checkpoint_end - STATE_LEN + history_idx
-    if HAS_TOKEN_MAP:
-        token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
-    values = tl.load(
-        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
-        mask=valid_conv,
-    )
-    tl.store(
-        conv_state_ptr
-        + state_idx * state_stride_0
-        + width_idx * state_stride_1
-        + history_idx * state_stride_2,
-        values,
-        mask=valid_conv,
-    )
+    # Only the leading programs cover conv columns; the rest skip the window.
+    if tl.program_id(1) * BLOCK_SIZE < WIDTH * STATE_LEN:
+        valid_conv = (
+            (cols < WIDTH * STATE_LEN)
+            & valid_checkpoint
+            & (checkpoint_offset >= STATE_LEN)
+        )
+        width_idx = cols // STATE_LEN
+        history_idx = cols % STATE_LEN
+        checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
+        token_idx = checkpoint_end - STATE_LEN + history_idx
+        if HAS_TOKEN_MAP:
+            token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
+        values = tl.load(
+            x_ptr + token_idx.to(tl.int64) * x_stride_0 + width_idx * x_stride_1,
+            mask=valid_conv,
+        )
+        tl.store(
+            conv_state_ptr
+            + state_idx * state_stride_0
+            + width_idx * state_stride_1
+            + history_idx * state_stride_2,
+            values,
+            mask=valid_conv,
+        )
 
     if HAS_RECURRENT:
         if HAS_RECURRENT_ROWS:

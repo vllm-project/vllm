@@ -284,6 +284,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
 
 class FlashAttentionBackend(AttentionBackend):
+    supports_kv_cache_update_bypass: bool = True
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -425,6 +427,9 @@ class FlashAttentionBackend(AttentionBackend):
             return False
         if head_size <= 256:
             return True
+        if current_platform.is_xpu():
+            # The XPU SYCL kernels support head sizes up to 512.
+            return head_size <= 512
         if is_fa_version_supported(4):
             return head_size <= 512
         return False
@@ -466,6 +471,16 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if (
+            device_capability == DeviceCapability(9, 0)
+            and kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and head_size == 512
+        ):
+            if block_size is not None and block_size % 64 != 0:
+                return "SM90 d512 FP8 KV requires a block size divisible by 64"
+            if use_sparse:
+                return "SM90 d512 FP8 KV does not support block sparsity"
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
@@ -481,16 +496,13 @@ class FlashAttentionBackend(AttentionBackend):
             and not flash_attn_supports_kv_cache_dtype(
                 kv_cache_dtype,
                 head_size=head_size,
-                head_size_v=head_size,
+                head_size_v=cls.head_size_v,
                 has_sinks=has_sink,
                 kv_cache_block_size=block_size,
                 supports_fa4_hd256=True,
             )
         ):
-            return (
-                "FP8 KV cache requires FA3 on SM90, FA4 with head_size=512 "
-                "on SM90, or FA4 on SM100"
-            )
+            return "FP8 KV requires FA3 (SM90), equal-d512 FA4 (SM90), or FA4 (SM100)."
         if (
             use_mm_prefix
             and get_flash_attn_version(
@@ -613,7 +625,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() in (3, 4)
+        if get_flash_attn_version() in (3, 4) or current_platform.is_xpu()
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
@@ -700,7 +712,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = get_flash_attn_version() == 3
         head_size_v = getattr(kv_cache_spec, "head_size_v", None)
         fa_version = get_flash_attn_version(
             head_size=self.headdim,
@@ -708,6 +719,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             kv_cache_block_size=self.block_size,
             supports_fa4_hd256=True,
         )
+        self.aot_schedule = fa_version == 3
         self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
             self.headdim, head_size_v
         )
@@ -1147,9 +1159,8 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        # FA4's SM90 FP8-KV path consumes native FP16/BF16 Q and dequantizes
-        # FP8 K/V in-kernel. Other FA4 paths (notably SM100) still require Q,
-        # K, and V to have the same FP8 dtype.
+        # FA4's SM90 d512 FP8-KV path consumes native FP16/BF16 Q. Other FA4
+        # FP8 paths (notably SM100) require Q, K, and V to share an FP8 dtype.
         uses_sm90_fa4_fp8_kv_dequant = (
             self.vllm_flash_attn_version == 4
             and current_platform.is_device_capability_family(90)
@@ -1158,6 +1169,13 @@ class FlashAttentionImpl(AttentionImpl):
         self.supports_quant_query_input = flash_attn_supports_quant_query_input() and (
             not uses_sm90_fa4_fp8_kv_dequant
         )
+        if uses_sm90_fa4_fp8_kv_dequant and self.dcp_world_size > 1:
+            # DCP context attention is non-causal, which the SM90 FP8 MMA
+            # kernel rejects at dispatch time.
+            raise NotImplementedError(
+                "FA4 SM90 FP8 KV cache does not support decode context "
+                "parallelism; use an unquantized KV cache."
+            )
 
         dcp_a2a = (
             vllm_config is not None
@@ -1173,6 +1191,25 @@ class FlashAttentionImpl(AttentionImpl):
             self._dcp_max_num_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
+
+    def _descale(
+        self, scale: torch.Tensor, scale_float: float, shape: tuple[int, int]
+    ) -> torch.Tensor | None:
+        # FA4 reads a missing descale as 1.0, and it copies every expanded view
+        # into a contiguous tensor: three copy kernels per layer and step. The
+        # scales are fixed once weights are loaded, so a per-tensor scale of 1.0
+        # (FP8 KV cache without calibrated scales) needs none. Per-head scales
+        # keep their tensor: their float mirror holds only the maximum.
+        if (
+            self.vllm_flash_attn_version == 4
+            and scale.numel() == 1
+            and scale_float == 1.0
+        ):
+            return None
+        # A (1, 1) expanded view (one sequence, one KV head per rank) counts
+        # as contiguous, so FA4 skips its copy and its CuTe layout check then
+        # rejects the zero stride.
+        return canonicalize_singleton_dim_strides(scale.expand(shape))
 
     def forward(
         self,
@@ -1281,14 +1318,13 @@ class FlashAttentionImpl(AttentionImpl):
         scheduler_metadata = attn_metadata.scheduler_metadata
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
-
         q_descale = (
-            layer._q_scale.expand(descale_shape)
+            self._descale(layer._q_scale, layer._q_scale_float, descale_shape)
             if self.supports_quant_query_input
             else None
         )
-        k_descale = layer._k_scale.expand(descale_shape)
-        v_descale = layer._v_scale.expand(descale_shape)
+        k_descale = self._descale(layer._k_scale, layer._k_scale_float, descale_shape)
+        v_descale = self._descale(layer._v_scale, layer._v_scale_float, descale_shape)
 
         if self.dcp_world_size > 1:
             self._forward_with_dcp(

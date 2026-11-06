@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, seq};
 use winnow::error::{ContextError, ErrMode};
@@ -10,7 +11,7 @@ use winnow::token::{literal, rest, take_until};
 
 use super::parameters::{ParamElement, ParamInput, ToolSchemas};
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::Tool;
 use crate::utils::recursion::ParserRecursionGuard;
 
@@ -138,15 +139,15 @@ impl MinimaxM3ToolParser {
 }
 
 impl ToolParser for MinimaxM3ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_minimax_m3_event(input, &mut self.mode)
@@ -166,7 +167,9 @@ impl ToolParser for MinimaxM3ToolParser {
             }
             MinimaxM3Mode::ToolBlock { .. } => {
                 if !self.buffer.trim_start().is_empty() {
-                    return Err(parsing_failed!("incomplete MiniMax M3 tool call"));
+                    return Err(ToolParserError::IncompleteToolCall {
+                        parser: "MiniMax M3",
+                    });
                 }
             }
             MinimaxM3Mode::Done => {}
