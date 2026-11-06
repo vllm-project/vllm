@@ -449,12 +449,7 @@ def _flashinfer_mm_encoder_autotune_num_items(
     return num_items
 
 
-def _run_flashinfer_autotune_mm_encoder(
-    runner: "GPUModelRunner", *, cache_hit: bool
-) -> None:
-    if cache_hit:
-        return
-
+def _run_flashinfer_autotune_mm_encoder(runner: "GPUModelRunner") -> None:
     mm_config = get_flashinfer_mm_encoder_autotune_config(runner.vllm_config)
     if mm_config is None:
         return
@@ -680,9 +675,9 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 autotune_hisparse_flashinfer_attention(runner)
             if not cache_hit:
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+                _run_flashinfer_autotune_mm_encoder(runner)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
-            _run_flashinfer_autotune_mm_encoder(runner, cache_hit=cache_hit)
     finally:
         set_autotune_process_group(None)
 
