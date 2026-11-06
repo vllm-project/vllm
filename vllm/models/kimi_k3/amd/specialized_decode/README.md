@@ -59,7 +59,8 @@ AITER MXFP4 bmms (`VLLM_ROCM_USE_AITER_FP4BMM=1`). Without them the MLA layers
 run vLLM's attention ops, then K2, and startup logs why; DCP1 runs only with M1
 and is refused. The KDA layers run K1 and K2 either way.
 
-KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
+KV transfer support is limited to built-in MoRIIO READ and WRITE consumers and
+the built-in Mooncake consumer.
 Keep the producer on `decode_backend=auto` and use matching cache layouts.
 
 If you request the specialized decode for anything else, startup fails with one
