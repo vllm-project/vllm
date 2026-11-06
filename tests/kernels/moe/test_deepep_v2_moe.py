@@ -137,7 +137,7 @@ def make_modular_kernel(
 
     fused_experts = TritonExperts(
         moe_config=moe_config,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
     )
 
     mk = FusedMoEKernel(
@@ -410,7 +410,7 @@ def _make_experts(
         )
         fused_experts = experts_cls(
             moe_config=moe_config,
-            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+            quant_schema=FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema,
         )
         return (
             fused_experts,
@@ -483,7 +483,7 @@ def _make_experts(
     )
     fused_experts = TrtLlmFp8ExpertsModular(
         moe_config=moe_config,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
     )
     return fused_experts, quant_config, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
 

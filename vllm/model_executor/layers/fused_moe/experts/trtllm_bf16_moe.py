@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
@@ -74,7 +75,7 @@ class TrtLlmBf16ExpertsBase:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -86,20 +87,20 @@ class TrtLlmBf16ExpertsBase:
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
         self.moe_config = moe_config
-        self.quant_schema = quant_config.quant_schema
+        self.quant_schema = quant_schema
         self.gemm1_activation_params: dict[str, torch.Tensor] = {}
         if moe_config.activation == MoEActivation.SWIGLUSTEP:
             if any(
                 value is not None
                 for value in (
-                    quant_config.gemm1_alpha,
-                    quant_config.gemm1_beta,
+                    quant_schema.gemm1_alpha,
+                    quant_schema.gemm1_beta,
                     moe_config.swiglu_alpha,
                     moe_config.swiglu_beta,
                 )
             ):
                 raise ValueError("SWIGLUSTEP does not support swiglu alpha/beta")
-            limit = quant_config.gemm1_clamp_limit
+            limit = quant_schema.gemm1_clamp_limit
             if limit is None:
                 limit = moe_config.swiglu_limit
             self.gemm1_activation_params["gemm1_clamp_limit"] = torch.full(

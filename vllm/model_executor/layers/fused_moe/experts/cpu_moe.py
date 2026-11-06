@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -164,9 +165,9 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         self._use_zentorch = False
 
     @classmethod
@@ -467,11 +468,11 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
         )
 
     @property
@@ -643,11 +644,11 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
         )
 
     @property
@@ -865,13 +866,13 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
         )
 
     @property
@@ -1032,11 +1033,11 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
         )
 
     @property
@@ -1202,6 +1203,13 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
 class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """Arm INT8 MoE with per-token activation and channelwise weight quantization."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_schema: FusedMoEQuantSchema,
+    ):
+        super().__init__(moe_config, quant_schema)
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -1360,6 +1368,13 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
 
 class PowerCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """POWER VSX INT8 MoE with per-token activation and channelwise weight quant."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_schema: FusedMoEQuantSchema,
+    ):
+        super().__init__(moe_config, quant_schema)
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -1520,9 +1535,9 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         logger.info_once("[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE")
 
     @property
@@ -1715,9 +1730,9 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
 
     @property
     def expects_unquantized_inputs(self) -> bool:

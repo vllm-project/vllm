@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
@@ -72,11 +73,11 @@ class TrtLlmNvFp4ExpertsBase:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         per_token_activation: bool = False,
     ):
         self.moe_config = moe_config
-        self.quant_schema = quant_config.quant_schema
+        self.quant_schema = quant_schema
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
@@ -98,8 +99,8 @@ class TrtLlmNvFp4ExpertsBase:
 
         self.g1_scale_c: torch.Tensor | None = None
 
-        # Fall back to moe_config.swiglu_* when quant_config doesn't carry them
-        # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_config).
+        # Fall back to moe_config.swiglu_* when quant_schema doesn't carry them
+        # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_schema).
         device = torch.accelerator.current_device_index()
 
         def _per_expert(val: float | None) -> torch.Tensor | None:
@@ -112,13 +113,13 @@ class TrtLlmNvFp4ExpertsBase:
                 device=device,
             )
 
-        clamp = quant_config.gemm1_clamp_limit
+        clamp = quant_schema.gemm1_clamp_limit
         if clamp is None:
             clamp = getattr(moe_config, "swiglu_limit", None)
-        alpha = quant_config.gemm1_alpha
+        alpha = quant_schema.gemm1_alpha
         if alpha is None:
             alpha = getattr(moe_config, "swiglu_alpha", None)
-        beta = quant_config.gemm1_beta
+        beta = quant_schema.gemm1_beta
         if beta is None:
             beta = getattr(moe_config, "swiglu_beta", None)
 
@@ -327,10 +328,10 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         per_token_activation: bool = False,
     ):
-        super().__init__(moe_config, quant_config, per_token_activation)
+        super().__init__(moe_config, quant_schema, per_token_activation)
         # Each launch permutes into its own buffer, so a chunked call finalizes.
         moe_config.limit_deferred_moe_finalize(self._get_chunk_size())
 

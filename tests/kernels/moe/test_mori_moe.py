@@ -131,7 +131,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
             w1[start:end].contiguous(), w2[start:end].contiguous()
         )
         local_w1.is_shuffled = local_w2.is_shuffled = True
-    prepare = maybe_make_prepare_finalize(config, quant)
+    prepare = maybe_make_prepare_finalize(config, quant.quant_schema)
     assert isinstance(prepare, MoriPrepareAndFinalize)
     assert prepare.use_fp8_dispatch == fp8
     assert prepare.use_fp4_dispatch == mxfp4
@@ -142,7 +142,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
         "mxfp4": AiterMxfp4Experts,
     }
     experts_cls = experts_cls_by_scheme[scheme]
-    experts = experts_cls(config, quant)
+    experts = experts_cls(config, quant.quant_schema)
     assert not experts.expects_unquantized_inputs
     kernel = FusedMoEKernel(prepare, experts)
     expert_mask = torch.zeros(32, dtype=torch.int32, device=pgi.device)

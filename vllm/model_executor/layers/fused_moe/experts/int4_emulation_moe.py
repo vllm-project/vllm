@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -38,9 +39,9 @@ class Int4EmulationTritonExperts(TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         self.quantization_emulation = True
         logger.warning_once(
             "Using Int4EmulationTritonExperts MoE backend. Int4 weights are "

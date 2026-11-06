@@ -138,7 +138,7 @@ def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     )
     experts = TrtLlmBf16ExpertsMonolithic(
         moe_config=_moe_config(top_k, routing_method),
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
     )
     w13 = block_major_k(
         torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN, device=DEVICE).bfloat16()
@@ -194,7 +194,7 @@ def _fp8_block_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     )
     experts = TrtLlmFp8ExpertsMonolithic(
         moe_config=_moe_config(top_k, routing_method),
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
     )
 
     def forward(router_logits, routing_replay_out):
@@ -253,7 +253,7 @@ def _nvfp4_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     )
     experts = TrtLlmNvFp4ExpertsMonolithic(
         moe_config=_moe_config(top_k, routing_method),
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
     )
 
     def forward(router_logits, routing_replay_out):

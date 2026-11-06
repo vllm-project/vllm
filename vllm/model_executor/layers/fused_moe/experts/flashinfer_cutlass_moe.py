@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -77,11 +78,11 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
 
-        assert quant_config.weight_quant_dtype in (
+        assert quant_schema.weight_quant_dtype in (
             "mxfp4",
             "nvfp4",
             torch.float8_e4m3fn,
@@ -101,7 +102,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
-        self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+        self.use_deepseek_fp8_block_scale = quant_schema.is_block_quantized
 
         def _per_expert(value: float | None) -> torch.Tensor | None:
             if value is None:
@@ -113,13 +114,13 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 device=self.device,
             )
 
-        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
-        self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
-        self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
+        self.gemm1_clamp_limit = _per_expert(quant_schema.gemm1_clamp_limit)
+        self.gemm1_alpha = _per_expert(quant_schema.gemm1_alpha)
+        self.gemm1_beta = _per_expert(quant_schema.gemm1_beta)
 
         if (
-            quant_config.weight_quant_dtype == "mxfp4"
-            and quant_config.quant_dtype == "mxfp8"
+            quant_schema.weight_quant_dtype == "mxfp4"
+            and quant_schema.quant_dtype == "mxfp8"
         ):
             self.fake_input_scale = torch.ones(
                 self.num_experts,

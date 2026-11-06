@@ -7,7 +7,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     DeepGemmExperts,
@@ -24,12 +24,12 @@ from vllm.utils.deep_gemm import (
 class TritonOrDeepGemmExperts(FallbackExperts):
     """DeepGemm with fallback to Triton for low latency shapes."""
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
+    def __init__(self, moe_config: FusedMoEConfig, quant_schema: FusedMoEQuantSchema):
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
-            experts=DeepGemmExperts(moe_config, quant_config),
-            fallback_experts=TritonExperts(moe_config, quant_config),
+            quant_schema=quant_schema,
+            experts=DeepGemmExperts(moe_config, quant_schema),
+            fallback_experts=TritonExperts(moe_config, quant_schema),
         )
 
     @staticmethod

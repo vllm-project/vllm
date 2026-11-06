@@ -279,13 +279,13 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=td.layer.moe,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=True,
             ),
             TrtLlmFp8ExpertsMonolithic(
                 moe_config=td.layer.moe,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
             ),
         )
 
@@ -391,13 +391,13 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
             FlashInferExperts(
                 moe_config=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
             ),
         )
 
@@ -886,11 +886,11 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
             return mk.FusedMoEKernel(
                 maybe_make_prepare_finalize(
                     moe=moe_config,
-                    quant_config=quant_config,
+                    quant_schema=quant_config.quant_schema,
                     allow_new_interface=True,
                 ),
                 TrtLlmFp8ExpertsModular(
-                    moe_config=moe_config, quant_config=quant_config
+                    moe_config=moe_config, quant_schema=quant_config.quant_schema
                 ),
             )
 
@@ -999,11 +999,13 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
             return mk.FusedMoEKernel(
                 maybe_make_prepare_finalize(
                     moe=moe_config,
-                    quant_config=quant_config,
+                    quant_schema=quant_config.quant_schema,
                     allow_new_interface=True,
                     use_monolithic=experts_cls is TrtLlmFp8ExpertsMonolithic,
                 ),
-                experts_cls(moe_config=moe_config, quant_config=quant_config),
+                experts_cls(
+                    moe_config=moe_config, quant_schema=quant_config.quant_schema
+                ),
             )
 
         a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
@@ -1129,12 +1131,12 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=True,
             ),
             TrtLlmFp8ExpertsMonolithic(
-                moe_config=moe_config, quant_config=quant_config
+                moe_config=moe_config, quant_schema=quant_config.quant_schema
             ),
         )
 

@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -33,11 +34,11 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
         )
 
     @property

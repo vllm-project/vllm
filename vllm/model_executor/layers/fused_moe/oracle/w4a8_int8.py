@@ -329,7 +329,7 @@ def make_w4a8_int8_moe_kernel(
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
@@ -348,7 +348,7 @@ def make_w4a8_int8_moe_kernel(
 
     experts = experts_cls(
         moe_config=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
     )
 
     kernel = mk.FusedMoEKernel(

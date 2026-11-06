@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -213,20 +214,20 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
-        if quant_config.weight_quant_dtype not in (
+        super().__init__(moe_config, quant_schema)
+        if quant_schema.weight_quant_dtype not in (
             "mxfp4",
             "nvfp4",
             *B12X_BLOCK_CODECS,
         ):
             raise ValueError(
-                f"unsupported b12x MoE weight format: {quant_config.weight_quant_dtype}"
+                f"unsupported b12x MoE weight format: {quant_schema.weight_quant_dtype}"
             )
         scheme = (
-            quant_config.weight_quant_dtype,
-            quant_config.quant_dtype,
+            quant_schema.weight_quant_dtype,
+            quant_schema.quant_dtype,
         )
         try:
             self._quant_mode, self._source_format, self._w13_layout = _B12X_MOE_MODES[

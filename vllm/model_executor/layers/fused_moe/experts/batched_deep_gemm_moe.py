@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -303,17 +304,17 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int,
         num_dispatchers: int,
     ):
         """max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
-        quant_config: Quantization configuration
+        quant_schema: Quantization configuration
         """
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )

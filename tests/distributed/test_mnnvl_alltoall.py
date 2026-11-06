@@ -1026,7 +1026,9 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
     scale_width = 8 if padded_mxfp8 else hidden_size // 16
     quant_config = FusedMoEQuantConfig.make("mxfp8" if padded_mxfp8 else "nvfp4")
     quant_config.mx_alignment = 128 if padded_mxfp8 else 0
-    layout = flashinfer_one_sided_dispatch_layout(hidden_size, quant_config)
+    layout = flashinfer_one_sided_dispatch_layout(
+        hidden_size, quant_config.quant_schema
+    )
     assert layout.dispatch_format == (
         QuantFormat.MXFP8 if padded_mxfp8 else QuantFormat.NVFP4
     )

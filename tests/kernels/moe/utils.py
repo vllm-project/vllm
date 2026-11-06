@@ -162,7 +162,7 @@ def batched_moe(
         BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             moe_config=moe_config,
         ),
     )
@@ -215,7 +215,7 @@ def naive_batched_moe(
         NaiveBatchedExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             moe_config=moe_config,
         ),
     )
@@ -579,11 +579,11 @@ def modular_triton_fused_moe(
     return FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
-        TritonExperts(moe_config, quant_config),
+        TritonExperts(moe_config, quant_config.quant_schema),
     )
 
 

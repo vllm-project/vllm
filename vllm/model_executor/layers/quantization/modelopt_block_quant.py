@@ -218,12 +218,12 @@ class ModelOptBlockQuantMoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         prepare_finalize = maybe_make_prepare_finalize(
             moe=self.moe,
-            quant_config=self.moe_quant_config,
+            quant_schema=self.moe_quant_config.quant_schema,
             routing_tables=layer._expert_routing_tables(),
             allow_new_interface=True,
         )
         assert prepare_finalize is not None
-        experts = B12xExperts(self.moe, self.moe_quant_config)
+        experts = B12xExperts(self.moe, self.moe_quant_config.quant_schema)
         self.moe_kernel = mk.FusedMoEKernel(prepare_finalize, experts)
         experts.process_weights_after_loading(layer)
 

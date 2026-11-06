@@ -673,10 +673,10 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
 
     dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
     experts_gptq = Int4EmulationTritonExperts(
-        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema
     )
     experts_awq = Int4EmulationTritonExperts(
-        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema
     )
 
     hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)
@@ -846,7 +846,8 @@ def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size
         max_num_tokens=512,
     )
     experts_ref = Int4EmulationTritonExperts(
-        moe_config_full, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        moe_config_full,
+        int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
     )
     out_no_ep = _run_emulation_forward(
         experts_ref,
@@ -882,7 +883,8 @@ def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size
             max_num_tokens=512,
         )
         experts_ep = Int4EmulationTritonExperts(
-            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+            moe_config_ep,
+            int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
         )
         out_rank = _run_emulation_forward_ep(
             experts_ep,
@@ -975,10 +977,12 @@ def test_ep_gptq_awq_agree(E, K, N, top_k, group_size, num_tokens, ep_size):
             max_num_tokens=512,
         )
         experts_gptq = Int4EmulationTritonExperts(
-            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+            moe_config_ep,
+            int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
         )
         experts_awq = Int4EmulationTritonExperts(
-            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+            moe_config_ep,
+            int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
         )
         out_gptq = _run_emulation_forward_ep(
             experts_gptq,
@@ -1068,7 +1072,8 @@ def test_ep_partial_rank_no_active_experts(
         max_num_tokens=512,
     )
     experts_ep = Int4EmulationTritonExperts(
-        moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        moe_config_ep,
+        int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
     )
     out = _run_emulation_forward_ep(
         experts_ep,
@@ -1144,7 +1149,8 @@ def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_s
         max_num_tokens=512,
     )
     experts_full = Int4EmulationTritonExperts(
-        moe_config_full, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        moe_config_full,
+        int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
     )
     out_full = _run_emulation_forward(
         experts_full,
@@ -1180,7 +1186,8 @@ def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_s
             max_num_tokens=512,
         )
         experts_ep = Int4EmulationTritonExperts(
-            moe_config_ep, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+            moe_config_ep,
+            int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema,
         )
         out_rank = _run_emulation_forward_ep(
             experts_ep,
@@ -1245,7 +1252,7 @@ def test_emulation_output_close_to_bf16_reference(
 
     dummy_scale = torch.ones(1, dtype=torch.float16, device=device)
     experts = Int4EmulationTritonExperts(
-        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
+        moe_config, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale).quant_schema
     )
 
     hidden_states = torch.randn(num_tokens, K, dtype=torch.bfloat16, device=device)

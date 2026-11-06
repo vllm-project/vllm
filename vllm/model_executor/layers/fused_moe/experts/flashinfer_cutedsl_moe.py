@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -57,14 +58,14 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         per_token_activation: bool = False,
     ):
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
         )
-        assert quant_config.quant_dtype == "nvfp4", (
+        assert quant_schema.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization is currently supported."
         )
         self.out_dtype = moe_config.in_dtype
@@ -77,9 +78,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.global_num_experts = moe_config.num_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
-        self.gemm1_alpha = quant_config.gemm1_alpha
-        self.gemm1_beta = quant_config.gemm1_beta
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_alpha = quant_schema.gemm1_alpha
+        self.gemm1_beta = quant_schema.gemm1_beta
+        self.gemm1_clamp_limit = quant_schema.gemm1_clamp_limit
         # FlashInfer selects SiTU via its beta parameters.
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta

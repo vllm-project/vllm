@@ -233,14 +233,14 @@ def oai_triton_moe_impl(
     moe_config = make_dummy_moe_config()
 
     if unfused:
-        fused_experts = UnfusedOAITritonExperts(moe_config, quant_config)
+        fused_experts = UnfusedOAITritonExperts(moe_config, quant_config.quant_schema)
     else:
-        fused_experts = OAITritonExperts(moe_config, quant_config)
+        fused_experts = OAITritonExperts(moe_config, quant_config.quant_schema)
 
     mk = FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
@@ -373,7 +373,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
         hidden_dim=k,
         intermediate_size=n,
     )
-    experts = UnfusedOAITritonExperts(moe_config, quant_config)
+    experts = UnfusedOAITritonExperts(moe_config, quant_config.quant_schema)
 
     _, _, N, K, top_k = experts.moe_problem_size(x_tri, w1_tri, w2_tri, topk_ids)
     assert top_k == topk

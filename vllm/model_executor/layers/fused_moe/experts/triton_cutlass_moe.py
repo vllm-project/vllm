@@ -8,7 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
@@ -22,14 +22,14 @@ class TritonOrCutlassExperts(FallbackExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
         self.is_sm100 = current_platform.has_device_capability(100)
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
-            experts=CutlassExpertsFp8(moe_config, quant_config),
-            fallback_experts=TritonExperts(moe_config, quant_config),
+            quant_schema=quant_schema,
+            experts=CutlassExpertsFp8(moe_config, quant_schema),
+            fallback_experts=TritonExperts(moe_config, quant_schema),
         )
 
     @staticmethod

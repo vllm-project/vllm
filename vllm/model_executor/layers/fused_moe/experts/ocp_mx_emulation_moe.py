@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
@@ -91,9 +92,9 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         logger.warning_once(
             "Using OCP_MXQuantizationEmulationTritonExperts MOE backend. This"
             " will dequantize weights on the fly and may be slower than native"
@@ -101,9 +102,9 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             " quantization support for better performance."
         )
 
-        self.ocp_mx_scheme = quant_config.ocp_mx_scheme
+        self.ocp_mx_scheme = quant_schema.ocp_mx_scheme
         assert self.ocp_mx_scheme is not None, (
-            "ocp_mx_scheme must be set in quant_config for"
+            "ocp_mx_scheme must be set in quant_schema for"
             " OCP_MXQuantizationEmulationTritonExperts"
         )
 

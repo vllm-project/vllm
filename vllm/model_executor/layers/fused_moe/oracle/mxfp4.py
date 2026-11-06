@@ -2321,7 +2321,7 @@ def make_mxfp4_moe_kernel(
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,
@@ -2337,14 +2337,14 @@ def make_mxfp4_moe_kernel(
         assert max_num_tokens is not None
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=moe_quant_config,
+            quant_schema=moe_quant_config.quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=moe_quant_config,
+            quant_schema=moe_quant_config.quant_schema,
         )
 
     kernel = mk.FusedMoEKernel(

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEp,
@@ -57,9 +58,9 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ) -> None:
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         self._adapter: FlashInferMoeEp | None = None
 
     @staticmethod

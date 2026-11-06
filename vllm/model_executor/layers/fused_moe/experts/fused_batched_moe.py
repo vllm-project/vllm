@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     has_configured_moe_config,
@@ -715,13 +716,13 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int,
         num_dispatchers: int,
     ):
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
@@ -939,13 +940,13 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int,
         num_dispatchers: int,
     ):
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )

@@ -1339,7 +1339,9 @@ def test_flashinfer_experts_swiglu_params_follow_quant_config(supplied: bool):
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=torch.bfloat16,
     )
-    experts = FlashInferExperts(moe_config=moe_config, quant_config=quant_config)
+    experts = FlashInferExperts(
+        moe_config=moe_config, quant_schema=quant_config.quant_schema
+    )
 
     if supplied:
         for name, value in (

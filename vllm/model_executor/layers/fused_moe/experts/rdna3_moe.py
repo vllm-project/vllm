@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -65,14 +66,14 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        assert quant_config.use_int4_w4a16, "Supports only int4_w4a16"
+        assert quant_schema.use_int4_w4a16, "Supports only int4_w4a16"
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )

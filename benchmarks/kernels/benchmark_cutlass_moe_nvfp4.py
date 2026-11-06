@@ -204,13 +204,13 @@ def bench_run(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
             CutlassExpertsFp4(
                 moe_config=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
             ),
         )
 
@@ -255,13 +255,13 @@ def bench_run(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
             CutlassExpertsFp4(
                 moe_config=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
             ),
         )
 

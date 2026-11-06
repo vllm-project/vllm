@@ -78,7 +78,9 @@ def test_flashinfer_swigluoai_params_are_forwarded(activation, monkeypatch):
         gemm1_beta=1.0,
         gemm1_clamp_limit=7.0,
     )
-    experts = FlashInferExperts(moe_config=moe_config, quant_config=quant_config)
+    experts = FlashInferExperts(
+        moe_config=moe_config, quant_schema=quant_config.quant_schema
+    )
 
     call_args = {}
 
@@ -181,11 +183,13 @@ def test_flashinfer_fp4_moe_no_graph(
         flashinfer_experts = FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
-            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
+            FlashInferExperts(
+                moe_config=moe_config, quant_schema=quant_config.quant_schema
+            ),
         )
 
         flashinfer_output = flashinfer_experts.apply(

@@ -205,7 +205,7 @@ def test_block_fp8_padding_on_graph_replay(num_tokens, with_metadata, monkeypatc
     aq, scales = per_token_group_quant_fp8(x, 128, use_ue8m0=True)
     w1, w2, s1, s2 = make_block_quant_fp8_weights(e, n, k, BLOCK_SIZE)
     quant = fp8_w8a8_moe_quant_config(w1_scale=s1, w2_scale=s2, block_shape=BLOCK_SIZE)
-    experts = impl.DeepGemmExperts(make_dummy_moe_config(), quant)
+    experts = impl.DeepGemmExperts(make_dummy_moe_config(), quant.quant_schema)
     ids = torch.zeros(num_tokens, topk, device="cuda", dtype=torch.int64)
     weights = torch.full((num_tokens, topk), 0.5, device="cuda")
     counts = torch.zeros(e, device="cuda", dtype=torch.int32)
@@ -357,13 +357,13 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     deep_gemm_experts = mk.FusedMoEKernel(
         prepare_finalize=maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
         fused_experts=TritonOrDeepGemmExperts(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
         ),
     )
 
@@ -551,13 +551,13 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
     deep_gemm_fp4_experts = mk.FusedMoEKernel(
         prepare_finalize=maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
         fused_experts=DeepGemmFP4Experts(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
         ),
     )
 

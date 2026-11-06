@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
@@ -139,27 +140,27 @@ def _valid_deep_gemm(
 class DeepGemmExperts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation."""
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+    def __init__(self, moe_config: FusedMoEConfig, quant_schema: FusedMoEQuantSchema):
+        super().__init__(moe_config=moe_config, quant_schema=quant_schema)
         # MXFP8: FP8 e4m3 values + UE8M0 1x32 block scales (Blackwell). Reuses
         # the same grouped GEMM (aliased to fp8_fp4) with recipe (1, 32).
-        self.mxfp8 = quant_config.block_shape == [1, 32]
+        self.mxfp8 = quant_schema.block_shape == [1, 32]
         if self.mxfp8:
-            assert quant_config.quant_dtype == "mxfp8"
+            assert quant_schema.quant_dtype == "mxfp8"
         else:
-            assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
-            assert quant_config.quant_dtype == torch.float8_e4m3fn
-        assert not quant_config.per_act_token_quant
-        assert not quant_config.per_out_ch_quant
+            assert quant_schema.block_shape == get_mk_alignment_for_contiguous_layout()
+            assert quant_schema.quant_dtype == torch.float8_e4m3fn
+        assert not quant_schema.per_act_token_quant
+        assert not quant_schema.per_out_ch_quant
 
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_clamp_limit = quant_schema.gemm1_clamp_limit
         # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
         # FP8 (silu) configs leave these None, reproducing plain silu.
         self.gemm1_alpha = (
-            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+            quant_schema.gemm1_alpha if quant_schema.gemm1_alpha is not None else 1.0
         )
         self.gemm1_beta = (
-            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+            quant_schema.gemm1_beta if quant_schema.gemm1_beta is not None else 0.0
         )
 
     @staticmethod
@@ -459,13 +460,13 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     # FP4 weight block size
     _WEIGHT_BLOCK_K = 32
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
-        assert quant_config.weight_quant_dtype == "mxfp4"
-        assert not quant_config.per_act_token_quant
-        assert not quant_config.per_out_ch_quant
+    def __init__(self, moe_config: FusedMoEConfig, quant_schema: FusedMoEQuantSchema):
+        super().__init__(moe_config=moe_config, quant_schema=quant_schema)
+        assert quant_schema.weight_quant_dtype == "mxfp4"
+        assert not quant_schema.per_act_token_quant
+        assert not quant_schema.per_out_ch_quant
 
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_clamp_limit = quant_schema.gemm1_clamp_limit
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

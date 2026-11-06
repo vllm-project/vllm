@@ -73,7 +73,7 @@ def test_batched_deepgemm_vs_triton(
     triton_experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
         moe_config=make_dummy_moe_config(),
     )
     mk_triton = FusedMoEKernel(
@@ -98,7 +98,7 @@ def test_batched_deepgemm_vs_triton(
     deepgemm_experts = BatchedDeepGemmExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
         moe_config=make_dummy_moe_config(),
     )
     mk_deepgemm = FusedMoEKernel(

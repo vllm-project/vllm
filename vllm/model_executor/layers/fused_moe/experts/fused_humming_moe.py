@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.fused_globalize_align_block_size import (
     fused_globalize_align_block_size,
@@ -130,20 +131,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
+        *,
+        humming_configs: dict[str, "HummingLayerConfig"],
+        w1_hadamard_block_size: int = 1,
+        w2_hadamard_block_size: int = 1,
     ):
-        humming_quant_config = cast("HummingMoEQuantConfig", quant_config)
-        self.humming_configs: dict[str, HummingLayerConfig] = {
-            "w13": humming_quant_config.w1_humming_config,
-            "w2": humming_quant_config.w2_humming_config,
-        }
+        self.humming_configs = humming_configs
         self.locks = create_humming_locks(moe_config.device)
         self.num_experts = moe_config.num_local_experts
         self.global_num_experts = moe_config.num_experts
-        self.w1_hadamard_block_size = humming_quant_config.w1_hadamard_block_size
-        self.w2_hadamard_block_size = humming_quant_config.w2_hadamard_block_size
+        self.w1_hadamard_block_size = w1_hadamard_block_size
+        self.w2_hadamard_block_size = w2_hadamard_block_size
         self.init_humming_moe()
 
         if self.is_batched():
@@ -151,7 +152,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )

@@ -180,12 +180,12 @@ def make_modular_kernel(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
         )
     else:
         fused_experts = TritonExperts(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
         )
 
     mk = FusedMoEKernel(

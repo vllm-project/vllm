@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
@@ -123,19 +124,59 @@ def validate_fp8_deployment(moe_config: FusedMoEConfig) -> None:
         )
 
 
+@dataclass(frozen=True)
+class _MuseSparkMoEQuantSchema(FusedMoEQuantSchema):
+    post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
+
+    @classmethod
+    def from_config(
+        cls,
+        config: FusedMoEQuantConfig,
+        post_expert_norm_fn: Callable[..., torch.Tensor] | None,
+    ) -> "_MuseSparkMoEQuantSchema":
+        schema = config.quant_schema
+        return cls(
+            **{f.name: getattr(schema, f.name) for f in fields(FusedMoEQuantSchema)},
+            post_expert_norm_fn=post_expert_norm_fn,
+        )
+
+
+@dataclass(frozen=True)
+class _MuseSparkAiterMoEQuantSchema(_MuseSparkMoEQuantSchema):
+    pass
+
+
 @dataclass
 class MuseSparkUnquantizedMoEQuantConfig(FusedMoEQuantConfig):
     post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._schema = _MuseSparkMoEQuantSchema.from_config(
+            self, self.post_expert_norm_fn
+        )
 
 
 @dataclass
 class MuseSparkQuarkFp8MoEQuantConfig(FusedMoEQuantConfig):
     post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._schema = _MuseSparkMoEQuantSchema.from_config(
+            self, self.post_expert_norm_fn
+        )
+
 
 @dataclass
 class MuseSparkQuarkOCPMXMoEQuantConfig(FusedMoEQuantConfig):
     post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._schema = _MuseSparkAiterMoEQuantSchema.from_config(
+            self, self.post_expert_norm_fn
+        )
 
 
 class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
@@ -318,19 +359,18 @@ class MuseSparkTritonExperts(_RouteOutputHandoff, TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ) -> None:
-        super().__init__(moe_config, quant_config)
-        if not isinstance(
-            quant_config,
-            MuseSparkUnquantizedMoEQuantConfig | MuseSparkQuarkFp8MoEQuantConfig,
+        super().__init__(moe_config, quant_schema)
+        if not isinstance(quant_schema, _MuseSparkMoEQuantSchema) or isinstance(
+            quant_schema, _MuseSparkAiterMoEQuantSchema
         ):
             raise TypeError(
-                "MuseSparkTritonExperts requires a MuseSpark Triton quant config."
+                "MuseSparkTritonExperts requires a MuseSpark Triton quant schema."
             )
-        if quant_config.post_expert_norm_fn is None:
+        if quant_schema.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
-        self.post_expert_norm_fn = quant_config.post_expert_norm_fn
+        self.post_expert_norm_fn = quant_schema.post_expert_norm_fn
 
     def workspace_shapes(
         self,
@@ -412,16 +452,16 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ) -> None:
-        super().__init__(moe_config, quant_config)
-        if not isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig):
+        super().__init__(moe_config, quant_schema)
+        if not isinstance(quant_schema, _MuseSparkAiterMoEQuantSchema):
             raise TypeError(
-                "MuseSparkAiterExperts requires MuseSparkQuarkOCPMXMoEQuantConfig."
+                "MuseSparkAiterExperts requires a MuseSpark AITER quant schema."
             )
-        if quant_config.post_expert_norm_fn is None:
+        if quant_schema.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
-        self.post_expert_norm_fn = quant_config.post_expert_norm_fn
+        self.post_expert_norm_fn = quant_schema.post_expert_norm_fn
         self._unit_weights_bufs: dict[int, torch.Tensor] = {}
 
     def _unit_weights(

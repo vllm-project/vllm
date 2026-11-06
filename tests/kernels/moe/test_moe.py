@@ -1375,7 +1375,13 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     quant_config = humming_utils.get_humming_moe_quant_config(layer)
     experts = HummingIndexedExperts(
         moe_config=moe_config,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
+        humming_configs={
+            "w13": quant_config.w1_humming_config,
+            "w2": quant_config.w2_humming_config,
+        },
+        w1_hadamard_block_size=quant_config.w1_hadamard_block_size,
+        w2_hadamard_block_size=quant_config.w2_hadamard_block_size,
     )
     return experts, layer, quant_config
 

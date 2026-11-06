@@ -464,7 +464,7 @@ def make_wna16_moe_kernel(
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,
@@ -483,7 +483,7 @@ def make_wna16_moe_kernel(
 
     experts = experts_cls(
         moe_config=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         **extra_args,
     )
 

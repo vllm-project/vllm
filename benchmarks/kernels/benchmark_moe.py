@@ -289,13 +289,13 @@ def benchmark_config(
             deep_gemm_experts = mk.FusedMoEKernel(
                 prepare_finalize=maybe_make_prepare_finalize(
                     moe=moe_config,
-                    quant_config=quant_config,
+                    quant_schema=quant_config.quant_schema,
                     allow_new_interface=True,
                     use_monolithic=False,
                 ),
                 fused_experts=TritonOrDeepGemmExperts(
                     moe_config=moe_config,
-                    quant_config=quant_config,
+                    quant_schema=quant_config.quant_schema,
                 ),
             )
 

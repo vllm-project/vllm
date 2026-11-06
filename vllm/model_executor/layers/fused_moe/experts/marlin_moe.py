@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
@@ -567,23 +568,23 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         # TODO (varun) : Enable activation quantization
         assert (
-            quant_config.use_mxfp4_w4a16
-            or quant_config.use_nvfp4_w4a16
-            or quant_config.use_int4_w4a16
-            or quant_config.use_int8_w8a16
-            or quant_config.use_fp8_w8a16
+            quant_schema.use_mxfp4_w4a16
+            or quant_schema.use_nvfp4_w4a16
+            or quant_schema.use_int4_w4a16
+            or quant_schema.use_int8_w8a16
+            or quant_schema.use_fp8_w8a16
         ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16 or fp8_w8a16"
         self.input_dtype = get_marlin_input_dtype()
 
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
@@ -923,13 +924,13 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int,
         num_dispatchers: int,
     ):
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )

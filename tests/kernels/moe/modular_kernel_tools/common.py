@@ -853,7 +853,7 @@ def make_modular_kernel(
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
         allow_new_interface=True,
     )
     assert prepare_finalize is not None

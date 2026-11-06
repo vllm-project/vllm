@@ -347,11 +347,11 @@ def test_cutlass_fp4_moe_EP(
     kernel = mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
-        experts_cls(moe_config=moe_config, quant_config=quant_config),
+        experts_cls(moe_config=moe_config, quant_schema=quant_config.quant_schema),
     )
     apply_kwargs = {
         "hidden_states": hidden_states,
@@ -744,13 +744,13 @@ def run_with_expert_maps(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=new_quant_config,
+                quant_schema=new_quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
             experts_cls(
                 moe_config=moe_config,
-                quant_config=new_quant_config,
+                quant_schema=new_quant_config.quant_schema,
             ),
         )
         out_tensor = out_tensor + kernel.apply(quant_config=new_quant_config, **kwargs)
@@ -810,13 +810,13 @@ def run_8_bit(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
             CutlassExpertsFp8(
                 moe_config=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
             ),
         )
         return kernel.apply(quant_config=quant_config, **kwargs)

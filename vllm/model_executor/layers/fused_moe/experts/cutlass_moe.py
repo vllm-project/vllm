@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     MoEPermuteScratch,
@@ -291,17 +292,17 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        assert quant_config.use_fp8_w8a8
+        assert quant_schema.use_fp8_w8a8
 
         e = moe_config.num_local_experts
         n = moe_config.intermediate_size_per_partition
@@ -710,6 +711,13 @@ def run_cutlass_moe_fp4(
 class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_schema: FusedMoEQuantSchema,
+    ):
+        super().__init__(moe_config, quant_schema)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
             return
@@ -1055,6 +1063,13 @@ def swizzle_mxfp4_scales(
 class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     """CUTLASS MXFP4 x MXFP4 fused MoE expert implementation."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_schema: FusedMoEQuantSchema,
+    ):
+        super().__init__(moe_config, quant_schema)
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -1336,12 +1351,12 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         b_strides1: torch.Tensor,
         b_strides2: torch.Tensor,
         group_size: int,
     ):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+        super().__init__(moe_config=moe_config, quant_schema=quant_schema)
 
         e = moe_config.num_local_experts
         n = moe_config.intermediate_size_per_partition

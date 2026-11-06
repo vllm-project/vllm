@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.router.cpu_router import select_experts
@@ -37,9 +38,9 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         # Defaults hold until process_weights_after_loading sees the layer.
         self.renormalize = moe_config.routing_method in (
             RoutingMethodType.Renormalize,

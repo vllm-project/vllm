@@ -117,13 +117,13 @@ def test_trtllm_bf16_moe_modular_no_graph(
         trtllm_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+                quant_schema=FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
             TrtLlmBf16ExpertsModular(
                 moe_config=moe_config,
-                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+                quant_schema=FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema,
             ),
         )
 
@@ -164,7 +164,7 @@ def test_trtllm_bf16_lora_accepts_checkpoint_shaped_weights(has_lora_delta):
     config = make_dummy_moe_config(
         num_experts=128, hidden_dim=256, intermediate_size=128
     )
-    experts = TrtLlmBf16LoRAExperts(config, FUSED_MOE_UNQUANTIZED_CONFIG)
+    experts = TrtLlmBf16LoRAExperts(config, FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema)
     x = torch.randn(2, 256, device="cuda", dtype=torch.bfloat16) / 10
     w1, w2 = convert_to_unquantized_kernel_format(
         UnquantizedMoeBackend.FLASHINFER_TRTLLM,

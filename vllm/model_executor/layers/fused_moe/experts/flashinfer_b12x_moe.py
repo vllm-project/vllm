@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -52,10 +53,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
-        assert quant_config.quant_dtype == "nvfp4", (
+        super().__init__(moe_config=moe_config, quant_schema=quant_schema)
+        assert quant_schema.quant_dtype == "nvfp4", (
             "FlashInferB12xExperts only supports nvfp4 quantization."
         )
         self.out_dtype = moe_config.in_dtype

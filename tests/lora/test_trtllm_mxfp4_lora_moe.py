@@ -73,7 +73,7 @@ def _make_experts(has_bias: bool, activation=MoEActivation.SILU):
         activation=activation,
     )
     quant_config = mxfp4_w4a16_moe_quant_config(ks13, ks2, kb13, kb2)
-    experts = TrtLlmMxfp4LoRAExperts(config, quant_config)
+    experts = TrtLlmMxfp4LoRAExperts(config, quant_config.quant_schema)
     reference = (_dequant_mxfp4(w13, s13), _dequant_mxfp4(w2, s2), b13, b2)
     return experts, (k13, k2), reference
 

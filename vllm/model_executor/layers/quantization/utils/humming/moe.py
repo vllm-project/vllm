@@ -271,7 +271,7 @@ def make_humming_moe_kernel(
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
@@ -280,20 +280,32 @@ def make_humming_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    assert isinstance(moe_quant_config, HummingMoEQuantConfig)
+    extra_kwargs: dict[str, Any] = dict(
+        humming_configs={
+            "w13": moe_quant_config.w1_humming_config,
+            "w2": moe_quant_config.w2_humming_config,
+        },
+        w1_hadamard_block_size=moe_quant_config.w1_hadamard_block_size,
+        w2_hadamard_block_size=moe_quant_config.w2_hadamard_block_size,
+    )
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=moe_quant_config,
+            quant_schema=moe_quant_config.quant_schema,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=moe_quant_config,
+            quant_schema=moe_quant_config.quant_schema,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

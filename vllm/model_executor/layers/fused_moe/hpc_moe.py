@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -35,11 +36,11 @@ class HPCExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
 
-        assert quant_config.weight_quant_dtype in (torch.float8_e4m3fn,), (
+        assert quant_schema.weight_quant_dtype in (torch.float8_e4m3fn,), (
             "Only fp8 quantization is currently supported."
         )
 

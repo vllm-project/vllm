@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -508,12 +509,12 @@ class FusedMoEExperts(ABC):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         """moe_config: MoE layer configuration.
-        quant_config: Quantization parameters for this experts instance.
+        quant_schema: Static quantization parameters for this experts instance.
         """
         if self.activation_format() == FusedMoEActivationFormat.Standard and (
             max_num_tokens is not None or num_dispatchers is not None
@@ -531,9 +532,9 @@ class FusedMoEExperts(ABC):
             )
 
         self.moe_config = moe_config
-        self.quant_schema = quant_config.quant_schema
-        self.activation_config = ApplyMoEActivationConfig.from_configs(
-            moe_config, quant_config
+        self.quant_schema = quant_schema
+        self.activation_config = ApplyMoEActivationConfig.from_schema(
+            moe_config, quant_schema
         )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers

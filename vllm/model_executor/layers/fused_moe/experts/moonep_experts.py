@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -64,18 +65,23 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
-        assert quant_config.quant_dtype is None, (
+        super().__init__(
+            moe_config,
+            quant_schema,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        assert quant_schema.quant_dtype is None, (
             "MoonEPExperts supports unquantized BF16 only"
         )
         if (
-            quant_config.gemm1_alpha is not None
-            or quant_config.gemm1_beta is not None
-            or quant_config.gemm1_clamp_limit is not None
+            quant_schema.gemm1_alpha is not None
+            or quant_schema.gemm1_beta is not None
+            or quant_schema.gemm1_clamp_limit is not None
         ):
             raise NotImplementedError(
                 "MoonEPExperts implements plain silu(gate) * up only; SwiGLU "

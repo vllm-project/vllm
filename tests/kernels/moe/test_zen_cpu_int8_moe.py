@@ -199,7 +199,7 @@ def test_zen_int8_dispatch_contract(
     router_logits = torch.randn((BATCH_SIZE, EXPERT_NUM), dtype=torch.bfloat16)
     topk_weights, topk_ids = _softmax_topk(router_logits, topk_num, False)
 
-    experts = ZenCPUExpertsInt8(moe_config, quant_config)
+    experts = ZenCPUExpertsInt8(moe_config, quant_config.quant_schema)
     # zentorch_fused_moe takes no expert_map.
     assert not experts.supports_expert_map()
     output = torch.empty_like(input)

@@ -347,7 +347,9 @@ def test_flashinfer_cutedsl_fp4_moe(
             assert w2_cutedsl.untyped_storage().nbytes() > 0
 
         experts = FlashInferCuteDSLExperts(
-            moe_config, quant_config, per_token_activation=per_token_activation
+            moe_config,
+            quant_config.quant_schema,
+            per_token_activation=per_token_activation,
         )
         fake_layer.w13_weight_scale_2 = w1_alpha
         fake_layer.w2_weight_scale_2 = w2_alpha
@@ -358,7 +360,7 @@ def test_flashinfer_cutedsl_fp4_moe(
         cutedsl_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
@@ -488,7 +490,7 @@ def test_localization_arguments_initialized_after_loading(
         w1_scale=scale,
         w2_scale=scale,
     )
-    experts = FlashInferCuteDSLExperts(config, quant_config)
+    experts = FlashInferCuteDSLExperts(config, quant_config.quant_schema)
     shard = {
         name: torch.ones(1)
         for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")

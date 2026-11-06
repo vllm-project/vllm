@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
@@ -55,7 +55,7 @@ class FlashInferOneSidedDispatchLayout:
 
 def flashinfer_one_sided_dispatch_layout(
     hidden_dim: int,
-    quant_config: FusedMoEQuantConfig,
+    quant_schema: FusedMoEQuantSchema,
     input_dtype: torch.dtype | None = None,
 ) -> FlashInferOneSidedDispatchLayout:
     """Return the one-sided activation payload layout."""
@@ -71,12 +71,12 @@ def flashinfer_one_sided_dispatch_layout(
         return FlashInferOneSidedDispatchLayout(
             QuantFormat.FP16 if input_dtype == torch.float16 else QuantFormat.BF16
         )
-    if quant_config.quant_dtype is None:
+    if quant_schema.quant_dtype is None:
         return FlashInferOneSidedDispatchLayout(QuantFormat.BF16)
-    if quant_config.quant_dtype == "nvfp4":
+    if quant_schema.quant_dtype == "nvfp4":
         return FlashInferOneSidedDispatchLayout(QuantFormat.NVFP4)
-    if quant_config.quant_dtype == "mxfp8":
-        align = quant_config.mx_alignment
+    if quant_schema.quant_dtype == "mxfp8":
+        align = quant_schema.mx_alignment
         padded_k = (
             ((hidden_dim + align - 1) // align) * align if align > 0 else hidden_dim
         )
@@ -86,9 +86,9 @@ def flashinfer_one_sided_dispatch_layout(
             QuantFormat.MXFP8, max(0, extra_scale_bytes)
         )
     if (
-        quant_config.use_fp8_w8a8
-        and quant_config.quant_dtype == current_platform.fp8_dtype()
-        and quant_config.block_shape == [128, 128]
+        quant_schema.use_fp8_w8a8
+        and quant_schema.quant_dtype == current_platform.fp8_dtype()
+        and quant_schema.block_shape == [128, 128]
     ):
         if hidden_dim % 128 != 0:
             raise NotImplementedError(
@@ -100,9 +100,9 @@ def flashinfer_one_sided_dispatch_layout(
         "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
         "DeepSeek Blockwise FP8 (E4M3 with FP32 1x128 scales), and bf16 "
         "(quant_dtype=None) today; got "
-        f"quant_dtype={quant_config.quant_dtype!r}, "
-        f"use_fp8_w8a8={quant_config.use_fp8_w8a8!r}, "
-        f"block_shape={quant_config.block_shape!r}"
+        f"quant_dtype={quant_schema.quant_dtype!r}, "
+        f"use_fp8_w8a8={quant_schema.use_fp8_w8a8!r}, "
+        f"block_shape={quant_schema.block_shape!r}"
     )
 
 
@@ -190,7 +190,7 @@ def maybe_roundup_layer_hidden_size(
 
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig | None,
+    quant_schema: FusedMoEQuantSchema | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
@@ -249,7 +249,7 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_deepep_ll_kernels:
-        assert quant_config is not None
+        assert quant_schema is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -269,8 +269,8 @@ def maybe_make_prepare_finalize(
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+            quant_schema.quant_dtype == current_platform.fp8_dtype()
+            and quant_schema.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
@@ -286,9 +286,9 @@ def maybe_make_prepare_finalize(
         assert moe.dp_size == all2all_manager.dp_world_size
 
         use_fp8_dispatch = (
-            quant_config is not None
-            and quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.is_block_quantized
+            quant_schema is not None
+            and quant_schema.quant_dtype == current_platform.fp8_dtype()
+            and quant_schema.is_block_quantized
         )
         all_to_all_args = dict(
             num_max_tokens_per_rank=moe.max_num_tokens,
@@ -360,18 +360,19 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_mori_epv1_kernels:
-        assert quant_config is not None
+        assert quant_schema is not None
 
         # MXFP4 activations are dispatched as packed FP4 with their e8m0
         # block scales, which the experts consume without re-quantizing.
-        use_fp4_dispatch = quant_config.use_mxfp4_w4a4
+        use_fp4_dispatch = quant_schema.use_mxfp4_w4a4
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = not use_fp4_dispatch and (
-            quant_config.is_per_act_token
-            or quant_config.is_block_quantized
-            or quant_config.is_per_tensor
+            quant_schema.is_per_act_token
+            or quant_schema.is_block_quantized
+            or quant_schema.is_per_tensor
         )
+        quant_dtype: torch.dtype | str | None
         if use_fp4_dispatch:
             # One e8m0 scale per 32-element block. token_hidden_size stays
             # the unpacked hidden size: mori sizes its token buffers by the
@@ -383,10 +384,10 @@ def maybe_make_prepare_finalize(
             # For PTPC (per token per channel) or per-tensor quant,
             # scale dim is 1. For 1x128 quant, scale dim is
             # hidden_dim // 128
-            quant_dtype = quant_config.quant_dtype
+            quant_dtype = quant_schema.quant_dtype
             scale_dim = (
                 1
-                if (quant_config.is_per_act_token or quant_config.is_per_tensor)
+                if (quant_schema.is_per_act_token or quant_schema.is_per_tensor)
                 else moe.hidden_dim // 128
             )
             scale_type_size = torch.float32.itemsize
@@ -419,18 +420,18 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
-        assert quant_config is not None
+        assert quant_schema is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
     elif moe.use_fi_nvl_one_sided_kernels:
-        assert quant_config is not None
+        assert quant_schema is not None
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
         dispatch_layout = flashinfer_one_sided_dispatch_layout(
-            moe.hidden_dim, quant_config, input_dtype=input_dtype
+            moe.hidden_dim, quant_schema, input_dtype=input_dtype
         )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
@@ -450,7 +451,7 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_nixl_ep_kernels:
-        assert quant_config is not None
+        assert quant_schema is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -468,8 +469,8 @@ def maybe_make_prepare_finalize(
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
+            quant_schema.quant_dtype == current_platform.fp8_dtype()
+            and quant_schema.block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
         )
 
         prepare_finalize = NixlEPPrepareAndFinalize(

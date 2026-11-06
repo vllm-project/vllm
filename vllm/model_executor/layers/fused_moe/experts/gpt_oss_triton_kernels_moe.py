@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
@@ -1016,6 +1017,13 @@ def masked_moe_sum(
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_schema: FusedMoEQuantSchema,
+    ):
+        super().__init__(moe_config, quant_schema)
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -1506,9 +1514,9 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         self.topk = moe_config.experts_per_token
         self.renormalize = moe_config.routing_method in (
             RoutingMethodType.Renormalize,

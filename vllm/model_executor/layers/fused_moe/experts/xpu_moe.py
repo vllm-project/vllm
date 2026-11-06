@@ -8,6 +8,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -53,17 +54,17 @@ class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
             max_num_tokens,
             num_dispatchers,
         )
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.gemm1_clamp_limit = quant_schema.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
         is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
         if not is_xe2_or_xe3:
@@ -191,13 +192,13 @@ class XPUExpertsFp8(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
             max_num_tokens,
             num_dispatchers,
         )
@@ -218,17 +219,17 @@ class XPUExpertsMxFp8(XPUExpertsFp8):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
             max_num_tokens,
             num_dispatchers,
         )
-        assert quant_config.quant_dtype == "mxfp8"
+        assert quant_schema.quant_dtype == "mxfp8"
 
     @staticmethod
     def _supports_quant_scheme(
@@ -246,13 +247,13 @@ class XPUExpertsBlockFp8(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
             max_num_tokens,
             num_dispatchers,
         )
@@ -284,13 +285,13 @@ class XPUExpertsWNA16(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
             max_num_tokens,
             num_dispatchers,
         )
@@ -310,13 +311,13 @@ class XPUExpertsMxFp4(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
         super().__init__(
             moe_config,
-            quant_config,
+            quant_schema,
             max_num_tokens,
             num_dispatchers,
         )

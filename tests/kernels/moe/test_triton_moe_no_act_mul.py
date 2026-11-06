@@ -139,7 +139,7 @@ def test_triton_experts_no_mul_activation(
 
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        quant_schema=FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema,
     )
 
     ws1_shape, ws2_shape, out_shape = experts.workspace_shapes(
@@ -212,7 +212,7 @@ def test_workspace_shapes_no_mul_vs_gated():
 
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        quant_schema=FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema,
     )
 
     ws1_no_mul, _, out_no_mul = experts.workspace_shapes(
@@ -247,7 +247,7 @@ def test_adjust_n_for_activation():
 
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
-        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        quant_schema=FUSED_MOE_UNQUANTIZED_CONFIG.quant_schema,
     )
 
     N = 256

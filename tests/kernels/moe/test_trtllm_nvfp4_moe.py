@@ -108,7 +108,7 @@ def _make_trtllm_fp4_moe_kernel(
 ) -> mk.FusedMoEKernel:
     experts = TrtLlmNvFp4ExpertsModular(
         moe_config=moe_config,
-        quant_config=quant_config,
+        quant_schema=quant_config.quant_schema,
         per_token_activation=per_token_activation,
     )
     # Mimic the production weight-loader path so per-expert tensors that
@@ -127,7 +127,7 @@ def _make_trtllm_fp4_moe_kernel(
     return mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
@@ -421,7 +421,7 @@ def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
             max_num_tokens=16,
         )
         experts = TrtLlmNvFp4ExpertsModular(
-            moe_config=moe_config, quant_config=quant_config
+            moe_config=moe_config, quant_schema=quant_config.quant_schema
         )
         g1_alphas = quant_config.g1_alphas
         assert g1_alphas is not None

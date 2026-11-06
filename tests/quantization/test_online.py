@@ -1487,10 +1487,10 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
     config.moe_parallel_config.all2all_backend = "flashinfer_nvlink_one_sided"
     expert_quant_config = FusedMoEQuantConfig.make("nvfp4")
 
-    def check_dispatch_layout(*, quant_config, input_dtype, **kwargs):
-        assert quant_config is expert_quant_config
+    def check_dispatch_layout(*, quant_schema, input_dtype, **kwargs):
+        assert quant_schema is expert_quant_config.quant_schema
         layout = flashinfer_one_sided_dispatch_layout(
-            config.hidden_dim, quant_config, input_dtype=input_dtype
+            config.hidden_dim, quant_schema, input_dtype=input_dtype
         )
         if per_token_activation:
             assert input_dtype == config.in_dtype
@@ -1556,7 +1556,7 @@ def test_one_sided_dispatch_format_preserves_payload_capacity(
 
     quant_config = FusedMoEQuantConfig.make(quant_dtype, block_shape=block_shape)
     quant_config.mx_alignment = alignment
-    layout = flashinfer_one_sided_dispatch_layout(hidden, quant_config)
+    layout = flashinfer_one_sided_dispatch_layout(hidden, quant_config.quant_schema)
     assert layout.dispatch_format.name == expected_format
     params = MoEEpCommParams(
         num_experts=8,
@@ -1584,7 +1584,9 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
 
     with pytest.raises(ValueError, match="unpacked inputs must be float16 or bfloat16"):
         flashinfer_one_sided_dispatch_layout(
-            6144, FusedMoEQuantConfig.make("nvfp4"), input_dtype=input_dtype
+            6144,
+            FusedMoEQuantConfig.make("nvfp4").quant_schema,
+            input_dtype=input_dtype,
         )
 
 

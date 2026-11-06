@@ -205,7 +205,7 @@ def _make_b12x_moe_kernel(
         in_dtype=hidden_states.dtype,
         activation=activation,
     )
-    experts = B12xExperts(moe_config, quant_config)
+    experts = B12xExperts(moe_config, quant_config.quant_schema)
     layer = SimpleNamespace(
         activation=activation,
         apply_router_weight_on_input=False,
@@ -226,7 +226,7 @@ def _make_b12x_moe_kernel(
     return mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
             allow_new_interface=True,
             use_monolithic=False,
         ),
@@ -778,7 +778,7 @@ def test_b12x_moe_uses_minimax_swiglu_parameters() -> None:
     config.swiglu_limit = 7.0
     config.swiglu_alpha = 1.702
     config.swiglu_beta = 1.0
-    experts = B12xExperts(config, _quant_config("mxfp4", None))
+    experts = B12xExperts(config, _quant_config("mxfp4", None).quant_schema)
 
     assert experts._swiglu_params(config.activation) == (7.0, 1.702, 1.0)
 
@@ -793,7 +793,7 @@ def test_b12x_moe_warmup_runs_each_planner_regime_once(
             hidden_dim=128,
             intermediate_size=64,
         ),
-        _quant_config("mxfp4", None),
+        _quant_config("mxfp4", None).quant_schema,
     )
     prepared = SimpleNamespace(
         num_experts=4,
@@ -875,7 +875,7 @@ def test_b12x_moe_reload_reprepares_current_parameters(
     monkeypatch.setattr(b12x, "_require_b12x_fused_moe", lambda: extension)
     experts = B12xExperts(
         make_dummy_moe_config(num_experts=2, hidden_dim=4, intermediate_size=8),
-        _quant_config("mxfp4", None),
+        _quant_config("mxfp4", None).quant_schema,
     )
     layer = SimpleNamespace(
         activation=MoEActivation.SILU,
@@ -917,7 +917,7 @@ def test_b12x_source_release_preserves_prepared_storage_owner() -> None:
         )
     experts = B12xExperts(
         make_dummy_moe_config(hidden_dim=128, intermediate_size=64),
-        _quant_config("mxfp4", None),
+        _quant_config("mxfp4", None).quant_schema,
     )
     owner = SimpleNamespace(
         w1_fp4=layer.w13_weight,
@@ -950,7 +950,7 @@ def test_b12x_source_release_preserves_prepared_storage_owner() -> None:
 def test_b12x_moe_rejects_router_weight_on_input_for_w4a8() -> None:
     experts = B12xExperts(
         make_dummy_moe_config(hidden_dim=256, intermediate_size=64),
-        _quant_config("mxfp4", "mxfp8"),
+        _quant_config("mxfp4", "mxfp8").quant_schema,
     )
     layer = SimpleNamespace(
         activation=MoEActivation.SILU,
@@ -969,7 +969,7 @@ def test_b12x_moe_workspace_uses_prepared_router_weight_contract(
 ) -> None:
     experts = B12xExperts(
         make_dummy_moe_config(hidden_dim=128, intermediate_size=64),
-        _quant_config("mxfp4", None),
+        _quant_config("mxfp4", None).quant_schema,
     )
     prepared = SimpleNamespace(
         plan=SimpleNamespace(discards_source_parameters=False),

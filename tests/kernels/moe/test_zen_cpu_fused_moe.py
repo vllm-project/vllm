@@ -164,7 +164,7 @@ def test_zen_cpu_fused_moe_forward(
         if use_bias
         else FusedMoEQuantConfig.make()
     )
-    experts = CPUUnquantizedExperts(moe_config, quant_config)
+    experts = CPUUnquantizedExperts(moe_config, quant_config.quant_schema)
     experts.process_weights_after_loading(layer)
     assert experts._use_zentorch is True
 

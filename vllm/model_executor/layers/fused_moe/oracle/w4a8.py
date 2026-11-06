@@ -255,7 +255,7 @@ def make_w4a8_moe_kernel(
     assert b_strides1 is not None and b_strides2 is not None
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         routing_tables=routing_tables,
         allow_new_interface=True,
     )
@@ -265,7 +265,7 @@ def make_w4a8_moe_kernel(
 
     experts = experts_cls(
         moe_config=moe_config,
-        quant_config=moe_quant_config,
+        quant_schema=moe_quant_config.quant_schema,
         b_strides1=b_strides1,
         b_strides2=b_strides2,
         group_size=group_size,

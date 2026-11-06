@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import (
@@ -341,9 +342,9 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         logger.warning_once(
             "Using Nvfp4QuantizationEmulationTritonExperts MOE backend. This will"
             " dequantize weights on the fly and may be slower than native"

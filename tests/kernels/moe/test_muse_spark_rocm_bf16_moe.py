@@ -197,7 +197,7 @@ def _route_launcher(
 def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None:
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
     quant_config = _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
-    experts = MuseSparkAiterExperts(config, quant_config)
+    experts = MuseSparkAiterExperts(config, quant_config.quant_schema)
     calls: list[dict[str, torch.Tensor | bool]] = []
 
     def _fake_aiter_fused_experts(**kwargs) -> torch.Tensor:
@@ -603,7 +603,7 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         / intermediate_size**0.5
     )
     w13, w2, quant_config = _mxfp4_weights(w13_float, w2_float)
-    experts = MuseSparkAiterExperts(config, quant_config)
+    experts = MuseSparkAiterExperts(config, quant_config.quant_schema)
     reducer = experts.finalize_weight_and_reduce_impl()
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -697,7 +697,7 @@ def test_rocm_triton_experts_numeric_and_graph_replay() -> None:
         device="cuda",
     )
     quant_config = _quant_config(_input_scaled_rms_norm)
-    experts = MuseSparkTritonExperts(moe_config, quant_config)
+    experts = MuseSparkTritonExperts(moe_config, quant_config.quant_schema)
     reducer = experts.finalize_weight_and_reduce_impl()
 
     hidden_states = (torch.randn(num_tokens, hidden_size, device="cuda") * 0.2).to(
@@ -843,11 +843,11 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
         experts: MuseSparkTritonExperts | MuseSparkAiterExperts
         if backend == "triton":
             quant_config = _quant_config(_rms_norm)
-            experts = MuseSparkTritonExperts(config, quant_config)
+            experts = MuseSparkTritonExperts(config, quant_config.quant_schema)
             kernel_map = expert_map
         else:
             w13, w2, quant_config = _mxfp4_weights(w13, w2)
-            experts = MuseSparkAiterExperts(config, quant_config)
+            experts = MuseSparkAiterExperts(config, quant_config.quant_schema)
             kernel_map = expert_mask
         route_buffer, launch = _route_launcher(
             experts,

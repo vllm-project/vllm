@@ -270,7 +270,9 @@ def moonep_modular_kernel_impl(
             intermediate_size=config.n,
             max_num_tokens=max_tokens_per_rank,
         )
-        experts = MoonEPExperts(moe_config=moe_config, quant_config=_no_quant_config())
+        experts = MoonEPExperts(
+            moe_config=moe_config, quant_schema=_no_quant_config().quant_schema
+        )
         # Stand-in for the layer carrying the layout, as
         # convert_to_unquantized_kernel_format leaves it in the engine path.
         fake_layer = types.SimpleNamespace(_moonep_weight_layout=weight_layout)

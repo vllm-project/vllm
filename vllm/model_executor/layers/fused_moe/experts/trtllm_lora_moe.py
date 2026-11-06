@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
@@ -125,9 +126,9 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
@@ -593,11 +594,11 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        _TrtLlmLoRAExpertsBase.__init__(self, moe_config, quant_config)
+        _TrtLlmLoRAExpertsBase.__init__(self, moe_config, quant_schema)
         # gemm1_alpha / gemm1_beta / gemm1_clamp_limit, hidden_dim_unpadded.
-        TrtLlmMxfp4ExpertsBase.__init__(self, moe_config, quant_config)
+        TrtLlmMxfp4ExpertsBase.__init__(self, moe_config, quant_schema)
 
     @staticmethod
     def _supports_quant_scheme(

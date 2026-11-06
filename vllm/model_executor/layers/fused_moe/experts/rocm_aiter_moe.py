@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -485,6 +486,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     _AITER_QUANT_METHOD: QuantMethod
     _SUPPORTS_ROUTER_WEIGHT_ON_INPUT = True
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_schema: FusedMoEQuantSchema,
+    ):
+        super().__init__(moe_config, quant_schema)
 
     def _extra_fused_moe_kwargs(self, quant_config: FusedMoEQuantConfig) -> dict:
         """Leaf-specific extra kwargs for `rocm_aiter_fused_experts`."""

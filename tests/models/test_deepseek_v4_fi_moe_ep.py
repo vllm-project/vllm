@@ -246,7 +246,7 @@ def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
     quant_config = FusedMoEQuantConfig.make("nvfp4", weight_dtype="nvfp4")
     kernel = mk.FusedMoEKernel(
         PassThroughPrepareAndFinalize(),
-        FlashInferMoeEpExperts(moe, quant_config),
+        FlashInferMoeEpExperts(moe, quant_config.quant_schema),
     )
 
     assert not kernel.is_monolithic
@@ -341,7 +341,7 @@ def test_passthrough_all2all_backend_selects_the_pass_through_stages():
     assert not moe.moe_parallel_config.use_all2all_kernels
 
     prepare_finalize = maybe_make_prepare_finalize(
-        moe, FusedMoEQuantConfig.make("nvfp4", weight_dtype="nvfp4")
+        moe, FusedMoEQuantConfig.make("nvfp4", weight_dtype="nvfp4").quant_schema
     )
 
     assert isinstance(prepare_finalize, PassThroughPrepareAndFinalize)

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
     nvfp4_moe_quant_config,
 )
@@ -86,9 +87,9 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
     ):
-        super().__init__(moe_config, quant_config)
+        super().__init__(moe_config, quant_schema)
 
         self.quantization_emulation = True
 
@@ -700,11 +701,11 @@ def test_nvfp4_moe_correctness(
     fused_quant_config = _make_quant_config()
     ref_experts = Nvfp4QuantizationEmulationTritonExpertsReference(
         moe_config=moe_config,
-        quant_config=ref_quant_config,
+        quant_schema=ref_quant_config.quant_schema,
     )
     fused_experts = Nvfp4QuantizationEmulationTritonExperts(
         moe_config=moe_config,
-        quant_config=fused_quant_config,
+        quant_schema=fused_quant_config.quant_schema,
     )
 
     torch.manual_seed(42)

@@ -34,7 +34,7 @@ def _make_eep_experts(
     assert quant_method.moe_quant_config is not None
     experts_kwargs: dict[str, Any] = {
         "moe_config": moe_config,
-        "quant_config": quant_method.moe_quant_config,
+        "quant_schema": quant_method.moe_quant_config.quant_schema,
     }
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -91,7 +91,7 @@ def make_eep_staged_quant_method(
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe_config,
-        quant_method.moe_quant_config,
+        quant_method.moe_quant_config.quant_schema,
         routing_tables=None,
         allow_new_interface=True,
         use_monolithic=quant_method.is_monolithic,

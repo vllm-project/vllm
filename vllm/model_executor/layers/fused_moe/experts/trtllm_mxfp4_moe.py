@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
@@ -42,11 +43,11 @@ class TrtLlmMxfp4ExpertsBase:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         **kwargs,
     ):
         self.moe_config = moe_config
-        self.quant_schema = quant_config.quant_schema
+        self.quant_schema = quant_schema
 
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -60,29 +61,29 @@ class TrtLlmMxfp4ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        # MXFP4-specific TRTLLM parameters from quant_config
+        # MXFP4-specific TRTLLM parameters from quant_schema
         device = torch.accelerator.current_device_index()
-        if quant_config.gemm1_alpha is not None:
+        if quant_schema.gemm1_alpha is not None:
             self.gemm1_alpha = torch.tensor(
-                [quant_config.gemm1_alpha] * self.local_num_experts,
+                [quant_schema.gemm1_alpha] * self.local_num_experts,
                 dtype=torch.float32,
                 device=device,
             )
         else:
             self.gemm1_alpha = None
 
-        if quant_config.gemm1_beta is not None:
+        if quant_schema.gemm1_beta is not None:
             self.gemm1_beta = torch.tensor(
-                [quant_config.gemm1_beta] * self.local_num_experts,
+                [quant_schema.gemm1_beta] * self.local_num_experts,
                 dtype=torch.float32,
                 device=device,
             )
         else:
             self.gemm1_beta = None
 
-        if quant_config.gemm1_clamp_limit is not None:
+        if quant_schema.gemm1_clamp_limit is not None:
             self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                [quant_schema.gemm1_clamp_limit] * self.local_num_experts,
                 dtype=torch.float32,
                 device=device,
             )
@@ -295,10 +296,10 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         **kwargs,
     ):
-        super().__init__(moe_config, quant_config, **kwargs)
+        super().__init__(moe_config, quant_schema, **kwargs)
         # Each launch permutes into its own buffer, so a chunked call finalizes.
         moe_config.limit_deferred_moe_finalize(
             self._max_supported_tokens(self.topk, moe_config.num_experts)

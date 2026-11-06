@@ -587,7 +587,7 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         if use_bias
         else FusedMoEQuantConfig.make()
     )
-    experts = experts_cls(moe_config, quant_config)
+    experts = experts_cls(moe_config, quant_config.quant_schema)
     assert experts.isa == isa
     experts.process_weights_after_loading(layer)
 
@@ -682,7 +682,7 @@ def test_cpu_experts_int8_unaligned_intermediate_size(
         a2_scale=None,
         per_act_token_quant=True,
     )
-    experts = CPUExpertsInt8(moe_config, quant_config)
+    experts = CPUExpertsInt8(moe_config, quant_config.quant_schema)
     experts.process_weights_after_loading(layer)
 
     output = torch.empty_like(input)

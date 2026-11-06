@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
@@ -20,11 +21,11 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_schema: FusedMoEQuantSchema,
         experts: mk.FusedMoEExpertsModular,
         fallback_experts: mk.FusedMoEExpertsModular,
     ):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+        super().__init__(moe_config=moe_config, quant_schema=quant_schema)
         self.fallback_experts = fallback_experts
         self.experts = experts
 

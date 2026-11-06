@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
         FusedMoEQuantConfig,
+        FusedMoEQuantSchema,
     )
 
 
@@ -179,13 +180,22 @@ class ApplyMoEActivationConfig:
         quant_config: "FusedMoEQuantConfig",
     ) -> "ApplyMoEActivationConfig":
         """Build from the model and quantization configurations."""
-        clamp_limit = quant_config.gemm1_clamp_limit
+        return cls.from_schema(moe_config, quant_config.quant_schema)
+
+    @classmethod
+    def from_schema(
+        cls,
+        moe_config: "FusedMoEConfig",
+        quant_schema: "FusedMoEQuantSchema",
+    ) -> "ApplyMoEActivationConfig":
+        """Build from the model configuration and static quantization schema."""
+        clamp_limit = quant_schema.gemm1_clamp_limit
         if clamp_limit is None:
             clamp_limit = moe_config.swiglu_limit
-        alpha = quant_config.gemm1_alpha
+        alpha = quant_schema.gemm1_alpha
         if alpha is None:
             alpha = moe_config.swiglu_alpha
-        beta = quant_config.gemm1_beta
+        beta = quant_schema.gemm1_beta
         if beta is None:
             beta = moe_config.swiglu_beta
         return cls(

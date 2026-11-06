@@ -179,7 +179,7 @@ def test_flashinfer_b12x_moe(
 
         experts = FlashInferB12xExperts(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
         )
 
         _process_b12x_weights(
@@ -193,7 +193,7 @@ def test_flashinfer_b12x_moe(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
@@ -299,7 +299,7 @@ def test_flashinfer_b12x_moe_relu2(
 
         experts = FlashInferB12xExperts(
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_schema=quant_config.quant_schema,
         )
         _process_b12x_weights(
             experts,
@@ -312,7 +312,7 @@ def test_flashinfer_b12x_moe_relu2(
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
                 moe=moe_config,
-                quant_config=quant_config,
+                quant_schema=quant_config.quant_schema,
                 allow_new_interface=True,
                 use_monolithic=False,
             ),
