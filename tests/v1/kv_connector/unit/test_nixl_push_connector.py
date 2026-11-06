@@ -43,12 +43,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    NixlPushChunkJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
     NixlPushConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
+    _ChunkTask,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
@@ -528,6 +530,49 @@ def _registration_data(
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
     }
+
+
+def test_chunked_push_final_job_queued_before_first_chunk_is_ready():
+    # With async scheduling the final job can reach the writer while the
+    # first chunk is computing. Both chunks still go out as chunk WRITEs.
+    w = _StubWriterWorker.fresh()
+    w._chunked_push = True
+    w._chunk_job_inbox = queue.Queue()
+    w._chunk_deferred, w._chunk_states = [], {}
+    w._chunk_transfers, w._chunk_transfer_tasks = {}, {}
+    w._next_chunk_transfer_id, w._completed_chunk_requests = 0, set()
+    w._chunk_lock = threading.Lock()
+    w._chunk_registrations = {"req-p": _registration_data("req-d")}
+    w._ensure_handshake = lambda *a, **k: None
+    w._chunk_path_supported = lambda job, reg_data: True
+    submitted: list[tuple[int, bool]] = []
+
+    def submit(job, reg_data, *, fallback):
+        submitted.append((job.start_block, fallback))
+        return [object()], False, False
+
+    w._submit_chunk_job = submit
+    tasks = []
+    for block in (0, 1):
+        job = NixlPushChunkJob(
+            request_id="req-p",
+            local_block_ids=([1, 2],),
+            start_block=block,
+            end_block=block + 1,
+            total_blocks=2,
+            is_final=block == 1,
+        )
+        tasks.append(_ChunkTask(job=job, event=MagicMock()))
+        tasks[-1].event.query.return_value = False
+        w._chunk_job_inbox.put(tasks[-1])
+    w._drain_chunk_job_inbox()
+
+    tasks[0].event.query.return_value = True
+    w._process_chunk_jobs()
+    w._finish_chunk_job(tasks[0])
+    tasks[1].event.query.return_value = True
+    w._process_chunk_jobs()
+    assert submitted == [(0, False), (1, False)]
 
 
 class TestPushWriterRegSend:
