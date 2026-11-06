@@ -232,6 +232,15 @@ requires_one_sided = pytest.mark.skipif(
     not has_flashinfer_nvlink_one_sided(),
     reason="FlashInfer NVLink one-sided not available",
 )
+# GPUs whose FlashInfer kernel module carries the sentinel protocol's kernels.
+_SENTINEL_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
+
+
+def _has_sentinel_kernels() -> bool:
+    capability = current_platform.get_device_capability()
+    return capability is not None and tuple(capability) in _SENTINEL_CAPABILITIES
+
+
 requires_ptrace = pytest.mark.skipif(
     not _has_sys_ptrace(),
     reason="SYS_PTRACE required (docker run --cap-add=SYS_PTRACE)",
@@ -1096,7 +1105,7 @@ def test_two_sided_dispatch_combine(world_size, empty_rank):
 # ---------------------------------------------------------------------------
 
 
-def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
+def _one_sided_data_worker(rank, world_size, *, padded_mxfp8, sync_protocol):
     from flashinfer.fused_moe import QuantFormat
 
     from vllm.distributed.device_communicators.all2all import (
@@ -1137,6 +1146,14 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
     )
     assert manager.initialized
     communication = manager.get_communication()
+    assert communication.config.sync_protocol == sync_protocol
+    # Steps up to sentinel_max_tokens take the sentinel protocol: none under
+    # "fence", and every step of this test (32 tokens) under "auto" and
+    # "sentinel" where the GPU and format support it. Padded MXFP8 rows (hidden
+    # 160) are not a sentinel format, so they always use fences.
+    sentinel_ok = sync_protocol != "fence" and not padded_mxfp8
+    expected_max = tokens_per_rank if sentinel_ok and _has_sentinel_kernels() else 0
+    assert communication.sentinel_max_tokens == expected_max
 
     with _make_forward_context(rank, world_size, tokens_per_rank):
         dp_metadata = get_forward_context().dp_metadata
@@ -1154,6 +1171,12 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
                 device=device,
                 dtype=torch.uint8,
             )
+            if not padded_mxfp8:
+                # The sentinel protocol delivers NVFP4 -0 (0b1000) as +0, the
+                # same value, so draw packed E2M1 pairs without -0 to compare
+                # raw bytes.
+                x = torch.where((x & 0x0F) == 0x08, x & 0xF0, x)
+                x = torch.where((x & 0xF0) == 0x80, x & 0x0F, x)
             x_sf = torch.randint(
                 0,
                 256,
@@ -1225,16 +1248,24 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
 @pytest.mark.parametrize("padded_mxfp8", [False, True])
-def test_one_sided_dispatch_combine(world_size, padded_mxfp8):
+@pytest.mark.parametrize("sync_protocol", ["auto", "fence", "sentinel"])
+def test_one_sided_dispatch_combine(
+    world_size, padded_mxfp8, sync_protocol, monkeypatch
+):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL", sync_protocol)
     _spawn_workers(
-        partial(_one_sided_data_worker, padded_mxfp8=padded_mxfp8),
+        partial(
+            _one_sided_data_worker,
+            padded_mxfp8=padded_mxfp8,
+            sync_protocol=sync_protocol,
+        ),
         world_size,
         dp_size=world_size,
     )
 
 
-def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_graph):
+def _one_sided_prepare_finalize_worker(rank, world_size, *, token_counts, cuda_graph):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkOneSidedManager,
     )
@@ -1256,10 +1287,10 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
     try:
         hidden = 256
         local_experts = 8
-        token_counts = [0 if empty_rank else 3, 7]
+        token_counts = list(token_counts)
         num_tokens = token_counts[rank]
         adapter = FlashInferNVLinkOneSidedPrepareAndFinalize(
-            max_num_tokens=16,
+            max_num_tokens=512,
             top_k=2,
             num_experts=local_experts * world_size,
             hidden_size=hidden,
@@ -1338,14 +1369,19 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
 @requires_multi_gpu
 @requires_one_sided
 @requires_ptrace
-@pytest.mark.parametrize("empty_rank", [False, True])
+# Under the default sync protocol ("auto"), (3, 7) and (0, 7) are sentinel
+# steps and (10, 300) is a fence step: the busiest rank's count, not the local
+# one, must decide the protocol on both ranks, or the ranks wait on each other.
+@pytest.mark.parametrize(
+    "token_counts", [(3, 7), (0, 7), (10, 300)], ids=["small", "empty", "above_256"]
+)
 @pytest.mark.parametrize("cuda_graph", [False, True])
-def test_one_sided_prepare_finalize(empty_rank, cuda_graph):
+def test_one_sided_prepare_finalize(token_counts, cuda_graph):
     """Check the vLLM adapter's weighted routing, padding and output on two GPUs."""
     _spawn_workers(
         partial(
             _one_sided_prepare_finalize_worker,
-            empty_rank=empty_rank,
+            token_counts=token_counts,
             cuda_graph=cuda_graph,
         ),
         2,

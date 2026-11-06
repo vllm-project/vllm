@@ -772,8 +772,9 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
-            "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
-            "Please install FlashInfer 0.7.2 or later."
+            "FlashInfer MoEEpCommunication NVLink one-sided API with "
+            "NVLinkOneSidedConfig.sync_protocol not found. "
+            "Please install a FlashInfer release that provides it."
         )
         super().__init__(cpu_group)
         self.initialized = False
@@ -865,10 +866,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             extra_payload_bytes_per_token=extra_payload_bytes_per_token,
             use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
-            # Keep the fence transport; FlashInfer otherwise picks CFT counted
-            # writes or the Lamport transport where the platform supports them.
-            cft=False,
-            lamport=False,
+            sync_protocol=envs.VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL,
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
@@ -888,11 +886,17 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.top_k = top_k
         self.num_experts = num_experts
         self.initialized = True
+        # sentinel_max_tokens is the largest step FlashInfer takes on the
+        # sentinel protocol; 0 when every step uses fences, also where the
+        # GPUs or the dispatch format do not support the sentinel protocol.
         logger.info(
-            "FlashInfer One-sided NVLink initialized for rank %s, size %s, hidden %s",
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s, "
+            "hidden %s, sync protocol %s, sentinel steps up to %d tokens per rank",
             self.rank,
             self.world_size,
             params.hidden_size,
+            envs.VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL,
+            replacement.sentinel_max_tokens,
         )
         dist.barrier(group=self.cpu_group)
 

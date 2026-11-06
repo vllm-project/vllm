@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
+    VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL: Literal["auto", "fence", "sentinel"] = "auto"
     VLLM_XGRAMMAR_CACHE_MB: int = 512
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1926,6 +1927,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when the installed FlashInfer MoeAlltoAll kernel supports it.
     "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
+    ),
+    # How the flashinfer_nvlink_one_sided all-to-all signals that a step's rows
+    # have arrived (FlashInfer's NVLinkOneSidedConfig.sync_protocol).
+    # "fence": per-peer completion flags behind a fence, for every step.
+    # "sentinel": receivers poll the rows themselves, for every step; its
+    # workspace grows with max_num_batched_tokens, so prefer "auto".
+    # "auto": sentinel for steps whose busiest rank sends at most 256 tokens,
+    # fence for larger steps. Where a GPU or payload format cannot use the
+    # sentinel protocol, FlashInfer uses fences.
+    "VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL": env_with_choices(
+        "VLLM_FLASHINFER_MOE_A2A_SYNC_PROTOCOL", "auto", ["auto", "fence", "sentinel"]
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
