@@ -1567,9 +1567,7 @@ def wait_for_engine_startup(
                 parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
-            # The engines are compared with each other: each hash is taken
-            # after engine initialization, which can resolve settings the
-            # front-end's ParallelConfig never sees.
+            # Compare possibly-updated engine config hashes with each other.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
                 if reference_config_hash is None:
