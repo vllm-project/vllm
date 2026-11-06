@@ -112,8 +112,8 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
     pytest -v -s entrypoints/scale_out
-    --deselect="entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_parity[n2]"
-    --deselect="entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_stream_parity[n2]"'
+    --deselect="tests/entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_parity[n2]"
+    --deselect="tests/entrypoints/scale_out/derender/test_derender_parity.py::test_inline_derender_stream_parity[n2]"'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Generate)"
   key: entrypoints-integration-api-server-generate-intel

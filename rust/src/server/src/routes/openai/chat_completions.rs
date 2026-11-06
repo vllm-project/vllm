@@ -124,6 +124,7 @@ pub async fn chat_completions(
                     prepared.request_id.clone(),
                     prepared.response_model.clone(),
                     created,
+                    state.system_fingerprint.clone(),
                     api_server_options,
                     count_reasoning_tokens,
                     prepared.options.clone(),
@@ -141,6 +142,7 @@ pub async fn chat_completions(
                 prepared.request_id.clone(),
                 prepared.response_model.clone(),
                 created,
+                state.system_fingerprint.clone(),
                 api_server_options,
                 count_reasoning_tokens,
                 prepared.options.clone(),
@@ -197,6 +199,7 @@ async fn collect_chat_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -358,7 +361,7 @@ async fn collect_chat_completion(
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         prompt_text,
@@ -375,6 +378,7 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -610,7 +614,12 @@ async fn chat_completion_chunk_stream(
                     kv_transfer_params.map(|value| *value),
                     weight_versions.filter(|_| return_weight_versions),
                 ) {
-                    Ok(chunk) => {
+                    Ok(mut chunk) => {
+                        // Like Python, the last chunk carries the fingerprint:
+                        // this one, or the usage chunk that follows.
+                        if !include_usage {
+                            chunk.system_fingerprint = system_fingerprint.clone();
+                        }
                         let finish_reason = chunk.choices[0].finish_reason.as_deref();
                         if let Some(delta_log) = delta_log.as_mut() {
                             delta_log.finish(finish_reason);
@@ -654,6 +663,7 @@ async fn chat_completion_chunk_stream(
                             count_reasoning_tokens.then_some(final_usage.reasoning_tokens),
                         ),
                         metrics,
+                        system_fingerprint,
                     ))
                     .await;
                 }
@@ -676,10 +686,12 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
 }
 
@@ -1321,6 +1333,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1418,6 +1431,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1471,6 +1485,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1537,6 +1552,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions::default(),
@@ -1622,6 +1638,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1759,6 +1776,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1842,6 +1860,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1908,6 +1927,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             false,
             ResponseOptions {
@@ -1992,6 +2012,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             true,
             ResponseOptions {
@@ -2068,6 +2089,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             true,
             ResponseOptions {
@@ -2133,6 +2155,7 @@ mod tests {
                 "chatcmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 count_reasoning_tokens,
                 ResponseOptions {

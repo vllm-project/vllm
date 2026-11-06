@@ -1434,11 +1434,13 @@ steps:
   - vllm/models/deepseek_v41/amd/mono/common/
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_index_cache_overrides.py
+  - tests/models/minimax_m3/test_dspark_drafter.py
   - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
+  - pytest -v -s models/minimax_m3/test_dspark_drafter.py
   # the long TP4 hand-off stress
   - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
@@ -5980,15 +5982,7 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/conftest.py
   commands:
-  - >-
-    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
-    pytest -v -s
-    v1/e2e/spec_decode/acceptance_rates/mtp_other/
-    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
-    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
-    fi
-  - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
-  - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) V1 E2E Hybrid Chunked Prefill" # TBD
   timeout_in_minutes: 35
