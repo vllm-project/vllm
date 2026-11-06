@@ -30,6 +30,7 @@ from vllm.tracing import (
     instrument_manual,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -213,7 +214,9 @@ class RequestState:
         self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
         self.prompt = prompt
-        self.prompt_token_ids = prompt_token_ids
+        # The same list as every other holder of this prompt, and only extended
+        # in place, so hiding it from the cyclic GC here covers them all.
+        self.prompt_token_ids = gc_untrack(prompt_token_ids)
         self.prompt_embeds = prompt_embeds
         self.prompt_len = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
@@ -265,7 +268,7 @@ class RequestState:
         if self.prompt_token_ids:
             self.prompt_token_ids.extend(update.prompt_token_ids or ())
         else:
-            self.prompt_token_ids = update.prompt_token_ids or []
+            self.prompt_token_ids = gc_untrack(update.prompt_token_ids or [])
         assert self.prompt_token_ids is not None
         self.prompt_len = len(self.prompt_token_ids)
         if self.stats is not None:

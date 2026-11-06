@@ -14,12 +14,14 @@ mod tekken;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 mod tiktoken;
+mod unavailable;
 
 pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
 pub use incremental::{DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribution};
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
+pub use unavailable::UnavailableTokenizer;
 
 pub trait Tokenizer: Send + Sync {
     /// Encode one prompt string into token IDs.
