@@ -417,6 +417,22 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
 class MiniMaxM3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     model_cls = MiniMaxM3DSparkModel
 
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # On gfx950 each Markov sampling step of the speculator is one launch
+        # (amd/ops/fused_markov.py). Batch-sharded sampling keeps its own loop: a
+        # model's sample_sequential turns it off.
+        if (
+            current_platform.is_rocm()
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
+                from vllm.models.minimax_m3.amd.ops import fused_markov
+
+                self.sample_sequential = fused_markov.sample_sequential
+
     @staticmethod
     def _rename_checkpoint_weights(
         weights: Iterable[tuple[str, torch.Tensor]],
