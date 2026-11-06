@@ -34,26 +34,58 @@ def snapshot_path(root: str, config_hash: str, rank: int) -> Path:
     return Path(root) / f"{config_hash}-rank{rank}.bin"
 
 
+def _checkpoint_id(path) -> object:
+    """Location-independent identity of a checkpoint: HF repo@commit when the path
+    is an HF cache snapshot, plus name/size of weight files and config.json bytes."""
+    import hashlib
+
+    if path is None or not os.path.isdir(str(path)):
+        return path
+    p = Path(path).resolve()
+    ident = p.name
+    if p.parent.name == "snapshots" and p.parent.parent.name.startswith("models--"):
+        ident = (
+            p.parent.parent.name[len("models--") :].replace("--", "/") + "@" + p.name
+        )
+    files = sorted(
+        (f.name, f.stat().st_size)
+        for f in p.iterdir()
+        if f.suffix in (".safetensors", ".bin", ".pt", ".gguf")
+    )
+    cfg = p / "config.json"
+    digest = hashlib.sha256(cfg.read_bytes()).hexdigest()[:16] if cfg.exists() else None
+    return [ident, files, digest]
+
+
 def weights_key(vllm_config) -> str:
     """Hash of the settings that shape post-processed weights.
 
     compute_hash() is not stable across processes for some configs (seen with
-    dflash), so the key is built from model, quantization and parallel layout."""
+    dflash), so the key is built from model, quantization and parallel layout.
+    It is independent of where the checkpoint lives, so snapshots can be copied
+    between servers with the same GPU and software stack."""
     import hashlib
+
+    import vllm
 
     m, p, s = vllm_config.model_config, vllm_config.parallel_config, None
     spec = vllm_config.speculative_config
     if spec is not None:
         s = [
-            getattr(spec, k, None)
-            for k in ("method", "model", "num_speculative_tokens")
+            getattr(spec, "method", None),
+            getattr(spec, "num_speculative_tokens", None),
         ]
+        draft = getattr(spec, "draft_model_config", None)
+        s.append(_checkpoint_id(draft.model) if draft is not None else spec.model)
+    overrides = (
+        m.hf_overrides if not callable(m.hf_overrides) else repr(type(m.hf_overrides))
+    )
     parts = [
-        m.model,
+        _checkpoint_id(m.model),
         m.revision,
         str(m.dtype),
         m.quantization,
-        m.hf_overrides,
+        overrides,
         getattr(vllm_config.cache_config, "cache_dtype", None),
         p.tensor_parallel_size,
         p.pipeline_parallel_size,
@@ -61,6 +93,9 @@ def weights_key(vllm_config) -> str:
         s,
         getattr(m.multimodal_config, "language_model_only", None),
         torch.__version__,
+        torch.version.cuda,
+        vllm.__version__,
+        torch.cuda.get_device_capability() if torch.cuda.is_available() else None,
         _MAGIC,
     ]
     return hashlib.sha256(repr(parts).encode()).hexdigest()[:10]
