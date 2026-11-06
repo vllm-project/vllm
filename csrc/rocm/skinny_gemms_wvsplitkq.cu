@@ -60,7 +60,7 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   }
 
 #define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)      \
-  if (on_gfx12())                                                      \
+  if (on_gfx12() || on_gfx117x())                                      \
     WVSPLITKQ_IMPL(32, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
   else                                                                 \
     WVSPLITKQ_IMPL(64, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)

@@ -45,6 +45,12 @@
   #define __HIP__MI3XX__
 #endif
 
+// gfx1170 and gfx1171 predefine __GFX11__ but have the RDNA4 FP8 dot
+// instruction (v_dot4_f32_fp8_fp8), so wvSplitKQ uses the __GFX12__ path.
+#if defined(__gfx1170__) || defined(__gfx1171__)
+  #define __HIP__GFX117X__
+#endif
+
 // Defined unconditionally: a TU that already has a different LDS_SIZE (e.g.
 // skinny_gemms_int4.cuh, which uses 64 KiB and no gfx950 case) must not
 // silently size these kernels' LDS window from it.
@@ -93,6 +99,16 @@ inline bool on_gfx12() {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx12") != std::string::npos;
+  }();
+  return result;
+}
+
+inline bool on_gfx117x() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1170") != std::string::npos ||
+           device_arch.find("gfx1171") != std::string::npos;
   }();
   return result;
 }
@@ -1641,7 +1657,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
 }
 #endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
 
-#if defined(__HIP__MI3XX__) || defined(__GFX12__)
+#if defined(__HIP__MI3XX__) || defined(__GFX12__) || defined(__HIP__GFX117X__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -1689,7 +1705,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   float sB = *s_B;
 
   while (m < M) {
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
     // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
     float sum[N][YTILE] = {};
   #else
@@ -1727,7 +1743,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
           // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
           for (int y = 0; y < YTILE; ++y) {
     #pragma unroll
@@ -1751,7 +1767,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
     // Final reduction
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
     // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
@@ -1789,7 +1805,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
     const bool writeback_lane =
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
         threadIdx.x == (THRDS - 1);
   #else
         threadIdx.x == 0;
@@ -1805,7 +1821,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
           float result = sum[n][y] * sA * sB;
   #else
           float result = sum[n][y][0] * sA * sB;
@@ -1823,7 +1839,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
+#else   // !__HIP__MI3XX__ && !__GFX12__ && !__HIP__GFX117X__
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
@@ -1835,9 +1851,9 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE;
 }
-#endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
+#endif  // __HIP__MI3XX__ || __GFX12__ || __HIP__GFX117X__
 
-#if defined(__HIP__MI3XX__) || defined(__GFX12__)
+#if defined(__HIP__MI3XX__) || defined(__GFX12__) || defined(__HIP__GFX117X__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -1884,7 +1900,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   float sB = *s_B;
 
   while (m < M) {
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
     // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
     float sum[N][YTILE] = {};
   #else
@@ -1924,7 +1940,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
           // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
           for (int y = 0; y < YTILE; ++y) {
     #pragma unroll
@@ -1948,7 +1964,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
     // Final reduction
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
     // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
@@ -1986,7 +2002,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
     const bool writeback_lane =
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
         threadIdx.x == (THRDS - 1);
   #else
         threadIdx.x == 0;
@@ -2002,7 +2018,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-  #ifdef __GFX12__
+  #if defined(__GFX12__) || defined(__HIP__GFX117X__)
           float result = sum[n][y] * sA * sB;
   #else
           float result = sum[n][y][0] * sA * sB;
@@ -2020,7 +2036,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
+#else   // !__HIP__MI3XX__ && !__GFX12__ && !__HIP__GFX117X__
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
@@ -2032,7 +2048,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const int CuCount) {
   UNREACHABLE_CODE;
 }
-#endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
+#endif  // __HIP__MI3XX__ || __GFX12__ || __HIP__GFX117X__
 
 // Do not leak this into the including translation units: skinny_gemms_int4.cuh
 // defines its own LDS_SIZE (64 KiB, no gfx950 case), so a shared TU must
