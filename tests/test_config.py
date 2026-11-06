@@ -111,6 +111,53 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     assert config.compute_hash() != fixed_hash
 
 
+@pytest.mark.parametrize(
+    ("mode", "input_dtype", "use_ubatching", "pp_size", "error"),
+    [
+        ("align", torch.bfloat16, False, 1, None),
+        ("align", torch.float16, False, 1, "bfloat16 model inputs"),
+        ("none", torch.float16, False, 1, None),
+        ("align", torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
+        ("align", torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
+    ],
+    ids=[
+        "align-bf16",
+        "align-fp16-rejected",
+        "none-fp16",
+        "microbatch-rejected",
+        "pp-rejected",
+    ],
+)
+def test_flashinfer_replayssm_validates_config(
+    mode, input_dtype, use_ubatching, pp_size, error
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode=mode,
+            mamba_ssm_cache_dtype="float16",
+            replayssm_buffer_len=16,
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="NemotronHForCausalLM",
+            dtype=input_dtype,
+        ),
+        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
+        ),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -295,7 +342,10 @@ def test_kda_recoverssm_derivation_is_revalidated():
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            use_ubatching=False,
+        ),
         kv_transfer_config=None,
         use_v2_model_runner=True,
     )
@@ -318,9 +368,17 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
+    config.mamba_config.backend = MambaBackendEnum.TRITON
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+    # Ordinary Triton ReplaySSM keeps its pre-existing PP support surface.
+    config.model_config.architecture = "NemotronHForCausalLM"
+    config.num_speculative_tokens = 0
+    config.cache_config.use_kda_recoverssm = False
+    config.use_v2_model_runner = False
+    VllmConfig.validate_mamba_cached_kernel(config)
 
 
 @pytest.mark.parametrize("supported", [True, False])
@@ -4773,3 +4831,24 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def test_layer_range_with_prefill_context_parallel(monkeypatch):
+    """Workers are laid out as PP x PCP x TP: every PCP and TP rank of a
+    stage gets that stage's layers, so layer counts match under an uneven
+    partition."""
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "5,7")
+    model_config = ModelConfig("facebook/opt-125m")  # 12 layers
+    ranges = [
+        model_config.get_layers_start_end_indices(
+            ParallelConfig(
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=2,
+                pipeline_parallel_size=2,
+                distributed_executor_backend="mp",
+                rank=rank,
+            )
+        )
+        for rank in range(8)
+    ]
+    assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4

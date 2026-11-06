@@ -131,13 +131,6 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            spec_config = vllm_config.speculative_config
-            if (
-                spec_config is not None
-                and spec_config.method not in ("mtp", "dspark", "dflash")
-                and spec_config.kv_cache_dtype is None
-            ):
-                spec_config.kv_cache_dtype = "auto"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
@@ -166,7 +159,7 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
         spec_config = vllm_config.speculative_config
         if (
             spec_config is not None
-            and spec_config.method != "mtp"
+            and spec_config.method not in ("mtp", "dspark")
             and spec_config.kv_cache_dtype is None
         ):
             spec_config.kv_cache_dtype = "auto"
@@ -536,6 +529,17 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
 
 class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # Trained with Matryoshka Representation Learning (see the model card),
+        # but the published configs don't declare the supported dimensions.
+        # Only fill in the default; keep explicit settings such as overrides.
+        hf_config = model_config.hf_config
+        if not hasattr(hf_config, "matryoshka_dimensions") and not hasattr(
+            hf_config, "is_matryoshka"
+        ):
+            hf_config.matryoshka_dimensions = [128, 256, 512, 768]
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         Gemma4Config.verify_and_update_config(vllm_config)
