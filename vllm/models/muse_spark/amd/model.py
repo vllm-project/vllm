@@ -99,6 +99,16 @@ def _supports_router_bf16x3_device() -> bool:
     return on_gfx950()
 
 
+def _pooling_uses_default_gemm() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    # Importing a foreign platform can reload torch extension libraries.
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() in (3, 4)
+
+
 def norm_residual_then_norm(
     x: MuseSpark1xResidualStream,
     pre_norm: MuseSpark1xRMSNorm,
@@ -213,7 +223,7 @@ class MuseSpark1xMoE(nn.Module):
 
         hidden_size = config.moe_hidden_size
         # The default unquantized GEMM dispatch is benchmarked against F.linear
-        # for these shapes on ROCm only.
+        # for these shapes on CDNA3 and CDNA4 only.
         self.pooler: ReplicatedLinear | None = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
@@ -221,7 +231,7 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.pooler",
         )
-        if not current_platform.is_rocm():
+        if not _pooling_uses_default_gemm():
             self.pooler.quant_method = MuseSparkTorchLinearMethod()
         self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
             hidden_size,
@@ -230,7 +240,7 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.unpooler",
         )
-        if not current_platform.is_rocm():
+        if not _pooling_uses_default_gemm():
             self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
         if self.pooler is not None:
