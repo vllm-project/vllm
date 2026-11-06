@@ -53,6 +53,16 @@ Other transforms, older GPUs, and an explicit `--linear-backend` other than `aut
 !!! note
     The `fp_quant` quantization method and the QuTLASS backend have been removed. Use a compressed-tensors checkpoint instead.
 
+!!! note
+    Marlin kernels no longer quantize activations to INT8 or FP8, and the `VLLM_MARLIN_INPUT_DTYPE` environment variable has been removed (setting it is an error). Marlin always runs with 16-bit activations. To run GPTQ, AWQ, or compressed-tensors weight-only checkpoints with 8-bit activations (W4A8), use the `humming` quantization method and set the activation dtype with `VLLM_HUMMING_INPUT_QUANT_CONFIG`, for example:
+
+    ```bash
+    VLLM_HUMMING_INPUT_QUANT_CONFIG='{"dtype":"int8"}' \
+      vllm serve <model> --quantization humming
+    ```
+
+    Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
