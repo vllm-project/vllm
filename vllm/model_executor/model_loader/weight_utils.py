@@ -206,6 +206,8 @@ def get_quant_config(
     from vllm.config.quantization import (
         _ONLINE_SHORTHANDS,
         QuantizationConfigArgs,
+        QuantSpec,
+        merge_quantization_config,
         resolve_quantization_config,
     )
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -326,6 +328,16 @@ def get_quant_config(
     # is not set yet.
     if quant_cls is OnlineQuantizationConfig and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
+        # Activation-only overrides apply to pre-quantized checkpoints; without
+        # a weight key, standalone online quantization would silently no-op.
+        specs = [(kind, getattr(online_args, kind)) for kind in ("linear", "moe")]
+        specs += [(f"targets[{p}]", t) for p, t in (online_args.targets or {}).items()]
+        for name, spec in specs:
+            if isinstance(spec, QuantSpec) and "weight" not in spec.fields_set:
+                raise ValueError(
+                    f"quantization_config.{name} = {spec} does not set a weight "
+                    "quantization key, which online quantization requires."
+                )
         return OnlineQuantizationConfig(args=online_args)
 
     model_name_or_path = (
@@ -365,8 +377,10 @@ def get_quant_config(
             assert fp8_args is not None
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -377,8 +391,10 @@ def get_quant_config(
     ]
     if len(quant_config_files) == 0:
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
@@ -1511,18 +1527,20 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run every module's own post-load hook after a full load or reload,
-    each module after all of its submodules.
+def finalize_model_weights(
+    model: torch.nn.Module, target_device: torch.device | None = None
+) -> None:
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
 
-    Quantization methods, the submodules of quantized layers (their quant
-    method processes them) and attention layers are skipped: the loader runs
-    them in its earlier per-layer passes, which later passes may read.
+    Quantization methods and the submodules of quantized layers are skipped:
+    their quant method processes them, in the loader's per-layer pass.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
+    from vllm.model_executor.model_loader.utils import device_loading_context
 
     seen: set[torch.nn.Module] = set()
 
@@ -1538,26 +1556,14 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
         yield module
 
     for module in children_first(model):
-        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
-            module
-        ):
+        if isinstance(module, QuantizeMethodBase):
             continue
         hook = getattr(module, "process_weights_after_loading", None)
         if callable(hook):
-            hook()
-
-
-@torch.no_grad()
-def refresh_derived_weights(model: torch.nn.Module) -> None:
-    """Call ``refresh_derived_weights()`` on every module that defines it, to
-    rebuild tensors kept out of ``state_dict()`` after the weights were
-    overwritten in place. Hooks must be idempotent, write in place and run no
-    collectives.
-    """
-    for module in model.modules():
-        refresh = getattr(module, "refresh_derived_weights", None)
-        if callable(refresh):
-            refresh()
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

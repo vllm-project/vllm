@@ -923,3 +923,73 @@ async def test_abort_requests_is_served_without_tokens_only(client):
         "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="The Rust frontend does not support /render",
+)
+@pytest.mark.parametrize(
+    ("server", "server_flag"),
+    [
+        (["--gpu-memory-utilization", "0.3"], False),
+        (["--gpu-memory-utilization", "0.3", "--return-tokens-as-token-ids"], True),
+    ],
+    indirect=["server"],
+    scope="module",
+)
+async def test_derender_logprob_request_override(client, server_flag):
+    """Both derender routes must use the same tri-state override as coupled chat."""
+    for override in (None, False, True):
+        request = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_completion_tokens": 2,
+            "temperature": 0,
+            "logprobs": True,
+            "top_logprobs": 2,
+        }
+        if override is not None:
+            request["return_tokens_as_token_ids"] = override
+        coupled = await client.post("/v1/chat/completions", json=request)
+        assert coupled.status_code == 200, coupled.text
+        expected = coupled.json()["choices"][0]["logprobs"]
+        assert expected and expected["content"]
+        placeholders = server_flag if override is None else override
+        if placeholders:
+            # Both derender paths keep generate text mode's null bytes
+            # for placeholders; coupled chat currently includes bytes.
+            # Normalize only that existing representation difference.
+            for entry in expected["content"]:
+                entry["bytes"] = None
+                for top in entry["top_logprobs"]:
+                    top["bytes"] = None
+        # Separate requests can differ slightly in floating-point logprobs.
+        # Keep token strings, bytes and the remaining structure exact.
+        for entry in expected["content"]:
+            entry["logprob"] = pytest.approx(entry["logprob"], abs=1e-3)
+            for top in entry["top_logprobs"]:
+                top["logprob"] = pytest.approx(top["logprob"], abs=1e-3)
+        rendered = await client.post("/v1/chat/completions/render", json=request)
+        assert rendered.status_code == 200, rendered.text
+        payload = rendered.json()
+        for mode in ("derender", "tokens"):
+            generated = await client.post(
+                "/inference/v1/generate", json={**payload, "output_mode": mode}
+            )
+            assert generated.status_code == 200, generated.text
+            result = generated.json()
+            if mode == "tokens":
+                derendered = await client.post(
+                    "/v1/chat/completions/derender",
+                    json={
+                        "model": MODEL_NAME,
+                        "chat_request": request,
+                        "prompt_token_ids": payload["token_ids"],
+                        "generate_response": result,
+                    },
+                )
+                assert derendered.status_code == 200, derendered.text
+                result = derendered.json()
+            assert result["choices"][0]["logprobs"] == expected
