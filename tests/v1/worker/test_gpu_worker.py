@@ -283,14 +283,35 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     assert get_current_vllm_config_or_none() is None
 
 
-@pytest.mark.parametrize("estimate_enabled", [True, False])
-def test_cudagraph_memory_profile_runs_only_when_applied(monkeypatch, estimate_enabled):
-    """The graph memory estimate is a full capture pass; with the estimate
-    disabled it is neither run nor subtracted from the KV cache budget."""
+@pytest.mark.parametrize(
+    "use_v2,extensible,cudagraphs,estimate_enabled,estimate,warns",
+    [
+        # MRV1: the flag decides whether the estimate runs and is applied.
+        (False, False, True, True, 3, False),
+        (False, False, True, False, 3, True),
+        # MRV2 with the extensible cache: the estimate is 0 by design, and
+        # neither flag value warns about unaccounted graph memory.
+        (True, True, True, True, 0, False),
+        (True, True, True, False, 0, False),
+        # MRV2 fallback (extensible cache off).
+        (True, False, True, True, 3, False),
+        (True, False, True, False, 3, True),
+        # MRV2 with no graphs to capture and the flag at 1.
+        (True, False, False, True, 0, False),
+    ],
+)
+def test_cudagraph_memory_profile_runs_only_when_applied(
+    monkeypatch, use_v2, extensible, cudagraphs, estimate_enabled, estimate, warns
+):
+    """The graph memory estimate is a throwaway capture pass; with the
+    estimate disabled it is neither run nor subtracted from the KV cache
+    budget, and the disabled-estimate warning only fires when graph memory
+    goes unaccounted for."""
     from vllm.config import CUDAGraphMode
 
-    estimate = 3 * GiB_bytes
+    estimate *= GiB_bytes
     calls = []
+    warnings = []
 
     def profile_cudagraph_memory():
         calls.append(1)
@@ -298,12 +319,17 @@ def test_cudagraph_memory_profile_runs_only_when_applied(monkeypatch, estimate_e
 
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL if cudagraphs else CUDAGraphMode.NONE
+            )
         ),
         randomize_dummy_inputs=False,
-        use_v2_model_runner=False,
+        use_v2_model_runner=use_v2,
         cache_config=SimpleNamespace(
-            kv_cache_memory_bytes=None, gpu_memory_utilization=0.9
+            kv_cache_memory_bytes=None,
+            gpu_memory_utilization=0.9,
+            resolved_gpu_memory_utilization=0.9,
+            enable_extensible_kv_cache=extensible,
         ),
         model_config=SimpleNamespace(multimodal_config=None),
         parallel_config=SimpleNamespace(),
@@ -331,6 +357,9 @@ def test_cudagraph_memory_profile_runs_only_when_applied(monkeypatch, estimate_e
         lambda *args, **kwargs: nullcontext(profile_result),
     )
     monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        gpu_worker.logger, "warning", lambda msg, *args: warnings.append(msg)
+    )
     monkeypatch.setenv(
         "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1" if estimate_enabled else "0"
     )
@@ -340,6 +369,10 @@ def test_cudagraph_memory_profile_runs_only_when_applied(monkeypatch, estimate_e
     assert calls == ([1] if estimate_enabled else [])
     expected = 52 * GiB_bytes - (estimate if estimate_enabled else 0)
     assert available == expected
+    disabled_warnings = [
+        msg for msg in warnings if "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0" in msg
+    ]
+    assert len(disabled_warnings) == (1 if warns else 0), warnings
 
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and

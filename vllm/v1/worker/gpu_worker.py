@@ -792,18 +792,16 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
-        #
-        # The estimate captures every graph once and frees them again, which
-        # can take minutes on large models. Skip it when its result would be
-        # ignored anyway.
+        # The estimate is a throwaway capture pass; skip it when the flag
+        # says its result is not applied.
         cudagraph_memory_estimate = 0
-        graphs_captured = (
+        may_capture_graphs = (
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ) and (
             self.use_v2_model_runner
             or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         )
-        if graphs_captured and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+        if may_capture_graphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         init_free_memory = self.init_snapshot.free_memory
@@ -878,7 +876,13 @@ class Worker(WorkerBase):
                 equiv_util,
                 suggested_util,
             )
-        elif graphs_captured:
+        elif (
+            may_capture_graphs
+            and not envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            and not self.cache_config.enable_extensible_kv_cache
+        ):
+            # The extensible KV cache measures the capture footprint after
+            # warmup, so the disabled estimate loses nothing there.
             logger.warning(
                 "CUDA graph memory profiling is disabled "
                 "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
