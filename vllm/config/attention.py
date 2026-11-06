@@ -41,7 +41,7 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Decoder attention backend to use. Use "auto" or None for automatic
+    """Attention backend to use. Use "auto" or None for automatic
     selection. TORCH_SDPA is reserved for multi-modal encoder attention."""
 
     minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass"
