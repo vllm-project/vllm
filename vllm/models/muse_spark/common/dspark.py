@@ -533,6 +533,7 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Identical full-vocabulary heads may be shared with an FP32 target head.
+        assert self.lm_head is not None
         return self.logits_processor(
             self.lm_head, hidden_states.to(self.lm_head.weight.dtype)
         )

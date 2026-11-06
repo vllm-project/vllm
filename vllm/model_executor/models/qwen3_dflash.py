@@ -917,7 +917,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.has_own_lm_head = lm_head_ownership is not False
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head: ParallelLMHead | None = (
-            ParallelLMHead(
+            ParallelLMHead(  # type: ignore[assignment]
                 self.config.draft_vocab_size,
                 self.config.hidden_size,
                 quant_config=(

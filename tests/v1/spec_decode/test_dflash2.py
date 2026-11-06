@@ -605,7 +605,6 @@ def _patch_dflash_vocab_modules(monkeypatch):
     )
     monkeypatch.setattr(qwen3_dflash, "get_draft_quant_config", lambda _: None)
     monkeypatch.setattr(qwen3_dflash, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(qwen3_dflash, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(qwen3_dflash, "VocabParallelEmbedding", _VocabModule)
     monkeypatch.setattr(qwen3_dflash, "ParallelLMHead", _VocabModule)
     monkeypatch.setattr(qwen3_dflash2, "CandidateSelector", _CandidateSelector)

@@ -111,8 +111,6 @@ def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch)
         assert proposer.draft_attn_groups[0].layer_names == expected_order
         assert proposer.block_size == SCHEDULER_BLOCK_SIZE
 
-        assert proposer.block_size == KERNEL_BLOCK_SIZE
-
 
 def test_v1_shares_vocab_modules_that_start_as_none(monkeypatch):
     monkeypatch.setattr(
