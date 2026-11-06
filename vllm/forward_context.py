@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 import torch
@@ -83,6 +84,11 @@ class DPMetadata:
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: list[int] | None = None
+
+    @cached_property
+    def num_tokens_across_dp_list(self) -> list[int]:
+        """CPU token counts, materialized at most once per forward context."""
+        return self.num_tokens_across_dp_cpu.tolist()
 
     @staticmethod
     def make(

@@ -1089,6 +1089,9 @@ class Worker(WorkerBase):
             # reach shapes (spec-decode drafts, encoder batches) profiling
             # does not, and `measure_kv_cache_blocks` keeps that peak free.
             torch.accelerator.reset_peak_memory_stats(self.device)
+        expert_load_stats = getattr(self.model_runner, "expert_load_stats", None)
+        if expert_load_stats is not None:
+            expert_load_stats.active = False
         warmup_sizes: list[int] = []
 
         if (
@@ -1295,6 +1298,10 @@ class Worker(WorkerBase):
             )
 
             trigger_inductor_lazy_init(self.device)
+
+        if expert_load_stats is not None:
+            expert_load_stats.warmup()
+            expert_load_stats.active = True
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
