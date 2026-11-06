@@ -262,7 +262,7 @@ def aiter_moe_pads(
     So both stage 1 kernels expect the undoubled pad. Recheck these lines on an
     AITER bump.
     """
-    if activation == MoEActivation.SITU:
+    if activation in (MoEActivation.SITU, MoEActivation.RELU2_NO_MUL):
         return hidden_pad, intermediate_pad
     double = tp_size == 1 and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
     return (
@@ -289,6 +289,8 @@ def _resolve_aiter_activation(
         activation_interleave = False
     elif activation == MoEActivation.SITU:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
+    elif activation == MoEActivation.RELU2_NO_MUL:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("relu2")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
     if activation_method is None:
@@ -435,6 +437,8 @@ def rocm_aiter_fused_experts(
             if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
             else GateMode.SEPARATED.value
         )
+    elif activation == MoEActivation.RELU2_NO_MUL:
+        gate_mode = GateMode.SEPARATED.value
     elif gate_mode_override is not None:
         gate_mode = gate_mode_override
     elif activation_interleave is not None:
@@ -534,6 +538,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
@@ -748,6 +753,10 @@ class AiterMxfp4Experts(AiterExperts):
     Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
 
     _AITER_QUANT_METHOD = QuantMethod.BLOCK_1X32
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
