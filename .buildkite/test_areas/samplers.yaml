@@ -10,6 +10,8 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
+  - vllm/v1/worker/gpu/sample/
+  - tests/v1/worker/test_gpu_sampler_flags.py
   - tests/samplers
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
@@ -18,6 +20,7 @@ steps:
     # values explicitly to still cover the PyTorch-native (Triton) path.
     - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers -k "not test_beam_search_passes_multimodal_data"
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers -k "not test_beam_search_passes_multimodal_data"
+    - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s v1/worker/test_gpu_sampler_flags.py
   mirror:
     amd:
       automatic_shard: true

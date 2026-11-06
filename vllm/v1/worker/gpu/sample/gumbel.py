@@ -2,6 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.config import VllmConfig
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.draft_logits import draft_logits_row
 
@@ -281,6 +287,41 @@ def gumbel_block_argmax(
     )
 
 
+def _temperature_sampling_warmup_inputs(vllm_config: VllmConfig):
+    vocab_size = vllm_config.model_config.get_vocab_size()
+    num_blocks = triton.cdiv(vocab_size, 1024)
+    use_fp64 = vllm_config.model_config.use_fp64_gumbel
+    dtype = WarmupChoices(vllm_config.model_config.dtype, torch.float32)
+    logits_stride = WarmupChoices(1, 2, 16)
+    return dict(
+        grid=(1, num_blocks),
+        local_argmax_ptr=TritonWarmupTensor(torch.int64),
+        local_argmax_stride=num_blocks,
+        local_max_ptr=TritonWarmupTensor(torch.float64 if use_fp64 else torch.float32),
+        local_max_stride=num_blocks,
+        logits_cache_ptr=None,
+        logits_cache_stride_0=0,
+        logits_cache_stride_1=0,
+        logits_cache_col_ptr=None,
+        logits_cache_source_ptr=None,
+        logits_cache_source_stride=0,
+        logits_cache_row_mapping_ptr=None,
+        logits_ptr=TritonWarmupTensor(dtype),
+        logits_stride=logits_stride,
+        expanded_idx_mapping_ptr=TritonWarmupTensor(torch.int64),
+        seeds_ptr=TritonWarmupTensor(torch.int64),
+        pos_ptr=TritonWarmupTensor(torch.int64),
+        temp_ptr=TritonWarmupTensor(torch.float32),
+        vocab_size=vocab_size,
+        BLOCK_SIZE=1024,
+        IS_DRAFTING=False,
+        APPLY_TEMPERATURE=True,
+        USE_FP64=use_fp64,
+        PER_TOKEN_COL=False,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(warmup_inputs=_temperature_sampling_warmup_inputs)
 @triton.jit
 def _gumbel_sample_kernel(
     local_argmax_ptr,

@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -20,7 +21,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import _gumbel_sample_kernel, gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
@@ -95,6 +96,13 @@ class Sampler:
         self.use_xpu_sampler = (
             not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
         )
+        self._use_temperature_sampling = (
+            current_platform.is_cuda()
+            and type(self) is Sampler
+            and not return_sampling_mask
+        )
+        if self._use_temperature_sampling:
+            _gumbel_sample_kernel.register_warmup()
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
@@ -284,6 +292,26 @@ class Sampler:
         seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self._use_temperature_sampling
+            and not return_logprobs
+            and not np.any(self.may_mask_logits[idx_mapping_np])
+            and not self.sampling_states.any_greedy(idx_mapping_np)
+        ):
+            # Scale on load instead of materializing temperature-scaled FP32
+            # logits. Subclasses retain their _sample_random dispatch.
+            sampled = gumbel_sample(
+                logits,
+                expanded_idx_mapping,
+                self.sampling_states.temperature.gpu,
+                self.sampling_states.seeds.gpu,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
+                use_fp64=self.use_fp64_gumbel,
+            )
+            return sampled, logits
+
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
