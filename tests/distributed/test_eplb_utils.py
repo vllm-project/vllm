@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -192,10 +193,15 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         torch.cuda.set_sync_debug_mode(prev_mode)
 
 
-def _start_ft_async_eplb_with_failing_worker(monkeypatch):
+def _start_ft_async_eplb_with_failing_worker(
+    monkeypatch, reset_during_transfer: bool = False
+):
     """Start single-rank async EPLB under fault tolerance whose worker fails
     every layer transfer. On one rank the EP group stands in for the EPLB group.
+    With ``reset_during_transfer``, an FT reset lands before each failure.
     """
+    if current_platform.is_xpu():
+        pytest.skip("dist_init initializes NCCL, not XCCL")
     num_layers, num_experts, interval = 2, 4, 2
     device = torch.device(current_platform.device_type)
     monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
@@ -207,6 +213,8 @@ def _start_ft_async_eplb_with_failing_worker(monkeypatch):
     failures: list[Exception] = []
 
     def failing_transfer_layer(**kwargs):
+        if reset_during_transfer:
+            state.ft_reset_epoch += 1
         failures.append(RuntimeError(f"injected transfer failure {len(failures)}"))
         raise failures[-1]
 
@@ -281,3 +289,25 @@ def test_fault_tolerance_reset_rearms_async_eplb(dist_init, monkeypatch):
 
     assert exc is not None
     assert exc.__cause__ is failures[1]
+
+
+def test_fault_tolerance_drops_failure_from_abandoned_cycle(dist_init, monkeypatch):
+    """A failure from a cycle that an FT reset abandoned is stale, so it must
+    not fail the rearrangement that runs after recovery.
+    """
+    handled = threading.Event()
+    monkeypatch.setattr(
+        async_worker.logger, "exception", lambda *args, **kwargs: handled.set()
+    )
+    state, _, failures = _start_ft_async_eplb_with_failing_worker(
+        monkeypatch, reset_during_transfer=True
+    )
+
+    for _ in range(1000):
+        state.step()
+        if handled.wait(timeout=0.01):
+            break
+
+    assert failures, "the injected transfer failure never ran"
+    assert state.async_worker_error is None
+    state.step()

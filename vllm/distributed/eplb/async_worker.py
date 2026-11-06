@@ -81,15 +81,19 @@ def transfer_run_periodically(
 ) -> None:
     rank = get_eplb_group().device_group.rank()
     while True:
+        reset_epoch = state.ft_reset_epoch
         try:
             state.rearrange_event.wait(stream=stream)
-            _transfer_cycle(state, stream, is_profile)
+            reset_epoch = state.ft_reset_epoch
+            _transfer_cycle(state, stream, is_profile, reset_epoch)
         except Exception as exc:
             if not state.parallel_config.enable_fault_tolerance:
                 raise
             # Report the failure so step() raises on every rank and FT takes
             # over; keep the thread alive so EPLB can resume after a retry.
-            state.async_worker_error = exc
+            # A failure from a cycle that an FT reset abandoned is stale.
+            if state.ft_reset_epoch == reset_epoch:
+                state.async_worker_error = exc
             logger.exception(
                 "async loop error (Rank %d); continuing under fault tolerance",
                 rank,
@@ -100,12 +104,13 @@ def _transfer_cycle(
     state: "EplbState",
     stream: torch.Stream,
     is_profile: bool,
+    reset_epoch: int,
 ) -> None:
-    """Run one rebalance pass over all model states and layers."""
-    # Snapshot the FT reset epoch. A change in this value means a fault
-    # recovery happened, and the in-flight rebalance must be abandoned.
-    reset_epoch = state.ft_reset_epoch
+    """Run one rebalance pass over all model states and layers.
 
+    ``reset_epoch`` is the FT reset epoch when the pass started. A change in
+    this value means a fault recovery happened, and the pass is abandoned.
+    """
     eplb_group = get_eplb_group().device_group
     eplb_cpu_group = get_eplb_group().cpu_group
     ep_rank = eplb_group.rank()
