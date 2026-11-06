@@ -256,6 +256,26 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
+# Batch sizes probed when asking whether a blockscale GEMM shape is tuned.
+_BLOCKSCALE_SAMPLE_M = (
+    32768,
+    8192,
+    4096,
+    2048,
+    1024,
+    512,
+    256,
+    128,
+    64,
+    32,
+    16,
+    8,
+    4,
+    2,
+    1,
+)
+
+
 def _ck_gemm_shape_is_tuned(
     N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
 ) -> bool:
@@ -4503,6 +4523,47 @@ class rocm_aiter_ops:
     @functools.cache
     def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
+
+    @staticmethod
+    @functools.cache
+    def blockscale_tuned_m_count(n: int, k: int, preshuffled: bool) -> int:
+        """How many sampled batch sizes have a tuned aiter blockscale row for
+        (N, K), in the plain or the bpreshuffle table.
+
+        A weight's layout is fixed once at load and then serves every batch
+        size, so probe M values from decode to prefill through aiter's own
+        lookup (which pads M) rather than M=1 alone: some shapes are tuned for
+        prefill-sized M only.
+        """
+        if not current_platform.is_rocm():
+            return 0
+        from aiter.jit.core import AITER_CONFIGS
+        from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
+
+        config_file = (
+            AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+            if preshuffled
+            else AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE
+        )
+        return sum(
+            get_CKGEMM_config(m, n, k, config_file) is not None
+            for m in _BLOCKSCALE_SAMPLE_M
+        )
+
+    @staticmethod
+    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
+        """Whether aiter has a tuned blockscale bpreshuffle config for (N, K)."""
+        return rocm_aiter_ops.blockscale_tuned_m_count(n, k, preshuffled=True) > 0
+
+    @staticmethod
+    def prefers_plain_blockscale(n: int, k: int) -> bool:
+        """Whether (N, K) should run the plain blockscale GEMM even though the
+        bpreshuffle one is tuned. The plain GEMM needs no weight relayout, so
+        it is the first choice; bpreshuffle only covers shapes the plain
+        table leaves untuned."""
+        plain = rocm_aiter_ops.blockscale_tuned_m_count(n, k, preshuffled=False)
+        shuffled = rocm_aiter_ops.blockscale_tuned_m_count(n, k, preshuffled=True)
+        return plain >= shuffled
 
     @staticmethod
     def shuffle_weight(
