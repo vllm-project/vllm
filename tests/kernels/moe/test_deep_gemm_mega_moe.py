@@ -432,16 +432,18 @@ def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
     assert_matches_cold_start(model, seed=2)
 
 
-def test_deep_gemm_mega_moe_nvfp4_layerwise_reload_does_not_buffer_until_finalize(
-    monkeypatch,
+@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
+    monkeypatch, weight_format
 ):
-    """Layerwise reload replays the layer's loads as soon as its last checkpoint
-    tensor arrives instead of buffering them until finalize: the derived scale
-    buffer is not counted as loadable."""
+    """Layerwise reload processes the layer when its last checkpoint tensor
+    arrives: not earlier (an over-count, which drops the later loads) and not
+    only at finalize (a derived tensor such as ``_l2_alpha`` counted as
+    loadable)."""
     from vllm.model_executor.model_loader.reload import layerwise
 
     model = torch.nn.Module()
-    model.experts = _make_mega_moe_experts(4, 3, MEGA_MOE_NVFP4)
+    model.experts = _make_mega_moe_experts(4, 3, weight_format)
     _load_mega_moe_checkpoint_shuffled(model.experts, 3, seed=0)
     layerwise.record_metadata_for_reloading(model)
     processed: list[str] = []
@@ -453,15 +455,31 @@ def test_deep_gemm_mega_moe_nvfp4_layerwise_reload_does_not_buffer_until_finaliz
 
     monkeypatch.setattr(layerwise, "_layerwise_process", spy)
     layerwise.initialize_layerwise_reload(model)
-    ckpt = _load_mega_moe_checkpoint_shuffled(model.experts, 3, seed=1, process=False)
+    ckpt, shards = _mega_moe_checkpoint(model.experts, 3, seed=1)
+    # Block scales last: an over-count of them would process the layer early.
+    shards.sort(key=lambda shard: shard[0].endswith("weight_scale"))
+    for name, loaded_weight, shard_id, expert_id in shards:
+        assert processed == []
+        param = getattr(model.experts, name)
+        param.weight_loader(
+            param,
+            loaded_weight,
+            f"experts.{name}",
+            shard_id=shard_id,
+            expert_id=expert_id,
+        )
     assert processed == ["DeepGemmMegaMoEExperts"]
     layerwise.finalize_layerwise_reload(model, SimpleNamespace(quantization=None))
     assert processed == ["DeepGemmMegaMoEExperts"]
-    physical = torch.arange(4) % 3
-    assert torch.equal(
-        model.experts.w13_weight_scale_2[0], ckpt["w13_weight_scale_2"][physical]
-    )
-    assert model.experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
+    _assert_mega_moe_layout(model.experts, _expected_mega_moe_layout(ckpt, 4, 3))
+    if weight_format.routed.has_global_scale:
+        physical = torch.arange(4) % 3
+        l1_scale = ckpt["w13_weight_scale_2"][physical].expand(2, 4)
+        assert torch.equal(model.experts.w13_weight_scale_2, l1_scale)
+        w2_scale = ckpt["w2_weight_scale_2"][physical]
+        assert torch.equal(model.experts.w2_weight_scale_2, w2_scale)
+        assert torch.equal(model.experts.w2_input_scale, ckpt["w2_input_scale"])
+        assert model.experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
 
 
 def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
@@ -551,23 +569,9 @@ def test_deep_gemm_mega_moe_nvfp4_rejects_mismatched_l1_scales():
         experts.process_weights_after_loading()
 
 
-def test_deep_gemm_mega_moe_nvfp4_loads_and_processes_meta_tensors():
-    """Reload dry runs load meta stand-ins, and a layer still on meta (weight
-    cache) skips post-load processing."""
+def test_deep_gemm_mega_moe_nvfp4_skips_post_load_processing_on_meta():
+    """A layer still on meta (weight cache) skips post-load processing."""
     experts = _make_mega_moe_experts(1, 1, MEGA_MOE_NVFP4).to("meta")
-    for name, shard_id in (
-        ("w2_input_scale", "w2"),
-        ("w13_weight_scale_2", "w1"),
-        ("w13_weight_scale_2", "w3"),
-    ):
-        assert experts.weight_loader(
-            getattr(experts, name),
-            torch.empty((), device="meta"),
-            f"experts.{name}",
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
-        )
     experts.process_weights_after_loading()
     assert experts.l2_activation_scale == 1.0
 
