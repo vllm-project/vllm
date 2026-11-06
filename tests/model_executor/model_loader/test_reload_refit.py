@@ -313,15 +313,16 @@ REFIT_CASES = [
 def checkpoint_b(tmp_path_factory):
     """B for a case, and the tensors it leaves unchanged; derived B is
     written once per model."""
-    cache: dict[str, tuple[str, list[str]]] = {}
+    cache: dict[tuple[str, str | None], tuple[str, list[str]]] = {}
 
     def get(case: RefitCase) -> tuple[str, list[str]]:
-        if case.model not in cache:
+        key = (case.model, case.model_b)
+        if key not in cache:
             b = case.model_b or _rolled(
                 case.model, tmp_path_factory.mktemp("rolled") / "b"
             )
-            cache[case.model] = (b, _unchanged(case.model, b))
-        return cache[case.model]
+            cache[key] = (b, _unchanged(case.model, b))
+        return cache[key]
 
     return get
 
