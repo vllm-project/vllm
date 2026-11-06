@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     masked_amax_scale,
     moe_kernel_quantize_input,
+    moe_padding_mask,
     swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -652,13 +653,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
             # Row-local schemes quantize per row, but a per-tensor dynamic
             # scale spans the whole activation. Restrict it to routed rows so
-            # the uninitialized `PaddedStandard` padding rows cannot poison it.
+            # the uninitialized `PaddedStandard` padding rows cannot poison it,
+            # and drop CUDA graph padding rows that the router did not skip.
             a2_quant_scale = a2_scale
             if self.quant_config.act_scale_is_tensor_wide(a2_scale):
+                row_valid = topk_ids.view(-1) >= 0
+                is_padding = moe_padding_mask(topk_ids.size(0))
+                if is_padding is not None:
+                    row_valid &= ~is_padding.repeat_interleave(topk_ids.size(1))
                 a2_quant_scale = masked_amax_scale(
                     intermediate_cache2,
                     self.quant_dtype,
-                    row_valid=topk_ids.view(-1) >= 0,
+                    row_valid=row_valid,
                 )
             qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
                 intermediate_cache2,

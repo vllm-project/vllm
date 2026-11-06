@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
@@ -453,6 +454,13 @@ def _mxfp6_e2m3_quantize(
     A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
 
     return A, None
+
+
+def moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    if not is_forward_context_available():
+        return None
+    is_padding = get_forward_context().is_padding
+    return None if is_padding is None else is_padding[:num_tokens]
 
 
 @triton.jit

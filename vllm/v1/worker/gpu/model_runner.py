@@ -29,7 +29,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -1464,9 +1463,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
-        if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding[:num_tokens].fill_(False)
-            is_padding[num_tokens:].fill_(True)
+        is_padding[:num_tokens].fill_(False)
+        is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
