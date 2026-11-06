@@ -698,9 +698,11 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+      - tests/kernels/attention/test_minimax_m3_nvfp4_sparse_decode.py
       commands:
       - pytest -v -s tests/kernels/attention/test_minimax_m3.py
           tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+          tests/kernels/attention/test_minimax_m3_nvfp4_sparse_decode.py
 
 - label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
   key: kernels-minimax-m3-sparse-prefill-h100
