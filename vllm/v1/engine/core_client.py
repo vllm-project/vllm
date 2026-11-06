@@ -516,6 +516,8 @@ class BackgroundResources:
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
+    # Set when shutdown() was requested, rather than following an engine death.
+    stop_requested: bool = False
 
     def __call__(self):
         """Clean up background resources."""
@@ -784,6 +786,7 @@ class MPClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
         if self._finalizer.detach() is not None:
+            self.resources.stop_requested = not self.resources.engine_dead
             timeout_str = "default" if timeout is None else f"{timeout}s"
             logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
             if self.resources.engine_manager is not None:
