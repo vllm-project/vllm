@@ -6,9 +6,8 @@ from __future__ import annotations
 
 import ctypes
 import itertools
-import math
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
 
@@ -19,28 +18,6 @@ from vllm.utils.vmm_driver import get_vmm_driver
 
 def _round_up(value: int, multiple: int) -> int:
     return ((value + multiple - 1) // multiple) * multiple
-
-
-def granule_block_alignment(block_strides: Iterable[int], granule: int) -> int:
-    """Block count multiple at which every stride's prefix is a granule multiple."""
-    alignment = 1
-    for stride in set(block_strides):
-        alignment = math.lcm(alignment, granule // math.gcd(granule, stride))
-    return alignment
-
-
-def granule_aligned_blocks(
-    num_blocks: int, block_strides: Iterable[int], granule: int
-) -> int:
-    """Largest count up to num_blocks at which, for every block stride, that
-    many blocks span a whole number of granules.
-
-    Segments hold num_blocks blocks of one stride each, so at such a count
-    every segment starts and ends on a granule boundary and one physical chunk
-    can back it exactly, as RDMA registration of a segment requires.
-    """
-    alignment = granule_block_alignment(block_strides, granule)
-    return num_blocks // alignment * alignment
 
 
 # ROCm reports a 4 KiB granularity (CUDA 2 MiB); commit in larger units to
@@ -224,9 +201,11 @@ _DLManagedTensor._fields_ = [
     ("deleter", _DLDeleter),
 ]
 
-_PyCapsule_New = ctypes.pythonapi.PyCapsule_New
-_PyCapsule_New.restype = ctypes.py_object
-_PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+# A private prototype: ctypes.pythonapi.PyCapsule_New is shared, and other
+# libraries (e.g. FlashInfer's MNNVL buffers) reset its restype.
+_PyCapsule_New = ctypes.PYFUNCTYPE(
+    ctypes.py_object, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p
+)(("PyCapsule_New", ctypes.pythonapi))
 _malloc = ctypes.CDLL(None).malloc
 _malloc.restype = ctypes.c_void_p
 _malloc.argtypes = [ctypes.c_size_t]

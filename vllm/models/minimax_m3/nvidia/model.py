@@ -241,8 +241,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         return False
     parallel_config = vllm_config.parallel_config
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
     )
 
@@ -340,8 +339,31 @@ def _mega_moe_expert_weight(
     return name, weight
 
 
+def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
+    """Whether ``linear`` takes a pre-quantized MXFP8 activation whose UE8M0
+    scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
+    kernels write)."""
+    if get_input_quant_key(linear) != kMxfp8Dynamic:
+        return False
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+    kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return type(kernel) in (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+
 class MiniMAXGemmaRMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by FlashInfer kernels.
+    """Gemma-style RMS normalization.
+
+    2-D inputs run the Triton kernel in ``ops/norm_mxfp8.py``; with
+    ``mxfp8=True`` the normed activation is emitted as MXFP8 (a
+    ``QuantizedActivation``) for a consumer linear instead of BF16. Other
+    shapes (the dspark drafter's per-head norms) keep the FlashInfer kernels.
 
     When ``residual`` is given, the fused add + norm runs in place and the
     updated ``(x, residual)`` pair is returned.
@@ -360,7 +382,33 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
+        mxfp8: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if x.dim() == 2:
+            from vllm.models.minimax_m3.nvidia.ops.norm_mxfp8 import (
+                gemma_rmsnorm_mxfp8,
+            )
+
+            out, scale = gemma_rmsnorm_mxfp8(
+                x,
+                self.weight,
+                self.variance_epsilon,
+                residual=residual,
+                mxfp8=mxfp8,
+            )
+            if mxfp8:
+                out = QuantizedActivation(
+                    data=out,
+                    scale=scale,
+                    orig_dtype=x.dtype,
+                    orig_shape=x.shape,
+                    quant_key=kMxfp8Dynamic,
+                )
+            if residual is None:
+                return out
+            return out, residual
+
+        assert not mxfp8
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
         if residual is None:
@@ -400,7 +448,8 @@ class MiniMaxM3MLP(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            # Under SP the forward reduce-scatters the output itself.
+            reduce_results=reduce_results and not use_sequence_parallel,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
@@ -1345,11 +1394,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 hidden_states, residual, self.input_layernorm
             )
         else:
+            # MXFP8 output when qkv_proj consumes it (checked per call: LoRA
+            # wrappers installed after construction change the key), but not
+            # under sequence parallelism, which all-gathers the norm output.
+            mxfp8 = not self.use_sequence_parallel and _consumes_mxfp8_128x4(
+                self.self_attn.qkv_proj
+            )
             if residual is None:
                 residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
+                hidden_states = self.input_layernorm(hidden_states, mxfp8=mxfp8)
             else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+                hidden_states, residual = self.input_layernorm(
+                    hidden_states, residual, mxfp8=mxfp8
+                )
         return hidden_states, residual
 
     def forward_after_input_norm(
@@ -1552,6 +1609,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
+            if residual is not None:
+                residual = sp_shard(residual)
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
@@ -1580,6 +1639,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.end_layer, hidden_states, residual
             )
+            if self.use_sequence_parallel:
+                # PP transport expects tensors replicated across TP ranks.
+                hidden_size = hidden_states.shape[-1]
+                packed = torch.cat([hidden_states, residual, *aux_hidden_states], -1)
+                packed = sp_all_gather(packed)[:num_tokens]
+                hidden_states, residual, *aux_hidden_states = packed.split(
+                    hidden_size, dim=-1
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,

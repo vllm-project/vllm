@@ -410,6 +410,8 @@ def tiny_model(checkpoints):
             init_workspace_manager(device)
             with set_default_torch_dtype(torch.bfloat16), device:
                 lm = MuseSparkForConditionalGeneration(vllm_config=vllm_config)
+            # A preceding CPU test may have populated the shared RoPE cache.
+            lm.to(device)
             model_config = vllm_config.model_config
             text_config = model_config.hf_text_config
             dims = MonoDims.from_config(text_config, 1)
