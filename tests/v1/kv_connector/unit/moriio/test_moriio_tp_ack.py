@@ -481,25 +481,33 @@ def test_failed_read_reports_blocks_only_for_one_group(
     assert worker._failed_sync_recving == expected_failed
 
 
+_COMPLETION_ERROR = "transport retry counter exceeded"
+_POST_ERROR = "ibv_post_send failed with 12: Cannot allocate memory (posted 3/8 WRs)"
+
+
 @pytest.mark.parametrize(
-    ("has_mamba", "single_group", "backend", "qps", "fails_step"),
+    ("has_mamba", "single_group", "backend", "qps", "message", "fails_step"),
     [
-        (True, False, "rdma", 1, False),
-        (True, True, "rdma", 1, False),
-        (False, False, "rdma", 1, False),
-        (True, False, "xgmi", 4, False),
-        (True, False, "rdma", 4, True),
-        (False, False, "rdma", 4, True),
-        (False, True, "rdma", 4, False),
+        (True, False, "rdma", 1, _COMPLETION_ERROR, False),
+        (True, True, "rdma", 1, _COMPLETION_ERROR, False),
+        (False, False, "rdma", 1, _COMPLETION_ERROR, False),
+        (True, False, "xgmi", 4, _COMPLETION_ERROR, False),
+        (True, False, "rdma", 4, _COMPLETION_ERROR, True),
+        (False, False, "rdma", 4, _COMPLETION_ERROR, True),
+        (False, True, "rdma", 4, _COMPLETION_ERROR, False),
+        (True, False, "rdma", 1, _POST_ERROR, True),
+        (True, False, "rdma", 1, "SQ full (read): ep=0", True),
+        (False, True, "rdma", 1, _POST_ERROR, False),
     ],
 )
 def test_terminal_read_failure_fails_the_step_only_while_dma_may_continue(
-    has_mamba, single_group, backend, qps, fails_step
+    has_mamba, single_group, backend, qps, message, fails_step
 ):
     """Once every READ is terminal the failure is reported instead of killing
-    the engine, unless request-level recovery would free blocks that another
-    QP of a failed transfer may still write into. Block-level recovery for a
-    single KV cache group is unchanged."""
+    the engine, unless request-level recovery would free blocks that the
+    failed transfer may still write into: through another QP, or through work
+    requests posted before a post failure. Block-level recovery for a single
+    KV cache group is unchanged."""
 
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
@@ -512,7 +520,7 @@ def test_terminal_read_failure_fails_the_step_only_while_dma_may_continue(
     worker._has_mamba = has_mamba
     worker._single_kv_cache_group = single_group
     worker.moriio_config = SimpleNamespace(backend=backend, qp_per_transfer=qps)
-    worker._reads_issued_this_step = [_ReadStatus("failed")]
+    worker._reads_issued_this_step = [_ReadStatus("failed", message)]
     worker.moriio_wrapper = FailingWrapper()
 
     if fails_step:
@@ -571,7 +579,7 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
     worker._single_kv_cache_group = True
-    worker._reads_issued_this_step = [_ReadStatus("failed")]
+    worker._reads_issued_this_step = [_ReadStatus("failed", _COMPLETION_ERROR)]
     worker.moriio_wrapper = FailingWrapper()
 
     worker._await_reads_issued_this_step()
@@ -579,8 +587,9 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
 
 
 class _ReadStatus:
-    def __init__(self, state: str):
+    def __init__(self, state: str, message: str = "SQ full"):
         self.state = state
+        self.message = message
 
     def Succeeded(self):
         return self.state == "success"
@@ -589,7 +598,7 @@ class _ReadStatus:
         return self.state == "failed"
 
     def Message(self):
-        return "SQ full"
+        return self.message
 
     def Code(self):
         return -1
@@ -631,7 +640,7 @@ def fake_clock(monkeypatch):
 
 
 def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
-    failed_a = _ReadStatus("failed")
+    failed_a = _ReadStatus("failed", _COMPLETION_ERROR)
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
     worker._single_kv_cache_group = True
