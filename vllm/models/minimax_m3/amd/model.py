@@ -1789,7 +1789,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         decode = self.specialized_decode
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(
@@ -1829,7 +1828,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

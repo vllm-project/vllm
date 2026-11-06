@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from bisect import bisect_right
 from typing import cast
 
 import torch
@@ -53,16 +54,28 @@ def verify_supports_aux_hidden_states_over_pp(model: nn.Module, method: str) -> 
         )
 
 
-def aux_hidden_state_relay_keys(model: nn.Module) -> tuple[str, ...]:
+def aux_hidden_state_keys(
+    model: nn.Module,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Keys of the aux hidden states taken by earlier PP stages, and of those
+    taken by this stage that it sends on (none on the last stage)."""
     from vllm.distributed.parallel_state import get_pp_group
 
     pp = get_pp_group()
-    if pp.world_size < 2 or pp.is_first_rank or pp.is_last_rank:
-        return ()
+    if pp.world_size < 2:
+        return (), ()
     inner = _inner_decoder(model)
     assert inner is not None
-    return tuple(
-        f"{inner.AUX_HIDDEN_STATE_KEY}{i}" for i in range(inner._aux_slot_base_cached)
+    key = inner.AUX_HIDDEN_STATE_KEY
+    base = inner._aux_slot_base_cached
+    end = (
+        base
+        if pp.is_last_rank
+        else bisect_right(inner.aux_hidden_state_layers, inner.end_layer)
+    )
+    return (
+        tuple(f"{key}{i}" for i in range(base)),
+        tuple(f"{key}{i}" for i in range(base, end)),
     )
 
 

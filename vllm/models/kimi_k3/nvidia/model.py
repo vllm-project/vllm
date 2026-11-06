@@ -1144,8 +1144,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
         if (
@@ -1243,7 +1241,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

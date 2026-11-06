@@ -164,6 +164,13 @@ class ForwardBench:
                 output = self.runner.pp_handler.relay_aux_hidden_states(
                     inputs["intermediate_tensors"], output
                 )
+            elif (
+                self.runner.use_aux_hidden_state_outputs
+                and self.runner.pp_handler is not None
+            ):
+                output = self.runner.pp_handler.add_upstream_aux_hidden_states(
+                    inputs["intermediate_tensors"], output
+                )
             if self.drafter is not None:
                 self.drafter.propose(output)
             return output

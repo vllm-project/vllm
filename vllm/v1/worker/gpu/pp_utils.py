@@ -96,7 +96,9 @@ class PPHandler:
         )
         # Whether sampled tokens were broadcast this step.
         self.sampled_tokens_broadcast = False
-        self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
+        # Aux hidden states taken by earlier stages, and by this non-last stage.
+        self.upstream_aux_keys: tuple[str, ...] = ()
+        self.local_aux_keys: tuple[str, ...] = ()
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
@@ -107,26 +109,51 @@ class PPHandler:
 
     def configure_aux_hidden_state_relay(self, model: torch.nn.Module) -> None:
         from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-            aux_hidden_state_relay_keys,
+            aux_hidden_state_keys,
         )
 
-        self.aux_hidden_state_relay_keys = aux_hidden_state_relay_keys(model)
+        self.upstream_aux_keys, self.local_aux_keys = aux_hidden_state_keys(model)
 
     def relay_aux_hidden_states(
         self,
         intermediate_tensors: IntermediateTensors | None,
         output_intermediate_tensors: IntermediateTensors,
     ) -> IntermediateTensors:
-        if not self.aux_hidden_state_relay_keys:
+        """Forward earlier stages' aux hidden states next to this stage's."""
+        missing = [
+            key
+            for key in self.local_aux_keys
+            if key not in output_intermediate_tensors.tensors
+        ]
+        if missing:
+            raise RuntimeError(
+                f"The model did not send aux hidden states {missing} to the next "
+                "PP stage; its forward must add pack_local_aux_hidden_states() "
+                "to the IntermediateTensors it returns."
+            )
+        if not self.upstream_aux_keys:
             return output_intermediate_tensors
         assert intermediate_tensors is not None
         return IntermediateTensors(
             output_intermediate_tensors.tensors
-            | {
-                key: intermediate_tensors[key]
-                for key in self.aux_hidden_state_relay_keys
-            }
+            | {key: intermediate_tensors[key] for key in self.upstream_aux_keys}
         )
+
+    def add_upstream_aux_hidden_states(
+        self,
+        intermediate_tensors: IntermediateTensors | None,
+        model_output: torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Put earlier stages' aux hidden states before the last stage's."""
+        if isinstance(model_output, tuple):
+            hidden_states, aux_hidden_states = model_output
+        else:
+            hidden_states, aux_hidden_states = model_output, []
+        if not self.upstream_aux_keys:
+            return hidden_states, aux_hidden_states
+        assert intermediate_tensors is not None
+        upstream = [intermediate_tensors[key] for key in self.upstream_aux_keys]
+        return hidden_states, upstream + aux_hidden_states
 
     def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor | None] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
