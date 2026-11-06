@@ -486,6 +486,8 @@ class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMo
 
 
 class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    """Modular MXFP4 TRTLLM experts with unquantized activations."""
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -498,6 +500,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
 
 
 class TrtLlmMxfp4Mxfp8ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    """Modular MXFP4 TRTLLM experts with dynamic MXFP8 activations."""
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,

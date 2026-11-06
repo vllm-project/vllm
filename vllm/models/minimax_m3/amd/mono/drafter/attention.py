@@ -290,7 +290,7 @@ def block_math(lds, qb, tk, tv, blk, j, p0, lo, hi, l16, g4, mask):
 
 def store_partial(ap, wave, l16, g4, m, ls, o):
     """(m, l, o) of query rows 16 wave + l16 (< 112) -> the partial at ``ap``:
-    m [128] f32 at 0, l at 512 B, o [112][128] at 1 KB."""
+    ``m[128]`` f32 at 0, l at 512 B, ``o[112][128]`` at 1 KB."""
     mr = wave * 16 + l16
     if g4 == 0:
         dev.st(ap, mr, m, CM_DEV)
