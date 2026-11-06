@@ -516,25 +516,3 @@ If you observe that GPU utilization is lower than expected, CPU contention may b
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
 
 For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.
-
-## MiniMax M3 indexer context parallelism
-
-With `--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on"}'`, the MSA backend
-can shard FP8 index K over single-node NVLink TP2 or TP4 with 128-token pages.
-Rank-local CPU offload with the built-in `SimpleCPUOffloadConnector` preserves
-sharding. Other KV transfer connectors retain replicated index K.
-Prefill defaults to gathering index K and scoring the local query heads.
-To score local K and exchange Top16 candidates instead, use
-`--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on","indexer_prefill_cp":"local_score"}'`.
-Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache layout.
-The experimental `local_score_unified` mode also includes decode queries in the
-local-score exchange during mixed batches; pure decode keeps its existing path.
-All modes preserve logical 128-token block IDs and main attention.
-P128 CP uses FlashInfer's CAKE MSA ICP kernels for prefill and decode;
-it does not require a custom MSA build. Install a FlashInfer build containing
-[the fused prefill APIs](https://github.com/flashinfer-ai/flashinfer/pull/8502).
-If those APIs are unavailable, index K stays replicated with a warning.
-Local prefill fuses scoring and Top16, reuses a bounded candidate workspace,
-and exchanges once per layer. Per-layer CUDA graphs reduce launch overhead;
-short windows use CAKE's materialized fallback.
-There is no automatic path selection; compare full-model performance for your workload.
