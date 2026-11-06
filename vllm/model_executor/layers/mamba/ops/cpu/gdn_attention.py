@@ -16,7 +16,6 @@ from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_update_cpu,
 )
-from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -126,13 +125,6 @@ def _causal_conv1d_update_cpu(
     )
     _scatter_ds_conv_states(conv_states, conv_state_indices, scratch)
     return out
-
-
-def is_arm_bf16() -> bool:
-    return (
-        current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-        and torch.cpu.get_capabilities().get("bf16", False)
-    )
 
 
 def cpu_gdn_attention_core(
@@ -519,8 +511,6 @@ def _spec_forward(
     seq_starts = spec_qsl_cpu[:-1]
     seq_lens = spec_qsl_cpu[1:] - spec_qsl_cpu[:-1]
 
-    is_amx = torch.cpu._is_amx_tile_supported()
-
     # ---- 1. Convolution (per-sequence rolling buffer) ----
     dim = mixed_qkv_spec.size(-1)
     bias = layer.conv1d.bias
@@ -530,7 +520,6 @@ def _spec_forward(
     # is where the next step expects them only when every row is full-length.
     can_use_native_conv = (
         ops.supports_fused_gdn_convs()
-        and (is_amx or is_arm_bf16())
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
@@ -620,9 +609,7 @@ def _spec_aware_nonspec(
     assert query_start_loc is not None
     state_indices_tensor = state_indices_tensor.contiguous()
 
-    can_use_native_conv = ops.supports_fused_gdn_convs() and (
-        torch.cpu._is_amx_tile_supported() or is_arm_bf16()
-    )
+    can_use_native_conv = ops.supports_fused_gdn_convs()
 
     if not can_use_native_conv:
         conv_weights = _unpacked_conv_weight(layer)
@@ -766,8 +753,7 @@ def _spec_aware_nonspec_subset(
     assert has_initial_state is not None
     prefill_state_indices = prefill_state_indices.contiguous()
 
-    is_amx = torch.cpu._is_amx_tile_supported()
-    can_use_native_conv = ops.supports_fused_gdn_convs() and (is_amx or is_arm_bf16())
+    can_use_native_conv = ops.supports_fused_gdn_convs()
 
     if can_use_native_conv:
         conv_out = _causal_conv1d_fwd_cpu(
