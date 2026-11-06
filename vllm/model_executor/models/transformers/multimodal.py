@@ -228,13 +228,18 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return self._has_transcription_request and not self._get_max_audio_length()
 
     def _get_max_long_form_audio_length(self, seq_len: int) -> int:
-        """Samples of the longest audio, set with `--limit-mm-per-prompt`, or the
-        longest the API decodes."""
+        """Samples of the longest audio that fits in `seq_len`, set with
+        `--limit-mm-per-prompt`, or the longest the API decodes."""
+        limits = [int(seq_len * self._audio_samples_per_token)]
         options = self.ctx.get_mm_config().limit_per_prompt.get("audio")
-        max_duration_s = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
-        default = int(max_duration_s * self._get_audio_sampling_rate())
-        length = getattr(options, "length", None) or default
-        return min(length, int(seq_len * self._audio_samples_per_token))
+        if length := getattr(options, "length", None):
+            return min(length, *limits)
+        # 0 disables a limit
+        if max_duration_s := envs.VLLM_MAX_AUDIO_DECODE_DURATION_S:
+            limits.append(int(max_duration_s * self._get_audio_sampling_rate()))
+        if max_bytes := envs.VLLM_MAX_AUDIO_DECODE_BYTES:
+            limits.append(max_bytes // np.dtype(np.float32).itemsize)
+        return min(limits)
 
     def get_max_audio_tokens(self, seq_len: int) -> int:
         # Measured, as config limits can be per encoder window (e.g. Qwen3-ASR)

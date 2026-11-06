@@ -5,6 +5,7 @@ import pytest
 import transformers
 from packaging.version import Version
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.model_executor.model_loader import get_model_cls
@@ -226,6 +227,24 @@ def test_long_form_audio_limit(limit, expected_tokens):
             model_impl="transformers",
             limit_mm_per_prompt={"audio": limit},
         )
+    ).info
+
+    max_tokens = info.get_mm_max_tokens_per_item(10**6, {"audio": 1})
+    assert max_tokens == {"audio": expected_tokens}
+
+
+@pytest.mark.parametrize(
+    ("max_duration_s", "max_bytes", "expected_tokens"),
+    [(0, 0, 10**6), (3600, 4 * 24000 * 60, 450), (60, 0, 450)],
+)
+def test_long_form_audio_follows_the_decode_limits(
+    monkeypatch, max_duration_s, max_bytes, expected_tokens
+):
+    """Audio past either decode limit is refused, and 0 disables a limit."""
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_DURATION_S", max_duration_s)
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_BYTES", max_bytes)
+    info = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model="microsoft/VibeVoice-ASR-HF", model_impl="transformers")
     ).info
 
     max_tokens = info.get_mm_max_tokens_per_item(10**6, {"audio": 1})
