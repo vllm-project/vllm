@@ -17,6 +17,8 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderChatStreamRequest,
     DerenderCompletionRequest,
     DerenderCompletionStreamRequest,
+    GenerateDerenderResponse,
+    GenerateDerenderStreamResponse,
     GenerateRequest,
     GenerateResponse,
     GenerateStreamResponse,
@@ -26,8 +28,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
     MultiModalFeatures,
+    ParseContext,
     PlaceholderRangeInfo,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
@@ -88,6 +92,23 @@ def test_internal_instance_construction_treats_all_as_provided():
     assert req.is_sampling_param_provided("top_p")
 
 
+def test_dump_roundtrip_keeps_default_max_tokens_provided():
+    """``/render`` returns ``model_dump()`` of a request built from a resolved
+    ``SamplingParams``. ``max_tokens=16`` equals the dataclass default, which
+    ``omit_defaults`` leaves out; it must still reach generate as provided."""
+    sp = SamplingParams(max_tokens=16)
+    req = GenerateRequest(token_ids=[1, 2, 3], sampling_params=sp)
+    dumped = req.model_dump()
+    assert dumped["sampling_params"]["max_tokens"] == 16
+    parsed = GenerateRequest.model_validate(json.loads(json.dumps(dumped)))
+    assert parsed.sampling_params.max_tokens == 16
+    assert parsed.is_sampling_param_provided("max_tokens")
+
+    # A body that omitted ``max_tokens`` still omits it after a round trip.
+    req = GenerateRequest.model_validate(_base_payload())
+    assert "max_tokens" not in req.model_dump()["sampling_params"]
+
+
 def test_multimodal_features_reject_mismatched_parallel_fields():
     with pytest.raises(ValueError, match="same length"):
         MultiModalFeatures(
@@ -124,6 +145,31 @@ def test_generate_request_rejects_placeholder_outside_prompt():
         )
 
 
+def test_reasoning_parser_kwargs_rejects_unknown_keys():
+    """The engine splats these into its reasoning parser's constructor, so a
+    client must not be able to pass arbitrary keyword arguments."""
+    payload = {**_base_payload(), "reasoning_parser_kwargs": {"tokenizer": None}}
+    with pytest.raises(ValidationError, match="tokenizer"):
+        GenerateRequest.model_validate(payload)
+
+
+def test_rust_render_sampling_params_without_nulls_validate():
+    """Rust render omits unset sampling fields; Python generate rejects nulls."""
+    sampling_params = {"max_tokens": 64, "watermarking": True}
+    request = GenerateRequest.model_validate(
+        {"token_ids": [1, 2, 3], "sampling_params": sampling_params}
+    )
+    assert request.sampling_params.max_tokens == 64
+
+    with pytest.raises(ValidationError, match="temperature"):
+        GenerateRequest.model_validate(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_params": {**sampling_params, "temperature": None},
+            }
+        )
+
+
 def test_output_mode_defaults_to_tokens():
     assert GenerateRequest.model_validate(_base_payload()).output_mode == "tokens"
 
@@ -133,7 +179,67 @@ def test_output_mode_text_is_accepted():
     assert GenerateRequest.model_validate(payload).output_mode == "text"
 
 
-@pytest.mark.parametrize("output_mode", ["derender", "bogus", None])
+def test_output_mode_derender_is_accepted_with_parse_context():
+    payload = {
+        **_base_payload(),
+        "output_mode": "derender",
+        "parse_context": {"include_reasoning": False, "history_tool_call_cnt": 2},
+    }
+    request = GenerateRequest.model_validate(payload)
+    assert request.output_mode == "derender"
+    assert request.parse_context is not None
+    assert request.parse_context.include_reasoning is False
+    assert request.parse_context.history_tool_call_cnt == 2
+
+
+def test_parse_context_is_accepted_at_other_levels():
+    """/render always sets it, so a prefill leg must accept it unchanged."""
+    payload = {**_base_payload(), "parse_context": {}}
+    assert GenerateRequest.model_validate(payload).output_mode == "tokens"
+
+
+def test_parse_context_unknown_fields_rejected_only_in_derender_mode():
+    """An unknown field from a newer /render must fail derender which would
+    parse without it but not the levels that never read the context."""
+    payload = {**_base_payload(), "parse_context": {"tool_choise": "auto"}}
+    assert GenerateRequest.model_validate(payload).output_mode == "tokens"
+    with pytest.raises(ValidationError, match="tool_choise"):
+        GenerateRequest.model_validate({**payload, "output_mode": "derender"})
+
+
+def test_parse_context_rejects_non_json_template_kwargs():
+    """Render internal state must not become part of the wire shape."""
+    with pytest.raises(ValidationError, match="chat_template_kwargs"):
+        ParseContext(chat_template_kwargs={"_position_to_source": {(0, 0): "x"}})
+
+
+@pytest.mark.parametrize("tools", [None, []])
+def test_parse_context_to_chat_request_accepts_converter_tool_fields(tools):
+    """The Anthropic converter emits these and coupled /v1/messages serves them."""
+    chat_request = ParseContext(tools=tools, tool_choice="auto").to_chat_request()
+    assert chat_request.tools == tools
+    assert chat_request.tool_choice == "auto"
+
+
+def test_parse_context_to_chat_request_rejects_unknown_named_tool():
+    parse_context = ParseContext.model_validate(
+        {"tool_choice": {"type": "function", "function": {"name": "nope"}}}
+    )
+    with pytest.raises(VLLMValidationError, match="tool_choice"):
+        parse_context.to_chat_request()
+
+
+def test_derender_mode_rejects_detokenize_false():
+    payload = {
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"detokenize": False},
+        "output_mode": "derender",
+    }
+    with pytest.raises(ValidationError, match="detokenize"):
+        GenerateRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("output_mode", ["bogus", None])
 def test_output_mode_rejects_unsupported_levels(output_mode):
     """Levels the server does not implement fail instead of falling back to
     tokens which would answer 200 with the wrong response shape."""
@@ -188,6 +294,19 @@ def test_text_response_and_chunk_dispatch_on_output_mode():
     assert isinstance(chunk, GenerateTextStreamResponse)
 
 
+def test_derender_chunk_dispatches_and_derender_stream_request_rejects_it():
+    chunk = {
+        "output_mode": "derender",
+        "choices": [{"index": 0, "delta": {"content": "hi"}}],
+    }
+    parsed = TypeAdapter(GenerateStreamResponse).validate_python(chunk)
+    assert isinstance(parsed, GenerateDerenderStreamResponse)
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderChatStreamRequest.model_validate(
+            {"stream": True, "generate_chunk": chunk}
+        )
+
+
 def test_text_response_requires_text_on_every_choice():
     with pytest.raises(ValidationError, match="text"):
         TypeAdapter(GenerateResponse).validate_python(
@@ -195,7 +314,24 @@ def test_text_response_requires_text_on_every_choice():
         )
 
 
-@pytest.mark.parametrize("output_mode", ["derender", None, 5])
+def test_derender_response_dispatches_on_output_mode():
+    parsed = TypeAdapter(GenerateResponse).validate_python(
+        {
+            "output_mode": "derender",
+            "choices": [
+                {
+                    "index": 0,
+                    "token_ids": [1],
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        }
+    )
+    assert isinstance(parsed, GenerateDerenderResponse)
+    assert parsed.choices[0].message.content == "hi"
+
+
+@pytest.mark.parametrize("output_mode", [None, 5])
 def test_response_rejects_unknown_output_mode(output_mode):
     with pytest.raises(ValidationError):
         TypeAdapter(GenerateResponse).validate_python(
@@ -213,6 +349,21 @@ def test_derender_requests_accept_responses_without_output_mode():
             "generate_chunk": {"choices": [{"index": 0, "token_ids": [1]}]},
         }
     )
+
+
+def test_derender_chat_request_rejects_derender_responses():
+    derendered = {
+        "output_mode": "derender",
+        "choices": [
+            {
+                "index": 0,
+                "token_ids": [1],
+                "message": {"role": "assistant", "content": "hi"},
+            }
+        ],
+    }
+    with pytest.raises(ValidationError, match="output_mode"):
+        DerenderChatRequest.model_validate({"generate_response": derendered})
 
 
 def test_derender_requests_reject_text_responses():

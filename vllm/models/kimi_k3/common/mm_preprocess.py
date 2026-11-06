@@ -30,6 +30,9 @@ from vllm.multimodal.processing import (
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
 
 logger = init_logger(__name__)
 
@@ -106,6 +109,7 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
             self.ctx.model_config.model,
             revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=KimiK25FusedVisionProcessor,
         )
 
         # Resolve token ID from the tokenizer because transformers v5

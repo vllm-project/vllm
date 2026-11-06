@@ -63,6 +63,7 @@ with socket.create_connection(("127.0.0.1", int(sys.argv[1]))) as connection:
                     assert process.returncode is not None, "Server was not reaped"
         finally:
             # Keep failing regressions from leaking the deliberately orphaned worker.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(server._server_process.pid, signal.SIGKILL)
-            server._server_process.wait(timeout=10)
+            if server._server_process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(server._server_process.pid, signal.SIGKILL)
+                server._server_process.wait(timeout=10)
