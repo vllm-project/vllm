@@ -44,7 +44,9 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
             # Draft prefill shares the target's padded attention metadata.
             varlen_decode=self.enable_adaptive_verification,
         )
@@ -254,10 +256,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )
 
-        if dummy_run and dp_sync_state is not None:
-            num_reqs = min(num_reqs, dp_sync_state.num_reqs)
-
-        self._decode(
+        self._run_multi_step_decode(
             input_batch,
             num_rejected,
             num_reqs,
@@ -389,7 +388,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         self.input_buffers.positions[:num_reqs] = positions
         self.sample_src_positions[:num_reqs] = sample_src_positions
 
-    def _generate_draft(
+    def _decode(
         self,
         num_reqs: int,
         num_tokens_padded: int,

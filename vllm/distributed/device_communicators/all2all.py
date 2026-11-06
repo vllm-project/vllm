@@ -34,7 +34,7 @@ from .base_device_communicator import All2AllManagerBase, Cache
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
-    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll
+    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll, NVLinkTwoSidedAlltoAll
 
 
 logger = init_logger(__name__)
@@ -691,30 +691,31 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             self.rank,
             self.world_size,
         )
-        self.initialized = False
-        self.alltoall_info = None
+        self.communications: dict[tuple[int, ...], NVLinkTwoSidedAlltoAll] = {}
 
-    def initialize(
+    def get_communication(
         self,
-        world_size: int,
-        rank: int,
-        gpus_per_node: int,
-    ):
-        """Initialize workspace."""
-        from flashinfer.comm import Mapping
-        from flashinfer.comm.mnnvl import MnnvlConfig
-        from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+    ) -> "NVLinkTwoSidedAlltoAll":
+        """Return the communication for these sizes, creating it on first use.
 
-        if self.initialized:
-            return
+        Creation is collective over the EP group. FlashInfer keeps one
+        workspace per process and shares it across communications.
+        """
+        key = (max_num_tokens, top_k, num_experts, hidden_size)
+        communication = self.communications.get(key)
+        if communication is not None:
+            return communication
 
-        self.cleanup()
-        logger.debug("making map: rank=%d, world size=%d", rank, world_size)
-        self.mapping = Mapping(
-            world_size,
-            rank,
-            gpus_per_node,
-            tp_size=world_size,
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            MoEEpCommParams,
+            NVLinkTwoSidedAlltoAll,
+            NVLinkTwoSidedConfig,
+            create_communication,
         )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
@@ -724,62 +725,42 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         # MNNVL workspace is allocated per rank in the comm_backend's group; the
         # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
         # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(self.cpu_group),
-            fabric_page_size=1 << 29,  # 512MB
-            allocation_granularity=0,  # Auto-detect
+        bootstrap = BootstrapConfig(
+            world_size=self.world_size,
+            rank=self.rank,
+            device=torch.accelerator.current_device_index(),
+            process_group=self.cpu_group,
         )
-
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
-        self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, ep_config
+        params = MoEEpCommParams(
+            num_experts=num_experts,
+            top_k=top_k,
+            max_tokens_per_rank=max_num_tokens,
+            hidden_size=hidden_size,
+            # Received rows past a source rank's token count keep expert id
+            # num_experts, which no rank owns.
+            invalid_expert_id=num_experts,
         )
-
-        self.world_size = world_size
-        self.rank = rank
-        self.gpus_per_node = gpus_per_node
-        self.initialized = True
-
+        config = NVLinkTwoSidedConfig(comm_backend=CustomCommunicator(self.cpu_group))
+        # Bootstrap metadata must stay on the CPU even when model layers are
+        # constructed under a CUDA default-device context.
+        with torch.device("cpu"):
+            communication = create_communication(bootstrap, params, backend=config)
+        assert isinstance(communication, NVLinkTwoSidedAlltoAll)
+        self.communications[key] = communication
         logger.info(
-            "FlashInfer All2All initialized for rank %s, size %s", rank, world_size
+            "FlashInfer All2All initialized for rank %s, size %s",
+            self.rank,
+            self.world_size,
         )
-
-    def ensure_alltoall_workspace_initialized(self):
-        """Ensure workspace is initialized."""
-        if not has_flashinfer_nvlink_two_sided():
-            return False
-
-        if self.world_size <= 1:
-            return False
-
-        if not self.initialized:
-            self.initialize(
-                world_size=self.world_size,
-                rank=self.rank,
-                gpus_per_node=torch.accelerator.device_count,
-            )
-        return self.initialized
+        return communication
 
     def get_handle(self, kwargs):
         return self
 
     def cleanup(self):
-        """Clean up workspace."""
-        if (
-            self.initialized
-            and self.workspace_tensor is not None
-            and self.prepare_workspace_tensor is not None
-        ):
-            try:
-                del self.workspace_tensor
-                del self.prepare_workspace_tensor
-            except Exception as e:
-                logger.warning("Failed to cleanup FlashInfer workspace: %s", e)
-            finally:
-                self.workspace_tensor = None
-                self.prepare_workspace_tensor = None
-                self.mapping = None
-                self.initialized = False
+        for communication in self.communications.values():
+            communication.destroy()
+        self.communications.clear()
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
@@ -880,6 +861,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             extra_payload_bytes_per_token=extra_payload_bytes_per_token,
             use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
+            # Keep the fence transport; FlashInfer otherwise picks CFT counted
+            # writes or the Lamport transport where the platform supports them.
+            cft=False,
+            lamport=False,
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
@@ -1219,6 +1204,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         num_topk: int,
         use_fp8_dispatch: bool,
     ) -> dict:
+        allow_hybrid_mode = envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
         return dict(
             group=self._device_group
             if self._device_group is not None
@@ -1227,7 +1213,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             hidden=hidden,
             num_topk=num_topk,
             use_fp8_dispatch=use_fp8_dispatch,
-            allow_hybrid_mode=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE,
+            allow_hybrid_mode=allow_hybrid_mode,
+            # Direct-mode automatic selection uses at most nine QPs.
+            num_allocated_qps=0 if allow_hybrid_mode else 9,
             prefer_overlap_with_compute=envs.VLLM_DEEPEP_V2_PREFER_OVERLAP,
             allow_multiple_reduction=(envs.VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION),
             explicitly_destroy=True,
