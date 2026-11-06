@@ -632,7 +632,7 @@ class CompilationConfig:
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
-    auto-inference."""
+    auto-inference. A batch with more items runs eagerly in one forward."""
 
     encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.

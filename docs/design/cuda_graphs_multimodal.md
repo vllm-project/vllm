@@ -144,11 +144,12 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 ## Configuration
 
-Four fields in `CompilationConfig` control encoder CUDA Graphs:
+Five fields in `CompilationConfig` control encoder CUDA Graphs:
 
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
+* `encoder_cudagraph_max_token_budget` (`int | None`, default `5120`) — largest auto-generated token budget. A batch with more tokens runs eagerly. `None` captures up to the model's largest budget. Ignored when `encoder_cudagraph_token_budgets` is set.
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`. A batch with more items runs eagerly in one forward.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 Multi-path mode is configured at the model level through `EncoderCudaGraphConfig.paths`. Each `EncoderCudaGraphPathConfig` can set a path-specific minimum budget and whether zero-token batches are allowed. The manager automatically generates separate budget lists and uses the same execution loop for single- and multi-path models.
