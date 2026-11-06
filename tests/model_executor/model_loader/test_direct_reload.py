@@ -305,17 +305,30 @@ class TestRefusals:
         _assert_same(_state(model), before, addresses=True)
         assert "_direct_reload_begun" not in model.__dict__
 
-    def test_unmarked_model_refused_at_begin_not_cold_start(self):
+    @pytest.mark.parametrize("marked", [True, False])
+    def test_unmarked_model_warns_and_reloads(self, monkeypatch, marked):
+        from vllm.model_executor.model_loader.reload import direct
+
         class _Unmarked(_ToyModel):  # the mark is not inherited
             pass
 
+        warnings: list[tuple] = []
+        monkeypatch.setattr(
+            direct.logger, "warning_once", lambda *args: warnings.append(args)
+        )
+        cls = _ToyModel if marked else _Unmarked
         with _DEVICE:
-            model = _Unmarked()
+            model = cls()
         model.load_weights(_checkpoint().items())
         process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-        self._assert_begin_refused(
-            model, r"_Unmarked is not validated .*VLLM_RELOAD_MODE=layerwise"
-        )
+        assert warnings == []  # cold start does not check
+        _reload(model, _checkpoint(1.01))
+        if marked:
+            assert warnings == []
+        else:
+            assert len(warnings) == 1 and warnings[0][1] == "_Unmarked"
+            assert "not validated" in warnings[0][0]
+        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
 
     def test_online_quantization_refused(self):
         # finish clears the guard that keeps online quantization from
@@ -358,6 +371,24 @@ class TestRefusals:
         model.proj.add_module("experts", experts)
         self._assert_begin_refused(
             model, rf"{cls_name} is not supported \(proj\.experts\)"
+        )
+
+    @pytest.mark.parametrize(
+        "reason,match",
+        [
+            ("weight copies are built once", "weight copies are built once"),
+            (None, "no reason given"),
+        ],
+    )
+    def test_instance_declared_unsupported_refused(self, reason, match):
+        # set on a model instance at runtime (MiniMax-M3 AMD mono decode);
+        # False refuses even a validated class
+        model = _cold_start(_checkpoint())
+        model.supports_direct_reload = False  # type: ignore[misc]
+        if reason is not None:
+            model.direct_reload_unsupported_reason = reason  # type: ignore[misc]
+        self._assert_begin_refused(
+            model, rf"_ToyModel is not supported \(model\): {match}"
         )
 
     def test_replaced_param_refused(self):

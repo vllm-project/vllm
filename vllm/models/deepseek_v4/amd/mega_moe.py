@@ -61,7 +61,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
     _runtime_cache: dict[tuple, Any] = {}
     # finalize_weights skips the shuffle once its runtimes exist, and
     # finalize_mega_moe_weights drops the fused shared expert's module
-    direct_reload_unsupported = "its expert weights are shuffled only once"
+    supports_direct_reload = False
+    direct_reload_unsupported_reason = "its expert weights are shuffled only once"
 
     def __init__(
         self,

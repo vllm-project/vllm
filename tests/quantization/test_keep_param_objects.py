@@ -38,7 +38,6 @@ from vllm.model_executor.model_loader.reload.direct import (
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsDirectReload
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -288,14 +287,6 @@ def _same_bytes(a: torch.Tensor, b: torch.Tensor) -> bool:
     )
 
 
-class _Model(torch.nn.Module, SupportsDirectReload):
-    """The layer under test, as a model opted in to direct reload."""
-
-    def __init__(self, layer: torch.nn.Module):
-        super().__init__()
-        self.layer = layer
-
-
 def _cold_start(build: Callable, vllm_config, seed: int):
     # a second layer under the same name replaces the first one's registration
     vllm_config.compilation_config.static_forward_context.clear()
@@ -304,9 +295,8 @@ def _cold_start(build: Callable, vllm_config, seed: int):
     names = [n for n, _ in layer.named_parameters(recurse=False)]
     torch.manual_seed(seed)
     _load(layer)
-    model = _Model(layer)
-    process_weights_after_loading(model, vllm_config.model_config, torch.device("cuda"))
-    return model, method, names
+    process_weights_after_loading(layer, vllm_config.model_config, torch.device("cuda"))
+    return layer, method, names
 
 
 def _ct_int(
@@ -423,22 +413,20 @@ def test_direct_reload_keeps_kernel_tensor_addresses(
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.moe_backend = backend
     default_vllm_config.kernel_config.linear_backend = backend
-    model, method, names = _cold_start(build, default_vllm_config, seed=0)
-    layer = model.layer
+    layer, method, names = _cold_start(build, default_vllm_config, seed=0)
     # detached: a parameter rebound to new storage must not follow it
     cold = {n: t.detach() for n, t in _kernel_tensors(layer, method).items()}
 
-    begin_direct_reload(model)
+    begin_direct_reload(layer)
     torch.manual_seed(1)
     _load(layer, names)
-    finish_direct_reload(model, default_vllm_config.model_config, torch.device("cuda"))
+    finish_direct_reload(layer, default_vllm_config.model_config, torch.device("cuda"))
     reloaded = _kernel_tensors(layer, method)
     assert {n: t.data_ptr() for n, t in reloaded.items()} == {
         n: t.data_ptr() for n, t in cold.items()
     }
 
-    fresh_model, fresh_method, _ = _cold_start(build, default_vllm_config, seed=1)
-    fresh = _kernel_tensors(fresh_model.layer, fresh_method)
+    fresh = _kernel_tensors(*_cold_start(build, default_vllm_config, seed=1)[:2])
     # bytes: random FP8/E8M0 payloads include NaN encodings
     assert [n for n in reloaded if not _same_bytes(reloaded[n], fresh[n])] == []
 

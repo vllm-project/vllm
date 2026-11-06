@@ -1241,12 +1241,24 @@ def supports_replayssm(
 
 @runtime_checkable
 class SupportsDirectReload(Protocol):
-    """The model was validated with direct weight reload
-    (``VLLM_RELOAD_MODE=direct``) for the quantization formats and kernels
-    its tests cover; other paths rely on component refusals and the runtime
-    checks of the reload."""
+    """Whether a model or module reloads correctly with direct weight reload
+    (``VLLM_RELOAD_MODE=direct``).
 
-    supports_direct_reload: ClassVar[Literal[True]] = True
+    - Validated: a model class lists this protocol among its own bases (or
+      sets ``supports_direct_reload = True`` in its own body). Validated for
+      the quantization formats and kernels its tests cover; other paths rely
+      on refusals and the runtime checks of the reload. Not inherited: a
+      subclass of a validated class is not validated.
+    - Refused: any module (class or instance) sets
+      ``supports_direct_reload = False`` and
+      ``direct_reload_unsupported_reason``; inherited. A direct update of a
+      model containing it raises with the reason.
+    - Neither: a direct update warns that correctness is not guaranteed.
+    """
+
+    supports_direct_reload: ClassVar[bool] = True
+    direct_reload_unsupported_reason: ClassVar[str | None] = None
+    """Required when ``supports_direct_reload`` is False."""
 
 
 @overload
@@ -1262,9 +1274,13 @@ def supports_direct_reload(model: object) -> TypeIs[SupportsDirectReload]: ...
 def supports_direct_reload(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsDirectReload]] | TypeIs[SupportsDirectReload]:
-    # not inherited: subclasses (drafts, wrappers) are validated separately
+    # True is not inherited: subclasses (drafts, wrappers) are validated
+    # separately
     cls = model if isinstance(model, type) else type(model)
-    return SupportsDirectReload in cls.__bases__
+    return (
+        SupportsDirectReload in cls.__bases__
+        or vars(cls).get("supports_direct_reload") is True
+    )
 
 
 @runtime_checkable
