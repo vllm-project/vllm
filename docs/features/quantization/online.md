@@ -73,8 +73,6 @@ quantization_config:
   moe:
     weight: <name>
     activation: <name>
-  lm_head:
-    weight: <name>      # weight-only; see "Quantizing the lm_head"
   ignore: [<layer-name-or-regex-or-fnmatch-pattern>, ...]
 ```
 
@@ -189,25 +187,46 @@ adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where o
 
 ### Quantizing the lm_head
 
-`lm_head` quantizes an fp16/bf16 `ParallelLMHead` at load time, weight-only.
-Decode reads the whole lm_head every step, so on bandwidth-bound GPUs a
-full-precision head can be one of the largest per-token costs, even when a
-checkpoint quantizes every other linear layer. Supported weights:
+The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer, but online
+quantization can quantize an fp16/bf16 lm_head at load time with the online
+linear methods. Decode reads the whole lm_head every step, so on
+bandwidth-bound GPUs a full-precision head can be one of the largest per-token
+costs, even when a checkpoint quantizes every other linear layer.
 
-| Name | Recipe | Kernel |
-| ---- | ------ | ------ |
-| `int4_per_group_32_asym` | uint4 data, one scale and zero point per 32 input channels | The platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12 |
+Select the lm_head with a [`targets`](#fine-grained-per-layer-quantization-schemes)
+pattern that contains its module name, such as `"lm_head"` or
+`"re:.*lm_head$"`. Broad patterns such as `"re:.*"`, and the `linear` field, do
+not select it. For example:
+
+| Target value | Recipe | Notes |
+| ------------ | ------ | ----- |
+| `{"weight": "fp8_per_channel_static", "activation": null}` | fp8_e4m3 data, per-output-channel scale, BF16 activations | Any online linear spec is accepted, e.g. `"fp8_per_channel"` for W8A8. |
+| `{"weight": "int4_per_group_32_asym"}` | uint4 data, one scale and zero point per 32 input channels, BF16 activations | lm_head only. Runs on the platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12. |
 
 ```bash
 # Quark int4 checkpoint whose lm_head is left in bf16
 vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
-    --quantization-config '{"lm_head": "int4_per_group_32_asym"}'
+    --quantization-config '{"targets":{"lm_head":{"weight":"int4_per_group_32_asym"}}}'
 ```
 
-- The lm_head must be unquantized in the checkpoint; `lm_head` composes with
-  `linear`, `moe` and `targets`, and `targets` patterns never select the lm_head.
-- A head tied to the input embeddings keeps the embeddings' fp16/bf16 weight
-  and adds the int4 copy, so it costs memory instead of saving it.
+- The checkpoint must leave the lm_head unquantized: online re-quantization of
+  a checkpoint-quantized lm_head raises `NotImplementedError`.
+- `targets` is mutually exclusive with `linear` and `moe`. To also quantize
+  the linear layers online, add patterns for them to `targets`.
+- This quantizes the model's own lm_head. It is unrelated to
+  `draft_lm_head_quantization` in `--speculative-config`, which gives a
+  speculative-decoding drafter a private quantized copy of the target's lm_head
+  and leaves the target unchanged. Both live in
+  `vllm/model_executor/layers/quantization/online/lm_head.py`, where
+  `OnlineLMHeadMethodBase` implements the weight-only methods above that are
+  specific to the lm_head.
+
+!!! warning
+    A lm_head tied to the input embeddings (e.g. small Qwen3 and Gemma models)
+    keeps the embeddings' fp16/bf16 weight and adds the `int4_per_group_32_asym`
+    copy next to it. It reduces the weight bytes read per decode step, but
+    increases memory instead of saving it; the extra size is logged at load.
+    The other online methods reject a tied lm_head.
 
 ### Separate Schemes for Dense and MoE Layers
 
@@ -312,8 +331,6 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
       quantized only when a `targets` pattern contains its module name (`"re:.*"`
       does not select it), for example weight-only FP8:
       `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
-      A tied lm_head, or one the checkpoint already quantizes, raises an error. This quantizes the target model's own head; it is
-      unrelated to `draft_lm_head_quantization`, which gives a speculative-decoding
-      drafter a private quantized copy of the head and leaves the target unchanged.
+      See [Quantizing the lm_head](#quantizing-the-lm_head).
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.

@@ -371,12 +371,7 @@ def resolve_quant_method(
         return base_quant_method
 
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
-        base_quant_method,
-        (
-            UnquantizedLinearMethod,
-            UnquantizedFusedMoEMethod,
-            UnquantizedEmbeddingMethod,
-        ),
+        base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
     )
 
     if isinstance(layer, ParallelLMHead) and online_target is not None:
@@ -398,12 +393,6 @@ def resolve_quant_method(
         if online_target is None:
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
-        if isinstance(layer, ParallelLMHead):
-            raise NotImplementedError(
-                f"{prefix}: quantization_config.lm_head needs an unquantized "
-                f"lm_head, but the checkpoint quantizes it with "
-                f"{type(base_quant_method).__name__}."
-            )
         if online_target[3].hadamard_size is not None:
             raise NotImplementedError(
                 f"{prefix}: online hadamard_size on an already quantized layer "

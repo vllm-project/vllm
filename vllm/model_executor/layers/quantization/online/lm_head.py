@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Online lm_head quantization: weight-only methods selected by
-``quantization_config.lm_head``, and online-quantized copies of an
-already-loaded lm_head."""
+"""Online lm_head quantization: weight-only methods for the model's own
+lm_head, selected by a ``quantization_config.targets`` pattern naming it, and
+private quantized copies of an already-loaded lm_head for speculative-decoding
+drafters (``draft_lm_head_quantization``)."""
 
 from abc import abstractmethod
 from itertools import chain
@@ -52,7 +53,7 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
     """
 
     scheme: ClassVar[str]
-    """The ``quantization_config.lm_head`` name, for logs and errors."""
+    """The weight name in ``QUANT_KEY_NAMES``, for logs and errors."""
     weight_type: ClassVar[ScalarType]
     group_size: ClassVar[int]
     """Input channels per scale; -1 for one scale per output channel."""

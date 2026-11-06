@@ -3,7 +3,8 @@
 """Online int4 weight-only quantization.
 
 ``Int4PerGroup32AsymLMHeadMethod`` quantizes an fp16/bf16 lm_head at load time
-(``quantization_config.lm_head="int4_per_group_32_asym"``). Decode reads the
+(a ``quantization_config.targets`` pattern naming the lm_head, with
+``{"weight": "int4_per_group_32_asym"}``). Decode reads the
 whole lm_head every step, so on bandwidth-bound GPUs a full-precision head is
 one of the largest per-token costs even when the checkpoint quantizes every
 other linear layer.

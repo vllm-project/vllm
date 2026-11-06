@@ -50,6 +50,9 @@ from vllm.model_executor.layers.quantization.online.int4 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    OnlineLMHeadMethodBase,
+)
 from vllm.model_executor.layers.quantization.online.lut_b import (
     LutBOnlineMoEMethod,
 )
@@ -96,7 +99,6 @@ class OnlineQuantizationSource(str, Enum):
 
     linear = "linear"  # LinearBase
     moe = "moe"  # RoutedExperts
-    lm_head = "lm_head"  # ParallelLMHead
     targets = "targets"
 
 
@@ -107,14 +109,12 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    # lm_head only (`OnlineLMHeadMethodBase`).
+    kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.
 _ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
-
-_ONLINE_LM_HEAD_METHODS: dict[QuantKey, type] = {
-    kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
-}
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
@@ -218,17 +218,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         args: QuantizationConfigArgs,
     ) -> None:
         super().__init__()
-        if (
-            args.linear is None
-            and args.moe is None
-            and args.lm_head is None
-            and args.targets is None
-        ):
+        if args.linear is None and args.moe is None and args.targets is None:
             raise ValueError(
                 "OnlineQuantizationConfig requires at least one of "
-                "quantization_config.linear, quantization_config.moe, "
-                "quantization_config.lm_head, or quantization_config.targets "
-                "to be set."
+                "quantization_config.linear, quantization_config.moe, or "
+                "quantization_config.targets to be set."
             )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
@@ -320,6 +314,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
+        if issubclass(cls, OnlineLMHeadMethodBase) and not issubclass(
+            layer_cls, ParallelLMHead
+        ):
+            raise ValueError(
+                f"weight={spec.weight} quantizes only the lm_head: select it "
+                "with a quantization_config.targets pattern naming the "
+                f"lm_head, not for {layer_cls.__name__} layers."
+            )
         # TODO: InputHadamardLinearMethod is format-agnostic; allow the
         # remaining linear methods and MoE once validated.
         if (
@@ -350,22 +352,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
         """
         quant_spec: QuantSpec | None
-        if issubclass(layer_cls, ParallelLMHead):
-            # Only `lm_head` selects the lm_head; `targets` patterns apply to
-            # linear and MoE layers.
-            if self.args.lm_head is None or should_ignore_layer(
-                prefix,
-                ignore=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                use_fnmatch=True,
-            ):
-                return None
-            source = OnlineQuantizationSource.lm_head
-            quant_spec = self.args.lm_head
-            table = _ONLINE_LM_HEAD_METHODS
-            quant_key_str = str(quant_spec)
-            target_pattern = None
-        elif self.args.targets is not None:
+        if self.args.targets is not None:
             resolved_pattern = self._resolve_targets_quant_method_metadata(
                 prefix, layer_cls
             )

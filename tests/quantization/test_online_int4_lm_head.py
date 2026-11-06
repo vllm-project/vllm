@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for online int4 lm_head quantization
-(`quantization_config.lm_head="int4_per_group_32_asym"`).
+"""Tests for online int4 lm_head quantization (a `quantization_config.targets`
+pattern naming the lm_head, with `{"weight": "int4_per_group_32_asym"}`).
 
 Run `pytest tests/quantization/test_online_int4_lm_head.py`.
 """
@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.online import fp8 as online_fp8
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
@@ -47,6 +48,7 @@ from vllm.scalar_type import scalar_types
 
 SCHEME = "int4_per_group_32_asym"
 GROUP = 32
+LM_HEAD_TARGET = {"lm_head": QuantSpec(weight=SCHEME)}
 # Not a multiple of the vocab padding, so the head has zero-filled rows.
 VOCAB, HIDDEN = 4000, 2048
 
@@ -83,61 +85,91 @@ requires_kernel = pytest.mark.skipif(
 
 
 def test_name_maps_to_asymmetric_key():
-    args = QuantizationConfigArgs(lm_head=SCHEME)
-    assert args.lm_head == QuantSpec(weight=kInt4Static32Asym)
-    assert args.linear is None and args.moe is None
+    assert QuantSpec(weight=SCHEME).weight == kInt4Static32Asym
+    args = resolve_quantization_config(
+        "online", {"targets": {"lm_head": {"weight": SCHEME}}}
+    )
+    assert args is not None and args.targets == LM_HEAD_TARGET
 
 
-def test_lm_head_survives_shorthand_merge():
-    args = resolve_quantization_config("fp8_per_tensor", {"lm_head": SCHEME})
-    assert args is not None
-    assert args.lm_head == QuantSpec(weight=kInt4Static32Asym)
-    assert args.linear is not None  # from the shorthand
-
-
-def test_lm_head_only_config_is_valid():
-    OnlineQuantizationConfig(QuantizationConfigArgs(lm_head=SCHEME))
-
-
-def test_shorthand_without_lm_head_spec_is_rejected():
-    with pytest.raises(ValueError, match="does not define a lm_head spec"):
-        QuantizationConfigArgs(lm_head="fp8_per_tensor")
-
-
-def test_dispatch_selects_lm_head_only():
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(lm_head=SCHEME))
+def test_target_naming_the_head_selects_it():
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=LM_HEAD_TARGET))
     resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
     assert resolved is not None
-    assert resolved[0].value == "lm_head"
+    assert resolved[0].value == "targets" and resolved[2] == "lm_head"
     assert resolved[-1] is Int4PerGroup32AsymLMHeadMethod
+    assert resolved[3].activation is None  # weight-only
     assert config.resolve_quant_method_cls(VocabParallelEmbedding, "embed") is None
     assert config.resolve_quant_method_cls(ReplicatedLinear, "proj") is None
 
 
-def test_dispatch_honors_ignore():
-    args = QuantizationConfigArgs(lm_head=SCHEME, ignore=["lm_head"])
-    config = OnlineQuantizationConfig(args)
-    assert config.resolve_quant_method_cls(ParallelLMHead, "lm_head") is None
-
-
-def test_targets_do_not_select_the_lm_head():
-    # A catch-all target must not try to quantize the lm_head (only `lm_head`
-    # does), nor fail on it.
+def test_broad_targets_do_not_select_the_head():
+    # A catch-all pattern keeps meaning the linear and MoE layers.
     args = QuantizationConfigArgs(targets={"re:.*": "fp8_per_tensor"})
     config = OnlineQuantizationConfig(args)
     assert config.resolve_quant_method_cls(ParallelLMHead, "lm_head") is None
-    args = QuantizationConfigArgs(targets={"re:.*": "fp8_per_tensor"}, lm_head=SCHEME)
+    # It composes with a pattern naming the head.
+    args = QuantizationConfigArgs(
+        targets={"re:.*proj$": "fp8_per_tensor", r"re:.*lm_head$": {"weight": SCHEME}}
+    )
     config = OnlineQuantizationConfig(args)
     resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
     assert resolved is not None and resolved[-1] is Int4PerGroup32AsymLMHeadMethod
+    resolved = config.resolve_quant_method_cls(ReplicatedLinear, "o_proj")
+    assert resolved is not None and resolved[-1] is not Int4PerGroup32AsymLMHeadMethod
+
+
+def test_head_in_targets_and_ignore_is_rejected():
+    args = QuantizationConfigArgs(targets=LM_HEAD_TARGET, ignore=["lm_head"])
+    config = OnlineQuantizationConfig(args)
+    with pytest.raises(ValueError, match="matches both"):
+        config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        QuantizationConfigArgs(linear=QuantSpec(weight=SCHEME)),
+        QuantizationConfigArgs(targets={"re:.*": {"weight": SCHEME}}),
+    ],
+    ids=["linear", "broad_target"],
+)
+def test_int4_asym_is_rejected_on_linear_layers(args):
+    config = OnlineQuantizationConfig(args)
+    with pytest.raises(ValueError, match="quantizes only the lm_head"):
+        config.resolve_quant_method_cls(ReplicatedLinear, "model.layers.0.o_proj")
 
 
 def test_unsupported_lm_head_key_is_rejected():
     config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(lm_head="fp8_per_channel_static")
+        QuantizationConfigArgs(
+            targets={"lm_head": QuantSpec(weight="int8_per_channel_static")}
+        )
     )
     with pytest.raises(ValueError, match="not supported"):
         config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
+
+
+@pytest.mark.parametrize("checkpoint_quantized", [False, True])
+def test_checkpoint_lm_head_method(default_vllm_config, checkpoint_quantized):
+    # Online methods read the model dtype from the current config.
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    checkpoint_method = object() if checkpoint_quantized else None
+    quant_config = SimpleNamespace(
+        online_quantization_config=OnlineQuantizationConfig(
+            QuantizationConfigArgs(targets=LM_HEAD_TARGET)
+        ),
+        packed_modules_mapping={},
+        get_quant_method=lambda layer, prefix: checkpoint_method,
+    )
+    # Only the layer type is used, so skip building the head.
+    head = ParallelLMHead.__new__(ParallelLMHead)
+    if checkpoint_quantized:
+        with pytest.raises(NotImplementedError, match="already quantized"):
+            resolve_quant_method(quant_config, head, "lm_head")
+    else:
+        method = resolve_quant_method(quant_config, head, "lm_head")
+        assert isinstance(method, Int4PerGroup32AsymLMHeadMethod)
 
 
 # ------------------------------------------------------------- quantizer
@@ -194,7 +226,7 @@ def online_head_config(dist_init, monkeypatch):
         "get_current_vllm_config",
         lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
     )
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(lm_head=SCHEME))
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=LM_HEAD_TARGET))
     with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
         yield config
 

@@ -108,7 +108,7 @@ def quant_key_name(quant_key: QuantKey | None) -> str | None:
 
 @config
 class QuantSpec:
-    """Quantization spec for one layer kind (linear, MoE or lm_head).
+    """Quantization spec for one layer kind (linear or MoE).
 
     An omitted activation key lets the quantization implementation choose its
     default. An explicitly configured ``activation: null`` requests no
@@ -189,12 +189,6 @@ class QuantizationConfigArgs:
     moe: QuantSpec | None = None
     """Spec applied to ``FusedMoEFactory`` layers."""
 
-    lm_head: QuantSpec | None = None
-    """Spec applied to the ``ParallelLMHead`` (weight-only). Only an
-    unquantized fp16/bf16 lm_head can be quantized online; on a pre-quantized
-    checkpoint this applies when the checkpoint leaves the lm_head
-    unquantized. Not affected by `targets`."""
-
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for. Online quantization also supports
     fnmatch-style patterns."""
@@ -208,7 +202,7 @@ class QuantizationConfigArgs:
     Mutually exclusive with `linear` and `moe`.
     """
 
-    @field_validator("linear", "moe", "lm_head", mode="before")
+    @field_validator("linear", "moe", mode="before")
     @classmethod
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
         if not isinstance(v, str):
@@ -414,7 +408,6 @@ def merge_quantization_config(
     return QuantizationConfigArgs(
         linear=merge_spec(base.linear, override.linear),
         moe=merge_spec(base.moe, override.moe),
-        lm_head=merge_spec(base.lm_head, override.lm_head),
         ignore=override.ignore or base.ignore,
         targets=override.targets or base.targets,
     )
