@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import re
 from collections.abc import Iterator
 from unittest.mock import MagicMock
 
@@ -829,4 +830,36 @@ def test_use_native_raises_clear_error(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="use_native"):
+        LMCacheConnectorV1(vllm_config, MagicMock(), MagicMock())
+
+
+@pytest.mark.parametrize(
+    ("missing", "hint"),
+    [
+        ("lmcache", "pip install lmcache`"),
+        ("lmcache.integration.vllm.vllm_v1_adapter", "pip install lmcache_inprocess"),
+        ("lmcache.integration.vllm.utils", "No module named"),
+    ],
+)
+def test_missing_adapter_raises_install_hint(monkeypatch, missing, hint):
+    """A missing lmcache or in-process adapter names the package to install."""
+    import builtins
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
+    monkeypatch.setattr(KVConnectorBase_V1, "__init__", lambda self, **kwargs: None)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "lmcache.integration.vllm.vllm_v1_adapter":
+            raise ModuleNotFoundError(f"No module named '{missing}'", name=missing)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    vllm_config = MagicMock()
+    vllm_config.kv_transfer_config.get_from_extra_config.side_effect = (
+        lambda key, default: default
+    )
+
+    with pytest.raises(ImportError, match=re.escape(hint)):
         LMCacheConnectorV1(vllm_config, MagicMock(), MagicMock())

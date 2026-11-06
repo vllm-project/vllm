@@ -96,9 +96,27 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 "use_native to use the adapter shipped with lmcache."
             )
         # lazy import
-        from lmcache.integration.vllm.vllm_v1_adapter import (
-            LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
-        )
+        try:
+            from lmcache.integration.vllm.vllm_v1_adapter import (
+                LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
+            )
+        except ModuleNotFoundError as e:
+            if e.name == "lmcache":
+                raise ImportError(
+                    "LMCacheConnectorV1 requires lmcache: `pip install lmcache`."
+                ) from e
+            if e.name in (
+                "lmcache.integration",
+                "lmcache.integration.vllm",
+                "lmcache.integration.vllm.vllm_v1_adapter",
+            ):
+                # lmcache >= 0.5.7 ships the in-process adapter separately.
+                raise ImportError(
+                    "LMCacheConnectorV1 requires the lmcache in-process adapter, "
+                    "which newer lmcache releases ship separately: "
+                    "`pip install lmcache_inprocess`."
+                ) from e
+            raise
 
         cls = LMCacheConnectorLatestImpl
 
