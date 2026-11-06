@@ -37,6 +37,7 @@ logger = init_logger(__name__)
 
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
+    maps_slot_mapping = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
@@ -285,6 +286,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             dtype=torch.int64,
             device=self.device,
         )
+        self._kernel_context_slot_mappings = torch.zeros_like(
+            self._context_slot_mappings
+        )
 
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
         # of the kv-cache group its cache belongs to. Models that share a single group
@@ -383,16 +387,26 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
             context_slots = [
-                self._context_slot_mappings[gidx][start:end]
+                self._kernel_context_slots(gidx, start, end)
                 for gidx in self._layer_group_idx
             ]
         else:
-            context_slots = self._context_slot_mappings[0][start:end]
+            context_slots = self._kernel_context_slots(0, start, end)
         self.model.precompute_and_store_context_kv(
             self.hidden_states[start:end],
             self.context_positions[start:end],
             context_slots,
         )
+
+    def _kernel_context_slots(self, i: int, start: int, end: int) -> torch.Tensor:
+        """Context slots of draft group ``i``, in kernel blocks when its cache is
+        a packed token cache split into them. Recorded in FULL graphs as well."""
+        slots = self._context_slot_mappings[i][start:end]
+        for group in self.attn_groups[self.draft_kv_cache_group_ids[i]]:
+            if group.kernel_slot_mapping is not None:
+                out = self._kernel_context_slot_mappings[i][start:end]
+                return group.map_to_kernel_slot_mapping(slots, out=out)
+        return slots
 
     def _store_hidden_states(
         self,
@@ -578,6 +592,13 @@ class DFlashSpeculator(DraftModelSpeculator):
             parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_padded = batch_desc.num_tokens
+        # Packed token caches split into kernel blocks: the query slots the FULL
+        # graph reads live in each group's persistent mapped buffer.
+        for gid in self.draft_kv_cache_group_ids:
+            for group in self.attn_groups[gid]:
+                group.map_to_kernel_slot_mapping(
+                    self.block_tables.slot_mappings[gid, :num_tokens_padded]
+                )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
@@ -628,6 +649,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
                 self.block_tables.slot_mappings[:, :num_tokens_padded],
                 self.kv_cache_config,
+                self.attn_groups,
             )
             self._generate_draft(
                 num_reqs,

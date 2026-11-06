@@ -557,7 +557,11 @@ def sparse_attn_indexer(
     )
 
     # assert isinstance(attn_metadata, dict)
-    if not isinstance(attn_metadata, dict):
+    # kv_cache is an empty placeholder until bind_kv_cache runs after memory
+    # profiling; a cudagraph memory-profiling capture arrives with real
+    # (dict) metadata but the placeholder cache, and must only reserve
+    # workspace -- exactly like a dummy run.
+    if not isinstance(attn_metadata, dict) or kv_cache.numel() == 0:
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
@@ -675,7 +679,9 @@ def sparse_attn_indexer(
             num_tokens //= get_pcp_group().world_size
         k = k[:num_tokens]
 
-    if not skip_k_cache_insert:
+    if not skip_k_cache_insert and kv_cache.numel() > 0:
+        # kv_cache is an empty placeholder during CUDA-graph memory profiling
+        # (before the real cache is allocated); there is nothing to write into.
         assert k is not None
         k, slot_mapping_for_cache = maybe_gather_indexer_k(
             k,
