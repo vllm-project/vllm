@@ -51,12 +51,13 @@ class SleepModeBackend(ABC):
         self._state: SleepModeState = "RUNNING"
 
     @abstractmethod
-    def suspend(self, level: int = 1) -> None:
+    def suspend(self, level: int = 1, rewritten: Collection[int] = ()) -> None:
         """Free GPU state.
 
         ``level`` follows existing sleep-mode semantics: level 1 offloads
-        weights to host RAM (restorable in-process); level 2 discards weights
-        (reloaded from the model source on resume).
+        weights to host RAM (restorable in-process); level 2 discards the
+        tensors at the ``rewritten`` addresses, which the caller reloads from
+        the model source on resume, and keeps everything else.
         """
         raise NotImplementedError
 
@@ -68,12 +69,6 @@ class SleepModeBackend(ABC):
         (e.g. ``["weights"]`` or ``["kv_cache"]``).
         """
         raise NotImplementedError
-
-    def keep_all_but(self, rewritten: Collection[int]) -> None:
-        """Before a level-2 ``suspend``: keep the weights it would discard except
-        the tensors at these addresses, which the caller rewrites after ``resume``.
-        """
-        return None
 
     def state(self) -> SleepModeState:
         """Current lifecycle state. Lets ``/health`` distinguish a healthy-idle
@@ -131,23 +126,21 @@ class CuMemBackend(SleepModeBackend):
     are allocated outside the allocator pool).
     """
 
-    def suspend(self, level: int = 1) -> None:
+    def suspend(self, level: int = 1, rewritten: Collection[int] = ()) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
-        # Runtime state and graph pools are kept at every level; weights only
-        # at level 1.
-        offload_tags: tuple[str, ...] = ("runtime", "cudagraph")
-        if level == 1:
-            offload_tags = ("weights", *offload_tags)
-        allocator.sleep(offload_tags=offload_tags)
-
-    def keep_all_but(self, rewritten: Collection[int]) -> None:
-        if current_platform.is_cuda_alike():
+        if level == 2 and current_platform.is_xpu():
+            allocator.sleep(offload_tags=("runtime", "cudagraph"))
+        elif level == 2:
             from vllm.device_allocator.cumem import CuMemAllocator
 
-            CuMemAllocator.get_instance().keep_all_but("weights", rewritten)
+            CuMemAllocator.get_instance().sleep(
+                ("weights", "runtime", "cudagraph"), rewritten
+            )
+        else:
+            allocator.sleep(offload_tags=("weights", "runtime", "cudagraph"))
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance

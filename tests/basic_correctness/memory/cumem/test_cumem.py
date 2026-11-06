@@ -546,15 +546,15 @@ def test_level2_keeps_what_the_update_does_not_rewrite():
         small_weight = torch.zeros(4096, dtype=torch.uint8, device=DEVICE_TYPE)
         table = torch.arange(4096, device=DEVICE_TYPE)
 
-    backend = CuMemBackend()
-    backend.keep_all_but({weight.data_ptr(), small_weight.data_ptr()})
     # ``weight`` has its own allocation; ``table`` shares one with ``small_weight``.
-    assert allocator.pointer_to_data[weight.data_ptr()].tag == "weights"
-    assert {d.tag for d in allocator.pointer_to_data.values()} == {"weights", "runtime"}
-
-    backend.suspend(level=2)
+    weight_data = allocator.pointer_to_data[weight.data_ptr()]
+    backend = CuMemBackend()
+    backend.suspend(level=2, rewritten={weight.data_ptr(), small_weight.data_ptr()})
     assert mapped_usage(allocator) == 0
-    backend.resume()
+    assert weight_data.cpu_backup_tensor is None
+    assert cpu_backups(allocator, {"weights"})
+
+    backend.resume(tags=["weights"])
     assert torch.equal(table, torch.arange(4096, device=DEVICE_TYPE))
 
 

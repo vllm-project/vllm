@@ -253,7 +253,23 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def _only_holding(self, tensors: Collection[int]) -> set[int]:
+        """Weights allocations whose live tensors all start at these addresses."""
+        return {
+            allocation["address"]
+            for pool, _ in self.allocator_and_pools.get("weights", [])
+            for allocation in pool.snapshot()
+            if all(
+                block["state"] == "inactive" or block["address"] in tensors
+                for block in allocation["blocks"]
+            )
+        }
+
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        rewritten: Collection[int] = (),
+    ) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
@@ -261,6 +277,8 @@ class CuMemAllocator:
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+            rewritten: Addresses of tensors the caller rewrites after waking.
+                Weights allocations holding nothing else are discarded too.
 
         """
         if offload_tags is None:
@@ -275,15 +293,16 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
+        discarded = self._only_holding(rewritten) if rewritten else set()
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags
+                requests_offload = data.tag in offload_tags and ptr not in discarded
                 was_offloaded = data.cpu_backup_tensor is not None
                 if requests_offload != was_offloaded:
                     has_policy_conflict = True
                 continue
-            offload = data.tag in offload_tags
+            offload = data.tag in offload_tags and ptr not in discarded
             total_bytes += data.handle[1]
             if offload:
                 backup_bytes += data.handle[1]
@@ -320,18 +339,6 @@ class CuMemAllocator:
             unmap_and_release(data.handle)
         finally:
             data.is_asleep = True
-
-    def keep_all_but(self, tag: str, rewritten: Collection[int]) -> None:
-        """Move ``tag`` allocations to the runtime tag, which every sleep offloads,
-        unless each live tensor in them starts at an address in ``rewritten``."""
-        for pool, _ in self.allocator_and_pools.get(tag, []):
-            for allocation in pool.snapshot():
-                data = self.pointer_to_data.get(allocation["address"])
-                if data is not None and any(
-                    block["state"] != "inactive" and block["address"] not in rewritten
-                    for block in allocation["blocks"]
-                ):
-                    data.tag = "runtime"
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""

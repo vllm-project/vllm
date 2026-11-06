@@ -335,18 +335,17 @@ class Worker(WorkerBase):
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
+        rewritten: set[int] = set()
 
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
             self._save_sleep_parameters(model)
-            # Level 2 discards only what the weight update rewrites: parameters.
-            self.sleep_mode_backend.keep_all_but(
-                {
-                    parameter.untyped_storage().data_ptr()
-                    for parameter in self._get_sleep_parameters(model).values()
-                }
-            )
+            # The weight update rewrites parameters; level 2 keeps everything else.
+            rewritten = {
+                parameter.untyped_storage().data_ptr()
+                for parameter in self._get_sleep_parameters(model).values()
+            }
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
@@ -363,7 +362,7 @@ class Worker(WorkerBase):
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None:
             extensible_kv_cache.release_physical()
-        self.sleep_mode_backend.suspend(level)
+        self.sleep_mode_backend.suspend(level, rewritten)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
