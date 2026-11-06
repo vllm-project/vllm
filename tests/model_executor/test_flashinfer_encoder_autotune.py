@@ -133,7 +133,7 @@ def test_flashinfer_autotune_vision_gemms(
 def test_flashinfer_autotune_data_parallel_encoder_cache(
     vllm_runner, monkeypatch, tmp_path
 ):
-    """A single dummy image at TP=2 must tune both ranks and reuse the cache."""
+    """An odd dummy batch at TP=2 must tune both ranks and reuse the cache."""
     from PIL import Image
 
     def encoder_info(worker):
@@ -170,7 +170,7 @@ def test_flashinfer_autotune_data_parallel_encoder_cache(
             mm_encoder_tp_mode="data",
             max_model_len=512,
             max_num_batched_tokens=512,
-            max_num_seqs=1,
+            max_num_seqs=3,
             gpu_memory_utilization=0.5,
             enforce_eager=True,
             compilation_config={"mode": 0},
@@ -184,7 +184,7 @@ def test_flashinfer_autotune_data_parallel_encoder_cache(
         ) as model:
             info = model.collective_rpc(encoder_info)
             assert len(info) == 2
-            assert all(rank_info[:3] == (True, 1, 1) for rank_info in info)
+            assert all(rank_info[:3] == (True, 1, 3) for rank_info in info)
             outputs.append(
                 model.generate_greedy_logprobs(
                     ["<|vision_start|><|image_pad|><|vision_end|>Describe the image."],

@@ -35,10 +35,10 @@ pytestmark = pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "mode,num_items,tp_size,expected",
     [
-        ("data", 1, 2, 2),
-        ("data", 3, 2, 4),
+        ("data", 1, 2, 0),
+        ("data", 3, 2, 2),
         ("data", 4, 2, 4),
-        ("data", 1, 4, 4),
+        ("data", 1, 4, 0),
         ("data", 3, 1, 3),
         ("weights", 3, 2, 3),
     ],
@@ -46,14 +46,15 @@ pytestmark = pytest.mark.cpu_test
 def test_encoder_autotune_dummy_items_balance_rank_shapes(
     mode, num_items, tp_size, expected
 ):
-    """Data-mode tuning must give each rank identical nonempty encoder work."""
+    """Balance data-mode tuning without exceeding the profiled item count."""
     from vllm.model_executor.models.vision import get_load_balance_assignment
 
     count = _flashinfer_mm_encoder_autotune_num_items(
         num_items, MultiModalConfig(mm_encoder_tp_mode=mode), tp_size
     )
     assert count == expected
-    if mode == "data":
+    assert count <= num_items
+    if mode == "data" and count:
         _, counts, loads = get_load_balance_assignment([256] * count, tp_size)
         assert min(counts) > 0
         assert len(set(counts)) == len(set(loads)) == 1

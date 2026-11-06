@@ -51,7 +51,6 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.config import MultiModalConfig
@@ -446,7 +445,7 @@ def _flashinfer_mm_encoder_autotune_num_items(
 ) -> int:
     # Identical dummy items must split evenly for matching rank caches.
     if mm_config.mm_encoder_tp_mode == "data":
-        return round_up(num_items, tp_size)
+        return num_items // tp_size * tp_size
     return num_items
 
 
@@ -473,25 +472,25 @@ def _run_flashinfer_autotune_mm_encoder(
         return
 
     encoder_runner = cast("GPUModelRunnerV2", runner).model_state.encoder_runner
+    tp_size = runner.vllm_config.parallel_config.tensor_parallel_size
 
     for modality in budget.mm_max_toks_per_item:
         num_profile_items = budget.mm_max_items_per_batch[modality]
         num_items = _flashinfer_mm_encoder_autotune_num_items(
             num_profile_items,
             mm_config,
-            runner.vllm_config.parallel_config.tensor_parallel_size,
+            tp_size,
         )
-        if num_items > num_profile_items:
+        if num_items == 0:
             logger.warning(
-                "FlashInfer encoder autotuning rounds the %s dummy batch from "
-                "%d to %d items to split evenly across TP ranks. Unsharded "
-                "encoder modules and projectors may exceed the memory reserved "
-                "during profiling and cause a startup OOM. If this occurs, set "
-                "enable_flashinfer_mm_encoder_autotune=false in --kernel-config.",
+                "Skipping FlashInfer autotuning for the %s encoder: the "
+                "profiling budget of %d items is smaller than TP size %d "
+                "and cannot give every rank nonempty work in data mode.",
                 modality,
                 num_profile_items,
-                num_items,
+                tp_size,
             )
+            continue
         dummy_inputs = budget.get_dummy_encoder_profile_inputs(
             modality, max_items_per_batch=num_items
         )
