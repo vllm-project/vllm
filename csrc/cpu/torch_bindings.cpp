@@ -79,8 +79,7 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<at::Tensor>& w2_bias,
                        const std::optional<double>& alpha,
                        const std::optional<double>& limit, bool is_vnni,
-                       int64_t act_method,
-                       bool skip_weighted = false);
+                       int64_t act_method, bool skip_weighted = false);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,

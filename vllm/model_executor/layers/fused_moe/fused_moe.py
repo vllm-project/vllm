@@ -12,6 +12,10 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -30,10 +34,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
-)
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -146,8 +146,10 @@ def fused_moe_kernel_gptq_awq(
     # TP sharding: each TP rank computes only its output shard (N_local = N // tp_size).
     tl.static_assert(N % tp_size == 0, "N must be divisible by tp_size")  # noqa: F821
     N_local = N // tp_size  # noqa: F821
-    tl.static_assert(N_local % BLOCK_SIZE_N == 0,
-                     "N_local must be divisible by BLOCK_SIZE_N for clean tiling")
+    tl.static_assert(
+        N_local % BLOCK_SIZE_N == 0,
+        "N_local must be divisible by BLOCK_SIZE_N for clean tiling",
+    )
     # N_start = tp_rank * N_local  # not used directly, we slice B and C before kernel launch
 
     # -----------------------------------------------------------
@@ -407,8 +409,10 @@ def fused_moe_kernel(
     # TP sharding: each TP rank computes only its output shard (N_local = N // tp_size).
     tl.static_assert(N % tp_size == 0, "N must be divisible by tp_size")  # noqa: F821
     N_local = N // tp_size  # noqa: F821
-    tl.static_assert(N_local % BLOCK_SIZE_N == 0,
-                     "N_local must be divisible by BLOCK_SIZE_N for clean tiling")
+    tl.static_assert(
+        N_local % BLOCK_SIZE_N == 0,
+        "N_local must be divisible by BLOCK_SIZE_N for clean tiling",
+    )
     # N_start = tp_rank * N_local  # not used directly, we slice B and C before kernel launch
 
     # -----------------------------------------------------------
@@ -762,7 +766,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
 
     # TP sharding for output projection (w2): top_k == 1 identifies w2 call
-    is_w2 = (top_k == 1)
+    is_w2 = top_k == 1
     tp_size = get_tensor_model_parallel_world_size() if is_w2 else 1
     tp_rank = get_tensor_model_parallel_rank() if is_w2 else 0
 
@@ -773,17 +777,21 @@ def invoke_fused_moe_wna16_triton_kernel(
         N_local = N // tp_size
         N_start = tp_rank * N_local
         # Slice B: (E, N, K) -> (E, N_local, K)
-        B = B[:, N_start:N_start + N_local, :].contiguous()
+        B = B[:, N_start : N_start + N_local, :].contiguous()
         # Slice C: (M, topk, N) -> (M, topk, N_local)
-        C = C[:, :, N_start:N_start + N_local].contiguous()
+        C = C[:, :, N_start : N_start + N_local].contiguous()
         if B_scale is not None and B_scale.ndim == 3:
             # block-wise scale: [E, N//group_n, K//group_k] -> [E, N_local//group_n, K//group_k]
             group_n = block_shape[0] if block_shape else 1
-            B_scale = B_scale[:, N_start // group_n:(N_start + N_local) // group_n, :].contiguous()
+            B_scale = B_scale[
+                :, N_start // group_n : (N_start + N_local) // group_n, :
+            ].contiguous()
         if B_zp is not None and B_zp.ndim == 3:
             # block-wise zp: [E, N//group_n, K//group_k] -> [E, N_local//group_n, K//group_k]
             group_n = block_shape[0] if block_shape else 1
-            B_zp = B_zp[:, N_start // group_n:(N_start + N_local) // group_n, :].contiguous()
+            B_zp = B_zp[
+                :, N_start // group_n : (N_start + N_local) // group_n, :
+            ].contiguous()
         # Grid uses N_local
         grid = lambda META: (
             triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -930,7 +938,7 @@ def invoke_fused_moe_triton_kernel(
         EM = num_tokens * config["BLOCK_SIZE_M"]
 
     # TP sharding for output projection (w2): top_k == 1 identifies w2 call
-    is_w2 = (top_k == 1)
+    is_w2 = top_k == 1
     tp_size = get_tensor_model_parallel_world_size() if is_w2 else 1
     tp_rank = get_tensor_model_parallel_rank() if is_w2 else 0
 
@@ -941,19 +949,21 @@ def invoke_fused_moe_triton_kernel(
         N_local = N // tp_size
         N_start = tp_rank * N_local
         # Slice B: (E, N, K) -> (E, N_local, K)
-        B = B[:, N_start:N_start + N_local, :].contiguous()
+        B = B[:, N_start : N_start + N_local, :].contiguous()
         # Slice C: (M, topk, N) -> (M, topk, N_local)
-        C = C[:, :, N_start:N_start + N_local].contiguous()
+        C = C[:, :, N_start : N_start + N_local].contiguous()
         if B_bias is not None:
             # bias shape: [num_experts, N] -> [num_experts, N_local]
-            B_bias = B_bias[:, N_start:N_start + N_local].contiguous()
+            B_bias = B_bias[:, N_start : N_start + N_local].contiguous()
         if B_scale is not None and B_scale.ndim == 3:
             # block-wise scale: [E, N//group_n, K//group_k] -> [E, N_local//group_n, K//group_k]
             group_n = block_shape[0] if block_shape else 1
-            B_scale = B_scale[:, N_start // group_n:(N_start + N_local) // group_n, :].contiguous()
+            B_scale = B_scale[
+                :, N_start // group_n : (N_start + N_local) // group_n, :
+            ].contiguous()
         elif B_scale is not None and B_scale.ndim == 2:
             # channel-wise scale: [E, N] -> [E, N_local]
-            B_scale = B_scale[:, N_start:N_start + N_local].contiguous()
+            B_scale = B_scale[:, N_start : N_start + N_local].contiguous()
         # Grid uses N_local
         grid = lambda META: (
             triton.cdiv(EM, META["BLOCK_SIZE_M"])
