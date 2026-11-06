@@ -96,6 +96,15 @@ class Fp8BlockScaledMMLinearKernel(
 
         replace_parameter(layer, params.WEIGHT, new_weight.data)
         replace_parameter(layer, params.block_scale_attr, new_weight_scale.data)
+        # FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS): store the 2^-k
+        # prescaled block scales once, next to the unscaled ones.
+        scale = getattr(layer, "partial_sum_scale", 1.0)
+        if (
+            self.supports_partial_sum_dtype
+            and getattr(layer, "partial_sum_dtype", None) is not None
+            and scale != 1.0
+        ):
+            layer.partial_sum_block_scale = new_weight_scale.data * scale
 
     def apply_weights(
         self,
@@ -135,7 +144,10 @@ class Fp8BlockScaledMMLinearKernel(
         if out_dtype != self.config.out_dtype:
             partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
             if partial_sum_scale != 1.0:
-                weight_scale = weight_scale * partial_sum_scale
+                prescaled = getattr(layer, "partial_sum_block_scale", None)
+                weight_scale = (
+                    weight_scale * partial_sum_scale if prescaled is None else prescaled
+                )
             output = self.apply_block_scaled_mm_out(
                 A=q_input,
                 B=weight,

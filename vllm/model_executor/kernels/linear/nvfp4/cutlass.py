@@ -17,7 +17,12 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
+from .base import (
+    NvFp4LinearKernel,
+    NvFp4LinearLayerConfig,
+    partial_sum_alpha,
+    store_partial_sum_alpha,
+)
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
@@ -50,6 +55,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
+        store_partial_sum_alpha(layer)
 
     def apply_weights(
         self,
@@ -75,7 +81,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         alpha = layer.alpha
         partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
         if output_dtype != x.dtype and partial_sum_scale != 1.0:
-            alpha = alpha * partial_sum_scale
+            alpha = partial_sum_alpha(layer)
             if bias is not None:
                 bias = bias * partial_sum_scale
         if bias is not None:

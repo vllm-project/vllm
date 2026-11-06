@@ -29,7 +29,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_bf16_fp4,
 )
 
-from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
+from .base import (
+    NvFp4LinearKernel,
+    NvFp4LinearLayerConfig,
+    partial_sum_alpha,
+    store_partial_sum_alpha,
+)
 
 
 class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
@@ -223,6 +228,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
+        store_partial_sum_alpha(layer)
 
     def apply_weights(
         self,
@@ -260,7 +266,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             output_dtype = partial_sum_dtype
             partial_sum_scale = layer.partial_sum_scale
             if partial_sum_scale != 1.0:
-                alpha = alpha * partial_sum_scale
+                alpha = partial_sum_alpha(layer)
                 if bias is not None:
                     bias = bias * partial_sum_scale
 

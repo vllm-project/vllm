@@ -957,10 +957,14 @@ def test_tp_fp16_partial_sums_scale_is_exact_and_overflows():
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
 def test_tp_fp16_partial_sums_nvfp4_kernel():
     """NVFP4 ("kernel" mode, CUTLASS and FlashInfer CUTLASS): the FP16 partial
-    sum carries the 2^-k prescale on alpha and on the rank-0 bias, with the
-    CUTLASS bias in the GEMM epilogue (SM120) or added after it."""
+    sum carries the 2^-k prescale on alpha (per call or stored after loading)
+    and on the rank-0 bias, with the CUTLASS bias in the GEMM epilogue (SM120)
+    or added after it."""
     from vllm._custom_ops import scaled_fp4_quant
-    from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
+    from vllm.model_executor.kernels.linear.nvfp4.base import (
+        NvFp4LinearLayerConfig,
+        store_partial_sum_alpha,
+    )
     from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
         CutlassNvFp4LinearKernel,
     )
@@ -1004,6 +1008,12 @@ def test_tp_fp16_partial_sums_nvfp4_kernel():
             rms = float(ref.float().pow(2).mean().sqrt())
             diff = float((part.float() * 4 - ref.float()).abs().mean()) / rms
             assert diff < 1e-2, (cls.__name__, bias_epilogue, diff)
+            # alpha prescaled once after loading: same output as per call
+            store_partial_sum_alpha(layer)
+            torch.testing.assert_close(
+                kernel.apply_weights(layer, x, b), part, rtol=0, atol=0
+            )
+            del layer.partial_sum_alpha
 
 
 @multi_gpu_test(num_gpus=2)

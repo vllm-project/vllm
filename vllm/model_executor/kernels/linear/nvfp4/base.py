@@ -10,6 +10,20 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
+def store_partial_sum_alpha(layer: torch.nn.Module) -> None:
+    """With FP16 partial sums (VLLM_TP_FP16_PARTIAL_SUMS), store alpha times the
+    2^-k prescale once; ``layer.alpha`` keeps its unscaled value."""
+    scale = getattr(layer, "partial_sum_scale", 1.0)
+    if getattr(layer, "partial_sum_dtype", None) is not None and scale != 1.0:
+        layer.partial_sum_alpha = layer.alpha * scale
+
+
+def partial_sum_alpha(layer: torch.nn.Module) -> torch.Tensor:
+    """``layer.alpha`` with the 2^-k prescale of FP16 partial sums."""
+    alpha = getattr(layer, "partial_sum_alpha", None)
+    return layer.alpha * layer.partial_sum_scale if alpha is None else alpha
+
+
 @dataclass
 class NvFp4LinearLayerConfig:
     """Configuration for an NVFP4 linear layer.
