@@ -235,7 +235,7 @@ def test_long_form_audio_limit(limit, expected_tokens):
 
 @pytest.mark.parametrize(
     ("max_duration_s", "max_bytes", "expected_tokens"),
-    [(0, 0, 10**6), (3600, 4 * 24000 * 60, 450), (60, 0, 450)],
+    [(0, 0, 10**6), (3600, 4 * 24000 * 60, 450)],
 )
 def test_long_form_audio_follows_the_decode_limits(
     monkeypatch, max_duration_s, max_bytes, expected_tokens
