@@ -51,4 +51,4 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s distributed/test_eplb_execute.py -k "torch_xccl"'
+      pytest -v -s distributed/test_eplb_execute.py -k "xccl"'
