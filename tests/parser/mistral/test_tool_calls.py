@@ -38,6 +38,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
@@ -1923,6 +1924,28 @@ def test_adjust_request_non_mistral_tokenizer(
     result = non_mistral_parser.adjust_request(request)
 
     assert result.skip_special_tokens is expected_skip
+
+
+@pytest.mark.parametrize("responses", [True, False])
+def test_adjust_request_mistral_tokenizer_keeps_skip_special_tokens(
+    mistral_tool_parser: MistralToolParser, responses: bool
+) -> None:
+    # MistralTokenizer keeps the parser's markers with skip_special_tokens=True,
+    # and forcing False corrupts byte-fallback text (e.g. Korean).
+    request = (
+        ResponsesRequest(
+            model="m", input="hi", tools=[{"type": "function", "name": "f"}]
+        )
+        if responses
+        else _make_request()
+    )
+    with patch.object(
+        type(mistral_tool_parser.model_tokenizer),
+        "supports_grammar",
+        new_callable=lambda: property(lambda self: False),
+    ):
+        result = mistral_tool_parser.adjust_request(request)
+    assert result.skip_special_tokens is None
 
 
 @pytest.mark.parametrize(
