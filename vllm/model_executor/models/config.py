@@ -933,6 +933,17 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.logit_mean = 2.65
 
 
+class Lfm3VlForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # The checkpoints nest the video processor config in processor_config.json,
+        # where the video loader lookup by processor name does not see it.
+        mm_config = model_config.multimodal_config
+        if mm_config is not None:
+            video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
+            video_kwargs.setdefault("video_backend", "qwen3_vl")
+
+
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1497,6 +1508,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
+    "Lfm3VlForConditionalGeneration": Lfm3VlForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
