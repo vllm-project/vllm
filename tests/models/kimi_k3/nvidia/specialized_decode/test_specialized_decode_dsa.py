@@ -15,6 +15,8 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import FlashInferMLASparseImpl
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -1146,10 +1148,6 @@ def test_flashinfer_dcp_core_merges_to_full_attention(
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.prepared import (
         PreparedDsa,
     )
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseImpl,
-    )
 
     if kernel != "trtllm" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
@@ -1312,9 +1310,6 @@ def flashinfer_impl(heads, kernel, config, kv_cache_dtype="fp8_e4m3"):
     """A FlashInfer sparse MLA impl at K3.1's MLA sizes on ``kernel`` (trtllm-gen or
     prims_ts), with a workspace."""
     from vllm.model_executor.layers.linear import ColumnParallelLinear
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseImpl,
-    )
 
     config.kernel_config.flashinfer_sparse_mla_kernel = kernel
     text = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)
@@ -1367,7 +1362,6 @@ def test_flashinfer_sparse_core_tp(
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.attn_fi import (
         FlashInferCore,
     )
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 
     if kernel != "trtllm" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
@@ -1513,7 +1507,6 @@ def test_flashinfer_kernels_share_precision(
         FlashInferCore,
         kernel_for,
     )
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 
     if not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
@@ -2365,8 +2358,6 @@ def test_prepared_dsa_run_matches_stock(
     top-k, the MLA rows and the indexer keys (and their SM100 MX scales) the step
     inserts, and every other cache byte left as it was; serially and with the
     query forked off the indexer path (QueryNorm, then MlaQuery on a side stream)."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if LAYER_CORES[core][2] == "prims_ts" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     check_layer_step(run_layer_step(core, batch, q, overlap=overlap), q)
@@ -2416,8 +2407,6 @@ def test_prepared_dsa_run_wide_matches_stock(
     """test_prepared_dsa_run_matches_stock at 80-320 rows (a wide step's DSA
     core): the specialized and the stock layer each against FP32 attention over
     its own top-k; the top-k exact up to its BF16 logits (the width check)."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if LAYER_CORES[core][2] == "prims_ts" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     check_layer_step(run_layer_step(core, batch, q, overlap=overlap), q)
@@ -2438,8 +2427,6 @@ def test_prepared_dsa_graph_waits_for_rows(
     the select's short-context bypass), or only the counts at short contexts
     (rows below 2048 keys count fewer than 2048). Zero-count rows in a graph:
     test_flashinfer_sparse_core_tp."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if LAYER_CORES[core][2] == "prims_ts" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     args = dict(overlap=overlap, graph=True, poison=poison, offset=offset)
@@ -2457,8 +2444,6 @@ def test_prims_ts_runs_on_the_layer_stream(
     while the decodes are stream ordered: PreparedDsa runs each on the stream the
     layer runs on (eager and captured), under every query overlap mode, never on
     the overlap side stream (run_layer_step checks each call)."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     step = run_layer_step(core, batch, q, overlap=overlap, graph=True)
@@ -2485,7 +2470,6 @@ def check_prepare_allocates_nothing(core, world=1):
         dcp_box,
         pack_dsa_projection,
     )
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 
     cache_dtype, _, kernel = LAYER_CORES[core]
     if kernel != "trtllm" and not has_flashinfer_prims_ts_sparse_mla():
@@ -2638,8 +2622,6 @@ def test_prepared_dsa_run_dcp_matches_stock(
     mailbox polled by MlaQuery ("serial"), or by QueryWait after the indexer
     ("wait") or on the forked query ("fork"). ``partials``: DcpValue's exchange
     (BF16 latent rows or "proj" value rows; both exact up to BF16 rounding)."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if LAYER_CORES[core][2] == "prims_ts" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     step = run_layer_step(core, batch, q, dcp8_group, overlap, partials)
@@ -2664,8 +2646,6 @@ def test_prepared_dsa_run_dcp_wide_matches_stock(dcp8_group, core, batch, q, ove
     """test_prepared_dsa_run_dcp_matches_stock at 80-320 rows (a wide DCP8 step's
     DSA core; past one row per SM the fused scorer feeds the merge's own local
     top-N; from 160 rows "proj" partials), every query overlap mode."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if LAYER_CORES[core][2] == "prims_ts" and not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     step = run_layer_step(core, batch, q, dcp8_group, overlap, "default")
@@ -2694,8 +2674,6 @@ def test_prepare_cache_allocates_nothing_dcp(dcp8_group, core):
 @pytest.mark.parametrize("batch,q", [(15, 5), (60, 5)])
 def test_prims_ts_runs_on_the_layer_stream_dcp(dcp8_group, batch, q, overlap):
     """DCP8 (every batch on prims_ts): see test_prims_ts_runs_on_the_layer_stream."""
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     step = run_layer_step("fi-prims_ts", batch, q, dcp8_group, overlap)
@@ -3745,7 +3723,6 @@ def test_prims_ts_plan_matches_stock(default_vllm_config, dist_init, heads, batc
         FlashInferCore,
         plan_rows_for,
     )
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 
     if not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
@@ -3937,7 +3914,6 @@ def test_prepared_dsa_compiles_once_per_kernel(
     from vllm.models.kimi_k3.nvidia.specialized_decode.runtime.providers import (
         pack_dsa_projection,
     )
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
     from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
     if LAYER_CORES[core][2] == "prims_ts" and not has_flashinfer_prims_ts_sparse_mla():
