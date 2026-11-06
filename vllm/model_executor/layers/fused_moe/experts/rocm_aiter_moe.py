@@ -56,6 +56,7 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
+    GELU_TANH = 4
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -282,6 +283,8 @@ def _resolve_aiter_activation(
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
+    elif activation == MoEActivation.GELU_TANH:
+        activation_method = ActivationMethod.GELU_TANH
     elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
@@ -510,6 +513,16 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         is_supported, reason = super().is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
         )
+        # AITER implements gelu_tanh only for per-tensor and per-channel FP8.
+        if (
+            is_supported
+            and moe_config.activation == MoEActivation.GELU_TANH
+            and weight_key not in (kFp8StaticTensorSym, kFp8StaticChannelSym)
+        ):
+            return False, (
+                "AiterExperts supports gelu_tanh only with per-tensor or "
+                f"per-channel FP8 weights, not {weight_key}"
+            )
         if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
             reason = (
                 f"{reason}. AITER MoE is not enabled — "
@@ -531,6 +544,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
