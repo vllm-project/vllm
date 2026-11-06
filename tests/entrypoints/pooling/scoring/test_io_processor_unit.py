@@ -134,12 +134,17 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     assert prompt["prompt_token_ids"] == processor.tokenizer.encode(expected)
 
 
-@pytest.mark.parametrize("truncate_prompt_tokens,max_total_tokens", [(4, 32), (-1, 8)])
+@pytest.mark.parametrize(
+    "truncate_prompt_tokens,max_total_tokens,truncation_side",
+    [(4, 32, None), (-1, 8, None), (4, 32, "right")],
+)
 def test_truncation_keeps_jinavl_score_token(
-    llm_reranker_processor, truncate_prompt_tokens, max_total_tokens
+    llm_reranker_processor, truncate_prompt_tokens, max_total_tokens, truncation_side
 ):
     """JinaVL scores the token it appends to the prompt, so binding
-    truncation must keep it within the requested length."""
+    truncation must keep it within the requested length. An explicit
+    truncation side skips tokenizer truncation and cuts in
+    apply_post_tokenization instead."""
     processor = llm_reranker_processor
     processor.supports_score_template = True
     processor.model = JinaVLForSequenceClassification
@@ -155,6 +160,7 @@ def test_truncation_keeps_jinavl_score_token(
             tok_params=TokenizeParams(
                 max_total_tokens=max_total_tokens,
                 truncate_prompt_tokens=truncate_prompt_tokens,
+                truncation_side=truncation_side,
             ),
             prompt_extras=None,
             skip_mm_cache=False,
