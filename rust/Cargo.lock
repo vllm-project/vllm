@@ -5745,6 +5745,7 @@ name = "vllm-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
  "easy-ext",
@@ -5774,6 +5775,7 @@ dependencies = [
  "clap",
  "expect-test",
  "libc",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -5875,6 +5877,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "serial_test",
  "sha2",
