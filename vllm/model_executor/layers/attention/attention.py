@@ -523,6 +523,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
+        # Layer-specific extras, forwarded unchanged to `_dispatch_attention`.
+        # Plain `Attention` takes none; subclasses that override
+        # `_dispatch_attention` may.
+        **dispatch_kwargs: Any,
     ) -> torch.Tensor:
         """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -567,18 +571,44 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
-        kv_cache_dummy_dep = None
+        self._dispatch_attention(query, key, value, output, **dispatch_kwargs)
+        return output.view(-1, hidden_size)
+
+    def _update_kv_cache(
+        self, key: torch.Tensor | None, value: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Write key/value into the KV cache.
+
+        Returns a dummy tensor that the attention call must take as
+        `kv_cache_dummy_dep`, or None if nothing was written.
+        """
+        # Skip this if sharing KV cache with an earlier attention layer.
+        if (
+            self.attn_backend.forward_includes_kv_cache_update
+            or self.kv_sharing_target_layer_name is not None
+            or key is None
+            or value is None
+        ):
+            return None
         if self.use_direct_call:
-            # Skip this if sharing KV cache with an earlier attention layer.
-            if (
-                not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
-            ):
-                kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
-                )
+            return unified_kv_cache_update(key, value, self.layer_name)
+        return torch.ops.vllm.unified_kv_cache_update(
+            key, value, _encode_layer_name(self.layer_name)
+        )
+
+    def _dispatch_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        output: torch.Tensor,
+    ) -> None:
+        """Update the KV cache and run the attention op, writing into `output`.
+
+        Subclasses override this to use their own attention op.
+        """
+        kv_cache_dummy_dep = self._update_kv_cache(key, value)
+        if self.use_direct_call:
             unified_attention_with_output(
                 query,
                 key,
@@ -588,26 +618,14 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
-            # Skip this if sharing KV cache with an earlier attention layer.
-            encoded = _encode_layer_name(self.layer_name)
-            if (
-                not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
-            ):
-                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                    key, value, encoded
-                )
             torch.ops.vllm.unified_attention_with_output(
                 query,
                 key,
                 value,
                 output,
-                encoded,
+                _encode_layer_name(self.layer_name),
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-        return output.view(-1, hidden_size)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

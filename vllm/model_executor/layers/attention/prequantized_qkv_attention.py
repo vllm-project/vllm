@@ -5,10 +5,12 @@
 The generic ``Attention`` layer and ``AttentionImpl`` interface only know about
 floating-point Q/K/V. A model whose fused producer already emits FP8 Q/K/V with
 per-(sequence, KV head) descales uses ``PrequantizedQKVAttention`` instead. It
-adds one model-owned custom op that calls ``forward_with_prequantized_qkv`` on
-the backend implementation. That method exists only on the ROCm AITER FA impl;
-no other backend, and neither ``AttentionImpl`` nor ``Attention.forward``,
-changes.
+overrides ``Attention._dispatch_attention`` to call one model-owned custom op,
+which calls ``forward_with_prequantized_qkv`` on the backend implementation.
+That method exists only on the ROCm AITER FA impl. ``AttentionImpl``, the
+``unified_attention_with_output`` schema and ``Attention.forward``'s arguments
+do not change; the PrequantizedQKV bundle travels through ``forward``'s
+``**dispatch_kwargs``.
 """
 
 from typing import Any, NamedTuple
@@ -19,7 +21,6 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
-    unified_kv_cache_update,
 )
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -69,42 +70,23 @@ class PrequantizedQKVAttention(Attention):
     def supports_prequantized_qkv_input(self) -> bool:
         return bool(getattr(self.impl, "supports_prequantized_qkv_input", False))
 
-    def forward(
+    def _dispatch_attention(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output_shape: torch.Size | None = None,
-        output_dtype: torch.dtype | None = None,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        output: torch.Tensor,
         prequantized_qkv: PrequantizedQKV | None = None,
-    ) -> torch.Tensor:
+    ) -> None:
         if prequantized_qkv is None:
-            return super().forward(
-                query,
-                key,
-                value,
-                output_shape=output_shape,
-                output_dtype=output_dtype,
-            )
+            super()._dispatch_attention(query, key, value, output)
+            return
         if not self.supports_prequantized_qkv_input:
             raise ValueError(
                 f"{self.layer_name} received prequantized QKV, but its attention "
                 "backend does not support it"
             )
-
-        if output_dtype is None:
-            output_dtype = query.dtype
-        if output_shape is None:
-            output_shape = torch.Size(
-                (query.shape[0], self.num_heads * self.head_size_v)
-            )
-        output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
-        hidden_size = output_shape[-1]
-
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size_v)
-        output = output.view(-1, self.num_heads, self.head_size_v)
+        assert key is not None and value is not None
         prequantized_qkv = PrequantizedQKV(
             query=prequantized_qkv.query.view(-1, self.num_heads, self.head_size),
             key=prequantized_qkv.key.view(-1, self.num_kv_heads, self.head_size),
@@ -113,18 +95,8 @@ class PrequantizedQKVAttention(Attention):
             key_descale=prequantized_qkv.key_descale,
             value_descale=prequantized_qkv.value_descale,
         )
-
-        # Same KV-cache update and ordering as ``Attention.forward``.
-        kv_cache_dummy_dep = None
-        update_kv_cache = (
-            not self.attn_backend.forward_includes_kv_cache_update
-            and self.kv_sharing_target_layer_name is None
-        )
+        kv_cache_dummy_dep = self._update_kv_cache(key, value)
         if self.use_direct_call:
-            if update_kv_cache:
-                kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
-                )
             unified_prequantized_attention_with_output(
                 query,
                 key,
@@ -135,21 +107,15 @@ class PrequantizedQKVAttention(Attention):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
-            encoded = _encode_layer_name(self.layer_name)
-            if update_kv_cache:
-                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                    key, value, encoded
-                )
             torch.ops.vllm.unified_prequantized_attention_with_output(
                 query,
                 key,
                 value,
                 output,
-                encoded,
+                _encode_layer_name(self.layer_name),
                 *prequantized_qkv,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-        return output.view(-1, hidden_size)
 
 
 @eager_break_during_capture
