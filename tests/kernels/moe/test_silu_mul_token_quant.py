@@ -12,10 +12,10 @@ from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.experts.silu_mul_token_quant import (
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.silu_mul_token_quant import (
     silu_mul_token_quant,
 )
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 

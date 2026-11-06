@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
-from vllm.model_executor.layers.fused_moe.experts.silu_mul_token_quant import (
-    silu_mul_token_quant,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
     _weights_host_resident,
@@ -33,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
+from vllm.model_executor.layers.fused_moe.silu_mul_token_quant import (
+    silu_mul_token_quant,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
