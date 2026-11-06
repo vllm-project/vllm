@@ -670,6 +670,42 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return deep_gemm.get_block_m_for_nvfp4_mega_moe(*args)
         return deep_gemm.get_block_m_for_mega_moe(*args, self.weight_format.mma_type)
 
+    def _evenmoe_routes(self) -> bool:
+        """Whether an EvenMoE L2 policy owns replica selection for this layer."""
+        if self.eplb_state.logical_to_physical_map is None:
+            return False
+        from vllm.distributed.eplb.evenmoe_runtime import get_evenmoe_routing
+
+        return get_evenmoe_routing() is not None
+
+    def _evenmoe_map(
+        self, topk_ids: torch.Tensor, topk_weights: torch.Tensor
+    ) -> torch.Tensor:
+        """Logical ids -> physical replicas through the EvenMoE-aware kernel."""
+        from vllm.model_executor.layers.fused_moe.router.base_router import (
+            eplb_map_to_physical_and_record,
+        )
+        from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+        state = self.eplb_state
+        assert state.expert_load_view is not None
+        assert state.logical_to_physical_map is not None
+        assert state.logical_replica_count is not None
+        assert state.should_record_tensor is not None
+        assert state.num_unpadded_tokens_tensors is not None
+        return eplb_map_to_physical_and_record(
+            topk_ids,
+            expert_load_view=state.expert_load_view,
+            logical_to_physical_map=state.logical_to_physical_map,
+            logical_replica_count=state.logical_replica_count,
+            record_enabled=state.should_record_tensor,
+            num_unpadded_tokens=state.num_unpadded_tokens_tensors[
+                dbo_current_ubatch_id()
+            ],
+            layer_state=state,
+            topk_weights=topk_weights,
+        )
+
     def set_eplb_state(
         self,
         moe_layer_idx: int,
@@ -768,6 +804,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
 
+        # An EvenMoE L2 policy (static, lplb, ultraep) picks each token's
+        # replica itself; staging's hash-based pick would bypass it. Map here
+        # with the router's fused kernel, which also records the expert load,
+        # and hand staging physical ids with its own mapping disabled.
+        staging_eplb_state: EplbLayerState | None = self.eplb_state
+        if self._evenmoe_routes():
+            topk_ids = self._evenmoe_map(topk_ids, topk_weights)
+            staging_eplb_state = None
+
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
@@ -799,7 +844,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 w2_global_scale=self.w2_weight_scale_2,
                 l2_alpha=self._l2_alpha,
                 l2_activation_scale=l2_activation_scale,
-                eplb_state=self.eplb_state,
+                eplb_state=staging_eplb_state,
             )
             kwargs.update(
                 l1_alpha=self.w13_weight_scale_2,
@@ -821,7 +866,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 shared_x_sf=shared_x_sf,
                 shared_block_m=shared_block_m,
                 hidden_quant=fmt.hidden_quant,
-                eplb_state=self.eplb_state,
+                eplb_state=staging_eplb_state,
             )
 
         if self.has_fused_shared_experts:
