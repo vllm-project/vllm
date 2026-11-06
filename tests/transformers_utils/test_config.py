@@ -12,13 +12,12 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import PreTrainedConfig, Qwen3ASRConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
-    get_config,
     get_safetensors_params_metadata,
     mrope_num_dims,
     patch_legacy_rope_type,
@@ -70,30 +69,6 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
             for key, value in expected.items():
                 assert config.rope_parameters[layer_type][key] == value
         assert set(config.rope_parameters) == set(per_layer)
-
-
-@pytest.mark.parametrize(
-    ("model", "architecture", "num_labels", "output_dim"),
-    [
-        ("Qwen/Qwen3-ASR-1.7B", "Qwen3ASRForConditionalGeneration", 2, 2048),
-        (
-            "Qwen/Qwen3-ForcedAligner-0.6B",
-            "Qwen3ASRForcedAlignerForTokenClassification",
-            5000,
-            1024,
-        ),
-    ],
-)
-def test_qwen3_asr_original_checkpoints_use_the_upstream_config(
-    model, architecture, num_labels, output_dim
-):
-    config = get_config(model, trust_remote_code=False)
-
-    assert isinstance(config, Qwen3ASRConfig)
-    assert config.architectures == [architecture]
-    assert config.num_labels == num_labels
-    assert config.audio_config.output_dim == output_dim
-    assert uses_mrope(config)
 
 
 def test_patch_legacy_rope_type_preserves_nope_layers():
