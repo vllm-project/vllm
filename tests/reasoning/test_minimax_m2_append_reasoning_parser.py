@@ -217,3 +217,17 @@ def test_is_reasoning_end_streaming_matches_default(minimax_m2_tokenizer):
             ([start, 1], [2, 3], False),
         ],
     )
+
+
+class _NoThinkTokenizer:
+    def get_vocab(self) -> dict[str, int]:
+        return {"a": 1, "b": 2, "c": 3}
+
+
+def test_is_reasoning_end_streaming_without_end_token_in_vocab():
+    """A vocab without </think> never ends reasoning, as in the default."""
+    parser = MiniMaxM2AppendThinkReasoningParser(_NoThinkTokenizer())
+    assert parser.end_token_id is None
+    check_streaming_end_matches_default(
+        parser, alphabet=[1, 2, 3], hand_cases=[([1], [2, 3], False)]
+    )
