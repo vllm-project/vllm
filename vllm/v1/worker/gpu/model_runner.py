@@ -924,6 +924,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs = min(
                 num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
             )
+            # Keep room for each request's draft slots.
             num_tokens = min(
                 num_tokens,
                 self.max_num_tokens
