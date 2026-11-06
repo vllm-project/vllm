@@ -41,12 +41,12 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     BlobBlockHashes,
     ChunkedTokenDatabase,
     MooncakeLookupResult,
@@ -55,7 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     ReqMeta,
     TailKeyBoundary,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     ATTENTION_STORE_LAYOUTS,
     AttentionStoreLayout,
     KeyMetadata,
@@ -65,7 +65,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
     StoreShardId,
     TokenMajorStoreLayout,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
     RESET_MSG,
     RESP_ERR,
@@ -73,7 +73,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     decode_lookup_response,
     encode_lookup_response,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.selective_lease import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease import (  # noqa: E501
     SelectiveLookupLease,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
