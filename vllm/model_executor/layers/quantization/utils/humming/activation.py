@@ -9,7 +9,17 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
 )
 
-_SILU_IMPL = "a / (1.f + expf(-a))"
+# Humming builds process_input without fast math, so request fast SiLU math
+# explicitly; precise expf and IEEE division make the fused activation +
+# quantization kernel issue-bound at prefill sizes. The flush-to-zero exp2
+# drops __expf's denormal guard and is exact here: e^x underflows only where
+# SiLU(a) == a.
+_EXP_FTZ = (
+    "[](float x) { float y; "
+    'asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x * 1.4426950408889634f)); '
+    "return y; }"
+)
+_SILU_IMPL = f"__fdividef(a, 1.f + {_EXP_FTZ}(-a))"
 _GELU_IMPL = "0.5f * a * (1.f + erff(a * 0.7071067811865476f))"
 _RELU2_IMPL = "fmaxf(a, 0.f) * fmaxf(a, 0.f)"
 _GELU_TANH_IMPL = """[](float a) {
@@ -20,7 +30,7 @@ _GELU_TANH_IMPL = """[](float a) {
 _CLAMPED_SILU_IMPL = """[](float a, float b) {{
     const float gate = fminf(a, {limit});
     const float up = fmaxf(fminf(b, {limit}), -{limit});
-    const float activated_gate = gate / (1.f + expf(-{alpha} * gate));
+    const float activated_gate = __fdividef(gate, 1.f + {exp}(-{alpha} * gate));
     return activated_gate * (up + {beta});
 }}(a, b)"""
 
@@ -50,7 +60,7 @@ _HUMMING_ACTIVATIONS: dict[MoEActivation, dict[str, str]] = {
         "activation_type": "binary_split",
         "activation_impl": """[](float a, float b) {{
             const float gate = {situ_beta} * tanhf(a / {situ_beta});
-            const float activated_gate = gate / (1.f + expf(-a));
+            const float activated_gate = __fdividef(gate, 1.f + {exp}(-a));
             const float up = {situ_up};
             return activated_gate * up;
         }}(a, b)""",
@@ -61,12 +71,12 @@ _HUMMING_ACTIVATIONS: dict[MoEActivation, dict[str, str]] = {
     },
     MoEActivation.SWIGLUSTEP: {
         "activation_type": "binary_split",
-        "activation_impl": """[](float a, float b) {
-            const float activated_gate = a / (1.f + expf(-a));
+        "activation_impl": f"""[](float a, float b) {{
+            const float activated_gate = __fdividef(a, 1.f + {_EXP_FTZ}(-a));
             const float gate = fminf(activated_gate, 7.f);
             const float up = fmaxf(fminf(b, 7.f), -7.f);
             return gate * up;
-        }(a, b)""",
+        }}(a, b)""",
     },
     MoEActivation.SILU_NO_MUL: {
         "activation_type": "unary",
@@ -114,13 +124,17 @@ def get_humming_activation(
             situ_up = f"({float(linear_beta)}f) * tanhf(b / ({float(linear_beta)}f))"
         situ_beta = f"({float(config.activation_situ_beta)}f)"
         activation_impl = definition["activation_impl"]
-        activation_impl = activation_impl.format(situ_beta=situ_beta, situ_up=situ_up)
+        activation_impl = activation_impl.format(
+            situ_beta=situ_beta, situ_up=situ_up, exp=_EXP_FTZ
+        )
         definition["activation_impl"] = activation_impl
     elif use_clamped_silu:
         assert config.clamp_limit is not None
         limit = f"({float(config.clamp_limit)}f)"
         alpha = f"({float(config.alpha)}f)"
         beta = f"({float(config.beta)}f)"
-        activation_impl = _CLAMPED_SILU_IMPL.format(limit=limit, alpha=alpha, beta=beta)
+        activation_impl = _CLAMPED_SILU_IMPL.format(
+            limit=limit, alpha=alpha, beta=beta, exp=_EXP_FTZ
+        )
         definition["activation_impl"] = activation_impl
     return definition
