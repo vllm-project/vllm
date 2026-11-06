@@ -15,6 +15,40 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 ## Hybrid Mamba models
 
+### GDN prefill checkpoints
+
+With prefix caching enabled and `--mamba-cache-mode align`, Qwen Gated DeltaNet
+(GDN) layers can export an internal prefill checkpoint. This lets a prefill
+continue past the cache block boundary in one forward pass, while preserving
+the state needed by a later prefix-cache hit.
+
+Internal checkpoints are enabled by default for the FlashInfer GDN prefill
+backend and for the Triton/FLA backend on CUDA and ROCm. The Triton/FLA kernel
+reads and writes recurrent state directly in the paged cache and exports
+checkpoints on its 64-token chunk grid. Every Mamba layer in a hybrid model
+must support internal checkpoints for this optimization to take effect.
+
+The checkpoint's offset from the start of the current prefill must be a
+multiple of 64; the total prompt length need not be. If the scheduler cannot
+place a valid internal checkpoint, it uses the split prefill path.
+
+To select Triton/FLA explicitly:
+
+```bash
+vllm serve <qwen-gdn-model> \
+    --enable-prefix-caching --mamba-cache-mode align \
+    --gdn-prefill-backend triton
+```
+
+An unsplit prefill can delay decode tokens of other requests. Reserving
+checkpoint state can also reduce effective KV cache capacity.
+
+Set `--additional-config '{"gdn_prefill_checkpoint": false}'` to disable internal
+GDN checkpoints and restore the split prefill. The Triton/FLA backend still
+uses direct paged-state I/O when checkpoints are disabled.
+
+### Shared-prefix junction checkpoints
+
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
 
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:

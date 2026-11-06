@@ -77,6 +77,9 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
+    PAGED_STATE_TUNING_BUCKETS,
+)
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
     fused_gdn_decode_post_conv_mtp_triton,
 )
@@ -122,6 +125,10 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 # regression was at 272 tokens (27B BF16 TP8).
 _BA_PROJ_OVERLAP_MAX_TOKENS = 256
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+
+def _prefill_on_paged_state(backend: str) -> bool:
+    return backend == "triton" and current_platform.is_cuda_alike()
 
 
 def supports_fused_mtp_decode() -> bool:
@@ -838,14 +845,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.vllm_config = vllm_config
-        # FlashInfer's prefill emits mid-prefill states, so an align-mode
-        # checkpoint needs no split prefill.
+        # FlashInfer's prefill emits mid-prefill states and the Triton/FLA one
+        # stores them into the paged state cache, so an align-mode checkpoint
+        # needs no split prefill.
         self._checkpoint_alignment: int | None = None
-        if (
-            vllm_config.cache_config.mamba_cache_mode == "align"
-            and self.gdn_prefill_backend == "flashinfer"
+        additional_config = vllm_config.additional_config
+        if vllm_config.cache_config.mamba_cache_mode == "align" and (
+            not isinstance(additional_config, dict)
+            or additional_config.get("gdn_prefill_checkpoint", True)
         ):
-            self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+            if self.gdn_prefill_backend == "flashinfer":
+                self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+            elif _prefill_on_paged_state(self.gdn_prefill_backend):
+                self._checkpoint_alignment = FLA_CHUNK_SIZE
+        if self._checkpoint_alignment is not None:
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
@@ -898,7 +911,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return spec
         # FlashInfer emits states at one stride for the whole batch, the gcd of
         # the offsets; keeping every offset on the prefix-cache grid keeps that
-        # stride a multiple of the grid, which bounds the states emitted.
+        # stride a multiple of the grid, which bounds the states emitted. The
+        # Triton/FLA kernel takes any offset on its 64-token chunk grid.
         return replace(
             spec,
             num_prefill_checkpoint_blocks=1,
@@ -1536,7 +1550,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
-        if self._exports_checkpoints:
+        if self._exports_checkpoints and self.gdn_prefill_backend == "flashinfer":
             # Size the workspace while profiling; it is locked afterwards.
             current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
 
@@ -1616,6 +1630,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             if self.gdn_prefill_backend == "flashinfer":
                 self._warmup_flashinfer_prefill_variants(q, k, v, g, beta, state)
+            elif _prefill_on_paged_state(self.gdn_prefill_backend):
+                self._warmup_paged_state_prefill_variants(
+                    dummy_mixed_qkv.shape[-1], dtype, state
+                )
         except Exception:
             logger.warning(
                 "GDN prefill kernel warmup (T=%d) failed for "
@@ -1696,6 +1714,72 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 checkpoint_cu_starts=checkpoint_cu_starts if has_checkpoint else None,
                 checkpoint_every_n_tokens=q.shape[1] if has_checkpoint else 0,
             )
+
+    def _warmup_paged_state_prefill_variants(
+        self, qkv_dim: int, dtype: torch.dtype, state: torch.Tensor
+    ) -> None:
+        """Autotune the Triton/FLA prefill on the paged state cache.
+
+        Reading and writing cache rows, with and without checkpoint stores, are
+        autotuning keys of their own, keyed by every tensor's dtype and by
+        bucket of sequence count. The best tile depends on the batch's shape,
+        so tune each on a dummy batch as large as a prefill step, split into
+        one bucket's worth of sequences, with the dtypes the metadata builder
+        passes.
+        """
+        device = state.device
+        scheduler_config = self.vllm_config.scheduler_config
+        num_tokens = min(scheduler_config.max_num_batched_tokens, 8192)
+        num_v_heads = self.num_v_heads // self.tp_size
+        q, k, v, g, beta = (
+            x.unsqueeze(0)
+            for x in fused_post_conv_prep(
+                conv_output=torch.randn(
+                    num_tokens, qkv_dim, device=device, dtype=dtype
+                ),
+                a=torch.randn(num_tokens, num_v_heads, device=device, dtype=dtype),
+                b=torch.randn(num_tokens, num_v_heads, device=device, dtype=dtype),
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
+        )
+        sequence_counts = {
+            min(bucket, scheduler_config.max_num_seqs, num_tokens)
+            for bucket in PAGED_STATE_TUNING_BUCKETS
+        }
+        for num_seqs in sorted(sequence_counts):
+            seq_len = num_tokens // num_seqs
+            rows = torch.arange(1, num_seqs + 1, device=device, dtype=torch.int32)
+            state_cache = state.new_zeros(2 * num_seqs + 1, *state.shape[1:])
+            checkpoint_variants: list[dict[str, torch.Tensor]] = [{}]
+            if self._exports_checkpoints:
+                checkpoint_variants.append(
+                    dict(
+                        checkpoint_state=state_cache,
+                        checkpoint_offsets=torch.full_like(
+                            rows, seq_len // 2 // FLA_CHUNK_SIZE * FLA_CHUNK_SIZE
+                        ),
+                        checkpoint_state_indices=rows + num_seqs,
+                    )
+                )
+            for checkpoint_kwargs in checkpoint_variants:
+                fla_chunk_gated_delta_rule(
+                    *(x[:, : num_seqs * seq_len] for x in (q, k, v, g, beta)),
+                    cu_seqlens=torch.arange(
+                        num_seqs + 1, device=device, dtype=torch.int32
+                    )
+                    * seq_len,
+                    use_qk_l2norm_in_kernel=False,
+                    state_cache=state_cache,
+                    state_indices=rows,
+                    has_initial_state=torch.ones_like(rows, dtype=torch.bool),
+                    **checkpoint_kwargs,
+                )
 
     def _forward_core_rocm(
         self,
@@ -2020,6 +2104,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
+            checkpoint = attn_metadata.checkpoint
             if self.gdn_prefill_backend == "flashinfer":
                 # Without spec decodes the prefill rows follow the peeled
                 # decodes contiguously, so FlashInfer writes them straight
@@ -2042,7 +2127,50 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                 )
                 prefill_in_place = prefill_out is not None
+            elif _prefill_on_paged_state(self.gdn_prefill_backend):
+                # The kernel reads and writes the prefill rows of the paged
+                # state cache and stores each checkpoint's recurrent state into
+                # its block; the exporter adds the conv window.
+                checkpoint_kwargs = {}
+                if checkpoint is not None:
+                    # The prefill kernel runs the trailing checkpoint rows.
+                    num_prefill_rows = prefill_state_indices.shape[0]
+                    checkpoint_kwargs = dict(
+                        checkpoint_state=ssm_state,
+                        checkpoint_offsets=checkpoint.checkpoint_offsets[
+                            -num_prefill_rows:
+                        ],
+                        checkpoint_state_indices=checkpoint.state_indices[
+                            -num_prefill_rows:
+                        ],
+                    )
+                core_attn_out_non_spec, _ = fla_chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                    state_cache=ssm_state,
+                    state_indices=prefill_state_indices,
+                    has_initial_state=prefill_has_initial_state,
+                    **checkpoint_kwargs,
+                )
+                if checkpoint is not None:
+                    assert non_spec_query_start_loc is not None
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=conv_input_non_spec,
+                        conv_state=conv_state,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
             else:
+                assert checkpoint is None, (
+                    "A prefill checkpoint was scheduled but nothing exports it"
+                )
                 initial_state = ssm_state[prefill_state_indices]
                 initial_state[~prefill_has_initial_state, ...] = 0
                 (
@@ -2062,8 +2190,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=False,
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if not _prefill_on_paged_state(self.gdn_prefill_backend):
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)

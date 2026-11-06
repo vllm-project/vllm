@@ -63,9 +63,9 @@ MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 # (XPUPlatform.update_block_size_for_backend), so use one.
 BLOCK_SIZE = 576
 # The step actions also encode the split at the prompt's last block boundary,
-# which a GDN prefill backend with internal checkpoints (FlashInfer) skips; see
-# get_internal_checkpoint_step_configs.
-GDN_PREFILL_CONFIG = {"gdn_prefill_backend": "triton"}
+# which a GDN prefill with internal checkpoints (FlashInfer, Triton/FLA) skips;
+# see get_internal_checkpoint_step_configs.
+GDN_PREFILL_CONFIG = {"gdn_prefill_backend": "triton", "gdn_prefill_checkpoint": False}
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
@@ -1058,7 +1058,7 @@ def _run_mamba_prefix_cache_mrv2(
     async_scheduling: bool,
     additional_config: dict[str, Any] = GDN_PREFILL_CONFIG,
 ):
-    internal_checkpoints = additional_config["gdn_prefill_backend"] == "flashinfer"
+    internal_checkpoints = additional_config.get("gdn_prefill_checkpoint", True)
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -1406,4 +1406,18 @@ def test_mamba_prefix_cache_mrv2_async_flashinfer(monkeypatch: pytest.MonkeyPatc
         monkeypatch,
         async_scheduling=True,
         additional_config={"gdn_prefill_backend": "flashinfer"},
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="The Triton/FLA GDN prefill exports checkpoints on CUDA and ROCm.",
+)
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2_async_triton(monkeypatch: pytest.MonkeyPatch):
+    """The Triton/FLA prefill stores the checkpoint into its block itself."""
+    _run_mamba_prefix_cache_mrv2(
+        monkeypatch,
+        async_scheduling=True,
+        additional_config={"gdn_prefill_backend": "triton"},
     )
