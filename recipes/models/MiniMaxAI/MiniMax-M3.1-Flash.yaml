@@ -1414,6 +1414,9 @@ presets:
       - "--enable-prefix-caching"
     env:
       VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
+      # the DSpark drafter kernels (seven-token drafts; c64's three-token draft keeps
+      # the stock draft layers)
+      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
     json_args:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
     # The DBO points pass the DBO flags directly: the DBO / SP prefill feature's
@@ -1551,6 +1554,9 @@ guide: |
     by context instead of by index head.
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
+  - With a seven-token DSpark draft (`num_speculative_tokens: 7`),
+    `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs draft steps of up to 10 requests
+    as fused FlyDSL kernels.
 
   ### Parallel index top-k (AMD MI355X)
 
