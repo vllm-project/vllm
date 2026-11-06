@@ -76,12 +76,8 @@ export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} \
   --timeout-method=thread"
 
 # After its summary, a pytest process leaves without native library teardown, where it
-# has crashed with SIGSEGV after every test passed (amd_ci_fast_exit.py).
-# Installed into site-packages, not put on PYTHONPATH: commands that set PYTHONPATH themselves
-# still inherit PYTEST_ADDOPTS and must find the plugin.
-ci_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-cp "$ci_dir/amd_ci_fast_exit.py" \
-  "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/" || exit 1
+# has crashed with SIGSEGV after every test passed (amd_ci_fast_exit.py, which the test image
+# installs into site-packages so that commands setting their own PYTHONPATH still find it).
 export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_fast_exit"
 
 [[ $gpus == 0 ]] && export VLLM_TARGET_DEVICE=cpu
