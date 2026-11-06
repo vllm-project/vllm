@@ -940,6 +940,44 @@ def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
     assert reset_calls == [expected]
 
 
+@pytest.mark.parametrize(
+    "has_connector,has_requests,reset_connector,refused",
+    [
+        pytest.param(True, True, False, True, id="pending-keep"),
+        pytest.param(True, True, True, False, id="pending-reset"),
+        pytest.param(True, False, False, False, id="drained-keep"),
+        pytest.param(False, True, False, False, id="no-connector"),
+    ],
+)
+def test_inproc_sleep_refuses_to_keep_connector_with_pending_work(
+    has_connector, has_requests, reset_connector, refused
+):
+    """The in-process engine does not step until connector stores drain, so
+    keeping the connector's cache across a KV discard is refused while the
+    scheduler has work, before any state changes."""
+    core = object.__new__(EngineCore)
+    core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
+    core.scheduler = MagicMock()
+    core.scheduler.get_kv_connector.return_value = (
+        MagicMock() if has_connector else None
+    )
+    core.scheduler.has_requests.return_value = has_requests
+    core._reset_caches = MagicMock()
+
+    if refused:
+        with pytest.raises(RuntimeError, match="reset_connector=False"):
+            core.sleep(level=1, reset_connector=reset_connector)
+        core.scheduler.finish_requests.assert_not_called()
+        core.scheduler.set_pause_state.assert_not_called()
+        core._reset_caches.assert_not_called()
+        core.model_executor.sleep.assert_not_called()
+    else:
+        core.sleep(level=1, reset_connector=reset_connector)
+        core._reset_caches.assert_called_once_with(reset_connector=reset_connector)
+        core.model_executor.sleep.assert_called_once_with(1)
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before

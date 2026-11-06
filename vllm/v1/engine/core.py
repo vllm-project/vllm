@@ -1037,6 +1037,20 @@ class EngineCore:
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
+        # Unlike EngineCoreProc, this engine does not step until connector
+        # transfers drain, so stores may still read the KV cache that a sleep
+        # discards. A connector reset discards them; keeping the cache cannot.
+        if (
+            clear_cache
+            and not reset_connector
+            and self.scheduler.get_kv_connector() is not None
+            and self.scheduler.has_requests()
+        ):
+            raise RuntimeError(
+                "reset_connector=False requires a drained engine, which the "
+                "in-process engine cannot wait for. Enable multiprocessing or "
+                "keep reset_connector=True."
+            )
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)

@@ -869,7 +869,9 @@ class LLM(
             reset_connector: Whether discarding the KV cache also resets the
                 KV connector's cache, such as blocks offloaded to CPU. Ignored
                 at level 0. Keep it ``True`` if the weights may change before
-                ``wake_up``: block hashes do not cover them.
+                ``wake_up``: block hashes do not cover them. An in-process
+                engine refuses ``False`` while its scheduler has work left,
+                as connector transfers may still read the KV cache.
 
         """
         self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
