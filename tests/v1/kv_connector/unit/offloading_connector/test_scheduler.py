@@ -6973,7 +6973,9 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
     )
 
 
-def _make_put_scheduler(batch=2, capacity=8, reserve=0, block_sizes=(16,), window=None):
+def _make_put_scheduler(
+    batch=2, capacity=8, reserve=0, block_sizes=(16,), window=None, pool=None
+):
     from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
     from vllm.v1.kv_offload.tiering.manager import (
         CPUPrimaryTierOffloadingManager,
@@ -7011,7 +7013,8 @@ def _make_put_scheduler(batch=2, capacity=8, reserve=0, block_sizes=(16,), windo
     kv_config = KVCacheConfig(
         num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups
     )
-    primary = CPUPrimaryTierOffloadingManager(capacity, _mock_mmap_region(capacity))
+    pool = pool or capacity
+    primary = CPUPrimaryTierOffloadingManager(pool, _mock_mmap_region(pool))
     spec = MockOffloadingSpec(build_offloading_config(config, kv_config))
     spec.manager = TieringOffloadingManager(primary)
     return OffloadingConnectorScheduler(spec, config, kv_config)
@@ -7171,8 +7174,8 @@ def test_put_finish_excludes_reallocated_source_and_resolves_tail():
     output.finished_req_ids = {"put"}
     scheduler._current_batch_allocated_block_ids.add(4)
     [job] = scheduler._build_store_jobs(output).values()
-    assert job.src_spec.block_ids.tolist() == [3, 5]
-    assert state.group_states[0].next_stored_chunk_idx == 5
+    assert job.src_spec.block_ids.tolist() == [3, 5, 6, 7, 8]
+    assert state.group_states[0].next_stored_chunk_idx == 8
 
 
 def test_put_clipping_preserves_original_swa_eligibility():
@@ -7199,3 +7202,20 @@ def test_put_preemption_clears_admission_priority():
     output.preempted_req_ids = {"put"}
     assert scheduler._build_store_jobs(output) == {}
     assert scheduler._put_retry_after is None
+
+
+def test_put_finished_request_stores_tail_beyond_exhausted_credit():
+    # Credits are exhausted by the running batch, but a finished request's
+    # blocks are freed after this step: its whole tail must be offered now.
+    scheduler = _make_put_scheduler(batch=2, capacity=2, pool=8)
+    request, state = _put_request(scheduler)
+    output = _put_output(put=128)
+    [first] = scheduler._build_store_jobs(output).values()
+    assert first.src_spec.block_ids.tolist() == [1, 2]
+    assert scheduler.manager.get_put_admission_budget() == 0
+    request.num_computed_tokens = 128
+    request.status = RequestStatus.FINISHED_STOPPED
+    output.finished_req_ids = {"put"}
+    [tail] = scheduler._build_store_jobs(output).values()
+    assert tail.src_spec.block_ids.tolist() == [3, 4, 5, 6, 7, 8]
+    assert state.group_states[0].next_stored_chunk_idx == 8

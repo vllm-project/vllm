@@ -1987,7 +1987,7 @@ class OffloadingConnectorScheduler:
         self,
         ranges: list[tuple[int, int]],
         key_ends: list[tuple[int, OffloadKey, int, int]],
-        budget: int,
+        budget: int | None,
     ) -> tuple[list[tuple[int, int]], dict[OffloadKey, tuple[int, int]]]:
         """Select whole aligned multi-group units, never a flattened prefix.
 
@@ -1995,6 +1995,8 @@ class OffloadingConnectorScheduler:
         Clipping must not make an intermediate frontier look like a final SWA
         tail. A minimum unit may exceed the nominal batch size only if all its
         keys fit real credits (which are bounded by the PUT staging limit).
+        ``budget=None`` admits every unit: a finished request's blocks are
+        freed after this step, so its tail is offered once, in full.
         """
         alignment = lcm(
             self.config.alignment_tokens or 1,
@@ -2007,7 +2009,9 @@ class OffloadingConnectorScheduler:
         frontier = 0
         for end, keys in sorted(units.items()):
             size = len(chosen | keys)
-            if size > budget or (chosen and size > self._put_batch_chunks):
+            if budget is not None and (
+                size > budget or (chosen and size > self._put_batch_chunks)
+            ):
                 break
             chosen.update(keys)
             frontier = end
@@ -2062,7 +2066,7 @@ class OffloadingConnectorScheduler:
                     continue
                 assert self._put_manager is not None
                 admission_state = self._put_manager.get_put_admission_state()
-                budget = admission_state[0]
+                budget: int | None = admission_state[0]
                 previous, retries = self._put_retry_gate.get(req_id, ((), 0))
                 if (
                     previous == admission_state
@@ -2072,7 +2076,11 @@ class OffloadingConnectorScheduler:
                     self._put_retry_gate[req_id] = (previous, retries + 1)
                     continue
                 self._put_retry_gate.pop(req_id, None)
-                if budget == 0 and not req.is_finished():
+                if req.is_finished():
+                    # Last chance: blocks are freed after this step, so the
+                    # allocator, not the advisory credit, bounds this store.
+                    budget = None
+                elif budget == 0:
                     continue
 
             if req.status is RequestStatus.FINISHED_ABORTED:
