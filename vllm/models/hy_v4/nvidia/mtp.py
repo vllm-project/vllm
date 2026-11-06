@@ -521,7 +521,7 @@ class HYV4MTP(nn.Module):
     """HY V4 MTP draft head.
 
     Not a pipeline-parallel stage: the draft head always runs on a single rank,
-    matching `DeepseekV32MTP` / `KimiK3MTP` / `HYV3MTP`.
+    matching `DeepseekV32MTP` / `HYV3MTP`.
     """
 
     packed_modules_mapping = {

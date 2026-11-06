@@ -271,9 +271,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
-            block_ids = self.get_exchange_clipped_blocks(block_ids)
-
             remote_num_tokens = request.num_computed_tokens
+            block_ids = self.get_exchange_clipped_blocks(
+                block_ids, num_tokens=remote_num_tokens
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=is_p_node,

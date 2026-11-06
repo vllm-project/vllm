@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 import functools
+import importlib
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -2180,6 +2181,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
+            calls the FlyDSL kernel supports to it (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2252,6 +2255,11 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
+    _FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
+    _FLYDSL_SPARSE_MLA_MIN_TOKENS = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+    # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
+    # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
+    _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2281,6 +2289,10 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
+        cls._FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
+        cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
+            envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+        )
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -3021,7 +3033,24 @@ class rocm_aiter_ops:
         seq_lens: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_tokens: int,
+        *,
+        stable: bool = False,
+        values: torch.Tensor | None = None,
     ) -> None:
+        """Select each row's top-``topk_tokens`` logits.
+
+        Args:
+            logits: Per-row scores of shape ``[num_rows, max_model_len]``.
+            next_n: Query rows per request.
+            seq_lens: Valid width of each row.
+            topk_indices: Output buffer for the selected column indices.
+            topk_tokens: Number of entries selected per row.
+            stable: Emit in descending score order with a smallest-index
+                tie-break, so every rank selects and orders the same KV set.
+            values: Optional float32 buffer shaped like ``topk_indices`` that
+                receives the selected logits; short rows pad with ``-inf``.
+
+        """
         from aiter.ops.topk import top_k_per_row_decode
 
         top_k_per_row_decode(
@@ -3033,6 +3062,8 @@ class rocm_aiter_ops:
             logits.stride(0),
             logits.stride(1),
             k=topk_tokens,
+            stable=stable,
+            values=values,
         )
 
     @staticmethod
@@ -3801,6 +3832,106 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
 
     @staticmethod
+    @functools.cache
+    def _flydsl_sparse_mla_ops() -> tuple[Callable, Callable] | None:
+        """Return the FlyDSL sparse MLA (supported, fwd), or None if absent.
+
+        The in-tree kernel comes first so a stock aiter build gets it; an aiter
+        that carries its own copy serves as the fallback. Both need FlyDSL
+        itself, so a box without it keeps the Triton kernel.
+        """
+        error: Exception | None = None
+        for module in (
+            "vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla",
+            "aiter.ops.flydsl.sparse_mla",
+        ):
+            try:
+                flydsl = importlib.import_module(module)
+                return (
+                    flydsl.flydsl_sparse_mla_fp8ds_supported,
+                    flydsl.flydsl_sparse_mla_fp8ds_fwd,
+                )
+            except Exception as e:
+                error = e
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA is set, but no FlyDSL sparse "
+            "MLA could be imported (%s); using the Triton kernel.",
+            error,
+        )
+        return None
+
+    @classmethod
+    def _flydsl_sparse_mla_fwd(
+        cls,
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        has_invalid: bool,
+        return_lse: bool,
+        **support_kwargs: Any,
+    ) -> tuple[bool, torch.Tensor | None]:
+        """Run the call on the FlyDSL sparse MLA if it takes it.
+
+        Returns (handled, lse). The FlyDSL kernel covers the bf16 q, fp8_ds_mla
+        cache form with no scales, sink or extra segment (Kimi-K3.1 DSA); its
+        supports() check reads host metadata only, so it is CUDA-graph safe.
+        The kernel runs one workgroup per query row, so batches below
+        VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS (decode, small chunks)
+        stay on the Triton kernel, which splits the rows and is faster there. A config that never ran eagerly is not compiled
+        yet, so under graph capture it stays on the Triton kernel rather than
+        JIT-compiling and loading a module mid-capture. A row with no unmasked
+        key gives out 0 and lse -inf (the Triton kernel gives NaN).
+        """
+        if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
+            return False, None
+        if q.shape[0] < cls._FLYDSL_SPARSE_MLA_MIN_TOKENS:
+            return False, None
+        flydsl_ops = cls._flydsl_sparse_mla_ops()
+        if flydsl_ops is None:
+            return False, None
+        supported, fwd = flydsl_ops
+        if not supported(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            out=o,
+            **support_kwargs,
+        ):
+            return False, None
+        key = (q.shape[1], has_invalid, return_lse)
+        if key not in cls._FLYDSL_SPARSE_MLA_COMPILED:
+            if torch.cuda.is_current_stream_capturing():
+                return False, None
+            cls._FLYDSL_SPARSE_MLA_COMPILED.add(key)
+            logger.info(
+                "FlyDSL sparse MLA: heads=%d has_invalid=%s return_lse=%s "
+                "(first call: %d tokens)",
+                *key,
+                q.shape[0],
+            )
+        _, lse = fwd(
+            q,
+            kv_buffer,
+            kv_indptr,
+            kv_indices,
+            sm_scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            has_invalid=has_invalid,
+            out=o,
+            return_lse=return_lse,
+        )
+        return True, lse
+
+    @staticmethod
     def triton_sparse_mla_fwd(
         q: torch.Tensor,
         kv_buffer: torch.Tensor,
@@ -3820,7 +3951,8 @@ class rocm_aiter_ops:
         inv_rope_positions: torch.Tensor | None = None,
         inv_rope_cos_sin_cache: torch.Tensor | None = None,
         out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> None:
+        return_lse: bool = False,
+    ) -> torch.Tensor | None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
         kv_indices are ragged global slot ids. With has_invalid they may hold
@@ -3833,12 +3965,47 @@ class rocm_aiter_ops:
         compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
         make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
         replaces o with MXFP8 rows.
-        """
-        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
+        With VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA, the calls the FlyDSL
+        kernel supports (bf16 q, fp8_ds_mla, no scales/sink/extra) run there.
+        """
         assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
-        sparse_mla_fwd(
+        # The FlyDSL supports() check knows nothing of the inverse-RoPE
+        # store or the MXFP8 output, so it would accept a call whose result it
+        # then writes in the wrong form. Keep those on the Triton kernel.
+        flydsl_eligible = (
+            o is not None
+            and out_mxfp8 is None
+            and inv_rope_positions is None
+            and inv_rope_cos_sin_cache is None
+        )
+        if flydsl_eligible:
+            handled, lse = rocm_aiter_ops._flydsl_sparse_mla_fwd(
+                q,
+                kv_buffer,
+                o,
+                sm_scale,
+                kv_indptr,
+                kv_indices,
+                kv_lora_rank,
+                qk_rope_head_dim,
+                has_invalid,
+                return_lse,
+                q_scale=q_scale,
+                kv_scale=kv_scale,
+                attn_sink=attn_sink,
+                extra_kv=extra_kv_buffer,
+                extra_indptr=extra_kv_indptr,
+                extra_indices=extra_kv_indices,
+                dot_precision="fp8" if fp8_q else "bf16",
+            )
+            if handled:
+                return lse
+
+        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+
+        _, lse = sparse_mla_fwd(
             q,
             kv_buffer,
             kv_indptr,
@@ -3858,7 +4025,9 @@ class rocm_aiter_ops:
             inv_rope_positions=inv_rope_positions,
             inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
             out_mxfp8=out_mxfp8,
+            return_lse=return_lse,
         )
+        return lse
 
     @staticmethod
     def gather_kv_b_proj(

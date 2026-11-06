@@ -1426,6 +1426,45 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
+def test_map_block_ids_for_block_size_ratio_sliding_window():
+    """Sliding-window lists hold only the window, so they pair by the
+    position of the last transferred token, not from the start."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker._group_spec_types = (SlidingWindowSpec,)
+    worker.block_size = 16
+    for name in (
+        "get_mapped_blocks",
+        "_map_block_ids_for_block_size_ratio",
+        "_sliding_window_first_sub_block",
+    ):
+        _bind_worker_method(worker, name)
+
+    # 40 tokens, remote blocks of 4: the remote window (blocks 8, 9) holds
+    # tokens 32-39, which are sub-blocks 0 and 1 of local block 2 (16-47 in
+    # [1, 2]): sub-block ids 8 and 9.
+    local, remote = worker._map_block_ids_for_block_size_ratio(
+        [[1, 2]], [[50, 51]], 4, num_tokens=40
+    )
+    assert local == [[8, 9]]
+    assert remote == [[50, 51]]
+
+    # A remote window that starts before the local list drops its head:
+    # 20 tokens, remote blocks 2-4 (8-19), local block 1 (16-31).
+    local, remote = worker._map_block_ids_for_block_size_ratio(
+        [[3]], [[60, 61, 62]], 4, num_tokens=20
+    )
+    assert local == [[12]]
+    assert remote == [[62]]
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("kv_cache_layout", "enable_permute_local_kv"),
     [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
@@ -2081,6 +2120,10 @@ def test_exchange_clipped_blocks_ssm_single_state():
     )
     sched.blocks_per_sw = [2, 0]
     assert sched.get_exchange_clipped_blocks(([1, 2, 3], [7, 8, 9])) == ([2, 3], [7])
+    # A lookahead block past the 40 computed tokens (block size 16) goes first.
+    assert sched.get_exchange_clipped_blocks(
+        ([1, 2, 3, 4], [7, 8, 9]), num_tokens=40
+    ) == ([2, 3], [7])
 
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)

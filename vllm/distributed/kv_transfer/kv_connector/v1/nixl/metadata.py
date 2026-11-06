@@ -160,7 +160,7 @@ def compute_nixl_compatibility_hash(
     Factors included:
     - vLLM version and NIXL connector version
     - Model architecture (name, dtype, KV heads, layers)
-    - KV cache format (dtype, sliding window)
+    - KV cache format (dtype, DSA indexer key dtype, sliding window)
     - Attention backend
     - EAGLE/MTP configuration that affects transferred state
     - Transfer mode (push vs pull)
@@ -200,6 +200,8 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
+        # The DSA indexer key format (fp8 / mxfp4 rows differ in bytes per token).
+        "indexer_kv_dtype": str(vllm_config.attention_config.indexer_kv_dtype),
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
         # push (WRITE) and pull (READ) connectors are protocol-incompatible

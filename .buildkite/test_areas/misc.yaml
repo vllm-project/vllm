@@ -200,6 +200,30 @@ steps:
 #   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
 #   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
 
+- label: ":amd: (MI355 DPX) MoRIIO Hybrid Transfer Unit Tests"
+  key: amd-moriio-hybrid-transfer-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 15
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_moriio_hma_scheduler.py
+  - tests/v1/kv_connector/unit/test_moriio_transfer_completion.py
+  - tests/v1/kv_connector/unit/test_moriio_tp_ack.py
+  commands:
+  - python -c 'import mori.io'
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - >-
+    pytest -v -s
+    v1/kv_connector/unit/test_moriio_hma_scheduler.py
+    v1/kv_connector/unit/test_moriio_transfer_completion.py
+    v1/kv_connector/unit/test_moriio_tp_ack.py
+
 # UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
 # the connector or its tests change.
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"

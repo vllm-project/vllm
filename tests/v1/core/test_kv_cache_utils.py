@@ -1432,6 +1432,37 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert [len(group) for group in cached_blocks.blocks] == [1, 4]
 
 
+def test_dcp_hybrid_target_pads_replicated_draft_pages(monkeypatch):
+    """A hybrid target keeps a layer-compact layout next to a replicated draft:
+    the draft's pages are padded to the target's instead of packing blocks."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = None
+    target = new_mla_spec()
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((target.page_size_bytes // 4,),),
+        dtypes=(torch.float32,),
+    )
+    draft = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+        sliding_window=256,
+    )
+    specs = {"target": target, "mamba": mamba, "draft": draft}
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs.values())
+    assert layout == KVCacheLayout.LBHNC
+    groups = get_kv_cache_groups(config, specs)
+    assert {g.kv_cache_spec.page_size_bytes for g in groups} == {target.page_size_bytes}
+
+
 def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     """A replicated kpool tail ring is per-request state, not a draft group."""
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout

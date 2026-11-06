@@ -937,8 +937,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install FlashInfer's precompiled kernels for all GPU architectures (the default).
 # `vllm download-kernels` wraps this command but vLLM is only installed in later
 # stages, and running it there would rebuild this large layer for every wheel.
+# A FlashInfer nightly (requirements/cuda.txt) has its kernels on the nightly index.
 RUN --mount=type=cache,target=/opt/pip/cache \
-    PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
+    NIGHTLY=$(python3 -c "import importlib.metadata as m; from packaging.version import Version; print('--nightly' if Version(m.version('flashinfer-python')).is_devrelease else '')") && \
+    PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels ${NIGHTLY}
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES

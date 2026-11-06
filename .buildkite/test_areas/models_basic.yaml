@@ -261,6 +261,8 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/kimi_k3/
+      - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.

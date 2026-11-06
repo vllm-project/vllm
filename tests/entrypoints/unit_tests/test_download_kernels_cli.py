@@ -111,3 +111,26 @@ def test_download_kernels_skips_without_flashinfer(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(subprocess, "run", pytest.fail)
 
     assert download_kernels._download_flashinfer_kernels(dry_run=False) == 0
+
+
+@pytest.mark.parametrize(
+    ("flashinfer_version", "nightly"),
+    [("0.7.3.dev20261030", True), ("0.7.2.post1", False)],
+)
+def test_download_kernels_uses_nightly_index_for_nightly_flashinfer(
+    monkeypatch: pytest.MonkeyPatch, flashinfer_version: str, nightly: bool
+):
+    """FlashInfer publishes kernel wheels for a nightly only on its nightly
+    index, so a nightly flashinfer-python must ask its CLI for that index."""
+    commands = []
+
+    def run(cmd: list[str], **kwargs) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(download_kernels, "find_spec", lambda name: object())
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _: flashinfer_version)
+
+    assert download_kernels._download_flashinfer_kernels(dry_run=False) == 0
+    assert ("--nightly" in commands[0]) == nightly

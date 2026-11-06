@@ -322,7 +322,7 @@ class FlashInferMoeEp:
                 top_k=moe.experts_per_token,
                 gate_up_clamp=moe.swiglu_limit,
                 fast_math=True,
-                apply_topk_in_fc1=apply_topk_in_fc1,
+                apply_routing_weights_before_fc2=apply_topk_in_fc1,
                 combine_dtype="bf16",
                 input_norm_const=epilogue.input_norm_const,
                 fc1_alpha=None,

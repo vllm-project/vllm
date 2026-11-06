@@ -11,6 +11,7 @@ import logging
 import multiprocessing
 import os
 import subprocess
+import threading
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
@@ -611,12 +612,17 @@ def configure_subprocess(
             dp_local_rank,
             numactl_args,
         )
-    python_executable = os.fsdecode(multiprocessing.spawn.get_executable())
-    with (
-        _set_numa_wrapper_env(numactl_args, python_executable),
-        _mp_set_executable(executable, debug_str),
-    ):
-        yield
+    # The wrapper swaps process-global state (the spawn executable and the
+    # wrapper's environment), and the executor starts local workers from
+    # threads: serialize the swap and the launch, or one worker can start
+    # under another's binding (or trip _mp_set_executable's check).
+    with _NUMA_LAUNCH_LOCK:
+        python_executable = os.fsdecode(multiprocessing.spawn.get_executable())
+        with (
+            _set_numa_wrapper_env(numactl_args, python_executable),
+            _mp_set_executable(executable, debug_str),
+        ):
+            yield
 
 
 def _get_numactl_executable() -> tuple[str, str]:
@@ -651,6 +657,10 @@ def _set_numa_wrapper_env(numactl_args: str, python_executable: str):
             os.environ.pop(_NUMACTL_PYTHON_EXECUTABLE_ENV, None)
         else:
             os.environ[_NUMACTL_PYTHON_EXECUTABLE_ENV] = old_python_executable
+
+
+# Held while a subprocess launches under the numactl wrapper.
+_NUMA_LAUNCH_LOCK = threading.Lock()
 
 
 @contextmanager

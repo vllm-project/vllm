@@ -1034,3 +1034,51 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     assert numa_utils._is_auto_numa_available(
         verbose=False, require_unbound_process=True
     ) is (affinity == [3, 2, 1, 0])
+
+
+def test_configure_subprocess_serializes_concurrent_launches(monkeypatch):
+    """The executor starts local workers from threads; each launch must see
+    its own numactl arguments and the wrapper executable for its whole
+    context, not another thread's (nor trip _mp_set_executable's check)."""
+    import multiprocessing.spawn
+    import threading
+    import time
+
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
+    monkeypatch.setattr(numa_utils, "_resolve_numactl_args", lambda args: args)
+    original = multiprocessing.spawn.get_executable()
+    vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0, 0, 1, 1])
+    wrapper, _ = numa_utils._get_numactl_executable()
+    seen: dict[int, list[tuple[str | None, str]]] = {}
+    errors: list[BaseException] = []
+
+    def launch(local_rank: int) -> None:
+        try:
+            with numa_utils.configure_subprocess(
+                vllm_config, local_rank, process_kind="worker"
+            ):
+                for _ in range(3):
+                    seen.setdefault(local_rank, []).append(
+                        (
+                            os.environ.get(numa_utils._NUMACTL_ARGS_ENV),
+                            os.fsdecode(multiprocessing.spawn.get_executable()),
+                        )
+                    )
+                    time.sleep(0.01)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=launch, args=(r,)) for r in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    for local_rank, observations in seen.items():
+        expected = numa_utils._get_numactl_worker_args(
+            vllm_config.parallel_config, local_rank
+        )
+        assert observations == [(expected, wrapper)] * 3
+    assert multiprocessing.spawn.get_executable() == original

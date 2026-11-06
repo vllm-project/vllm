@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
 import torch
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -34,18 +36,276 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
+    triton_filter_and_convert_dcp_index,
+)
+from vllm.v1.attention.backends.utils import (
+    dcp_global_to_local_index,
+    get_dcp_local_seq_lens,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import (
+    DS_MLA_STATE_CONTENT_BYTES,
+    AttentionSpec,
+    KVCacheLayout,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+# Cap on the per-step all-gathered prefill KV used by the KV-gather path.
+_DCP_PREFILL_KV_GATHER_MAX_BYTES = 4 << 30
+
+
+@contextlib.contextmanager
+def _prefill_sparse_mla_launch():
+    """Large-prefill launch config for AITER's Triton sparse MLA.
+
+    AITER's defaults (4 warps, 2 waves/EU) are tuned for decode. For
+    thousands of local-head query rows over the KV-gathered prefill rows,
+    2 warps at 1 wave/EU measured faster on gfx950. The KV-gather prefill
+    launch is eager, so overriding the config for this one call is safe.
+    Older AITER builds without these hooks keep their defaults.
+    """
+    try:
+        import aiter.ops.triton.attention.sparse_mla as sm
+    except ImportError:
+        yield
+        return
+    get_config = getattr(sm, "_get_config", None)
+    async_config = getattr(sm, "_async_launch_config", None)
+    if get_config is None or async_config is None:
+        yield
+        return
+
+    def _config(arch=None):
+        cfg = dict(get_config(arch))
+        cfg["num_warps"] = 2
+        return cfg
+
+    def _async(*args, **kwargs):
+        enabled, block_k, _ = async_config(*args, **kwargs)
+        return enabled, block_k, 1
+
+    sm._get_config, sm._async_launch_config = _config, _async
+    try:
+        yield
+    finally:
+        sm._get_config, sm._async_launch_config = get_config, async_config
+
+
+@triton.jit
+def _kvgather_rows_kernel(
+    Pos,
+    pos_stride,
+    Req,
+    Out,
+    d0,
+    rank_rows,
+    lloc,
+    il,
+    w,
+    K: tl.constexpr,
+    B: tl.constexpr,
+):
+    """Global top-k position -> row of the DCP-gathered KV buffer (-1 kept)."""
+    t = tl.program_id(0)
+    j = tl.program_id(1) * B + tl.arange(0, B)
+    m = j < K
+    p = tl.load(Pos + t * pos_stride + j, mask=m, other=-1).to(tl.int64)
+    r = (tl.load(Req + t) - d0).to(tl.int64)
+    owner, lp = dcp_global_to_local_index(p, w, il)
+    row = owner * rank_rows + r * lloc + lp
+    tl.store(Out + t * K + j, tl.where(p >= 0, row, -1).to(tl.int32), mask=m)
+
+
+@triton.jit
+def _pack_valid_rows(
+    source,
+    stride,
+    indptr,
+    dest,
+    Counts,
+    rows,
+    K: tl.constexpr,
+    B: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, B)
+    value = tl.load(source + row * stride + col, col < K, other=-1)
+    if ROWS == 0:
+        keep = value >= 0
+        start = tl.load(indptr + row)
+        slot = tl.cumsum(keep.to(tl.int32), 0) - 1
+    else:
+        # Counts is given, so build indptr here instead of with a prefix sum.
+        # Valid entries are then a prefix of the row, so the slot is col.
+        r = tl.arange(0, ROWS)
+        counts = tl.load(Counts + r, r < rows, other=0)
+        start = tl.sum(tl.where(r < row, counts, 0))
+        count = tl.sum(tl.where(r == row, counts, 0))
+        keep = col < count
+        slot = col
+        tl.store(indptr + row + 1, start + count)
+        if row == 0:
+            tl.store(indptr, 0)
+    tl.store(dest + start + slot, value, keep)
+
+
+def _compact_dcp_indices(
+    indices: torch.Tensor, counts: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Preserve each row's valid slot order while removing invalid KV entries.
+
+    Args:
+        indices: Per-row KV rows, where ``-1`` marks an invalid entry.
+        counts: Optional per-row count of valid entries, which must then be a
+            prefix of the row. Pass it to save the separate prefix sum.
+
+    Returns:
+        The CSR row pointer and the packed rows.
+
+    """
+    rows, topk = indices.shape
+    if counts is None:
+        indptr = torch.zeros(rows + 1, dtype=torch.int32, device=indices.device)
+        valid = (indices >= 0).sum(dim=1, dtype=torch.int32)
+        torch.cumsum(valid, dim=0, out=indptr[1:])
+    else:
+        # _pack_valid_rows fills indptr, but it does not run without rows.
+        alloc = torch.empty if rows else torch.zeros
+        indptr = alloc(rows + 1, dtype=torch.int32, device=indices.device)
+    packed = torch.empty(indices.numel(), dtype=indices.dtype, device=indices.device)
+    if rows:
+        _pack_valid_rows[(rows,)](
+            indices,
+            indices.stride(0),
+            indptr,
+            packed,
+            counts,
+            rows,
+            topk,
+            triton.next_power_of_2(topk),
+            0 if counts is None else max(16, triton.next_power_of_2(rows)),
+        )
+    return indptr, packed
+
+
+@triton.jit
+def _score_key(x):
+    # Order-preserving int32 of an FP32 score; NaN sorts below -inf.
+    bits = x.to(tl.int32, bitcast=True)
+    key = bits ^ ((bits >> 31) & 0x7FFFFFFF)
+    return tl.where((bits & 0x7FFFFFFF) > 0x7F800000, -2147483648, key)
+
+
+@triton.jit
+def _select_owned_slots(
+    Scores,
+    Top,
+    Local,
+    Pages,
+    Staging,
+    Counts,
+    rank,
+    SS: tl.constexpr,
+    TS: tl.constexpr,
+    LS: tl.constexpr,
+    PS: tl.constexpr,
+    K: tl.constexpr,
+    Page: tl.constexpr,
+    Stride: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, K)
+    # The k-th best score; candidates tied with it fill the remaining room in
+    # rank-major position order.
+    top = _score_key(tl.load(Top + row * TS + col))
+    threshold = tl.min(top)
+    room = K - tl.sum((top > threshold).to(tl.int32))
+    score = _score_key(tl.load(Scores + row * SS + rank * K + col))
+    local = tl.load(Local + row * LS + col)
+    live = local >= 0
+    tied = (live & (score == threshold)).to(tl.int32)
+    if tl.sum(tied) > 0:
+        for plane in range(0, rank):
+            other = _score_key(tl.load(Scores + row * SS + plane * K + col))
+            room -= tl.sum((other == threshold).to(tl.int32))
+    keep = (live & (score > threshold)) | (
+        (tl.cumsum(tied, 0) - tied < room) & (tied != 0)
+    )
+    keep_i = keep.to(tl.int32)
+    dst = tl.cumsum(keep_i, 0) - keep_i
+    local = tl.where(keep, local, 0)
+    page = tl.load(Pages + row * PS + local // Page, keep, other=0)
+    tl.store(Staging + row * K + dst, page * Stride + local % Page, keep)
+    tl.store(Counts + row, tl.sum(keep_i))
+
+
+_score_widths: dict[tuple[torch.device, int], torch.Tensor] = {}
+
+
+def merge_dcp_scores(
+    scores: torch.Tensor,
+    local_indices: torch.Tensor,
+    token_block_table: torch.Tensor,
+    rank: int,
+    world_size: int,
+    page_size: int,
+    block_stride_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge rank-major score candidates into this rank's physical CSR slots.
+
+    Same selection as aiter ``flydsl_dcp_topk_merge``: the global top-k by
+    score, ties at the k-th score taken in rank-major position order.
+    """
+    rows, k = local_indices.shape
+    width = scores.shape[1]
+    assert width == world_size * k and scores.stride(1) == 1
+    ends = _score_widths.get((scores.device, width))
+    if ends is None or ends.numel() < rows:
+        ends = torch.full(
+            (max(rows, 1024),), width, dtype=torch.int32, device=scores.device
+        )
+        _score_widths[(scores.device, width)] = ends
+    # Only the k-th score is used: any tie order is fine here.
+    top = torch.empty(local_indices.shape, dtype=torch.float32, device=scores.device)
+    rocm_aiter_ops.indexer_top_k_decode(
+        scores,
+        1,
+        ends,
+        torch.empty_like(local_indices),
+        k,
+        values=top,
+    )
+    staging = torch.empty_like(local_indices)
+    counts = torch.empty(rows, dtype=torch.int32, device=scores.device)
+    _select_owned_slots[(rows,)](
+        scores,
+        top,
+        local_indices,
+        token_block_table,
+        staging,
+        counts,
+        rank,
+        scores.stride(0),
+        top.stride(0),
+        local_indices.stride(0),
+        token_block_table.stride(0),
+        k,
+        page_size,
+        block_stride_rows,
+        num_warps=8,
+    )
+    indptr, slots = _compact_dcp_indices(staging, counts)
+    return slots, indptr
 
 
 def _use_rocm_sparse_triton(
@@ -355,6 +615,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "fp8_ds_mla",
     ]
 
     @staticmethod
@@ -420,6 +681,9 @@ class ROCMAiterMLASparseMetadata(SparseMLACommonMetadata):
     paged_kv_indptr: torch.Tensor | None = None
     attn_out_dtype: torch.dtype | None = None
 
+    # Per-token page ids, cached on first use by the DCP score-only path.
+    _dcp_token_pages: torch.Tensor | None = None
+
     # Source buffer and index_epoch of paged_kv_indices; -1 before any remap.
     remapped_buf: object = None
     remapped_epoch: int = -1
@@ -454,7 +718,9 @@ class ROCMAiterMLASparseMetadataBuilder(
         parallel_config = vllm_config.parallel_config
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        self._init_reorder_batch_threshold(
+            1, supports_spec_as_decode=True, supports_dcp_with_varlen=True
+        )
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         attention_context = vllm_config.compilation_config.static_forward_context
@@ -462,9 +728,13 @@ class ROCMAiterMLASparseMetadataBuilder(
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic
         # terminates for HY-V4's TP1 H64 shape. The Triton sparse MLA kernel
         # never reads the persistent metadata either.
+        # fp8_ds_mla never reads it either: its forward_mqa branch always
+        # routes to aiter's Triton sparse_mla_fwd.
         self._use_persistent_metadata = all(
             getattr(attention_context[name].impl, "sinks", None) is None
             and not getattr(attention_context[name].impl, "use_aiter_sparse_mla", False)
+            and getattr(attention_context[name].impl, "kv_cache_dtype", None)
+            != "fp8_ds_mla"
             for name in layer_names
         )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
@@ -616,7 +886,9 @@ class ROCMAiterMLASparseMetadataBuilder(
             self.req_id_per_token_buffer[new_req_extent : self._prev_req_extent].fill_(
                 0
             )
-        if self._prev_indices_extent > new_indices_extent:
+        # DCP attention builds its own CSR indices: skip the paged ones.
+        dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        if not dcp and self._prev_indices_extent > new_indices_extent:
             self.paged_kv_indices[new_indices_extent : self._prev_indices_extent].fill_(
                 0
             )
@@ -625,20 +897,23 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.req_id_per_token_buffer[:new_req_extent].copy_(
             np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
-        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        sparse_seqlen = generate_sparse_seqlen_triton(
-            seq_lens,
-            query_start_loc,
-            self.topk_tokens,
-            num_tokens,
-            common_attn_metadata.max_query_len,
-        )
+        if not dcp:
+            query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            sparse_seqlen = generate_sparse_seqlen_triton(
+                seq_lens,
+                query_start_loc,
+                self.topk_tokens,
+                num_tokens,
+                common_attn_metadata.max_query_len,
+            )
 
-        torch.cumsum(sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1])
-        # fill_() with a value that aliases the destination clones it first.
-        indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
-        indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
+            torch.cumsum(
+                sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1]
+            )
+            # fill_() with a value that aliases the destination clones it first.
+            indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
+            indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
         qo_indptr = self.qo_indptr[: num_tokens + 1]
@@ -673,6 +948,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         is_long_pure_bf16_prefill = _is_long_bf16_prefill(self._mla_kv_dtype, metadata)
         if (
             self._use_persistent_metadata
+            and not dcp
             and not use_triton_sparse
             and not is_long_pure_bf16_prefill
             and num_tokens > 0
@@ -777,7 +1053,8 @@ def reference_mla_sparse_prefill(
 
 
 class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
-    supports_dcp = False
+    supports_dcp = True
+    can_return_lse_for_decode = True
     use_aiter_sparse_mla = False
 
     def __init__(
@@ -829,11 +1106,29 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             **mla_args,
         )
         self.softmax_scale = scale
+        if self.dcp_world_size > 1 and (
+            self.kv_cache_dtype != "fp8_ds_mla" or sinks is not None
+        ):
+            raise NotImplementedError(
+                "ROCm sparse DCP requires fp8_ds_mla without sinks"
+            )
+        if self.kv_cache_dtype == "fp8_ds_mla":
+            # The fp8_ds_mla branch of forward_mqa routes to aiter's Triton
+            # sparse_mla_fwd, which is validated on gfx950 only.
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                raise NotImplementedError(
+                    "ROCM_AITER_MLA_SPARSE with kv_cache_dtype=fp8_ds_mla "
+                    "requires gfx950 (aiter Triton sparse_mla_fwd, "
+                    "fp8_dsv32_mla layout)."
+                )
         self.supports_dense_mha_prefill = sinks is None  # type: ignore[misc]
         self.masked_mha_available = False
 
         vllm_config = get_current_vllm_config()
         self.owns_indexer: bool = indexer is not None
+        self.dcp_scores = getattr(indexer, "dcp_scores", None)
         self.index_epoch: int = _index_epoch(
             self.topk_indices_buffer, self.owns_indexer
         )
@@ -1153,6 +1448,109 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         )
         return output
 
+    def use_dcp_prefill_kvgather(
+        self, attn_metadata: ROCMAiterMLASparseMetadata, num_tokens: int
+    ) -> bool:
+        """Gather the prefill requests' KV instead of every rank's queries when
+        that moves fewer bytes (large prefill chunks)."""
+        md = attn_metadata
+        if self.dcp_world_size <= 1 or md.num_prefills == 0:
+            return False
+        if self.kv_cache_dtype != "fp8_ds_mla" or self.sinks is not None:
+            return False
+        rows = num_tokens - md.num_decode_tokens
+        if rows <= 0:
+            return False
+        w, il = self.dcp_world_size, md.cp_kv_cache_interleave_size
+        lloc = cdiv(md.prefill_max_seq_len, il * w) * il
+        kv_bytes = w * md.num_prefills * lloc * DS_MLA_STATE_CONTENT_BYTES["fp8_ds_mla"]
+        # bf16 query all-gather in + all-heads output all-to-all out
+        q_bytes = (
+            rows
+            * self.num_heads
+            * w
+            * (2 * self.kv_lora_rank + self.qk_rope_head_dim)
+            * 2
+        )
+        return kv_bytes < q_bytes and kv_bytes <= _DCP_PREFILL_KV_GATHER_MAX_BYTES
+
+    def sparse_dcp_prefill_kvgather(
+        self,
+        q: torch.Tensor,  # [T, H_local, L + P] bf16, prefill rows only
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: ROCMAiterMLASparseMetadata,
+        row0: int,
+    ) -> torch.Tensor:
+        """Sparse MLA for prefill rows under DCP without query gather or
+        output all-to-all: all-gather the prefill requests' fp8_ds_mla rows
+        (one collective), then attend with this rank's heads only."""
+        from vllm.distributed import get_dcp_group
+
+        md = attn_metadata
+        assert self.topk_indices_buffer is not None
+        w, me = self.dcp_world_size, self.dcp_rank
+        il, bs = md.cp_kv_cache_interleave_size, md.block_size
+        n_req, d0 = md.num_prefills, md.num_decodes
+        t = q.shape[0]
+        dev = q.device
+        rows_u8, stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, bs)
+        rows_u8 = rows_u8.view(torch.uint8)
+        lloc = cdiv(md.prefill_max_seq_len, il * w) * il
+
+        # This rank's local rows of each prefill request at a fixed stride lloc.
+        # They depend only on the step's metadata, which every sparse MLA
+        # layer of the group shares: build them once per metadata object.
+        slots = getattr(md, "_dcp_kvgather_slots", None)
+        if slots is None:
+            seq = cast(torch.Tensor, md.seq_lens)[d0 : d0 + n_req]
+            local_len = get_dcp_local_seq_lens(seq, w, me, il)
+            lp = torch.arange(lloc, device=dev, dtype=torch.int64)
+            bt = md.block_table[d0 : d0 + n_req]
+            blk = torch.gather(
+                bt, 1, (lp // bs).clamp(max=bt.shape[1] - 1).expand(n_req, -1)
+            ).to(torch.int64)
+            slots = blk * stride_rows + lp % bs
+            slots = torch.where(lp[None, :] < local_len[:, None], slots, 0).flatten()
+            md._dcp_kvgather_slots = slots  # type: ignore[attr-defined]
+        local = rows_u8.index_select(0, slots)
+        gathered = get_dcp_group().all_gather(local, dim=0)  # [w*n_req*lloc, B]
+
+        # Global top-k positions -> rows of the gathered buffer.
+        pos = self.topk_indices_buffer[row0 : row0 + t, : md.topk_tokens]
+        idx = torch.empty((t, md.topk_tokens), dtype=torch.int32, device=dev)
+        if t:
+            _kvgather_rows_kernel[(t, triton.cdiv(md.topk_tokens, 512))](
+                pos,
+                pos.stride(0),
+                md.req_id_per_token[row0:],
+                idx,
+                d0,
+                n_req * lloc,
+                lloc,
+                il,
+                w,
+                md.topk_tokens,
+                512,
+            )
+        indptr = torch.arange(t + 1, dtype=torch.int32, device=dev) * md.topk_tokens
+
+        out = torch.empty(
+            (t, q.shape[1], self.kv_lora_rank), dtype=md.attn_out_dtype, device=dev
+        )
+        with _prefill_sparse_mla_launch():
+            rocm_aiter_ops.triton_sparse_mla_fwd(
+                q,
+                gathered.unsqueeze(1),
+                out,
+                self.scale,
+                indptr,
+                idx.flatten(),
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                has_invalid=True,
+            )
+        return out
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -1164,9 +1562,13 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         # MQA 576/512 approach for both prefill and decode
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        # fp8_ds_mla is an opaque per-token byte format (fp8 latent + per-128
+        # fp32 scales + bf16 rope); only the Triton sparse MLA kernel reads it,
+        # and it wants a bf16 query.
+        fp8_ds_mla_cache = self.kv_cache_dtype == "fp8_ds_mla"
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            if fp8_attention:
+            if fp8_attention and not fp8_ds_mla_cache:
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
                     ql_nope, q_pe, layer._q_scale
                 )
@@ -1184,6 +1586,84 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
+
+        if self.dcp_world_size > 1:
+            if not fp8_ds_mla_cache or self.sinks is not None:
+                raise NotImplementedError(
+                    "ROCm sparse DCP requires fp8_ds_mla without sinks"
+                )
+            assert self.topk_indices_buffer is not None
+            score_only = self.dcp_scores is not None and not attn_metadata.num_prefills
+            if score_only:
+                from vllm.distributed import get_dcp_group
+
+                assert self.dcp_scores is not None
+
+                scores = (
+                    get_dcp_group()
+                    .all_gather(
+                        self.dcp_scores[:num_actual_toks].view(torch.int32), dim=1
+                    )
+                    .view(torch.float32)
+                )
+                token_pages = getattr(attn_metadata, "_dcp_token_pages", None)
+                if token_pages is None or token_pages.shape[0] != num_actual_toks:
+                    token_pages = attn_metadata.block_table[
+                        attn_metadata.req_id_per_token[:num_actual_toks]
+                    ]
+                    attn_metadata._dcp_token_pages = token_pages
+                packed, indptr = merge_dcp_scores(
+                    scores,
+                    self.topk_indices_buffer[:num_actual_toks],
+                    token_pages,
+                    self.dcp_rank,
+                    self.dcp_world_size,
+                    attn_metadata.block_size,
+                    block_stride_rows,
+                )
+                compact = True
+            else:
+                indices = triton_filter_and_convert_dcp_index(
+                    attn_metadata.req_id_per_token[:num_actual_toks],
+                    attn_metadata.block_table,
+                    self.topk_indices_buffer[:num_actual_toks],
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    attn_metadata.cp_kv_cache_interleave_size,
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    BLOCK_STRIDE_ROWS=block_stride_rows,
+                    NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+                    compact_valid_to_front=False,
+                )
+                compact = attn_metadata.num_prefills == 0
+                if compact:
+                    indptr, packed = _compact_dcp_indices(indices)
+                else:
+                    indptr = (
+                        torch.arange(
+                            num_actual_toks + 1, dtype=torch.int32, device=q.device
+                        )
+                        * attn_metadata.topk_tokens
+                    )
+                    packed = cast(torch.Tensor, indices).flatten()
+            output = torch.empty(
+                (q.shape[0], q.shape[1], self.kv_lora_rank),
+                dtype=attn_metadata.attn_out_dtype,
+                device=q.device,
+            )
+            lse = rocm_aiter_ops.triton_sparse_mla_fwd(
+                q,
+                kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+                output,
+                self.scale,
+                indptr,
+                packed,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                has_invalid=not compact,
+                return_lse=True,
+            )
+            return output, lse
 
         # Indexer layers may rewrite their buffer, so always remap. Non-indexer
         # layers have their own KV cache group: remap once per indexer write.
@@ -1210,6 +1690,42 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             )
             attn_metadata.remapped_buf = self.topk_indices_buffer
             attn_metadata.remapped_epoch = self.index_epoch
+
+        if fp8_ds_mla_cache:
+            assert self.sinks is None, (
+                "the fp8_ds_mla sparse MLA path does not support attention sinks"
+            )
+            if q.dtype != torch.bfloat16:
+                # A packed fp8 query would need a q_scale the aiter wrapper
+                # does not accept; only the dequantized bf16 form is supported.
+                raise NotImplementedError(
+                    f"fp8_ds_mla sparse MLA requires a bf16 query, got {q.dtype}"
+                )
+            output = torch.empty(
+                [q.shape[0], q.shape[1], self.kv_lora_rank],
+                dtype=attn_metadata.attn_out_dtype,
+                device=q.device,
+            )
+            rocm_aiter_ops.triton_sparse_mla_fwd(
+                q,
+                # The packed DSA record is 656 bytes wide, not the 576 of a
+                # plain QK row, so aiter only recognises it as a 3-D block
+                # cache. One record per block keeps the slot numbering the
+                # index stream already uses. The DCP branch above does the
+                # same.
+                kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+                output,
+                self.scale,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                # triton_convert_req_index_to_global_index writes 0, never -1,
+                # for an invalid top-k entry, so no slot in the stream is
+                # negative.
+                has_invalid=False,
+            )
+            return output, None
 
         # write the latent and rope to kv cache
         if fp8_attention:

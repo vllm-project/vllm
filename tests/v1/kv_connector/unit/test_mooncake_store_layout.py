@@ -298,6 +298,40 @@ def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
         layout.prepare_values([(0, BLOCK_SIZE + 1)], [0, 1], [0])
 
 
+def test_rank_local_registers_padded_kernel_blocks_as_one_region():
+    # Merged DSA cache (Kimi K3.1): 64-token kernel blocks of 64 x 788 B, each
+    # padded to 50512 B, 17 per manager block, grouped to manager blocks.
+    num_blocks, ratio, unit, padded = 4, 17, 64 * 788, 50_512
+    raw = torch.zeros(num_blocks * ratio * padded, dtype=torch.uint8)
+    cache = raw.as_strided((num_blocks * ratio, 1, 64, 788), (padded, unit, 788, 1))
+    layout = RankLocalStoreLayout(KeyMetadata("test-model", 0, 0, 0, 0), 1088, 1088)
+
+    layout.register_kv_caches([cache], num_blocks)
+
+    # One region of whole manager blocks, so a block's put never spills into
+    # the next block.
+    assert layout.kv_caches_base_addr == [raw.data_ptr()]
+    assert layout.block_stride == [ratio * padded]
+    # Stored up to the last kernel block's data, skipping its tail padding.
+    assert layout.block_len == [(ratio - 1) * padded + unit]
+    addrs, sizes, _ = layout.prepare_values([(0, 1088)], [num_blocks - 1], [0])
+    assert addrs[0][0] + sizes[0][0] == raw.data_ptr() + raw.numel() - (padded - unit)
+
+
+def test_rank_local_splits_interleaved_blocks_per_head():
+    # K and V of all blocks in separate planes: a block is not stride-compact.
+    num_blocks = 4
+    kv = torch.zeros(2, num_blocks, BLOCK_SIZE, 64, dtype=torch.uint8)
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0), BLOCK_SIZE, BLOCK_SIZE
+    )
+
+    layout.register_kv_caches([kv.permute(1, 0, 2, 3)], num_blocks)
+
+    assert layout.kv_caches_base_addr == [kv[0].data_ptr(), kv[1].data_ptr()]
+    assert layout.block_len == [BLOCK_SIZE * 64] * 2
+
+
 def test_rank_local_layout_skips_block_padding():
     """A state padded up to a larger page, like a Mamba state padded to the
     attention page size, is stored without the padding."""
