@@ -354,6 +354,8 @@ class FireRedASR2ForConditionalGeneration(
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError("FireRedASR2 does not support translation")
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language

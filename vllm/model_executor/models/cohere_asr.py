@@ -2076,6 +2076,8 @@ class CohereAsrForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError("Cohere ASR does not support translation")
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         language = stt_params.language

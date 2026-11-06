@@ -499,6 +499,8 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         cls,
         stt_params: SpeechToTextParams,
     ) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError("Voxtral Realtime does not support translation")
         audio = stt_params.audio
         model_config = stt_params.model_config
         stt_config = stt_params.stt_config
