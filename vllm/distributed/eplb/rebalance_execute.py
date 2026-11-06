@@ -738,7 +738,7 @@ def rearrange_expert_weights_inplace(
             ]
             for weight, buffer in zip(expert_weights[0], profile_buffer):
                 dummy_recv_buffer = [buffer for _ in range(ep_size)]
-                torch.distributed.barrier()
+                torch.distributed.barrier(group=ep_group)
                 all_gather(
                     dummy_recv_buffer,
                     weight,
