@@ -8,6 +8,7 @@ import pytest
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 
 PROMPT = "Hi there"
@@ -40,6 +41,7 @@ def _serving() -> OpenAIServingCompletion:
     serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
     serving.enable_prompt_tokens_details = False
     serving.enable_force_include_usage = False
+    serving.enable_log_outputs = False
     serving.enable_per_request_metrics = False
     serving.system_fingerprint = None
     serving.return_tokens_as_token_ids = False
@@ -85,7 +87,7 @@ async def test_stream_echo_without_generation_counts_no_completion_tokens():
     chunks = []
     async for line in _serving().completion_stream_generator(
         _request(stream=True),
-        [{"prompt": PROMPT}],
+        [tokens_input(PROMPT_TOKEN_IDS, prompt=PROMPT)],
         results(),
         "r",
         0,
