@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
 )
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -109,6 +113,9 @@ def fused_moe_kernel_gptq_awq(
     has_zp: tl.constexpr,
     use_int4_w4a16: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
+    # TP sharding
+    tp_size: tl.constexpr = 1,
+    tp_rank: tl.constexpr = 0,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -136,11 +143,19 @@ def fused_moe_kernel_gptq_awq(
     multiplication across different blocks processed by the same expert.
     """
     # -----------------------------------------------------------
+    # TP sharding: each TP rank computes only its output shard (N_local = N // tp_size).
+    tl.static_assert(N % tp_size == 0, "N must be divisible by tp_size")  # noqa: F821
+    N_local = N // tp_size  # noqa: F821
+    tl.static_assert(N_local % BLOCK_SIZE_N == 0,
+                     "N_local must be divisible by BLOCK_SIZE_N for clean tiling")
+    # N_start = tp_rank * N_local  # not used directly, we slice B and C before kernel launch
+
+    # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_n = tl.cdiv(N_local, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -356,6 +371,9 @@ def fused_moe_kernel(
     USE_TMA_B: tl.constexpr = False,
     USE_TMA_A: tl.constexpr = False,
     C_IS_SORTED: tl.constexpr = False,
+    # TP sharding
+    tp_size: tl.constexpr = 1,
+    tp_rank: tl.constexpr = 0,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -386,11 +404,19 @@ def fused_moe_kernel(
     multiplication across different blocks processed by the same expert.
     """
     # -----------------------------------------------------------
+    # TP sharding: each TP rank computes only its output shard (N_local = N // tp_size).
+    tl.static_assert(N % tp_size == 0, "N must be divisible by tp_size")  # noqa: F821
+    N_local = N // tp_size  # noqa: F821
+    tl.static_assert(N_local % BLOCK_SIZE_N == 0,
+                     "N_local must be divisible by BLOCK_SIZE_N for clean tiling")
+    # N_start = tp_rank * N_local  # not used directly, we slice B and C before kernel launch
+
+    # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_n = tl.cdiv(N_local, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -734,10 +760,41 @@ def invoke_fused_moe_wna16_triton_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
+
+    # TP sharding for output projection (w2): top_k == 1 identifies w2 call
+    is_w2 = (top_k == 1)
+    tp_size = get_tensor_model_parallel_world_size() if is_w2 else 1
+    tp_rank = get_tensor_model_parallel_rank() if is_w2 else 0
+
+    # Slice B and C for TP sharding on w2
+    if is_w2:
+        N = B.size(1)
+        assert N % tp_size == 0, f"N ({N}) must be divisible by tp_size ({tp_size})"
+        N_local = N // tp_size
+        N_start = tp_rank * N_local
+        # Slice B: (E, N, K) -> (E, N_local, K)
+        B = B[:, N_start:N_start + N_local, :].contiguous()
+        # Slice C: (M, topk, N) -> (M, topk, N_local)
+        C = C[:, :, N_start:N_start + N_local].contiguous()
+        if B_scale is not None and B_scale.ndim == 3:
+            # block-wise scale: [E, N//group_n, K//group_k] -> [E, N_local//group_n, K//group_k]
+            group_n = block_shape[0] if block_shape else 1
+            B_scale = B_scale[:, N_start // group_n:(N_start + N_local) // group_n, :].contiguous()
+        if B_zp is not None and B_zp.ndim == 3:
+            # block-wise zp: [E, N//group_n, K//group_k] -> [E, N_local//group_n, K//group_k]
+            group_n = block_shape[0] if block_shape else 1
+            B_zp = B_zp[:, N_start // group_n:(N_start + N_local) // group_n, :].contiguous()
+        # Grid uses N_local
+        grid = lambda META: (
+            triton.cdiv(EM, META["BLOCK_SIZE_M"])
+            * triton.cdiv(N_local, META["BLOCK_SIZE_N"]),
+        )
+    else:
+        grid = lambda META: (
+            triton.cdiv(EM, META["BLOCK_SIZE_M"])
+            * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+        )
+
     config = config.copy()
     config.update(
         get_moe_wna16_block_config(
@@ -763,8 +820,8 @@ def invoke_fused_moe_wna16_triton_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.size(1),
-        A.size(1),
+        B.size(1),  # N (N_local for w2)
+        A.size(1),  # K
         EM,
         num_tokens,
         A.stride(0),
@@ -788,6 +845,8 @@ def invoke_fused_moe_wna16_triton_kernel(
         has_zp=B_zp is not None,
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
         **config,
     )
 
@@ -869,10 +928,43 @@ def invoke_fused_moe_triton_kernel(
             )
     else:
         EM = num_tokens * config["BLOCK_SIZE_M"]
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
+
+    # TP sharding for output projection (w2): top_k == 1 identifies w2 call
+    is_w2 = (top_k == 1)
+    tp_size = get_tensor_model_parallel_world_size() if is_w2 else 1
+    tp_rank = get_tensor_model_parallel_rank() if is_w2 else 0
+
+    # Slice B and C for TP sharding on w2
+    if is_w2:
+        N = B.size(1)
+        assert N % tp_size == 0, f"N ({N}) must be divisible by tp_size ({tp_size})"
+        N_local = N // tp_size
+        N_start = tp_rank * N_local
+        # Slice B: (E, N, K) -> (E, N_local, K)
+        B = B[:, N_start:N_start + N_local, :].contiguous()
+        # Slice C: (M, topk, N) -> (M, topk, N_local)
+        C = C[:, :, N_start:N_start + N_local].contiguous()
+        if B_bias is not None:
+            # bias shape: [num_experts, N] -> [num_experts, N_local]
+            B_bias = B_bias[:, N_start:N_start + N_local].contiguous()
+        if B_scale is not None and B_scale.ndim == 3:
+            # block-wise scale: [E, N//group_n, K//group_k] -> [E, N_local//group_n, K//group_k]
+            group_n = block_shape[0] if block_shape else 1
+            B_scale = B_scale[:, N_start // group_n:(N_start + N_local) // group_n, :].contiguous()
+        elif B_scale is not None and B_scale.ndim == 2:
+            # channel-wise scale: [E, N] -> [E, N_local]
+            B_scale = B_scale[:, N_start:N_start + N_local].contiguous()
+        # Grid uses N_local
+        grid = lambda META: (
+            triton.cdiv(EM, META["BLOCK_SIZE_M"])
+            * triton.cdiv(N_local, META["BLOCK_SIZE_N"]),
+        )
+    else:
+        grid = lambda META: (
+            triton.cdiv(EM, META["BLOCK_SIZE_M"])
+            * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+        )
+
     HAS_BIAS = B_bias is not None
 
     config = config.copy()
@@ -947,8 +1039,8 @@ def invoke_fused_moe_triton_kernel(
         expert_ids,
         num_tokens_post_padded,
         a_desc,
-        B.size(1),
-        B.size(2),
+        B.size(1),  # N (N_local for w2)
+        B.size(2),  # K
         EM,
         num_tokens,
         A.stride(0),
@@ -984,6 +1076,8 @@ def invoke_fused_moe_triton_kernel(
         USE_TMA_B=use_tma_b,
         USE_TMA_A=use_tma_a,
         C_IS_SORTED=C_is_sorted,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
         **config,
     )
 
@@ -1023,7 +1117,6 @@ def dispatch_fused_moe_kernel(
         block_shape is not None and block_shape[1] > 0
     ):
         assert B_bias is None
-        assert sorted_token_ids is not None
 
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(
             num_valid_tokens=num_tokens,
@@ -1194,7 +1287,6 @@ def get_moe_configs(
     dtype: str | None,
     block_n: int | None = None,
     block_k: int | None = None,
-    down_moe: bool = False,
 ) -> dict[int, Any] | None:
     """Return optimized configurations for the fused MoE kernel.
 
@@ -1202,7 +1294,6 @@ def get_moe_configs(
     batch sizes to configurations of the fused_moe kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
-    A down-projection config is optional and uses a separate `_down.json` file.
     """
     # Avoid optimizing for the batch invariant case. Use default config
     if envs.VLLM_BATCH_INVARIANT:
@@ -1212,8 +1303,6 @@ def get_moe_configs(
     # directory
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
-    if down_moe:
-        json_file_name = json_file_name.removesuffix(".json") + "_down.json"
 
     config_file_paths = []
 
@@ -1246,12 +1335,11 @@ def get_moe_configs(
 
     # If no optimized configuration is available, we will use the default
     # configuration
-    if not down_moe:
-        logger.warning_once(
-            "Using default MoE config. Performance might be sub-optimal! "
-            "Config file not found at %s",
-            ", ".join(config_file_paths),
-        )
+    logger.warning_once(
+        "Using default MoE config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        ", ".join(config_file_paths),
+    )
     return None
 
 
