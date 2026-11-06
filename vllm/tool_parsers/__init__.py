@@ -222,6 +222,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
     ),
+    "ripple": (
+        "ripple_engine_tool_parser",
+        "RippleEngineToolParser",
+    ),
     "seed_oss": (
         "seed_oss_engine_tool_parser",
         "SeedOssEngineToolParser",
