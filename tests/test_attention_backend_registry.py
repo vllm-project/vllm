@@ -131,6 +131,21 @@ def test_custom_attention_backend_requires_dcp_opt_in():
     ]
 
 
+def test_custom_attention_backend_requires_hisparse_opt_in():
+    """Backends without a HiSparse path must not be selected with HiSparse."""
+    config = AttentionSelectorConfig(
+        head_size=64,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_hisparse=True,
+    )
+    kwargs = dict(device_capability=DeviceCapability(9, 0), **config._asdict())
+    assert CustomAttentionBackend.validate_configuration(**kwargs) == [
+        "HiSparse not supported"
+    ]
+
+
 def test_custom_is_not_alias_of_any_backend():
     # Get all members of AttentionBackendEnum
     all_backends = list(AttentionBackendEnum)

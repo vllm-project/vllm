@@ -30,7 +30,10 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.abstract import (
+    MambaBase,
+    fit_mamba_blocks_to_attention,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
@@ -545,7 +548,7 @@ def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
     for i, alignment in enumerate(prefill_checkpoint_alignments):
         forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
     Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
-    return cache_config
+    return vllm_config
 
 
 @pytest.mark.parametrize(
@@ -561,9 +564,34 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(
     grid. A Mamba layer that cannot checkpoint (like Qwen4Exp's PLE short conv)
     stops the scheduler from taking any, so the block stays.
     """
-    cache_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
+    vllm_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
 
-    assert cache_config.block_size == block_size
+    assert vllm_config.cache_config.block_size == block_size
+
+
+@pytest.mark.parametrize(
+    ("attn_block_sizes", "mamba_block_size"), [((576,), 576), ((128, 768), 384)]
+)
+def test_mamba_blocks_divide_resized_attention_blocks(
+    attn_block_sizes, mamba_block_size
+):
+    """Mamba blocks of the hybrid block (576) would grow the scheduler block of
+    attention specs resized to 128 and 768 tokens from 768 to 2304, so they
+    shrink to the largest 128-multiple of at most 576 that divides 768."""
+    vllm_config = _align_qwen3_5_blocks(64)
+    layers = vllm_config.compilation_config.static_forward_context
+    kv_cache_spec: dict[str, KVCacheSpec] = {
+        "mamba.0": layers["mamba.0"].get_kv_cache_spec(vllm_config)
+    }
+    for i, block_size in enumerate(attn_block_sizes):
+        kv_cache_spec[f"attn.{i}"] = FullAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16
+        )
+
+    kv_cache_spec = fit_mamba_blocks_to_attention(vllm_config, kv_cache_spec, layers)
+
+    assert vllm_config.cache_config.mamba_block_size == mamba_block_size
+    assert kv_cache_spec["mamba.0"].block_size == mamba_block_size
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):

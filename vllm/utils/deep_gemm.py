@@ -41,6 +41,16 @@ def get_paged_mqa_page_sizes() -> tuple[int, ...]:
     return (64,) if current_platform.is_device_capability_family(120) else (32, 64)
 
 
+def get_paged_mqa_kv_alignment() -> int | None:
+    """Byte alignment at which the paged-MQA logits kernels accept KV pages: 16
+    (TMA) on SM90 and SM100; None elsewhere, where pages must stay whole."""
+    if current_platform.is_device_capability_family(
+        90
+    ) or current_platform.is_device_capability_family(100):
+        return 16
+    return None
+
+
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """Check if DeepGemm should be auto-disabled for this model on Blackwell.
 

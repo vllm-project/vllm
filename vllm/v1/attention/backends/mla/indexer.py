@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -27,6 +27,7 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    get_paged_mqa_kv_alignment,
     get_paged_mqa_logits_metadata,
     get_paged_mqa_page_sizes,
     has_deep_gemm,
@@ -257,6 +258,13 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
             model_config = get_current_vllm_config().model_config
             index_kpool = model_config.hf_text_config.index_kpool
         return [index_kpool * n for n in get_paged_mqa_page_sizes()]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return replace(
+            super().customize_spec(spec),
+            kernel_block_byte_alignment=get_paged_mqa_kv_alignment(),
+        )
 
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):

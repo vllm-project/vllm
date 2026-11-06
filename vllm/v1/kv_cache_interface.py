@@ -201,6 +201,11 @@ class KVCacheSpec:
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
     blocks of up to ``n`` tokens."""
 
+    kernel_block_byte_alignment: int | None = field(default=None, kw_only=True)
+    """Byte alignment at which this cache's kernels accept kernel blocks. Lets
+    packed blocks that are not a whole number of kernel blocks apart be split
+    into kernel blocks; ``None`` requires whole kernel blocks."""
+
     is_draft: bool = field(default=False, kw_only=True, compare=False)
     """Whether a draft model owns this layer; excluded from equality so it never
     affects grouping."""
@@ -678,6 +683,7 @@ class FullAttentionSpec(AttentionSpec):
         merged_spec = cls(
             block_size=specs[0].block_size,
             block_stride_alignment=specs[0].block_stride_alignment,
+            kernel_block_byte_alignment=specs[0].kernel_block_byte_alignment,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
@@ -755,6 +761,9 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        kernel_block_byte_alignment_set = {
+            spec.kernel_block_byte_alignment for spec in specs
+        }
         assert (
             len(cache_dtype_str_set) == 1
             and len(topk_buffer_width_set) == 1
@@ -763,11 +772,12 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(kernel_block_byte_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, top-k buffer width, tokens per state, "
             "model version, cache role, "
-            "index-sharing role, and block stride alignment."
+            "index-sharing role, and block and kernel block alignments."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -788,6 +798,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_role=cache_role_set.pop(),
             is_index_group_leader=index_group_leader_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
+            kernel_block_byte_alignment=kernel_block_byte_alignment_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
@@ -837,6 +848,7 @@ class RSWASpec(FullAttentionSpec):
         return cls(
             block_size=base.block_size,
             block_stride_alignment=base.block_stride_alignment,
+            kernel_block_byte_alignment=base.kernel_block_byte_alignment,
             num_kv_heads=base.num_kv_heads,
             head_size=base.head_size,
             head_size_v=base.head_size_v,
@@ -1044,6 +1056,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        kernel_block_byte_alignment_set = {
+            spec.kernel_block_byte_alignment for spec in specs
+        }
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert len({spec.max_tp_shards for spec in specs}) == 1
         assert (
@@ -1054,14 +1069,17 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(extra_retained_set) == 1
             and len(bounded_replay_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(kernel_block_byte_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, retained token count, and replay policy."
+            "window size, retained token count, replay policy, and block and "
+            "kernel block alignments."
         )
         return cls(
             block_size=specs[0].block_size,
             block_stride_alignment=block_stride_alignment_set.pop(),
+            kernel_block_byte_alignment=kernel_block_byte_alignment_set.pop(),
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
@@ -1267,6 +1285,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             head_size_v=specs[0].head_size_v,
             sink_len=specs[0].sink_len,
             block_stride_alignment=specs[0].block_stride_alignment,
+            kernel_block_byte_alignment=specs[0].kernel_block_byte_alignment,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             dcp_sharded=specs[0].dcp_sharded,

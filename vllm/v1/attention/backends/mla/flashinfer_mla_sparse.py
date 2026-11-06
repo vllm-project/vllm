@@ -49,6 +49,10 @@ _TRTLLM_GEN_MAX_REQUESTS = 65535
 class _FlashInferMLASparseBackendBase(AttentionBackend):
     """Common metadata for concrete FlashInfer sparse MLA backends."""
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE"
@@ -178,6 +182,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE_SM120"
+
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return False
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:

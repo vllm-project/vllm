@@ -154,6 +154,10 @@ class FlashMLASparseBackend(AttentionBackend):
         "nvfp4_ds_mla",  # NVFP4 NoPE + FP8 RoPE (SM100 only)
     ]
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if (
