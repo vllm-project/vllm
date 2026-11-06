@@ -135,10 +135,10 @@ def test_mla_workspace_reserved_at_construction(reqs, q, heads, dcp):
     if dcp > 1:
         lse = torch.zeros(reqs, q, heads, device=dev)
         cp = dict(cp=(dcp, 0, 1), totals=lengths * dcp, pack=pack)
-    before = torch.cuda.memory_allocated(dev)
+    before = torch.accelerator.memory_allocated(dev)
     query = query.view(torch.float8_e4m3fn)
     args = (query, cache, table, lengths, max_seq, (0.1, 1.0), out, lse, split)
     mla.stock_decode(*args, **cp)
     torch.accelerator.synchronize()
     assert mla._WORKSPACE[dev, heads] is held
-    assert torch.cuda.memory_allocated(dev) == before
+    assert torch.accelerator.memory_allocated(dev) == before

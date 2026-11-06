@@ -736,7 +736,7 @@ class DraftDcp:
         by_layer = context.attn_metadata
         if not isinstance(by_layer, dict) or attn.layer_name not in by_layer:
             return None
-        metadata = by_layer[attn.layer_name]
+        metadata: Any = by_layer[attn.layer_name]
         rows = hidden.shape[0]
         n = metadata.num_actual_tokens
         if metadata.num_decode_tokens != n or not 1 <= n <= self.cap or n > rows:
@@ -821,6 +821,7 @@ class DraftDcp:
             dcp_tot_seq_lens=decode.dcp_tot_seq_lens,
             table_cache=decode.__dict__.setdefault("_draft_fold_tables", {}),
         )
+        assert lse is not None
         reqs = n // k
         w_uv = self.uv[id(attn)]
         value = self.value(n, k, w_uv)

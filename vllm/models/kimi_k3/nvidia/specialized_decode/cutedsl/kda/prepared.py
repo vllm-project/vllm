@@ -124,7 +124,7 @@ def wide(heads, requests, tokens, record):
     return heads * requests >= WIDE_ITEMS[kind_of(tokens, record)]
 
 
-def stream_layout(specs, tokens):
+def stream_layout(specs, tokens) -> tuple[bool, int] | None:
     """(conv dim-first, window) when KdaStream can cp.async this step's operands
     (16-byte aligned rows and slots), else None."""
     (_, x_stride, _), conv = specs[0], specs[3]
@@ -244,7 +244,7 @@ class PreparedKda:
         self.conv_dim_first, self.kernels = conv_dim_first, {}
         # RecoverSSM: verify steps leave the state checkpoint and write the records.
         records = getattr(attention, "recoverssm_records", None)
-        self.records = (records.correction, records.key_gate) if records else ()
+        self.records: tuple = (records.correction, records.key_gate) if records else ()
         self.backend = getattr(attention, "recoverssm_backend", None)
         self.lower_bound = attention.gate_lower_bound
         self.fused = False  # set by prepare_caches (deferred_supported)
@@ -288,7 +288,7 @@ class PreparedKda:
             slots = torch.empty(shape, dtype=torch.int32, **meta)
             accepted = accepted if tokens > 1 else None
             fused = record and self.fused
-            deferred = ()
+            deferred: tuple = ()
             if fused and not replays(self.heads, requests, True):
                 self.flushes.add(key)
             if fused:
@@ -311,7 +311,7 @@ class PreparedKda:
         pending counts of a deferred RecoverSSM step."""
         batch = projected.shape[0]
         key, rows = batch, batch
-        extra = ()
+        extra: tuple = ()
         if accepted is not None:
             rows = batch // q
             key, accepted = (rows, q), accepted[:rows]

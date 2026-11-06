@@ -96,7 +96,7 @@ def _linear_method_base():
     return UnquantizedLinearMethod
 
 
-class DraftLinearMethod(_linear_method_base()):
+class DraftLinearMethod(_linear_method_base()):  # type: ignore[misc]
     """An unquantized linear's ``apply`` on ``DraftGemm`` (2-D BF16 inputs without
     bias; anything else goes to the original method). A subclass of
     ``UnquantizedLinearMethod`` so type checks on the layer still hold."""

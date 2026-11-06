@@ -122,7 +122,7 @@ def live_moe_weights():
                     t.mul_(SHARED_GAIN)
         return model
 
-    base_loader.BaseModelLoader.load_model = load_model
+    base_loader.BaseModelLoader.load_model = load_model  # type: ignore[method-assign]
 
 
 def compare_layers(records):
@@ -138,7 +138,7 @@ def compare_layers(records):
         init(self, module, *args, **kwargs)
         moes[id(module)] = self
 
-    dep.DepMoe.__init__ = register
+    dep.DepMoe.__init__ = register  # type: ignore[method-assign]
     stock = km.KimiMoE.forward
 
     def forward(self, hidden_states):
@@ -189,7 +189,7 @@ def compare_layers(records):
         )
         return out
 
-    km.KimiMoE.forward = forward
+    km.KimiMoE.forward = forward  # type: ignore[method-assign]
 
 
 def worker(rank, port, out_dir):

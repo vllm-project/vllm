@@ -305,6 +305,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
     # so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
     mamba_aligned_state_indices: torch.Tensor | None = None
+    # Set by the specialized decode's deferred RecoverSSM (recoverssm/state.py).
+    recoverssm_pending: torch.Tensor | None
+    recoverssm_request_slots: torch.Tensor | None
+    recoverssm_record_rows: torch.Tensor
 
     def __init__(
         self,

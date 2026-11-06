@@ -1544,7 +1544,7 @@ class IndexerSelect:
                     if h0 + u < h1:
                         v = hot_list[h0 + u]
                         words = self.vector(address, v)
-                    batch.append((v, words))
+                    batch.append((v, words))  # type: ignore[arg-type]
                 count = Uint32(0)
                 for u in cutlass.range_constexpr(HOT // SELECT_THREADS):
                     v, words = batch[u]
@@ -2115,8 +2115,8 @@ def compile_indexer(
     q,
     topk,
     ctas,
-    keys,
-    scales,
+    keys: tuple[tuple[int, ...], tuple[int, ...]],
+    scales: tuple[tuple[int, ...], tuple[int, ...]],
     logits,
     tops,
     device,
@@ -2153,7 +2153,7 @@ def compile_indexer(
         scratch = fake(logits, (1,), cutlass.Int16)
         tops = fake(tops, (1,), cutlass.Int16)
         s = make_fake_stream()
-        args = query, weights, key_view, scale_view, *table, ends, scratch, tops
+        args: tuple = query, weights, key_view, scale_view, *table, ends, scratch, tops
         args += (q_scales, s)
         score_kernel = cute.compile(score, *args)
         if pitch:
@@ -2249,7 +2249,7 @@ class FusedIndexer:
         keys = tuple(self.keys.shape), tuple(self.keys.stride())
         scales = tuple(self.scales.shape), tuple(self.scales.stride())
         tops = tuple(self.tops.shape)
-        args = rows, q, self.topk, self.ctas, keys, scales, logits, tops
+        args: tuple = rows, q, self.topk, self.ctas, keys, scales, logits, tops
         packed = self.packs(rows)
         args += (self.device.index, self.ids is not None, self.pitch, packed)
         release = (rows, q) not in self.hold
@@ -2278,7 +2278,7 @@ class FusedIndexer:
         keys = tuple(self.keys.shape), tuple(self.keys.stride())
         scales = tuple(self.scales.shape), tuple(self.scales.stride())
         tops = tuple(self.tops.shape)
-        args = rows, q, self.topk, self.ctas, keys, scales, logits, tops
+        args: tuple = rows, q, self.topk, self.ctas, keys, scales, logits, tops
         args += (self.device.index, False, self.pitch, True)
         world = self.exchange.world
         _, local = compile_indexer(*args, page=self.page, fp4=self.fp4, exchange=world)

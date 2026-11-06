@@ -227,7 +227,9 @@ class FlashInferCore:
         for width in self.widths if shapes else ():
             PLANS.plan(self.device, sorted(shapes), self.fmt, width)
 
-    def convert(self, topk, metadata, rows, stride_rows, interleave):
+    def convert(
+        self, topk, metadata, rows, stride_rows, interleave
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """The top-k ids -> this rank's flat rows of the packed blocks (a compacted
         prefix; under DCP the global ids this rank owns, ``interleave`` tokens per
         rank in turn) and their counts."""

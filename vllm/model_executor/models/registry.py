@@ -763,6 +763,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "InternS2MobiusMTP": ("interns2_mobius", "InternS2MobiusMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
     "HYV4MTPModel": ("vllm.models.hy_v4", "HYV4MTP"),
+    "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
 }
 
 _TRANSFORMERS_SUPPORTED_MODELS = {

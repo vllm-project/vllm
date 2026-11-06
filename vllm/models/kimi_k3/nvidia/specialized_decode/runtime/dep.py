@@ -28,6 +28,8 @@ Precision is the stock layer's at every stage (FP32 accumulation, BF16 outputs;
 the split-K order differs). K3 MLA layers run stock (per-kind policy:
 ``DEP_KINDS``)."""
 
+from typing import Any
+
 import torch
 
 from ..cutedsl.gemm.projection import PreparedProjection
@@ -103,6 +105,7 @@ class DepProjection:
 
     def run(self, x, out):
         if x.shape[0] in self.batches:
+            assert self.split is not None
             return self.split.run(x, out)
         return torch.mm(x, self.weight.t(), out=out)
 
@@ -152,7 +155,7 @@ class DepAttention:
         local = self.local[:b]
         attention = self.attention
         slots = slot_mapping[attention.mla_attn.mla_attn.layer_name]
-        index = get_forward_context().attn_metadata[
+        index: Any = get_forward_context().attn_metadata[
             attention.dsa_indexer.k_cache.prefix
         ]
         self.core.run(

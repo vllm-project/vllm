@@ -63,7 +63,8 @@ def _check_ar_norm(comm, rank, world, device):
     from vllm.models.kimi_k3.nvidia.specialized_decode.drafter.comm import HIDDEN
 
     class Norm:
-        pass
+        weight: torch.Tensor
+        variance_epsilon: float
 
     norm = Norm()
     gen = torch.Generator(device="cpu").manual_seed(1234)
@@ -376,7 +377,7 @@ def _step_worker(rank, port, out_dir, dcp):
         )
         return None
 
-    DSparkSpeculator._generate_draft = compared
+    DSparkSpeculator._generate_draft = compared  # type: ignore[method-assign]
     import vllm.benchmarks.forward.main as fm
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 

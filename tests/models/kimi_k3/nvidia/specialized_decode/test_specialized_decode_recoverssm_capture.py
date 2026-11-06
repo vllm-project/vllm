@@ -82,14 +82,14 @@ def _graphed(fn, reset=None):
     """The server's capture of one graph: an eager warmup, capture, replay
     (after ``reset``: restore what the warmup wrote, e.g. the conv windows)."""
     fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         fn()
     if reset is not None:
         reset()
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 def test_records_scratch_row():
@@ -182,7 +182,7 @@ def test_specialized_capture_rows_without_record_slots(requests):
     conv.copy_(cache_saved[0])
     expected = torch.empty_like(captured)
     step(valid, expected)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(captured, expected, atol=0, rtol=0)
     torch.testing.assert_close(windows, conv, atol=0, rtol=0)
 

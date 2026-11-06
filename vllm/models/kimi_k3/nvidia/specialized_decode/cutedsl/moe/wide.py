@@ -343,7 +343,7 @@ class WideScratch:
         self.latent = empty((cap, 3584))  # this rank's routed latent partial
         self.experts = expert_scratch(tp, self.device, wide=True)
         h = 6144 // tp  # RouteSitu's (unused) SiTU-role arguments
-        self.unused = (empty((1, 64, WIDTH)), empty((cap, 3584)))
+        self.unused: tuple = (empty((1, 64, WIDTH)), empty((cap, 3584)))
         self.unused += (empty((cap, 2 * h), torch.float32), empty((cap, h)))
         self.empty = empty
         with torch.accelerator.device_index(self.device.index):
@@ -389,7 +389,7 @@ class WideMoE:
         scale, renorm = module.routed_scaling_factor, module.moe_renormalize
         scalars = tuple(map(cutlass.Float32, (scale, beta, linear_beta)))
         dev = state.device.index
-        self.plans = {}
+        self.plans: dict[int, tuple] = {}
         names = {}
         self.shared, self.routing = batch_table(SHARED), batch_table(ROUTING)
         for b in state.batches:
@@ -422,7 +422,11 @@ class WideMoE:
                 tail = tuple(map(to_cute, (buffers["plan"], buffers["lists"])))
                 tail += (to_cute(buffers["workspace"]), scalars[0])
                 box = to_cute(state.mailbox.buffer), cutlass.Int64(state.mailbox.mc)
-                args = (box, (bias, to_cute(ids), to_cute(weights)) + tail, publish)
+                args: tuple = (
+                    box,
+                    (bias, to_cute(ids), to_cute(weights)) + tail,
+                    publish,
+                )
                 lists = buffers["lists"]
                 self.plans[b] = "sharded", route, args, finalize, out, lists
                 continue

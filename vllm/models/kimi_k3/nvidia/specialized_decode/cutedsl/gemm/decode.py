@@ -85,8 +85,10 @@ class DecodeProjection:
             if skinny is not None and b in skinny.configs:
                 self.kinds[b], self.engines[b] = "skinny", skinny.run
             elif b in warp:
+                assert self.warp is not None
                 self.kinds[b], self.engines[b] = "warp", self.warp.run
             elif b in split:
+                assert self.split is not None
                 self.kinds[b], self.engines[b] = "split_k", self.split.run
             else:
                 self.kinds[b], self.engines[b] = "cublas", self.cublas

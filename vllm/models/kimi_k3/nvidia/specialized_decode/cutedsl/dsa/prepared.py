@@ -31,6 +31,7 @@ The packed projection row is [q_a 1536 | kv_a 576 | gate H*128 | wk 128 | wv 32]
 
 import math
 from functools import cache
+from typing import Any
 
 import cutlass.cute as cute
 import torch
@@ -183,7 +184,7 @@ def compile_core(
             if fp8 and value_bmm(heads, batch):  # W_UV bmm, then MlaGate
                 values = fake((heads, batch, 128), (batch * 128, 128, 1))
                 gated = MlaGate(heads, batch, q)
-                v_args = (values, gate, lengths, output, make_fake_stream())
+                v_args: tuple = (values, gate, lengths, output, make_fake_stream())
                 value_kernel = cute.compile(gated, *v_args)
             else:
                 value = MlaValue(heads, batch, q)
@@ -367,8 +368,13 @@ class PreparedDsa:
             # the specialized decode is built before vLLM profiles its memory for
             # the KV cache (only where prepare_cache can run it: its cache layout
             # aside, the same checks).
-            args = self.indexer, self.device, max(pitches), local_topk
-            reserve_fused_indexer(*args, blocks=kv_cache_blocks())
+            reserve_fused_indexer(
+                self.indexer,
+                self.device,
+                max(pitches),
+                local_topk,
+                blocks=kv_cache_blocks(),
+            )
         # DCP "proj" partials: every gathered head's W_UV (collective), and the
         # rows of its bmm (dcp_stage.projected_rows).
         self.uv_gathered = dcp.value_weights(layer.W_UV) if dcp else None
@@ -493,11 +499,12 @@ class PreparedDsa:
         from vllm.forward_context import get_forward_context
         from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
 
-        assert self.fused is not None and metadata.block_size == self.fused.page, (
+        assert self.fused is not None
+        assert metadata.block_size == self.fused.page, (
             metadata.block_size,
             self.fused.page,
         )
-        decode = get_forward_context().attn_metadata[self.indexer.k_cache.prefix]
+        decode: Any = get_forward_context().attn_metadata[self.indexer.k_cache.prefix]
         _, block_rows = flat_kv_row_view(cache, metadata.block_size)
         stage = self.query_stage
         args = stage.q_fp8, stage.head_w, decode.decode, metadata.block_table
@@ -537,8 +544,9 @@ class PreparedDsa:
                 weight = self.query_stage.index_projection.weight
                 specs = layout(weight), index_spec
                 normalized = mode not in FRONT
-                args = batch, self.heads, pitch, *specs, device.index, normalized
-                first = compile_front(*args)
+                first = compile_front(
+                    batch, self.heads, pitch, *specs, device.index, normalized
+                )
         return first, wait, norm
 
     def run_query(self, projected, cache, slots, q, publish=()):
@@ -601,7 +609,7 @@ class PreparedDsa:
         if self.fi is not None:
             kv, stride_rows = self.fi.rows(cache, md.block_size)
             sparse = self.cores[batch, q] == "sparse"
-            merged = None
+            merged: tuple[Any, Any] | None = None
             if topk is None and self.indexer_stage.local_topk:
                 stage = self.query_stage
                 args = stage.q_fp8, stage.head_w, md, stride_rows, batch
@@ -673,6 +681,7 @@ class PreparedDsa:
         core = self.dcp_core(cache, None, metadata, batch, projected, join, q)
         uv, w_uv = stage.views[4], None
         if box.mailbox(batch).format == PROJECTED:
+            assert self.uv_gathered is not None
             uv, w_uv = self.uv_gathered[1], self.uv_gathered[0]
         args = value, box, p, publish, self.heads, core, lengths[:reqs], uv
         return run_value(*args, projected, out, w_uv)

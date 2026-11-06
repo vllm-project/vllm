@@ -14,6 +14,8 @@ With the fused DCP indexer (``fused``, indexer.py) the scoring is its scorer (th
 same logits layout) and, packed, its select also takes the local top-N (the
 merge's B' rows), so the merge only all-gathers and selects."""
 
+from typing import Any
+
 import torch
 
 from vllm.utils.torch_utils import _encode_layer_name
@@ -120,7 +122,7 @@ class IndexerStage:
         )
 
         indexer, n = self.indexer, self.local_topk
-        index_md = get_forward_context().attn_metadata[indexer.k_cache.prefix]
+        index_md: Any = get_forward_context().attn_metadata[indexer.k_cache.prefix]
         decode, rows = index_md.decode, index_md.num_decode_tokens
         if (
             decode is None
@@ -162,8 +164,8 @@ class IndexerStage:
             assert metadata.block_size == fused.page, (metadata.block_size, fused.page)
             ids = None if self.dcp_ids is None else self.dcp_ids[:batch, : self.topk]
             args = metadata.req_id_per_token, metadata.block_table, stride_rows
-            merge = (*args, slots, valid, max_local_len)
-            fused.run_exchange(q_fp8, head_w, decode, batch, q, merge, ids)
+            exchange = (*args, slots, valid, max_local_len)
+            fused.run_exchange(q_fp8, head_w, decode, batch, q, exchange, ids)
             return slots, valid
         if fused is not None and decode.seq_lens.numel() == rows:
             # The logits stay valid until the merge returns (stream order): a
@@ -188,7 +190,9 @@ class IndexerStage:
         query = query.view(reqs, next_n, *query.shape[1:])
         if q_scale is not None:
             q_scale = q_scale.view(reqs, next_n, -1)
-        q_scale, weights = mqa_logits_mx_inputs(query, q_scale, head_w[:rows])
+        q_scale, weights = mqa_logits_mx_inputs(
+            query, q_scale, head_w[:rows], torch.bfloat16
+        )
         seq_lens = decode.seq_lens[:reqs]
         logits = fp8_fp4_paged_mqa_logits(
             (query, q_scale),
@@ -198,6 +202,7 @@ class IndexerStage:
             decode.block_table,
             decode.schedule_metadata,
             max_model_len=self.max_model_len,
+            logits_dtype=torch.bfloat16,
             indices=decode.indices,
         )
         # SM100 DeepGEMM emits bf16 at a 1 KiB row stride (DeepSelect's input).

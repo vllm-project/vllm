@@ -123,7 +123,7 @@ def admit(capture_sizes, plans):
             )
         return step
 
-    SpecializedDecode.plan = recording
+    SpecializedDecode.plan = recording  # type: ignore[method-assign]
 
 
 def worker(rank, port, out_dir):
