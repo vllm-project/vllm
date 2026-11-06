@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM secondary-tier adapter for KVCR."""
 
+import copy
 import ctypes
 import mmap
 import socket
@@ -85,6 +86,10 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        RequestHashChain,
+    )
+    from vllm.v1.kv_hints import KvHintsEnvelope
     from vllm.v1.kv_offload.base import OffloadingSpec
     from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
@@ -273,6 +278,14 @@ class _JobState:
     success: bool
     successful_keys: set[OffloadKey] | None
     handles: set[OpHandle] = field(default_factory=set)
+
+
+@dataclass
+class _HintState:
+    hint: "KvHintsEnvelope"
+    chain: "RequestHashChain"
+    eligible: set[OffloadKey]
+    router_hashes: set[int]
 
 
 # Held for the process lifetime after a startup failure that could not stop
@@ -498,9 +511,51 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             RequestHashChain,
         )
 
-        chain = ctx.get_state(RequestHashChain)
+        chain, hint = ctx.get_state(RequestHashChain), ctx.kv_hints
+        if chain is None or hint is None:
+            return set()
+        state = ctx.get_state(_HintState)
+        if state is not None and state.hint == hint:
+            previous = state.chain
+            if chain is previous:
+                return state.eligible
+            old_hashes = previous.block_hashes
+            unchanged_prefix = (
+                chain.request_id == previous.request_id == ctx.req_id
+                and chain.tokens_per_hash == previous.tokens_per_hash
+                and chain.group_chunks == previous.group_chunks
+                and chain.anchor_tokens == previous.anchor_tokens
+                and chain.block_hashes[: len(old_hashes)] == old_hashes
+            )
+            tail = chain.block_hashes[len(old_hashes) :]
+            values = {int.from_bytes(h[-8:], "big") for h in tail}
+            if (
+                not unchanged_prefix
+                or any(type(h) is not bytes or len(h) != 32 for h in tail)
+                or len(values) != len(tail)
+                or not state.router_hashes.isdisjoint(values)
+            ):
+                state.eligible = set()
+                self._kvcr.discard_hint(ctx.req_id)
+            state.router_hashes.update(values)
+            state.chain = chain
+            return state.eligible
+        eligible = self._validate_remote_keys(ctx, chain)
+        ctx.set_state(
+            _HintState(
+                copy.deepcopy(hint),
+                chain,
+                eligible,
+                {int.from_bytes(h[-8:], "big") for h in chain.block_hashes},
+            )
+        )
+        return eligible
+
+    def _validate_remote_keys(
+        self, ctx: ReqContext, chain: "RequestHashChain"
+    ) -> set[OffloadKey]:
         hint = ctx.kv_hints
-        if chain is None or hint is None or chain.request_id != ctx.req_id:
+        if hint is None or chain.request_id != ctx.req_id:
             return set()
         step, groups = chain.tokens_per_hash, chain.group_chunks
         if (

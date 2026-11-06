@@ -413,18 +413,18 @@ class RequestOffloadState:
 
     def update_offload_keys(self) -> None:
         if self.req_context.kv_hints is not None:
-            self.req_context.set_state(
-                RequestHashChain(
-                    request_id=self.req.request_id,
-                    block_hashes=tuple(self.req.block_hashes),
-                    tokens_per_hash=self.config.tokens_per_hash,
-                    group_chunks=tuple(
-                        (g.group_idx, g.tokens_per_chunk)
-                        for g in self.config.kv_group_configs
-                    ),
-                    anchor_tokens=self.config.alignment_tokens,
-                )
+            chain = RequestHashChain(
+                request_id=self.req.request_id,
+                block_hashes=tuple(self.req.block_hashes),
+                tokens_per_hash=self.config.tokens_per_hash,
+                group_chunks=tuple(
+                    (g.group_idx, g.tokens_per_chunk)
+                    for g in self.config.kv_group_configs
+                ),
+                anchor_tokens=self.config.alignment_tokens,
             )
+            if chain != self.req_context.get_state(RequestHashChain):
+                self.req_context.set_state(chain)
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):

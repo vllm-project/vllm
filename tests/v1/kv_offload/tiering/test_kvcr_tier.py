@@ -856,3 +856,139 @@ def test_strict_ambiguous_anchor_stays_local(monkeypatch, hashes):
     assert tier.lookup(key, ctx) is LookupResult.HIT
     assert kvcr.query_calls[-1][1] is None
     assert kvcr.submit_hint_calls == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "append",
+        "prefix",
+        "geometry",
+        "ambiguous",
+        "hint",
+        "shrink",
+        "scope",
+        "step",
+        "anchor",
+    ],
+)
+def test_strict_cached_validation_and_invalidation(monkeypatch, change):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    _set_chain(ctx)
+    tier.on_new_request(ctx)
+    key = make_offload_key((1).to_bytes(32, "big"), 0)
+    kvcr.query_status = QueryStatus.HIT
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert len(kvcr.submit_hint_calls) == 1
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert len(kvcr.submit_hint_calls) == 1
+    if change == "append":
+        _set_chain(ctx, hashes=(1, 2, 3, 4, 5))
+    elif change == "prefix":
+        _set_chain(ctx, hashes=(9, 2, 3, 4))
+    elif change == "geometry":
+        _set_chain(ctx, groups=((0, 32), (1, 32)))
+    elif change == "ambiguous":
+        _set_chain(ctx, hashes=(1, 2, 3, 4, (1 << 64) + 4))
+    elif change == "hint":
+        ctx.kv_hints.actions[0].payload["block_hashes"] = [99]
+    else:
+        from dataclasses import replace
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+            RequestHashChain,
+        )
+
+        chain = ctx.get_state(RequestHashChain)
+        changes = {
+            "shrink": {"block_hashes": chain.block_hashes[:3]},
+            "scope": {"request_id": "other"},
+            "step": {"tokens_per_hash": 8},
+            "anchor": {"anchor_tokens": 32},
+        }
+        ctx.set_state(replace(chain, **changes[change]))
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert kvcr.query_calls[-1][1] == ("req" if change == "append" else None)
+    assert len(kvcr.submit_hint_calls) == 1
+
+
+def test_strict_cached_validation_avoids_hash_encoding(monkeypatch):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    _set_chain(ctx)
+    tier.on_new_request(ctx)
+    # Changing the codec cannot affect a previously validated stable prefix.
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "0")
+    kvcr.query_status = QueryStatus.HIT
+    key = make_offload_key((1).to_bytes(32, "big"), 0)
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert kvcr.query_calls[-1][1] == "req"
+    assert len(kvcr.submit_hint_calls) == 1
+
+
+def test_scheduler_reuses_only_unchanged_trusted_snapshot():
+    from vllm import SamplingParams
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        RequestHashChain,
+        RequestOffloadState,
+        SchedulerOffloadConfig,
+    )
+    from vllm.v1.kv_offload.base import RequestOffloadingContext
+    from vllm.v1.request import Request
+
+    ctx = _hint_context()
+    request = Request("req", [1], SamplingParams(max_tokens=1), None)
+    request.block_hashes.extend([bytes(32), (1).to_bytes(32, "big")])
+    state = RequestOffloadState(
+        SchedulerOffloadConfig((), 1, 16, 1, False, False, alignment_tokens=64),
+        request,
+        ctx,
+        RequestOffloadingContext(),
+    )
+    state.update_offload_keys()
+    first = ctx.get_state(RequestHashChain)
+    state.update_offload_keys()
+    assert ctx.get_state(RequestHashChain) is first
+    request.block_hashes[0] = (2).to_bytes(32, "big")
+    state.update_offload_keys()
+    changed = ctx.get_state(RequestHashChain)
+    assert changed is not first
+    assert changed.block_hashes[0] == (2).to_bytes(32, "big")
+    assert first.block_hashes[0] == bytes(32)
+
+
+@pytest.mark.parametrize("successes", [(True, False), (False, True), (True, True)])
+def test_strict_partition_completions_preserve_partial_success(monkeypatch, successes):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    # Request registration may precede the first scheduler hash update.
+    tier.on_new_request(ctx)
+    assert kvcr.submit_hint_calls == []
+    _set_chain(ctx)
+    fine = make_offload_key((1).to_bytes(32, "big"), 0)
+    local = make_offload_key((1).to_bytes(32, "big"), 1)
+    tier.submit_load(
+        TransferJob(
+            job_id=7,
+            keys=[fine, local],
+            chunk_ids=np.array([0, 1]),
+            is_promotion=True,
+            req_context=ctx,
+        )
+    )
+    first, second = kvcr.deliver_calls
+    kvcr.completed.clear()
+    kvcr.complete(first[0], {fine: successes[0]})
+    assert list(tier.get_finished_jobs()) == []
+    kvcr.complete(second[0], {local: successes[1]})
+    expected = {key for key, success in zip((fine, local), successes) if success}
+    assert list(tier.get_finished_jobs()) == [
+        JobResult(7, all(successes), None if all(successes) else expected)
+    ]
