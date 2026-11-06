@@ -8,10 +8,6 @@ from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 
-requires_cuda_dash = pytest.mark.skipif(
-    current_platform.is_rocm(), reason="requires CUDA DASH backend"
-)
-
 
 def _attention_class_names(model):
     from vllm.model_executor.layers.attention import Attention
@@ -54,7 +50,6 @@ def _prefill_graph_segments(worker):
 
 
 @pytest.mark.core_model
-@requires_cuda_dash
 @pytest.mark.parametrize("crop_mode", [False, True])
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.parametrize("graph_mode", ["eager", "decode", "prefill"])
@@ -208,7 +203,6 @@ def test_unlimited_ocr2_batched_pages(
 
 
 @pytest.mark.core_model
-@requires_cuda_dash
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
     vllm_runner, monkeypatch, backend
@@ -261,7 +255,6 @@ def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
 
 
 @pytest.mark.core_model
-@requires_cuda_dash
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_unlimited_ocr2_excess_markers_survive_preemption(
     vllm_runner, monkeypatch, backend
