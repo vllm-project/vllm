@@ -6,7 +6,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Counter
-from vllm.v1.watermarking import GumbelWatermarkDetector
+from vllm.v1.watermarking import DualKeyGumbelWatermarkDetector, GumbelWatermarkDetector
 
 
 @pytest.mark.parametrize("enforce", [False, True])
@@ -65,3 +65,54 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner, enforce):
     assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
 
     assert result_no_wm.is_watermarked == enforce, result_no_wm
+
+
+@pytest.mark.parametrize(
+    "algorithm, detector_cls",
+    [
+        ("gumbel", GumbelWatermarkDetector),
+        ("dual_key_gumbel", DualKeyGumbelWatermarkDetector),
+    ],
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_greedy_draft_generated_sequence_is_watermarked(
+    vllm_runner, monkeypatch, algorithm, detector_cls
+):
+    """Greedy drafts accepted by the watermarked sample keep the watermark."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    watermark_config = {"key": 42, "context_width": 4}
+    detector = detector_cls(**watermark_config)
+
+    runner = vllm_runner(
+        "Qwen/Qwen3-4B-FP8",
+        watermark_config={**watermark_config, "algorithm": algorithm},
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_qwen3_4b_block7",
+            "num_speculative_tokens": 7,
+            "draft_sample_method": "greedy",
+        },
+        seed=0,
+        enforce_eager=True,
+        max_model_len=1024,
+        gpu_memory_utilization=0.4,
+        disable_log_stats=False,
+    )
+    request = "Tell me a story about an explorer who discovers a mysterious island."
+    params = SamplingParams(temperature=1.0, max_tokens=256, watermarking=True, seed=0)
+
+    with runner:
+        output = runner.llm.generate(request, params)
+        metrics = runner.llm.get_metrics()
+
+    num_accepted = sum(
+        m.value
+        for m in metrics
+        if isinstance(m, Counter) and m.name == "vllm:spec_decode_num_accepted_tokens"
+    )
+    assert num_accepted > 0
+
+    result = detector.detect(list(output[0].outputs[0].token_ids))
+    assert result.is_watermarked, result

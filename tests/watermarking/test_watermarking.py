@@ -1253,9 +1253,7 @@ def test_set_watermarked_sample_as_argmax_keeps_dual_key_routing():
         use_fp64=False,
     )
     skip_mask = torch.zeros(num_rows, dtype=torch.bool, device=device)
-    expected = watermarker.sample(
-        logits, contexts, random_sampler, skip_mask
-    ).token_ids
+    expected = watermarker.sample(logits, contexts, random_sampler, skip_mask).token_ids
     key_a = watermarker.draft_watermarker.sample(
         logits, contexts, random_sampler, skip_mask
     ).token_ids
