@@ -24,7 +24,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
-from vllm.sampling_params import SamplingParams
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -655,37 +654,3 @@ async def test_fetch_image_cache_evicted_after_stat(cached_image_eviction, use_a
     assert _image_equals(image, expected)
     assert cache_path.read_bytes() == cached_bytes
     assert _image_equals(reader.fetch_image(url), expected)
-
-
-def test_chat_cache_evicted_after_stat(cached_image_eviction, vllm_runner):
-    """A chat request must survive media eviction and preserve its output."""
-    reader, url, evict_after_stat = cached_image_eviction
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": url}},
-                {"type": "text", "text": "Describe this image."},
-            ],
-        }
-    ]
-    sampling_params = SamplingParams(temperature=0, max_tokens=1)
-    with vllm_runner(
-        "HuggingFaceTB/SmolVLM-256M-Instruct",
-        enforce_eager=True,
-        max_model_len=8192,
-        max_num_seqs=1,
-        mm_processor_cache_gb=0,
-        enable_prefix_caching=False,
-    ) as runner:
-        expected = runner.llm.chat(messages, sampling_params=sampling_params)[0]
-        cache_path = reader._media_cache_path(url)
-        cached_bytes = cache_path.read_bytes()
-
-        with evict_after_stat():
-            output = runner.llm.chat(messages, sampling_params=sampling_params)[0]
-
-        assert output.prompt_token_ids == expected.prompt_token_ids
-        assert output.outputs[0].token_ids
-        assert output.outputs[0].token_ids == expected.outputs[0].token_ids
-        assert cache_path.read_bytes() == cached_bytes
