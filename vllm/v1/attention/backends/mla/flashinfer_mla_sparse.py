@@ -23,6 +23,12 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import (
+    has_flashinfer_prims_ts_sparse_mla,
+    has_flashinfer_sparse_mla_sm120,
+    prims_ts_sparse_mla_format_error,
+    prims_ts_sparse_mla_schedules_native_heads,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -126,8 +132,6 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        from vllm.config import get_current_vllm_config
-
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         if (
@@ -142,8 +146,6 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         if kv_cache_dtype == "fp8_ds_mla":
             return f"{cls.get_name()} SM10 does not support fp8_ds_mla kv-cache dtype"
         if kv_cache_dtype == "nvfp4_ds_mla":
-            from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
             if vllm_config.kernel_config.flashinfer_sparse_mla_kernel == "trtllm":
                 return (
                     f"{cls.get_name()} reads nvfp4_ds_mla only with the prims_ts "
@@ -227,9 +229,6 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        from vllm.config import get_current_vllm_config
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
-
         if not has_flashinfer_sparse_mla_sm120():
             return (
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
@@ -543,11 +542,6 @@ def _prims_ts_row_buckets(vllm_config: VllmConfig) -> tuple[int, ...]:
 def _prims_ts_unsupported_reason(
     vllm_config: VllmConfig, kv_cache_dtype: str
 ) -> str | None:
-    from vllm.utils.flashinfer import (
-        has_flashinfer_prims_ts_sparse_mla,
-        prims_ts_sparse_mla_format_error,
-    )
-
     if kv_cache_dtype not in _PRIMS_TS_FORMATS:
         return f"kv-cache dtype {kv_cache_dtype!r} (needs fp8 or nvfp4_ds_mla)"
     text_config = vllm_config.model_config.hf_text_config
@@ -905,8 +899,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 self.bmm2_scale *= layer._k_scale_float
 
     def _prims_ts_query_heads(self, num_heads: int) -> int:
-        from vllm.utils.flashinfer import prims_ts_sparse_mla_schedules_native_heads
-
         if 64 < num_heads < _PRIMS_TS_2CTA_HEADS and (
             not prims_ts_sparse_mla_schedules_native_heads()
         ):

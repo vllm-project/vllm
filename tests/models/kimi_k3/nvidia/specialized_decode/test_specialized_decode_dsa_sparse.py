@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -194,8 +195,6 @@ def test_sparse_matches_emulation(counts):
 
 @pytest.mark.parametrize("counts", [[256, 255, 1, 31, 200], [300, 2048, 257, 513, 7]])
 def test_sparse_error_within_flashinfer(counts):
-    from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
     if not has_flashinfer_prims_ts_sparse_mla():
         pytest.skip("FlashInfer has no prims_ts sparse MLA")
     query, kv, rows, valid = _inputs(counts, seed=1)

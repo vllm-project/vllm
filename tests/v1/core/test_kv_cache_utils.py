@@ -41,6 +41,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_groups,
@@ -185,8 +186,6 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
 def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     """Workers report HiSparse's resident/hot caches, which lay out their own raw
     backing; KV cache layout resolution must skip them."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -1372,8 +1371,6 @@ def test_dcp_target_allocates_replicated_draft_independently(
     monkeypatch, sliding_window, disable_hybrid, pcp_size
 ):
     """A draft must retain all positions even when the target shards them."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4
@@ -1435,8 +1432,6 @@ def test_dcp_target_allocates_replicated_draft_independently(
 def test_dcp_hybrid_target_pads_replicated_draft_pages(monkeypatch):
     """A hybrid target keeps a layer-compact layout next to a replicated draft:
     the draft's pages are padded to the target's instead of packing blocks."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4
@@ -1465,8 +1460,6 @@ def test_dcp_hybrid_target_pads_replicated_draft_pages(monkeypatch):
 
 def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     """A replicated kpool tail ring is per-request state, not a draft group."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4

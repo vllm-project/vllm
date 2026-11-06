@@ -12,6 +12,9 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    trtllm_gen_query_heads,
+)
 
 from ..cutedsl.dsa.attn_ds import TOPK
 from ..cutedsl.dsa.index import DIM, HEADS
@@ -390,10 +393,6 @@ def dcp_box(runtime, heads, dsa=False, flashinfer=False, partials="default"):
         interleave = parallel.cp_kv_cache_interleave_size
         q_heads = None
         if dsa and flashinfer:
-            from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-                trtllm_gen_query_heads,
-            )
-
             q_heads = trtllm_gen_query_heads(group.world_size * heads)
         elif dsa:
             q_heads = 64 if group.world_size * heads <= 64 else 128

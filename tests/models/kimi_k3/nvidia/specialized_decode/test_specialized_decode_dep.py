@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import _prims_ts_row_buckets
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -321,9 +322,6 @@ def dep_layer_step(core, batch, q, contexts):
     )
     from vllm.models.kimi_k3.nvidia.specialized_decode.runtime.dep import (
         DepAttention,
-    )
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        _prims_ts_row_buckets,
     )
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerMetadataBuilder,
