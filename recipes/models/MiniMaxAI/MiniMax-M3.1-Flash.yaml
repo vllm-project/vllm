@@ -1528,11 +1528,6 @@ presets:
       GSM8K exact match (strict) over 1319 questions was 0.961 at concurrency 8, 0.963 at
       32 and 0.960 at 64.
 
-      - **The first concurrency 16 attempt was an outlier.** It ran on one node at 177.4 /
-        138.9 interactivity and 26,846 total tokens/s per GPU (ITL p50 5.64 ms), slower
-        than concurrency 32 on the same recipe, with GPU power 9% below the previous
-        revision. The rerun on another node gave the figures above (ITL p50 3.19 ms).
-        The cause was not isolated; treat concurrency 16 as a single good run.
       - **Concurrency 64 uses a host KV tier.** It passed on its first attempt here; the
         previous revision's first attempt hung at its first load from the host tier (23
         fetches in progress, none completing) and passed on a rerun, so treat the
