@@ -16,7 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
-import copy
+import inspect
 import os
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -87,7 +87,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import get_submodel_config_name
+from vllm.transformers_utils.config import get_thinker_config
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -119,8 +119,6 @@ class Base(
 ):
     hf_to_vllm_mapper: WeightsMapper
 
-    requires_raw_input_tokens: bool = False
-
     # TODO transformers will have a util to get these
     embedding_modules = {"embed_tokens": "input_embeddings"}
 
@@ -130,12 +128,10 @@ class Base(
 
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
-        submodel = get_submodel_config_name(self.config)
-        if submodel is not None:
-            composite = self.config
-            self.config = copy.copy(getattr(self.config, submodel))
-            if not self.config.architectures:
-                self.config.architectures = composite.architectures
+        if (thinker_config := get_thinker_config(self.config)) is not None:
+            if not thinker_config.architectures:
+                thinker_config.architectures = self.config.architectures
+            self.config = thinker_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -188,10 +184,6 @@ class Base(
             init_on_device_without_buffers("meta"),
         ):
             self.model: PreTrainedModel = self._create_model()
-
-        if getattr(self.model.get_decoder(), "hidden_size_per_layer_input", 0):
-            self.check_version("5.21.0", "per-layer input models")
-            self.requires_raw_input_tokens = True
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
@@ -309,14 +301,19 @@ class Base(
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
         supports torch compile if `can_enable_torch_compile` is True."""
+        # Applied to a PreTrainedModel so the batch dimension will exist
+        dynamic_arg_dims = DynamicArgDims(
+            input_ids=1,  # shape: [1, seq_len]
+            inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+            position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+        )
+        decoder_cls = self._pre_trained_model_classes.decoder
+        if "per_layer_inputs" in inspect.signature(decoder_cls.forward).parameters:
+            # shape: [1, seq_len, num_hidden_layers, hidden_size_per_layer_input]
+            dynamic_arg_dims["per_layer_inputs"] = 1
         self._decorate_cls_for_torch_compile(
-            cls=self._pre_trained_model_classes.decoder,
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=DynamicArgDims(
-                input_ids=1,  # shape: [1, seq_len]
-                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
-                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
-            ),
+            cls=decoder_cls,
+            dynamic_arg_dims=dynamic_arg_dims,
             enable_if=can_enable_torch_compile,
             is_encoder=False,
         )
@@ -808,18 +805,8 @@ class Base(
             positions = positions[None, ...]
 
         # Transformers models expect either input_ids or inputs_embeds, but not both
-        raw_input_ids = input_ids
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
-
-        if (
-            self.requires_raw_input_tokens
-            and inputs_embeds is not None
-            and raw_input_ids is not None
-        ):
-            kwargs["per_layer_inputs"] = self.model.get_decoder().get_per_layer_inputs(
-                raw_input_ids
-            )
 
         outputs = self.model(
             input_ids=input_ids,
@@ -853,18 +840,19 @@ class Base(
         *unexpected* key deserves a warning, so a pattern says nothing about a
         weight the model does have.
         """
-        keys = self.model._keys_to_ignore_on_load_unexpected or ()
-        patterns = [re.compile(key) for key in keys]
-        if not patterns:
+        keys = self.model._keys_to_ignore_on_load_unexpected
+        if not keys:
             yield from weights
             return
+        pattern = re.compile("|".join(keys))
         expected = {name for name, _ in self.named_parameters()}
         expected |= {name for name, _ in self.named_buffers()}
         for name, weight in weights:
-            if any(pattern.search(name) for pattern in patterns):
-                mapped = self.hf_to_vllm_mapper.map_name(name)
-                if mapped is None or mapped not in expected:
-                    continue
+            if (
+                pattern.search(name)
+                and self.hf_to_vllm_mapper.map_name(name) not in expected
+            ):
+                continue
             yield name, weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -881,8 +869,7 @@ class Base(
     def check_version(min_version: str, feature: str):
         installed = Version(transformers.__version__)
         required = Version(min_version)
-        # Base version, so a preview build passes (as tests/models/registry.py does)
-        if Version(installed.base_version) < required:
+        if installed < required:
             raise ImportError(
                 f"Transformers modeling backend requires transformers>={required} "
                 f"for {feature}, but got {installed}"

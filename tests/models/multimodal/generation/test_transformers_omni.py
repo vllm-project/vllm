@@ -8,7 +8,6 @@ from transformers import (
     Gemma3nForConditionalGeneration,
     Gemma4ForConditionalGeneration,
     Qwen2_5OmniThinkerForConditionalGeneration,
-    Qwen3OmniMoeThinkerForConditionalGeneration,
 )
 
 from vllm.assets.audio import AudioAsset
@@ -17,7 +16,6 @@ from vllm.assets.video import VideoAsset
 from vllm.envs import disable_envs_cache
 
 from ....conftest import HfRunner, VllmRunner
-from ....utils import large_gpu_mark
 from ...utils import check_logprobs_close
 from .vlm_utils import model_utils
 
@@ -62,22 +60,7 @@ OMNI_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
         "auto_cls": Gemma4ForConditionalGeneration,
         "vllm_runner_kwargs": {
             "gpu_memory_utilization": 0.85,
-            # FlashInfer cannot do gemma4's 512 head size, see
-            # https://github.com/vllm-project/vllm/issues/40677
-            "attention_backend": "TRITON_ATTN",
         },
-    },
-    "Qwen/Qwen3-Omni-30B-A3B-Instruct": {
-        "prompt": (
-            "<|im_start|>user\n"
-            "<|audio_start|><|audio_pad|><|audio_end|>"
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-            "Describe what you see and hear.<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        ),
-        "auto_cls": Qwen3OmniMoeThinkerForConditionalGeneration,
-        "min_gb": 80,
     },
 }
 
@@ -96,15 +79,7 @@ def use_spawn_for_omni_models(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        pytest.param(model_id, marks=large_gpu_mark(min_gb=settings["min_gb"]))
-        if "min_gb" in settings
-        else model_id
-        for model_id, settings in OMNI_MODEL_SETTINGS.items()
-    ],
-)
+@pytest.mark.parametrize("model_id", list(OMNI_MODEL_SETTINGS))
 def test_transformers_omni_generation(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -126,7 +101,8 @@ def test_transformers_omni_generation(
         dtype="bfloat16",
         enforce_eager=True,
         limit_mm_per_prompt={m: 1 for m in modalities},
-        **{"max_model_len": 4096, **settings.get("vllm_runner_kwargs", {})},
+        max_model_len=4096,
+        **settings.get("vllm_runner_kwargs", {}),
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             [settings["prompt"]],

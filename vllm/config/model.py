@@ -36,7 +36,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config,
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
-    get_submodel_config_name,
+    get_thinker_config,
     is_encoder_decoder,
     iter_rope_parameters,
     mrope_num_dims,
@@ -1153,11 +1153,8 @@ class ModelConfig:
         task = None
         # architectures is empty for with_hf_config() submodel views.
         architectures = self.architectures
-        submodel = get_submodel_config_name(self.hf_config)
-        if submodel is not None:
-            architectures = (
-                getattr(self.hf_config, submodel).architectures or architectures
-            )
+        if (thinker_config := get_thinker_config(self.hf_config)) is not None:
+            architectures = thinker_config.architectures or architectures
         if architectures and (
             defaults := try_match_architecture_defaults(architectures[0])
         ):

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
+from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
 
 from vllm import envs
 from vllm.config import (
@@ -31,7 +32,7 @@ from vllm.config import (
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.tasks import ScoreType
-from vllm.transformers_utils.config import get_submodel_config_name
+from vllm.transformers_utils.config import get_thinker_config
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 from vllm.utils.hashing import safe_hash
 
@@ -1358,14 +1359,9 @@ class _ModelRegistry:
                         warn_on_fail=False,
                     )
 
-        hf_config = model_config.hf_config
-        submodel = get_submodel_config_name(hf_config)
-        if submodel is None:
-            model_module = getattr(transformers, architecture, None)
-        else:
-            model_module = transformers.AutoModel._model_mapping.get(
-                type(getattr(hf_config, submodel)), None
-            )
+        if (thinker_config := get_thinker_config(model_config.hf_config)) is not None:
+            architecture = MODEL_MAPPING_NAMES[thinker_config.model_type]
+        model_module = getattr(transformers, architecture, None)
 
         if model_module is None:
             for name, module in auto_map.items():

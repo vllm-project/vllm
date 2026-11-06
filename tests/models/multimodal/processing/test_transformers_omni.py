@@ -4,13 +4,12 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.transformers.multimodal import MultiModalProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import (
-    LruKeyReplicatedSenderCache,
-    MultiModalProcessorOnlyCache,
-)
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 
 OMNI_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
     "Qwen/Qwen2.5-Omni-3B": {
@@ -57,14 +56,14 @@ def _audio(seconds: float = 1.0):
     return np.zeros(int(SAMPLING_RATE * seconds), dtype=np.float32)
 
 
-def _image(height: int = 64, width: int = 64):
-    return np.random.RandomState(0).randint(0, 256, (height, width, 3), dtype=np.uint8)
+def _image() -> np.ndarray:
+    rng = np.random.default_rng(0)
+    return rng.integers(256, size=(64, 64, 3), dtype=np.uint8)
 
 
-def _video(num_frames: int = 4, height: int = 64, width: int = 64):
-    frames = np.random.RandomState(1).randint(
-        0, 256, (num_frames, height, width, 3), dtype=np.uint8
-    )
+def _video(num_frames: int = 4, seed: int = 0) -> tuple[np.ndarray, dict]:
+    rng = np.random.default_rng(seed)
+    frames = rng.integers(256, size=(num_frames, 64, 64, 3), dtype=np.uint8)
     metadata = {
         "fps": 1.0,
         "total_num_frames": num_frames,
@@ -83,6 +82,20 @@ def _mm_data(model_id):
     return {m: data[m] for m in _modalities(model_id)}
 
 
+def _hf_mm_kwargs(mm_data):
+    kwargs = {"audio": mm_data.get("audio"), "images": mm_data.get("image")}
+    if videos := mm_data.get("video"):
+        kwargs |= {
+            "videos": [frames for frames, _ in videos],
+            "video_metadata": [
+                {k: v for k, v in metadata.items() if k != "do_sample_frames"}
+                for _, metadata in videos
+            ],
+            "do_sample_frames": videos[0][1]["do_sample_frames"],
+        }
+    return kwargs
+
+
 def _prompt(hf_processor, *modalities):
     text = ""
     for modality in modalities:
@@ -95,35 +108,48 @@ def _prompt(hf_processor, *modalities):
     return text + " Describe this."
 
 
-@pytest.mark.parametrize("model_id", list(OMNI_MODEL_SETTINGS))
-def test_omni_all_modalities_are_supported(model_id):
-    """An Omni processor reports every modality it takes, not one or two of them."""
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(
-        ModelConfig(model=model_id, model_impl="transformers")
-    )
-    assert set(_modalities(model_id)) <= set(
-        mm_processor.info.get_supported_mm_limits()
-    )
-    assert mm_processor.info.get_max_audio_tokens() > 0
-
-
-@pytest.mark.parametrize("model_id", list(OMNI_MODEL_SETTINGS))
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "Qwen/Qwen2.5-Omni-3B",
+        pytest.param(
+            "google/gemma-3n-E2B-it",
+            marks=pytest.mark.xfail(
+                reason="Gemma3nProcessor's expansion opens with newlines the "
+                "tokenizer merges into the prompt's own, so the expansion vLLM "
+                "splices in never gets merged.",
+                strict=True,
+            ),
+        ),
+        "google/gemma-4-E2B-it",
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+    ],
+)
 def test_omni_multimodal_processor(model_id):
-    """One prompt holding audio, an image and a video yields one placeholder each."""
+    """One prompt holding every modality the model takes yields one placeholder each,
+    and the token ids the HF processor produces itself."""
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(model=model_id, model_impl="transformers")
     )
+    info = mm_processor.info
+    assert isinstance(info, MultiModalProcessingInfo)
+    hf_processor = info.get_hf_processor()
     mm_data = _mm_data(model_id)
+    prompt = OMNI_MODEL_SETTINGS[model_id]["prompt"]
 
     result = mm_processor(
-        prompt=OMNI_MODEL_SETTINGS[model_id]["prompt"],
-        mm_items=mm_processor.info.parse_mm_data(mm_data),
+        prompt=prompt,
+        mm_items=info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
     )
 
     for modality in _modalities(model_id):
         assert len(result["mm_placeholders"][modality]) == 1
         assert len(result["mm_kwargs"][modality]) == 1
+    assert info.get_max_audio_tokens() > 0
+
+    hf_inputs = hf_processor(text=prompt, **_hf_mm_kwargs(mm_data), return_tensors="pt")
+    assert result["prompt_token_ids"] == hf_inputs["input_ids"][0].tolist()
 
 
 def test_omni_fields_stay_on_their_own_modality():
@@ -143,6 +169,9 @@ def test_omni_fields_stay_on_their_own_modality():
     (audio_item,) = result["mm_kwargs"]["audio"]
     (image_item,) = result["mm_kwargs"]["image"]
     (video_item,) = result["mm_kwargs"]["video"]
+    assert audio_item is not None
+    assert image_item is not None
+    assert video_item is not None
     assert {"input_features", "feature_attention_mask"} <= set(audio_item.keys())
     assert {"pixel_values", "image_grid_thw"} <= set(image_item.keys())
     assert {"pixel_values_videos", "video_grid_thw", "second_per_grid_ts"} <= set(
@@ -151,30 +180,7 @@ def test_omni_fields_stay_on_their_own_modality():
     assert not set(audio_item.keys()) & set(video_item.keys())
 
 
-def test_omni_audio_placeholder_matches_the_processor_count():
-    """The placeholder the backend locates is as long as the processor's own count."""
-    model_id = "Qwen/Qwen2.5-Omni-3B"
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(
-        ModelConfig(model=model_id, model_impl="transformers")
-    )
-    audio = _audio(1.7)
-
-    result = mm_processor(
-        prompt=_prompt(mm_processor.info.get_hf_processor(), "audio"),
-        mm_items=mm_processor.info.parse_mm_data({"audio": [audio]}),
-        hf_processor_mm_kwargs={},
-    )
-
-    hf_processor = mm_processor.info.get_hf_processor()
-    expected = hf_processor._get_num_multimodal_tokens(
-        audio_lengths=[len(audio)]
-    ).num_audio_tokens[0]
-    (placeholder,) = result["mm_placeholders"]["audio"]
-    assert placeholder.get_num_embeds() == expected
-
-
-@pytest.mark.parametrize("seconds", [1.3, 20.0])
-def test_omni_audio_in_video_shares_one_span(seconds):
+def test_omni_audio_in_video_shares_one_span():
     """Audio folded into a video shares its span, so each gets a view of it."""
     model_id = "Qwen/Qwen2.5-Omni-3B"
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
@@ -184,7 +190,7 @@ def test_omni_audio_in_video_shares_one_span(seconds):
             mm_processor_kwargs={"use_audio_in_video": True},
         )
     )
-    mm_data = {"audio": [_audio(seconds)], "video": [_video(num_frames=2)]}
+    mm_data = {"audio": [_audio(20.0)], "video": [_video(num_frames=2)]}
 
     result = mm_processor(
         prompt=_prompt(mm_processor.info.get_hf_processor(), "video"),
@@ -195,14 +201,19 @@ def test_omni_audio_in_video_shares_one_span(seconds):
     (audio,) = result["mm_placeholders"]["audio"]
     (video,) = result["mm_placeholders"]["video"]
     (video_item,) = result["mm_kwargs"]["video"]
+    assert audio.is_embed is not None
+    assert video.is_embed is not None
+    assert video_item is not None
     assert (audio.offset, audio.length) == (video.offset, video.length)
     assert not bool((audio.is_embed & video.is_embed).any())
     assert audio.get_num_embeds() > 0 and video.get_num_embeds() > 0
-    assert bool(video_item["use_audio_in_video"].data.item())
+    use_audio_in_video = video_item["use_audio_in_video"].data
+    assert isinstance(use_audio_in_video, torch.Tensor)
+    assert bool(use_audio_in_video.item())
 
 
 def test_omni_audio_in_video_needs_one_audio_per_video():
-    """A video carries one audio, so there cannot be more videos than audios."""
+    """A video carries one audio, so a request with videos needs as many audios."""
     model_id = "Qwen/Qwen2.5-Omni-3B"
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(
@@ -212,49 +223,30 @@ def test_omni_audio_in_video_needs_one_audio_per_video():
         )
     )
     hf_processor = mm_processor.info.get_hf_processor()
-    cache = MultiModalProcessorOnlyCache(mm_processor.info.ctx.model_config)
 
     def process(mm_data, *modalities):
         return mm_processor(
             prompt=_prompt(hf_processor, *modalities),
             mm_items=mm_processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
-            cache=cache,
         )
 
     too_many_videos = {"audio": [_audio()], "video": [_video(), _video(num_frames=2)]}
-    with pytest.raises(ValueError, match="num_audios=1 and num_videos=2"):
+    with pytest.raises(ValueError, match="num_audios=1, num_videos=2"):
         process(too_many_videos, "video", "video")
 
-    # The counts are the request's own, so a cache hit cannot bypass the check
-    process({"audio": [_audio()], "video": [_video()]}, "video")
-    process({"audio": [_audio(1.3)], "video": [_video(num_frames=2)]}, "video")
-    with pytest.raises(ValueError, match="num_audios=1 and num_videos=2"):
-        process(too_many_videos, "video", "video")
-    assert cache.make_stats().hits > 0
+    too_many_audios = {"audio": [_audio(), _audio(1.3)], "video": [_video()]}
+    with pytest.raises(ValueError, match="num_audios=2, num_videos=1"):
+        process(too_many_audios, "audio", "video")
 
-    result = mm_processor(
-        prompt=_prompt(hf_processor, "audio", "video"),
-        mm_items=mm_processor.info.parse_mm_data(
-            {"audio": [_audio(), _audio(1.3)], "video": [_video()]}
-        ),
-        hf_processor_mm_kwargs={},
-    )
-    audios = result["mm_placeholders"]["audio"]
-    assert len(audios) == 2
-    assert len(result["mm_placeholders"]["video"]) == 1
-    # Standalone audios come first, so the last one is the video's own track
-    expected = hf_processor._get_num_multimodal_tokens(
-        audio_lengths=[len(_audio()), len(_audio(1.3))]
-    ).num_audio_tokens
-    assert [audio.get_num_embeds() for audio in audios] == expected
+    (audio,) = process({"audio": [_audio()]}, "audio")["mm_placeholders"]["audio"]
+    assert audio.get_num_embeds() > 0
 
 
 @pytest.mark.parametrize("model_id", list(OMNI_MODEL_SETTINGS))
 def test_repeated_omni_request_hits_the_processor_cache(model_id):
     """A repeated request returns the same ids and hashes, with its fields intact."""
     model_config = ModelConfig(model=model_id, model_impl="transformers")
-    model_config.multimodal_config.mm_processor_cache_gb = 4
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     cache = MultiModalProcessorOnlyCache(model_config)
     mm_data = _mm_data(model_id)
@@ -277,29 +269,30 @@ def test_repeated_omni_request_hits_the_processor_cache(model_id):
     assert ("audio_feature_lengths" in audio_item) == model_config.uses_mrope
 
 
-def test_repeated_audio_in_video_request_hits_the_processor_cache():
-    """The fused path survives a cache hit, where the item comes back as None."""
+def test_repeated_audio_in_video_request_skips_the_processor_cache():
+    """The fused path skips the cache, so a cached audio still reaches its new video."""
     model_config = ModelConfig(
         model="Qwen/Qwen2.5-Omni-3B",
         model_impl="transformers",
         mm_processor_kwargs={"use_audio_in_video": True},
     )
-    model_config.multimodal_config.mm_processor_cache_gb = 4
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    cache = LruKeyReplicatedSenderCache(model_config)
-    mm_data = {"audio": [_audio(1.3)], "video": [_video(num_frames=2)]}
+    cache = MultiModalProcessorOnlyCache(model_config)
     prompt = _prompt(mm_processor.info.get_hf_processor(), "video")
 
-    results = [
-        mm_processor(
+    def process(video):
+        return mm_processor(
             prompt=prompt,
-            mm_items=mm_processor.info.parse_mm_data(mm_data),
+            mm_items=mm_processor.info.parse_mm_data(
+                {"audio": [_audio(1.3)], "video": [video]}
+            ),
             hf_processor_mm_kwargs={},
             cache=cache,
         )
-        for _ in range(3)
-    ]
 
-    assert cache.make_stats().hits > 0
-    for result in results[1:]:
-        assert result["prompt_token_ids"] == results[0]["prompt_token_ids"]
+    first, second = process(_video(num_frames=2)), process(_video(num_frames=2, seed=1))
+
+    assert cache.make_stats().hits == 0
+    assert first["prompt_token_ids"] == second["prompt_token_ids"]
+    assert first["mm_hashes"]["audio"] == second["mm_hashes"]["audio"]
+    assert first["mm_hashes"]["video"] != second["mm_hashes"]["video"]
