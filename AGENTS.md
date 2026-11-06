@@ -161,3 +161,4 @@ vulnerability process.
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
 - **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
   — Crate ownership, design principles, Python parity, and testing conventions.
+- **C++/CUDA kernels (`csrc/`)**: [`csrc/AGENTS.md`](csrc/AGENTS.md)
