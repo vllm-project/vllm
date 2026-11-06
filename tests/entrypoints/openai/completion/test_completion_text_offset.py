@@ -97,3 +97,19 @@ async def test_stream_text_offset_matches_non_stream_with_stop_holdback():
     assert response.choices[0].logprobs is not None
     assert response.choices[0].logprobs.text_offset == [0, 3, 6]
     assert stream_offsets == [0, 3, 6]
+
+
+def test_non_stream_response_omits_null_prompt_tokens_details():
+    """The OpenAI spec types ``usage.prompt_tokens_details`` as an object, not
+    nullable, so it is omitted when ``--enable-prompt-tokens-details`` is off."""
+    response = _serving().request_output_to_completion_response(
+        [_output("abc", [0], finished=True)],
+        _request(stream=False),
+        "r",
+        0,
+        "m",
+        None,
+        RequestResponseMetadata(request_id="r"),
+    )
+
+    assert "prompt_tokens_details" not in response.model_dump()["usage"]
