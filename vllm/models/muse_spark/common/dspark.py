@@ -490,7 +490,6 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             # Built on the first call (the memory-profiling run), from the
             # speculator's sampling state.
             self._markov_sampler = self._build_markov_sampler(speculator)
-            self._refuse_direct_reload()
         draft_logits = _draft_logits_values(speculator)
         assert draft_logits is not None
         self._markov_sampler.sample(
@@ -594,15 +593,12 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             self.model.specialized_draft = build_draft_decode(
                 self.model, self.model._compilation_mode
             )
-            self._refuse_direct_reload()
-
-    def _refuse_direct_reload(self) -> None:
-        # refuse at begin, before process_weights_after_loading raises at finish
-        self.supports_direct_reload = False
-        self.direct_reload_unsupported_reason = (
-            "the specialized decode does not support reloading the DSpark "
-            "draft's weights"
-        )
+            # refuse at begin, before this method raises at finish
+            self.supports_direct_reload = False
+            self.direct_reload_unsupported_reason = (
+                "the specialized decode does not support reloading the DSpark "
+                "draft's weights"
+            )
 
 
 EntryClass = MuseSparkDSparkForCausalLM

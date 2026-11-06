@@ -683,18 +683,17 @@ class Worker(WorkerBase):
         )
 
         model = self.model_runner.get_model()
+        engine = WeightTransferEngineFactory.create_engine(
+            config, self.vllm_config, self.device, model
+        )
         # sparse_nccl skips the direct-reload lifecycle (its engine warns)
         if direct_reload_enabled() and config.backend != "sparse_nccl":
             # refuse at startup, before a trainer connects and waits on us
-            for m in (model, self.get_draft_model()):
+            draft = self.get_draft_model()
+            for m in (model, draft if engine.supports_draft_weight_update else None):
                 if m is not None:
                     check_direct_reload_support(m, self.vllm_config)
-        self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-            config,
-            self.vllm_config,
-            self.device,
-            model,
-        )
+        self.weight_transfer_engine = engine
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the

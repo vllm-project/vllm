@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.utils import weights_already_processed
 
@@ -73,7 +74,8 @@ def reload_weights(
 
     if weights_iterator is None:
         model_loader = get_model_loader(load_config)
-        if not hasattr(model_loader, "get_all_weights"):
+        # before start_reload changes the model: the base method only raises
+        if type(model_loader).get_all_weights is BaseModelLoader.get_all_weights:
             raise NotImplementedError(
                 f"Model reloading with `{load_config.load_format}` format"
             )

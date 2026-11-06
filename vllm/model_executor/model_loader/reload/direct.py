@@ -263,9 +263,10 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     _check_params_kept(model)
     views = _checkpoint_views(model)
     if not model.__dict__.get("_direct_reload_supported"):
-        # cache a pass only: a refusal may clear (mono decode turned off)
         check_direct_reload_support(model)
-        model._direct_reload_supported = True
+        # cache a pass only (a refusal may clear: mono decode turned off), and
+        # only one that checked the config
+        model._direct_reload_supported = get_current_vllm_config_or_none() is not None
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin

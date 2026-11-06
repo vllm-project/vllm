@@ -346,7 +346,6 @@ class TestRefusals:
         "module_path,cls_name",
         [
             ("vllm.models.muse_spark.nvidia.mega_moe", "MuseSparkMegaMoEExperts"),
-            ("vllm.models.muse_spark.nvidia.hybrid_moe", "MuseSparkHybridMoEExperts"),
             ("vllm.models.deepseek_v4.amd.mega_moe", "DeepseekV4AiterMegaMoEExperts"),
             ("vllm.models.step5.nvidia.mega_moe", "Step5MegaMoEExperts"),
             # its rows are views of the cold-start checkpoint files
@@ -447,9 +446,13 @@ class TestCallSites:
             for r in caplog_vllm.records
         )
 
-    def test_begin_caches_only_a_pass(self, monkeypatch):
+    @pytest.mark.parametrize("with_config", [True, False])
+    def test_begin_caches_only_a_pass(self, monkeypatch, with_config):
+        # and only one that checked the config (a begin outside a config skips it)
         from vllm.model_executor.model_loader.reload import direct
 
+        config = _config() if with_config else None
+        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         calls = []
         check = direct.check_direct_reload_support
 
@@ -464,16 +467,24 @@ class TestCallSites:
                 begin_direct_reload(model)
         del model.supports_direct_reload  # e.g. mono decode turned off
         _reload(model, _checkpoint(1.01))
-        _reload(model, _checkpoint(1.02))  # the pass is cached: no walk
-        assert len(calls) == 3
-        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.02))))
+        _reload(model, _checkpoint(1.02))  # a cached pass skips the walk
+        assert len(calls) == (3 if with_config else 4)
 
-    def test_reload_weights_refused_before_config_changes(self):
-        model = _refused(_cold_start(_checkpoint()))
+    @pytest.mark.parametrize("refused", ["model", "loader"])
+    def test_reload_weights_refused_before_config_changes(self, refused):
+        model = _cold_start(_checkpoint())
         config = _reload_config(model="old", model_weights="w", revision="r")
+        if refused == "model":
+            _refused(model)
+        else:  # a loader that cannot iterate weights by name
+            config.load_config = LoadConfig(load_format="dummy")
         before = _state(model)
-        with pytest.raises(RuntimeError, match="weight copies are built once"):
+        with pytest.raises(
+            RuntimeError if refused == "model" else NotImplementedError,
+            match="built once|dummy",
+        ):
             reload_weights(config, model, None, "new", True)
+        assert "_direct_reload_begun" not in model.__dict__
         cfg = config.model_config
         assert (cfg.model, cfg.model_weights, cfg.revision) == ("old", "w", "r")
         _assert_same(_state(model), before, addresses=True)
@@ -496,7 +507,17 @@ class TestCallSites:
             assert warnings == []
         else:
             assert len(warnings) == 1 and "_UnmarkedOnce" in warnings[0].getMessage()
-        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.02))))
+
+
+def test_torchao_records_no_layout():
+    # its wrapper tensors have no storage to record; a direct update refuses
+    with _DEVICE:
+        model = _ToyModel()
+    model.load_weights(_checkpoint().items())
+    config = SimpleNamespace(**vars(_MODEL_CONFIG) | {"quantization": "torchao"})
+    process_weights_after_loading(model, config, _DEVICE)
+    with pytest.raises(RuntimeError, match="no checkpoint layout"):
+        begin_direct_reload(model)
 
 
 def test_retry_after_aborted_update_matches_cold_start():

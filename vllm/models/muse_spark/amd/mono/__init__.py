@@ -132,6 +132,9 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         buckets=buckets,
         fused_attention=fused,
     )
+    # refresh_weights rebuilds the norm copies captured graphs read
+    model.supports_direct_reload = False
+    model.direct_reload_unsupported_reason = "the --monokernel caches weight copies"
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "
         "up to %d rows run as FlyDSL launches (builds S=%s; MoE activations "
