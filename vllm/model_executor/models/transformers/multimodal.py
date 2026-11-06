@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 import transformers
+from torch.nn.utils.rnn import pad_sequence
 
 import vllm.envs as envs
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
@@ -197,13 +198,25 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         # huggingface/transformers#44394 lands.
         if hasattr(sub, "truncation"):
             return sub.max_length if sub.truncation else None
-        return getattr_iter(sub, ("n_samples", "nb_max_samples"))
+        max_length = getattr_iter(sub, ("n_samples", "nb_max_samples"))
+        return max_length if max_length and self._is_audio_capped else None
+
+    @cached_property
+    def _is_audio_capped(self) -> bool:
+        """Whether long audios stop adding tokens, as `n_samples` can be a window
+        that the processor splits them into (e.g. MOSS-Transcribe-Diarize)."""
+        num_samples = int(1800 * self._get_audio_sampling_rate())
+        tokens = self._count_audio_tokens(num_samples)
+        return tokens == self._count_audio_tokens(2 * num_samples)
 
     @cached_property
     def _audio_samples_per_token(self) -> float:
         """Samples behind each audio token, measured on a 60 s audio."""
-        processor = self.get_hf_processor()
         num_samples = int(60 * self._get_audio_sampling_rate())
+        return num_samples / self._count_audio_tokens(num_samples)
+
+    def _count_audio_tokens(self, num_samples: int) -> int:
+        processor = self.get_hf_processor()
         outputs = self.ctx.call_hf_processor(
             processor,
             dict(
@@ -216,7 +229,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         replacement = outputs["text_replacement_offsets"][0][0]["replacement"]
         tokenizer = self.get_tokenizer()
         seq = cached_encode(tokenizer, replacement, add_special_tokens=False)
-        return num_samples / int(_count_embed_tokens([seq])[0])
+        return len(seq)
 
     @cached_property
     def _has_transcription_request(self) -> bool:
@@ -572,6 +585,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
         hf_inputs.pop("attention_mask", None)
+        num_audio_windows = hf_inputs.pop("num_audio_windows", None)
 
         # Absent if the modality had no items
         sizes = {
@@ -596,6 +610,13 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             for modality in modalities
             for key in owned[modality]
         }
+
+        if num_audio_windows is not None:
+            for key in owned["audio"]:
+                if len(hf_inputs[key]) == num_audio_windows.sum():
+                    mm_fields[key] = MultiModalFieldConfig.flat_from_sizes(
+                        "audio", num_audio_windows
+                    )
 
         for modality in modalities:
             # One row per item, and only ever read on the CPU
@@ -682,7 +703,15 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         audios = mm_data.get("audio")
         if not isinstance(audios, Iterable) or not audios:
             return
-        if len({len(audio) for audio in audios}) == 1:
+        audios = list(audios)
+        tensors = {
+            key: value
+            for key in self._get_modality_field_names("audio")
+            if isinstance(value := hf_inputs.get(key), torch.Tensor)
+        }
+        # Processors can split long audios into windows, with a row for each one
+        is_windowed = any(len(value) != len(audios) for value in tensors.values())
+        if len({len(audio) for audio in audios}) == 1 and not is_windowed:
             return
 
         alone = [
@@ -696,9 +725,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             for audio in audios
         ]
 
-        for key in self._get_modality_field_names("audio"):
-            if isinstance(hf_inputs.get(key), torch.Tensor):
+        for key, value in tensors.items():
+            if len(value) == len(audios):
                 hf_inputs[key] = [output[key][0] for output in alone]
+            else:
+                windows = [len(output[key]) for output in alone]
+                hf_inputs["num_audio_windows"] = torch.tensor(windows)
 
     def _unpad_images(self, hf_inputs: "BatchFeature") -> None:
         """Trim each image back to its own size when the processor padded them all
@@ -1133,6 +1165,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             # HuggingFace's `get_audio_features` implementations branch on
             # per-sample feature lengths internally.
             with gpu_sync_allowed():
+                # Padded again as windows, unlike audios, are all the same length
+                kwargs = {
+                    key: pad_sequence(value, batch_first=True)
+                    if isinstance(value, list)
+                    else value
+                    for key, value in kwargs.items()
+                }
                 audio_output = self.model.get_audio_features(
                     input_features, return_dict=True, **kwargs
                 )

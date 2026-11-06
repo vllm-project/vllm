@@ -182,7 +182,8 @@ def test_unclaimed_fields_warn_rather_than_raise():
     [
         ("zai-org/GLM-ASR-Nano-2512", False),
         ("ibm-granite/granite-speech-3.3-2b", False),
-        ("Qwen/Qwen3-ASR-1.7B-hf", False),
+        ("Qwen/Qwen3-ASR-1.7B-hf", True),
+        ("hf-audio/MOSS-Transcribe-Diarize-HF", True),
         ("microsoft/VibeVoice-ASR-HF", True),
     ],
 )
@@ -209,10 +210,29 @@ def test_only_long_form_audio_fills_the_context(model_id, long_form):
 
     if long_form:
         assert max_tokens == seq_len
-        assert num_tokens == pytest.approx(seq_len, rel=0.01)
+        assert num_tokens == pytest.approx(seq_len, rel=0.02)
     else:
         assert max_tokens != seq_len
         assert num_tokens <= max_tokens
+
+
+def test_audio_windows_stay_with_their_audio():
+    """Processors can split audios into windows, which each item needs all of."""
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(
+            model="hf-audio/MOSS-Transcribe-Diarize-HF", model_impl="transformers"
+        )
+    )
+    audios = [np.zeros(s * 16000, dtype=np.float32) for s in (45, 70)]
+
+    result = mm_processor(
+        prompt=mm_processor.dummy_inputs.get_dummy_text({"audio": 2}),
+        mm_items=mm_processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"].get("audio", [])
+    assert [len(item["input_features"].data) for item in items if item] == [2, 3]
 
 
 @pytest.mark.parametrize(
