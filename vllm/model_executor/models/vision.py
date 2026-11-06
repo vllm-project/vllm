@@ -402,7 +402,10 @@ def run_dp_sharded_mrope_vision_model(
     This function is used to run the vision model with mrope.
 
     Args:
-        vision_model (torch.nn.Module): Vision model.
+        vision_model (torch.nn.Module): Vision model. ``dtype``, if defined,
+            must be the dtype of its returned embeddings; it is required when
+            that differs from the first parameter's dtype. It types the output
+            of ranks without images.
         pixel_values (torch.Tensor): Image/Video input tensor.
         grid_thw_list: List of grid dimensions for each image
         rope_type: Type of rope used in the vision model.
@@ -482,7 +485,10 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = next(vision_model.parameters()).dtype
+    # Output dtype of a rank without images; see `vision_model` in the docstring.
+    embed_dtype = (
+        getattr(vision_model, "dtype", None) or next(vision_model.parameters()).dtype
+    )
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
@@ -509,6 +515,15 @@ def run_dp_sharded_mrope_vision_model(
                 device=pixel_values.device,
                 dtype=embed_dtype,
             )
+
+    # An empty rank sends embed_dtype; mixed dtypes would hang the all-gather.
+    if tp_size > 1 and image_embeds_local.dtype != embed_dtype:
+        raise ValueError(
+            f"{type(vision_model).__name__} returned {image_embeds_local.dtype} "
+            f"embeddings, but a rank without images would send {embed_dtype}. "
+            "Define `dtype` on the vision model (an attribute or property) as "
+            "the dtype of its returned embeddings."
+        )
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
