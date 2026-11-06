@@ -361,17 +361,7 @@ class TopKTopPSampler(nn.Module):
         (#59786). Falls back to native sampling when fp64 Gumbel noise
         is requested.
         """
-        if k is not None or p is not None:
-            if HAS_TRITON:
-                logits = apply_top_k_top_p_triton(logits, k, p)
-            elif current_platform.get_cpu_architecture() in (
-                CpuArchEnum.ARM,
-                CpuArchEnum.POWERPC,
-                CpuArchEnum.S390X,
-            ):
-                logits = apply_top_k_top_p_cpu(logits, k, p)
-            else:
-                logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
