@@ -14,12 +14,12 @@ Weights are drawn in the checkpoint's formats before post-load processing
 vLLM's own post-load path builds every copy the kernels read. The engine runs
 teacher-forced decode (trace replay) with full-vocabulary logprobs, with the
 MonoKernel eager, under FULL graphs and with an e4m3 KV cache, against vLLM's
-layers in the same mode; eager also compares every decoder layer's outputs for
-each decode token, as the DeepSeek-V4.1 mono test does. Prompts mix short
-contexts with ones past the indexer's 2048 tokens, so the sparse layer
+layers in the same mode; eager also compares every decoder layer's outputs on
+every rank for each decode token, as the DeepSeek-V4/V4.1 mono tests do
+(``test_mono_decode_matches_the_model``), with their weight ranges. Prompts mix
+short contexts with ones past the indexer's 2048 tokens, so the sparse layer
 selects."""
 
-import io
 import json
 import zlib
 
@@ -44,20 +44,24 @@ KERNEL_LAYERS = (3, 4)
 VOCAB = 4096
 STEPS = 8
 SEED = 0
-# per-layer bounds on the relative error over all decode tokens, kernels against
-# vLLM's layers (eager). Two runs of vLLM's layers already differ by up to
-# (TP2/TP4): hidden 0.019, 0.052, 0.081, 0.29, 0.29, 0.055 and residual 0.001,
-# 0.019, 0.038, 0.055, 0.055 for layers 0-5; with equal inputs to layer 3 the
-# kernels' residual is within 0.001 of vLLM's, their MoE output within 0.22
-# (MXFP8 against MXFP4 inputs). Layer 5 has no residual.
-LAYER_BOUNDS = {
-    0: {"hidden": 0.05, "residual": 0.01},
-    1: {"hidden": 0.1, "residual": 0.04},
-    2: {"hidden": 0.15, "residual": 0.08},
-    3: {"hidden": 0.45, "residual": 0.1},
-    4: {"hidden": 0.45, "residual": 0.1},
-    5: {"hidden": 0.1},
-}
+# Per decode token, kernels against vLLM's layers (eager), for the tokens whose
+# input to layer 3 is the same in both runs: layers 0-2 run vLLM's code on both
+# sides and gave identical outputs. The others are all of one request's tokens
+# in one run: its prefill ran otherwise there (requests reach the engine core
+# while it runs), which moves its KDA state and so every later token a little.
+# - residual stream after layers 3 and 4: 0.0044 seen at TP2, TP4 and TP8;
+RESIDUAL_BOUND = 0.01
+# - layer 5's output, vLLM's MoE on the kernels' streams: 0.0065 seen;
+LAST_BOUND = 0.02
+# - the MoE output of layers 3 and 4: vLLM quantizes expert inputs to MXFP4, the
+#   kernels to MXFP8, which puts vLLM 0.21 and the kernels 0.047 from an fp32
+#   MoE (test_ffn_matches_glm5next_moe), so the two differ by 0.22-0.28 a token;
+MOE_BOUND = 0.3
+# - past MOE_BOUND only a token whose 8th and 9th routing scores on vLLM's path
+#   are within TIE: the residual streams' 0.1-0.4% difference moves scores by
+#   about 1e-3, so it may pick another expert (seen: 0.33-0.43 at gaps up to
+#   1.1e-3, at most 5 of 89 tokens), and later layers are exempt for it.
+TIE = 2e-3
 ENV = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
     "VLLM_USE_V2_MODEL_RUNNER": "1",
@@ -75,7 +79,7 @@ TPS = [pytest.param(tp, marks=pytest.mark.distributed(num_gpus=tp)) for tp in TP
 
 
 @torch.no_grad()
-def _fill(name: str, t: torch.Tensor, fan_in: int) -> None:
+def _fill(name: str, t: torch.Tensor) -> None:
     """A random value for every weight in the checkpoint's format, seeded by its
     name (alike in every run, so both engines load the same model)."""
     if t.device.type == "meta" or not t.numel():
@@ -86,8 +90,15 @@ def _fill(name: str, t: torch.Tensor, fan_in: int) -> None:
         return torch.randn(t.shape, generator=g, device=t.device) * scale + shift
 
     if t.dtype == torch.uint8 and "scale" in name:
-        # E8M0 2^-9 .. 2^-7: unit gate / up pre-activations
-        t.copy_(torch.randint(118, 121, t.shape, generator=g, device=t.device))
+        # E8M0 2^-12 .. 2^-8, alike over each 32 rows, as the DeepSeek-V4.1 mono
+        # test: larger random layers make the stack chaotic, and the order of
+        # atomics alone then moves vLLM's own outputs run to run
+        rows = t.shape[-2] if t.dim() > 1 else 1
+        shape = (*t.shape[:-2], -(-rows // 32), t.shape[-1]) if t.dim() > 1 else t.shape
+        e8m0 = torch.randint(115, 120, shape, generator=g, device=t.device)
+        if t.dim() > 1:
+            e8m0 = e8m0.repeat_interleave(32, dim=-2)[..., :rows, :]
+        t.copy_(e8m0)
     elif t.dtype in (torch.uint8, torch.float4_e2m1fn_x2):
         u8 = t.view(torch.uint8)
         u8.copy_(torch.randint(0, 256, u8.shape, generator=g, device=t.device))
@@ -96,8 +107,8 @@ def _fill(name: str, t: torch.Tensor, fan_in: int) -> None:
     elif not torch.is_floating_point(t):
         return
     elif name.endswith("weight_scale_inv"):
-        # FP8 block-128 scales of unit-normal FP8 values
-        t.fill_(fan_in**-0.5)
+        # FP8 block-128 scales of unit-normal FP8 values: weights of std 0.02
+        t.fill_(0.02)
     elif "norm" in name:
         t.copy_(randn(0.1, 1.0))
     elif name.endswith("A_log"):
@@ -110,10 +121,8 @@ def _fill(name: str, t: torch.Tensor, fan_in: int) -> None:
         t.copy_(randn(0.1))
     elif "embed_tokens" in name:
         t.copy_(randn())
-    elif t.dim() == 1:
-        t.copy_(randn(0.02))
     else:
-        t.copy_(randn(fan_in**-0.5))
+        t.copy_(randn(0.02))
 
 
 @register_model_loader(LOAD_FORMAT)
@@ -125,7 +134,7 @@ class RandomWeightLoader(DummyModelLoader):
     def load_weights(self, model, model_config) -> None:
         super().load_weights(model, model_config)
         for name, t in model.state_dict().items():
-            _fill(name, t, t.shape[-1] if t.dim() > 1 else 1)
+            _fill(name, t)
 
 
 class Probe:
@@ -137,19 +146,27 @@ class Probe:
 
         return failstop.counters["mono_steps"]
 
-    def start_capture(self) -> None:
+    def start_capture(self, lens: list[int]) -> None:
         """Keep every decoder layer's outputs (hidden states, residual) for each
-        decode token of a decode-only step, keyed by (layer, position): vLLM's
-        layers through forward hooks, the kernel layers by wrapping the launch
-        ``plan()`` returns. Eager only (hooks do not run in graph replay)."""
+        decode token of a decode-only step, keyed by (layer, prompt length,
+        position), as the DeepSeek-V4.1 mono test does: a token's step and row
+        can differ between engines, its prompt and position cannot (``lens``:
+        the batch's prompt lengths, more than STEPS apart). vLLM's layers are
+        read through forward hooks, the kernel layers by wrapping the launch
+        ``plan()`` returns; vLLM's MoE also keeps each token's margin between
+        its last chosen and first unchosen routing score. Eager only (hooks do
+        not run in graph replay)."""
         from vllm.forward_context import get_forward_context
         from vllm.models.glm5next.common.model import (
             Glm5NextDecoderLayer,
             Glm5NextModel,
+            Glm5NextMoE,
         )
 
         self._captured: dict = {}
+        self._gaps: dict = {}
         self._kernel_layers: set = set()
+        self._lens = sorted(lens)
         if getattr(self, "_hooked", False):
             return
         self._hooked = True
@@ -160,24 +177,50 @@ class Probe:
                 getattr(m, "num_prefills", 0) == 0 for m in md.values()
             )
 
+        def keys(idx, positions):
+            for row, p in enumerate(positions.tolist()):
+                yield row, (idx, max(n for n in self._lens if n <= p), p)
+
         def record(idx, positions, out, kernel=False):
             if not decode_only():
                 return
             if kernel:
                 self._kernel_layers.add(idx)
             # the last layer applies its own hc_post: no residual
-            for row, p in enumerate(positions.tolist()):
+            for row, key in keys(idx, positions):
                 self._captured.setdefault(
-                    (idx, p),
-                    [None if t is None else t[row].float().cpu() for t in out[:2]],
+                    key, [None if t is None else t[row].float().cpu() for t in out[:2]]
                 )
+
+        positions: list = [None]  # the running decoder layer's
+
+        def margin(idx, moe, h):
+            if not decode_only():
+                return
+            gate = moe.gate
+            scores = torch.sigmoid(h.float() @ gate.weight.float().T)
+            if gate.e_score_correction_bias is not None:
+                scores = scores + gate.e_score_correction_bias.float()
+            top = scores.topk(top_k + 1, dim=-1).values
+            gap = (top[:, top_k - 1] - top[:, top_k]).tolist()
+            for row, key in keys(idx, positions[0]):
+                self._gaps.setdefault(key, gap[row])
 
         model = self.model_runner.model  # type: ignore[attr-defined]
         backbone = next(m for m in model.modules() if isinstance(m, Glm5NextModel))
+        top_k = backbone.config.num_experts_per_tok
         for idx, layer in enumerate(backbone.layers):
-            if isinstance(layer, Glm5NextDecoderLayer):
-                layer.register_forward_hook(
-                    lambda m, args, out, idx=idx: record(idx, args[0], out)
+            if not isinstance(layer, Glm5NextDecoderLayer):
+                continue
+            layer.register_forward_pre_hook(
+                lambda m, args: positions.__setitem__(0, args[0])
+            )
+            layer.register_forward_hook(
+                lambda m, args, out, idx=idx: record(idx, args[0], out)
+            )
+            if isinstance(layer.mlp, Glm5NextMoE):
+                layer.mlp.register_forward_pre_hook(
+                    lambda m, args, idx=idx: margin(idx, m, args[0])
                 )
         decode = backbone.specialized_decode
         if decode is None:
@@ -206,11 +249,9 @@ class Probe:
 
         decode.plan = capturing_plan
 
-    def take_capture(self) -> bytes:
-        # one torch.save blob: the RPC encoder sends nested tensors as stubs
-        buf = io.BytesIO()
-        torch.save((self._captured, sorted(self._kernel_layers)), buf)
-        return buf.getvalue()
+    def save_capture(self, path: str) -> None:
+        captured = (self._captured, self._gaps, sorted(self._kernel_layers))
+        torch.save(captured, f"{path}.rank{self.rank}")  # type: ignore[attr-defined]
 
 
 @pytest.fixture(scope="module")
@@ -256,14 +297,15 @@ def _requests(tp: int):
     return requests
 
 
-def _decode(llm, tp: int, capture: bool = False):
+def _decode(llm, tp: int, capture: str | None = None):
     """Full-vocabulary logprobs of every decode step (the first output token
     comes from prefill, which runs stock), every token forced; with ``capture``
-    also each batch's decoder-layer outputs and the layers the kernels ran."""
+    each rank also saves each batch's decoder-layer outputs, routing margins and
+    the layers the kernels ran to ``{capture}.b{batch}.rank{rank}``."""
     from vllm import SamplingParams
 
-    rows, layers = [], []
-    for prompts, traces in _requests(tp):
+    rows = []
+    for b, (prompts, traces) in enumerate(_requests(tp)):
         params = [
             SamplingParams(
                 max_tokens=STEPS,
@@ -276,16 +318,16 @@ def _decode(llm, tp: int, capture: bool = False):
             for trace in traces
         ]
         if capture:
-            llm.collective_rpc("start_capture")
+            lens = [len(p["prompt_token_ids"]) for p in prompts]
+            llm.collective_rpc("start_capture", args=(lens,))
         outputs = llm.generate(prompts, params, use_tqdm=False)
         if capture:
-            blob = llm.collective_rpc("take_capture")[0]
-            layers.append(torch.load(io.BytesIO(blob)))
+            llm.collective_rpc("save_capture", args=(f"{capture}.b{b}",))
         for out, trace in zip(outputs, traces):
             assert list(out.outputs[0].token_ids) == trace
             for step in out.outputs[0].logprobs[1:]:
                 rows.append([step[v].logprob for v in range(VOCAB)])
-    return torch.tensor(rows), layers
+    return torch.tensor(rows)
 
 
 def _logit_errors(got, want):
@@ -304,14 +346,12 @@ def _logit_errors(got, want):
 
 def _assert_close(got, want):
     """The kernels quantize expert inputs to MXFP8 where vLLM's MoE uses MXFP4,
-    so the logits are close but not equal. Seen on these weights over four runs
-    on three nodes, against vLLM in the same mode: eager cos 0.9981-0.9993,
-    top-1 89-98%; FULL graphs (bf16 or e4m3 KV) cos 0.9984-0.9990, top-1 88-95%;
-    the worst row at most 12% in every mode.
-    vLLM's own FULL graphs differ from its eager path by more (cos 0.9977,
-    top-1 83%). A kernel layer that breaks moves every row."""
+    so the logits are close but not equal. Seen on these weights, against vLLM
+    in the same mode at TP2, TP4 and TP8: eager cos 0.9997, top-1 95-98%; FULL
+    graphs (bf16 or e4m3 KV) cos 0.9995-1.0000, top-1 96-98%; the worst row at
+    most 9.4%. A kernel layer that breaks moves every row."""
     cos, rows, top1 = _logit_errors(got, want)
-    assert cos > 0.997 and top1 > 0.8 and rows.max() < 0.2
+    assert cos > 0.999 and top1 > 0.9 and rows.max() < 0.2
 
 
 def _engine(vllm_runner, model_dir, tp, mono, graphs=False, kv="auto"):
@@ -347,19 +387,19 @@ def _env():
 _NATIVE: dict = {}
 
 
-def _native(vllm_runner, model_dir, tp, graphs, kv="auto"):
+def _native(vllm_runner, model_dir, tp, graphs, kv="auto", capture=None):
     """The reference: vLLM's layers in the same mode, decoded once a module."""
     key = (tp, graphs, kv)
     if key not in _NATIVE:
         with _engine(vllm_runner, model_dir, tp, mono=False, graphs=graphs, kv=kv) as r:
-            _NATIVE[key] = _decode(r.llm, tp, capture=not graphs)
+            _NATIVE[key] = _decode(r.llm, tp, capture)
             assert r.llm.collective_rpc("mono_steps") == [0] * tp
     return _NATIVE[key]
 
 
-def _mono(vllm_runner, model_dir, tp, graphs, kv="auto"):
+def _mono(vllm_runner, model_dir, tp, graphs, kv="auto", capture=None):
     with _engine(vllm_runner, model_dir, tp, mono=True, graphs=graphs, kv=kv) as r:
-        out = _decode(r.llm, tp, capture=not graphs)
+        logprobs = _decode(r.llm, tp, capture)
         steps = r.llm.collective_rpc("mono_steps")
     print(f"MonoKernel steps per rank: {steps}")
     # eager plans every decode step in Python (all of a batch's but the first,
@@ -367,52 +407,76 @@ def _mono(vllm_runner, model_dir, tp, graphs, kv="auto"):
     # at capture and replay the captured launches
     least = 1 if graphs else len(_batches(tp)) * (STEPS - 2)
     assert len(set(steps)) == 1 and steps[0] >= least, steps
-    return out
+    return logprobs
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).norm() / b.norm()).item()
 
 
-def _assert_layers_close(got, want):
-    """Each decoder layer's outputs (hidden states, residual) for every decode
-    token both engines ran in a decode-only step, kernels against vLLM's
-    layers. Layers 0-2 run vLLM's layers on both sides; 3 and 4 are the kernel
-    launches; 5 takes their output. The error is over all tokens at once: one
-    row alone moves by as much between two runs of vLLM's layers."""
-    rows: dict = {}
-    for (g, kernel_layers), (w, _) in zip(got, want, strict=True):
-        assert kernel_layers == list(KERNEL_LAYERS), kernel_layers
-        keys = g.keys() & w.keys()
-        assert {layer for layer, _ in keys} == set(range(LAYERS)), sorted(keys)
-        for key in keys:
-            for name, a, b in zip(("hidden", "residual"), g[key], w[key]):
-                assert (a is None) == (b is None), (key, name)
-                if a is not None:
-                    rows.setdefault((key[0], name), []).append((a, b))
-    errors = {
-        key: _rel(torch.stack([a for a, _ in ab]), torch.stack([b for _, b in ab]))
-        for key, ab in sorted(rows.items())
-    }
-    print("relative error per layer:", errors)
-    assert set(errors) == {(i, n) for i, b in LAYER_BOUNDS.items() for n in b}
-    for (layer, name), err in errors.items():
-        assert err < LAYER_BOUNDS[layer][name], (layer, name, err)
+def _assert_layers_close(got: str, want: str, tp: int) -> None:
+    """Every decoder layer's outputs on every rank, token by token, kernels
+    (``got``) against vLLM's layers (``want``), for the decode tokens whose
+    input to layer 3 is the same in both runs (see RESIDUAL_BOUND)."""
+    batches = _batches(tp)
+    for rank in range(tp):
+        same, flipped, seen = 0, [], {"residual": 0.0, "moe": 0.0, "last": 0.0}
+        for b in range(len(batches)):
+            g, _, kernel_layers = torch.load(f"{got}.b{b}.rank{rank}")
+            w, gaps, _ = torch.load(f"{want}.b{b}.rank{rank}")
+            assert kernel_layers == list(KERNEL_LAYERS), (rank, kernel_layers)
+            tokens = sorted({k[1:] for k in g} & {k[1:] for k in w})
+            for k in tokens:
+                assert all((i, *k) in g and (i, *k) in w for i in range(LAYERS)), k
+                if not all(
+                    torch.equal(x, y)
+                    for i in range(KERNEL_LAYERS[0])
+                    for x, y in zip(g[(i, *k)], w[(i, *k)])
+                ):
+                    continue
+                same += 1
+                for i in KERNEL_LAYERS:
+                    (x, res), (x_ref, res_ref) = g[(i, *k)], w[(i, *k)]
+                    err = _rel(res, res_ref)
+                    seen["residual"] = max(seen["residual"], err)
+                    assert err < RESIDUAL_BOUND, (rank, i, k, "residual", err)
+                    err = _rel(x, x_ref)
+                    if err >= MOE_BOUND:
+                        assert gaps[(i, *k)] < TIE, (rank, i, k, "moe", err, gaps)
+                        flipped.append((i, *k, round(err, 3), gaps[(i, *k)]))
+                        break  # its residual stream differs from here on
+                    seen["moe"] = max(seen["moe"], err)
+                else:
+                    err = _rel(g[(LAYERS - 1, *k)][0], w[(LAYERS - 1, *k)][0])
+                    seen["last"] = max(seen["last"], err)
+                    assert err < LAST_BOUND, (rank, k, "last layer", err)
+        print(
+            f"rank {rank}: {same} tokens with equal inputs, worst {seen}, "
+            f"near-tie flips {flipped}"
+        )
+        # at least one equal-input token a request, and few flips
+        assert same >= sum(batches), (rank, same)
+        assert len(flipped) <= same // 4, (rank, flipped)
 
 
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
 @pytest.mark.parametrize("tp", TPS)
-def test_model_matches_native(vllm_runner, model_dir, tp, graphs):
+def test_model_matches_native(vllm_runner, model_dir, tmp_path_factory, tp, graphs):
     """Teacher-forced decode with --monokernel against vLLM's layers: the
     decode steps take the kernels on every rank and the logits agree; eager
-    also compares every decoder layer's outputs, token by token."""
+    also compares every decoder layer's outputs on every rank, token by token,
+    as the DeepSeek-V4/V4.1 mono tests do (test_mono_decode_matches_the_model)."""
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
-    want, want_layers = _native(vllm_runner, model_dir, tp, graphs)
-    got, got_layers = _mono(vllm_runner, model_dir, tp, graphs)
-    _assert_close(got, want)
+    want = got = None
     if not graphs:
-        _assert_layers_close(got_layers, want_layers)
+        base = tmp_path_factory.getbasetemp()
+        want, got = f"{base}/native_tp{tp}", f"{base}/mono_tp{tp}"
+    want_logprobs = _native(vllm_runner, model_dir, tp, graphs, capture=want)
+    got_logprobs = _mono(vllm_runner, model_dir, tp, graphs, capture=got)
+    _assert_close(got_logprobs, want_logprobs)
+    if not graphs:
+        _assert_layers_close(got, want, tp)
 
 
 @pytest.mark.distributed(num_gpus=4)
@@ -423,6 +487,6 @@ def test_e4m3_kv_cache_matches_native(vllm_runner, model_dir, monkeypatch):
         pytest.skip("needs 4 GPUs")
     # vLLM's own fp8 sparse-MLA decode needs the Gluon path on ROCm
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "1")
-    want, _ = _native(vllm_runner, model_dir, 4, True, kv="fp8")
-    got, _ = _mono(vllm_runner, model_dir, 4, True, kv="fp8")
+    want = _native(vllm_runner, model_dir, 4, True, kv="fp8")
+    got = _mono(vllm_runner, model_dir, 4, True, kv="fp8")
     _assert_close(got, want)
