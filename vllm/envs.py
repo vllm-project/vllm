@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -774,7 +775,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
-    # Python package must be installed.
+    # Python package (>= 0.3.5) must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
@@ -960,8 +961,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
-    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
-    # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
+    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and on
+    # Zen CPUs zentorch DA8W4 kernels for int4, and DA8W8 for grouped int8 MoE.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
     # Using a flag to control microbatch on XPU device, users on XPU device can
     # decide to disable it when they needed.
@@ -1492,6 +1493,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # Enable parallel decode top-16 selection for the MiniMax-M3.1 NVFP4
+    # indexer on ROCm gfx950 (MI355X). Set to 1 to enable; disabled by default.
+    # Uses runtime shape metadata for mixed batches. FP8 indexers (including
+    # mono decode) bypass this path. Requires an image containing this kernel;
+    # select the recipe's parallel_topk feature or set this variable explicitly.
+    "VLLM_ROCM_PARALLEL_INDEX_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0") == "1"
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(

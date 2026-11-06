@@ -247,6 +247,8 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        # Appended per block below: much cheaper than packing the group id each time.
+        group_suffix = make_block_hash_with_group_id(BlockHash(b""), kv_cache_group_id)
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -257,9 +259,7 @@ class BlockPool:
             num_hash_tokens = (num_cached_blocks + i + 1) * block_size
 
             # Update and added the full block to the cache.
-            block_hash_with_group_id = make_block_hash_with_group_id(
-                block_hash, kv_cache_group_id
-            )
+            block_hash_with_group_id = BlockHashWithGroupId(block_hash + group_suffix)
             if blk.block_hash is not None:
                 # The only valid case where a "new full block" already has a
                 # hash is partial->full promotion of the same cache block.
@@ -606,12 +606,12 @@ class BlockPool:
         self,
         block: KVCacheBlock,
     ) -> list[BlockHashWithGroupId]:
-        block_hashes: list[BlockHashWithGroupId] = []
-        if block.block_hash is not None:
-            block_hashes.append(block.block_hash)
-        block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
-        if not block_hashes:
+        # A block only has secondary hashes alongside a primary one.
+        if block.block_hash is None:
             return []
+
+        block_hashes = [block.block_hash]
+        block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
 
         removed_hashes: list[BlockHashWithGroupId] = []
         for block_hash in block_hashes:
@@ -644,16 +644,16 @@ class BlockPool:
         block: KVCacheBlock,
         num_tokens: int | None,
     ) -> None:
-        if block.block_hash == block_hash_with_group_id:
-            return
-
-        if self.cached_block_hash_to_block.contain(
-            block_hash_with_group_id, block.block_id
+        if block.block_hash is None:
+            # A block without a hash has no entries in the cache yet.
+            block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
+        elif (
+            block.block_hash == block_hash_with_group_id
+            or self.cached_block_hash_to_block.contain(
+                block_hash_with_group_id, block.block_id
+            )
         ):
             return
-
-        if block.block_hash is None:
-            block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
         else:
             self.cached_block_hashes_by_block.setdefault(block.block_id, set()).add(
                 block_hash_with_group_id
@@ -700,16 +700,23 @@ class BlockPool:
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
-            for block in ret:
-                self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
+            if self.metrics_collector:
+                for block in ret:
+                    self._maybe_evict_cached_block(block)
+                    assert block.ref_cnt == 0
+                    block.ref_cnt = 1
                     self.metrics_collector.on_block_allocated(block)
+            else:
+                for block in ret:
+                    # Most blocks were never cached, so skip the call when possible.
+                    if block.block_hash is not None:
+                        self._maybe_evict_cached_block(block)
+                    assert block.ref_cnt == 0
+                    block.ref_cnt = 1
         else:
             for block in ret:
                 assert block.ref_cnt == 0
-                block.ref_cnt += 1
+                block.ref_cnt = 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
