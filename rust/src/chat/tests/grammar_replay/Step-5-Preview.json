@@ -1,0 +1,423 @@
+{
+  "model_id": "stepfun-ai/Step-5-Preview",
+  "vocab_size": 128896,
+  "all_stop_token_ids": [1, 2, 128007],
+  "grammars": [
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>\n<function="
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=get_weather>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=add>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                }
+              ],
+              "at_least_one": false,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "auto": {
+          "completion": "Need call the weather and add tools.</think>I will call the tools.<tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call><tool_call>\n<function=add>\n<parameter=y>\n1.0\n</parameter>\n<parameter=x>\n2\n</parameter>\n<parameter=items>\n[\"left\", \"right\"]\n</parameter>\n</function>\n</tool_call>",
+          "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128799, 43, 759, 1926, 270, 6704, 16, 128008, 201, 30, 8701, 110538, 65, 50219, 1018, 30, 41523, 31, 33182, 1018, 119606, 28011, 201, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128008, 201, 30, 8701, 31, 3327, 1018, 30, 41523, 60763, 1018, 19, 16, 18, 201, 1718, 41523, 1018, 30, 41523, 33577, 1018, 20, 201, 1718, 41523, 1018, 30, 41523, 31, 17173, 1018, 10931, 4589, 1760, 582, 2459, 35043, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128007]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>\n<function="
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=get_weather>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n<function=add>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "\n</function>\n</tool_call>"
+                }
+              ],
+              "at_least_one": true,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "required": {
+          "completion": "Need call the weather and add tools.</think><tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call><tool_call>\n<function=add>\n<parameter=y>\n1.0\n</parameter>\n<parameter=x>\n2\n</parameter>\n<parameter=items>\n[\"left\", \"right\"]\n</parameter>\n</function>\n</tool_call>",
+          "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128799, 128008, 201, 30, 8701, 110538, 65, 50219, 1018, 30, 41523, 31, 33182, 1018, 119606, 28011, 201, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128008, 201, 30, 8701, 31, 3327, 1018, 30, 41523, 60763, 1018, 19, 16, 18, 201, 1718, 41523, 1018, 30, 41523, 33577, 1018, 20, 201, 1718, 41523, 1018, 30, 41523, 31, 17173, 1018, 10931, 4589, 1760, 582, 2459, 35043, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128007]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "tag",
+              "begin": "<tool_call>\n<function=get_weather>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "\n</function>\n</tool_call>"
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "named": {
+          "completion": "Need call the weather and add tools.</think><tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call>",
+          "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128799, 128008, 201, 30, 8701, 110538, 65, 50219, 1018, 30, 41523, 31, 33182, 1018, 119606, 28011, 201, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128007]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "json_schema",
+              "json_schema": {
+                "type": "object",
+                "properties": {
+                  "answer": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "answer"
+                ]
+              },
+              "style": "json",
+              "any_order": false,
+              "max_whitespace_cnt": null,
+              "excludes": []
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "none_schema": {
+          "completion": "Need call the weather and add tools.</think>{\"answer\":\"sunny\"}",
+          "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128799, 24313, 19995, 16562, 69958, 2928, 62773, 128007]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "or",
+              "elements": [
+                {
+                  "type": "triggered_tags",
+                  "triggers": [
+                    "<tool_call>\n<function="
+                  ],
+                  "tags": [
+                    {
+                      "type": "tag",
+                      "begin": "<tool_call>\n<function=get_weather>\n",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                          "type": "object",
+                          "properties": {
+                            "location": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "location"
+                          ]
+                        },
+                        "style": "qwen_xml",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "\n</function>\n</tool_call>"
+                    },
+                    {
+                      "type": "tag",
+                      "begin": "<tool_call>\n<function=add>\n",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                          "type": "object",
+                          "properties": {
+                            "y": {
+                              "type": "number"
+                            },
+                            "x": {
+                              "type": "number"
+                            },
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "y",
+                            "x",
+                            "items"
+                          ]
+                        },
+                        "style": "qwen_xml",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "\n</function>\n</tool_call>"
+                    }
+                  ],
+                  "at_least_one": true,
+                  "stop_after_first": false,
+                  "excludes": [
+                    "<think>",
+                    "</think>"
+                  ]
+                },
+                {
+                  "type": "json_schema",
+                  "json_schema": {
+                    "type": "object",
+                    "properties": {
+                      "answer": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "answer"
+                    ]
+                  },
+                  "style": "json",
+                  "any_order": false,
+                  "max_whitespace_cnt": null,
+                  "excludes": []
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "auto_schema_content": {
+          "completion": "Need call the weather and add tools.</think>{\"answer\":\"sunny\"}",
+          "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128799, 24313, 19995, 16562, 69958, 2928, 62773, 128007]
+        },
+        "auto_schema_calls": {
+          "completion": "Need call the weather and add tools.</think><tool_call>\n<function=get_weather>\n<parameter=location>\nShanghai\n</parameter>\n</function>\n</tool_call><tool_call>\n<function=add>\n<parameter=y>\n1.0\n</parameter>\n<parameter=x>\n2\n</parameter>\n<parameter=items>\n[\"left\", \"right\"]\n</parameter>\n</function>\n</tool_call>",
+          "generation_token_ids": [50249, 1926, 270, 9670, 305, 1258, 6704, 16, 128799, 128008, 201, 30, 8701, 110538, 65, 50219, 1018, 30, 41523, 31, 33182, 1018, 119606, 28011, 201, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128008, 201, 30, 8701, 31, 3327, 1018, 30, 41523, 60763, 1018, 19, 16, 18, 201, 1718, 41523, 1018, 30, 41523, 33577, 1018, 20, 201, 1718, 41523, 1018, 30, 41523, 31, 17173, 1018, 10931, 4589, 1760, 582, 2459, 35043, 1718, 41523, 1018, 1718, 8701, 1018, 128009, 128007]
+        }
+      }
+    }
+  ]
+}

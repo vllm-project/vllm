@@ -6,6 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -325,3 +326,267 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.parametrize(
+    "B,H_Q,H_KV,D_QK,D_V,is_mla",
+    [
+        (256, 32, 1, 576, 512, True),  # grouped kernel
+        (1024, 32, 32, 128, 128, False),  # normal kernel
+    ],
+)
+def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
+    """attn_logits offsets must not overflow int32 when B * H_Q * num_kv_splits
+    * (D_V + 1) exceeds 2**31 (long max_model_len, large decode batch)."""
+    PAGE_SIZE = 16
+    seq_len = 33
+    num_kv_splits = 512
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    assert B * H_Q * num_kv_splits * (D_V + 1) > 2**31
+
+    num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
+    req_to_page = torch.arange(
+        B * num_pages_per_batch, device=DEVICE_TYPE, dtype=torch.int32
+    ).view(B, num_pages_per_batch)
+    k_buffer = torch.randn(
+        B * num_pages_per_batch, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    v_buffer = (
+        k_buffer[..., :D_V]
+        if is_mla
+        else torch.randn(
+            B * num_pages_per_batch,
+            PAGE_SIZE,
+            H_KV,
+            D_V,
+            dtype=dtype,
+            device=DEVICE_TYPE,
+        )
+    )
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
+
+    def run(rows):
+        n = rows.stop - rows.start
+        o = torch.zeros(n, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+        lse = torch.zeros(n, H_Q, dtype=dtype, device=DEVICE_TYPE)
+        attn_logits = torch.empty(
+            (n, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        )
+        decode_attention_fwd(
+            q[rows],
+            k_buffer,
+            v_buffer,
+            o,
+            lse,
+            req_to_page[rows],
+            b_seq_len[rows],
+            attn_logits,
+            num_kv_splits,
+            sm_scale,
+            PAGE_SIZE,
+            is_mla=is_mla,
+        )
+        return o, lse
+
+    o, lse = run(slice(0, B))
+    o_last, lse_last = run(slice(B - 1, B))
+
+    # Same compute order; the last request only differs in its logits offset.
+    assert torch.equal(o[-1:], o_last)
+    assert torch.equal(lse[-1:], lse_last)
+
+
+def _verify_reference(q, cache, block_table, seq_lens, real_seq_lens, qlen, scale):
+    """Causal MLA verify in the dtype of ``cache``: row t of a request attends
+    its first min(L - qlen + 1 + t, L_real) tokens; a row with none comes back
+    zero. A bf16 ``cache`` also rounds P to bf16 before the PV product, as the
+    kernel does."""
+    kv_lora_rank = 512
+    page_size = cache.shape[1]
+    lowp = cache.dtype == torch.bfloat16
+    dtype = torch.float32 if lowp else cache.dtype
+    out = torch.zeros(
+        q.shape[0], q.shape[1], kv_lora_rank, dtype=dtype, device=q.device
+    )
+    for b, seq_len in enumerate(seq_lens.tolist()):
+        real = seq_len if real_seq_lens is None else real_seq_lens[b].item()
+        lim = (torch.arange(qlen) + seq_len - qlen + 1).clamp(0, real).tolist()
+        if max(lim) == 0:
+            continue
+        num_pages = cdiv(seq_len, page_size)
+        kv = cache[block_table[b, :num_pages].long()].reshape(-1, cache.shape[-1])
+        kv = kv[: max(lim)].to(dtype)
+        rows = slice(b * qlen, (b + 1) * qlen)
+        s = torch.einsum("thd,kd->thk", q[rows].to(dtype), kv) * scale
+        keys = torch.arange(kv.shape[0], device=q.device)
+        hidden = keys[None, :] >= torch.tensor(lim, device=q.device)[:, None]
+        s = s.masked_fill(hidden[:, None, :], float("-inf"))
+        p = torch.exp(s - s.amax(-1, keepdim=True)).nan_to_num(0.0)
+        pv = p.bfloat16().to(dtype) if lowp else p
+        o = torch.einsum("thk,kd->thd", pv, kv[:, :kv_lora_rank])
+        out[rows] = o / p.sum(-1, keepdim=True).clamp(min=1e-30)
+    return out.bfloat16().to(dtype) if lowp else out
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only the ROCm AITER MLA backend uses it"
+)
+@pytest.mark.parametrize("num_heads", [8, 16, 128])
+@pytest.mark.parametrize("qlen", [5, 8])
+# 3 requests at 8 or 16 heads stay on the small-tile config; the rest reach
+# the 64-row tiles.
+@pytest.mark.parametrize("batch", [3, 24])
+@pytest.mark.parametrize("page_size", [1, 16])
+@pytest.mark.parametrize("kv_dtype", ["bf16", "fp8"])
+# 1 skips stage 2; 32 combines more splits than one stage-2 step holds.
+@pytest.mark.parametrize("num_kv_splits", [1, 4, 32])
+def test_decode_attention_fwd_verify(
+    num_heads, qlen, batch, page_size, kv_dtype, num_kv_splits
+):
+    from vllm.v1.attention.ops.triton_decode_attention import (
+        decode_attention_fwd_verify,
+    )
+
+    set_random_seed(0)
+    dim, kv_lora_rank = 576, 512
+    scale = 1.0 / (192**0.5)
+    # Ragged lengths, one shorter than qlen, one long enough for 32 splits,
+    # and a graph padding request.
+    lens = torch.randint(qlen, 700, (batch,))
+    lens[0] = qlen - 2
+    lens[1] = 4500
+    lens[-1] = 0
+    seq_lens = lens.to(torch.int32).to(DEVICE_TYPE)
+    pages_per_req = cdiv(int(lens.max()), page_size) + 1
+    num_pages = batch * pages_per_req + 3
+    block_table = (
+        torch.randperm(num_pages - 1, device=DEVICE_TYPE)[: batch * pages_per_req]
+        .view(batch, pages_per_req)
+        .to(torch.int32)
+    )
+    cache = torch.randn(num_pages, page_size, dim, device=DEVICE_TYPE) * 0.5
+    # Keys past each request's length, and the pages its table does not use,
+    # are NaN, so reading any of them fails instead of passing on valid data.
+    poison = num_pages - 1
+    cache[poison] = float("nan")
+    for b, n in enumerate(lens.tolist()):
+        used = cdiv(n, page_size)
+        block_table[b, used:] = poison
+        if n % page_size:
+            cache[block_table[b, used - 1], n % page_size :] = float("nan")
+    k_scale = torch.tensor(1.0, device=DEVICE_TYPE)
+    if kv_dtype == "fp8":
+        cache = cache.to(current_platform.fp8_dtype())
+        # Not a power of two, so dequantized keys round when cast to bf16.
+        k_scale = torch.tensor(0.37, device=DEVICE_TYPE)
+    else:
+        cache = cache.to(torch.bfloat16)
+    exact_cache = cache.double() * k_scale.item()
+    q = torch.randn(batch * qlen, num_heads, dim, device=DEVICE_TYPE).to(torch.bfloat16)
+    paged = cache.unsqueeze(2)
+    for real_seq_lens in (None, (seq_lens - 2).clamp(min=0)):
+        o = torch.full(
+            (batch * qlen, num_heads, kv_lora_rank),
+            float("nan"),
+            dtype=torch.bfloat16,
+            device=DEVICE_TYPE,
+        )
+        lse = torch.empty(batch * qlen, num_heads, device=DEVICE_TYPE)
+        logits = torch.full(
+            (batch * qlen, num_heads, num_kv_splits, kv_lora_rank + 1),
+            float("nan"),
+            device=DEVICE_TYPE,
+        )
+        decode_attention_fwd_verify(
+            q,
+            paged,
+            paged[..., :kv_lora_rank],
+            o,
+            lse,
+            block_table,
+            seq_lens,
+            real_seq_lens,
+            qlen,
+            logits,
+            num_kv_splits,
+            scale,
+            page_size,
+            k_scale=k_scale,
+        )
+        args = (block_table, seq_lens, real_seq_lens, qlen, scale)
+        ref = _verify_reference(q, exact_cache, *args)
+        # The kernel rounds the dequantized keys, P and the output to bf16;
+        # a reference with the same roundings bounds its error from fp64.
+        # Per request, so short requests do not set the long ones' bound.
+        ref_bf16 = _verify_reference(q, exact_cache.bfloat16(), *args).double()
+        err = (o.double() - ref).abs().view(batch, -1).amax(-1)
+        bf16_err = (ref_bf16 - ref).abs().view(batch, -1).amax(-1)
+        assert (err <= 2 * bf16_err).all(), (err, bf16_err)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only the ROCm AITER MLA backend uses it"
+)
+# 16 heads take the small-tile config, 128 the 64-row QSPLIT one.
+@pytest.mark.parametrize("num_heads", [16, 128])
+def test_decode_attention_fwd_verify_int64_page_offset(num_heads):
+    """Page offsets must not overflow int32 once the cache holds more than
+    2**31 elements (fp8 past 2 GiB)."""
+    from vllm.v1.attention.ops.triton_decode_attention import (
+        decode_attention_fwd_verify,
+    )
+
+    dim, kv_lora_rank, page_size, qlen = 576, 512, 16, 8
+    pages_per_req = cdiv(200, page_size)
+    # Every page the table points at starts past element 2**31.
+    first_high = 2**31 // (page_size * dim) + 1
+    num_pages = first_high + 2 * pages_per_req
+    torch.accelerator.empty_cache()
+    if torch.accelerator.get_memory_info()[0] < num_pages * page_size * dim + 2**30:
+        pytest.skip("needs about 3 GiB of free device memory")
+    set_random_seed(0)
+    fp8 = current_platform.fp8_dtype()
+    big = torch.empty(num_pages, page_size, 1, dim, dtype=fp8, device=DEVICE_TYPE)
+    seq_lens = torch.tensor([200, 37], dtype=torch.int32, device=DEVICE_TYPE)
+    high = torch.arange(first_high, num_pages, device=DEVICE_TYPE)
+    block_table = high.view(2, pages_per_req).to(torch.int32)
+    data = torch.randn(2 * pages_per_req, page_size, 1, dim, device=DEVICE_TYPE)
+    big[high] = data.to(fp8)
+    small = big[high].clone()
+    small_table = torch.arange(2 * pages_per_req, device=DEVICE_TYPE)
+    small_table = small_table.view(2, pages_per_req).to(torch.int32)
+    q = torch.randn(2 * qlen, num_heads, dim, device=DEVICE_TYPE).to(torch.bfloat16)
+    k_scale = torch.tensor(0.37, device=DEVICE_TYPE)
+
+    def run(cache, table):
+        rows = 2 * qlen
+        o = torch.empty(
+            rows, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=DEVICE_TYPE
+        )
+        lse = torch.empty(rows, num_heads, device=DEVICE_TYPE)
+        logits = torch.empty(rows, num_heads, 2, kv_lora_rank + 1, device=DEVICE_TYPE)
+        decode_attention_fwd_verify(
+            q,
+            cache,
+            cache[..., :kv_lora_rank],
+            o,
+            lse,
+            table,
+            seq_lens,
+            None,
+            qlen,
+            logits,
+            2,
+            dim**-0.5,
+            page_size,
+            k_scale=k_scale,
+        )
+        return o, lse
+
+    o_big, lse_big = run(big, block_table)
+    o_small, lse_small = run(small, small_table)
+    # Same data and compute order; only the page offsets differ.
+    assert torch.equal(o_big, o_small)
+    assert torch.equal(lse_big, lse_small)

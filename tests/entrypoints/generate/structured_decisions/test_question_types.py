@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from vllm.entrypoints.generate.structured_decisions.question_types import (
+from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
     Option,
     Question,
@@ -21,6 +22,20 @@ def choice(qid="bucket", criteria=None, instructions="Which team?", max_options=
         "choice",
         instructions,
         criteria or {"billing": "money", "outage": None, "other": None},
+        max_options,
+    )
+
+
+def noul(qid="urgent", criteria=None, instructions="Reply within the hour?"):
+    return build_question(qid, "noul", instructions, criteria, 128)
+
+
+def score(qid="tone", criteria=None, instructions="How angry?", max_options=128):
+    return build_question(
+        qid,
+        "score",
+        instructions,
+        criteria or ["calm", "annoyed", "furious"],
         max_options,
     )
 
@@ -45,6 +60,24 @@ def test_choice_prompt():
     )
 
 
+@pytest.mark.parametrize(
+    "q,body",
+    [
+        (choice(), "A: billing - money\nB: outage\nC: other\n"),
+        (noul(criteria={"true": "t", "false": "f"}), "yes: t\nno: f\n"),
+        (score(), "0: calm\n1: annoyed\n2: furious\n"),
+        # Instructions are kept as given, trailing newlines included.
+        (noul(instructions="Reply within the hour?\n\n"), "yes\nno\n"),
+    ],
+)
+def test_prompt_is_the_heading_then_the_body(q, body):
+    body += q.type.reply_instruction
+    assert q.type.body(q) == body
+    assert q.type.prompt(q) == f"Question: {q.instructions}\n{body}"
+    bare = replace(q, instructions="")
+    assert bare.type.prompt(bare) == body
+
+
 def test_choice_answer_shape():
     q = choice()
     answer = q.type.answer(q, [0.2, 0.7, 0.1], 0.5)
@@ -62,6 +95,10 @@ def test_choice_answer_shape():
         ("", "choice", {"x": None, "y": None}, "non-empty"),
         ("q", "nope", {"x": None, "y": None}, "unknown question type"),
         ("q", "choice", ["x", "y"], "must map option names"),
+        ("q", "noul", ["yes", "no"], "must be an object"),
+        ("q", "noul", {"maybe": "same day"}, "must be an object"),
+        ("q", "score", {"0": "calm", "1": "furious"}, "ordered list of levels"),
+        ("q", "score", ["calm"], "ordered list of levels"),
     ],
 )
 def test_build_question_rejects(qid, type_name, criteria, match):
@@ -80,6 +117,62 @@ def test_option_limit():
         choice(criteria={"x": None, "y": None, "z": None}, max_options=2)
     with pytest.raises(StructuredDecisionError, match="at most 26 options"):
         choice(criteria={str(i): None for i in range(27)})
+
+
+def test_noul_labels_and_prompt():
+    q = noul()
+    assert q.labels == ("yes", "no")
+    assert [a.name for a in q.options] == ["yes", "no"]
+    assert q.type.prompt(q) == (
+        "Question: Reply within the hour?\nyes\nno\nAnswer with yes or no only."
+    )
+    described = noul(criteria={"true": "same day", "false": "later"})
+    assert described.type.prompt(described) == (
+        "Question: Reply within the hour?\n"
+        "yes: same day\n"
+        "no: later\n"
+        "Answer with yes or no only."
+    )
+
+
+def test_noul_answer_shape():
+    q = noul()
+    answer = q.type.answer(q, [0.8, 0.2], 0.5)
+    assert answer == {
+        "type": "noul",
+        "noul": 0.8,
+        "probabilities": {"yes": 0.8, "no": 0.2},
+        "confidence": 0.4,
+    }
+
+
+def test_score_labels_are_levels():
+    assert score().labels == ("0", "1", "2")
+    with pytest.raises(StructuredDecisionError, match="at most 10"):
+        score(criteria=[str(i) for i in range(11)])
+
+
+def test_score_prompt():
+    q = score()
+    assert q.type.prompt(q) == (
+        "Question: How angry?\n"
+        "0: calm\n"
+        "1: annoyed\n"
+        "2: furious\n"
+        "Answer with the number of one level only."
+    )
+
+
+def test_score_answer_shape():
+    q = score()
+    answer = q.type.answer(q, [0.5, 0.25, 0.25], 0.4)
+    assert answer == {
+        "type": "score",
+        "score": 0.75,
+        "legend": {"0": "calm", "1": "annoyed", "2": "furious"},
+        "probabilities": {"0": 0.5, "1": 0.25, "2": 0.25},
+        "confidence": 0.2,
+    }
 
 
 def test_registered_type_plugs_in():

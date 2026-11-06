@@ -282,6 +282,12 @@ class VideoBackend(VideoLoader):
                 - ``hw_decoders`` (PyNvVideoCodec): maximum number of
                   concurrent decoder slots. Defaults to 2 and must be a
                   positive integer.
+                - ``max_width`` / ``max_height`` (PyNvVideoCodec): optional
+                  maximum input dimensions configured for each decoder. Both
+                  must be positive integers and set together. Values are
+                  clamped to each codec's hardware limits. By default, decoder
+                  dimensions also cover the input's opposite orientation when
+                  that fits the reserved memory and hardware limits.
                 - ``pool_size`` / ``timeout_sec`` (DeepStream): decoder pool
                   size and pool acquisition timeout in seconds.
 
@@ -1569,4 +1575,68 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
             video_backend="opencv_dynamic",
             valid_frame_indices=valid_frame_indices,
         )
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("clef_omni")
+class ClefOmniVideoBackend(VideoBackend):
+    """Clef-Omni's reference sampling: the first frame at or after each
+    ``1/fps`` boundary (frame i sits at ``i / original_fps`` seconds, so the
+    k-th boundary is crossed by frame ``ceil(k * original_fps / fps)``),
+    capped at 768 frames and padded to an even count by repeating the last
+    frame."""
+
+    MAX_FRAMES = 768
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        if source.original_fps <= 0:
+            raise ValueError("video has an unknown frame rate")
+        step = source.original_fps / target.fps
+        indices = []
+        k = 0
+        while (index := math.ceil(k * step - 1e-6)) < source.total_frames_num:
+            indices.append(index)
+            if len(indices) > cls.MAX_FRAMES:
+                raise ValueError(
+                    f"video is longer than {cls.MAX_FRAMES / target.fps:.0f} seconds"
+                )
+            k += 1
+        if not indices:
+            raise ValueError("video has no decodable frames")
+        return indices
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: VideoDecoderBackend = "opencv",
+        **kwargs: Any,
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
+        frames, metadata = super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+        if len(frames) % 2:
+            last = frames[-1:]
+            if isinstance(frames, torch.Tensor):
+                frames = torch.cat([frames, last])
+            else:
+                frames = np.concatenate([frames, last])
+            metadata["frames_indices"].append(metadata["frames_indices"][-1])
         return frames, metadata

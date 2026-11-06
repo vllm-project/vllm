@@ -18,11 +18,13 @@ from transformers.models.embedding_gemma2.processing_embedding_gemma2 import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import EncoderOnlyAttention
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -36,10 +38,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.gemma4 import (
-    Gemma4MLP,
-    gemma4_layer_config,
-)
+from vllm.model_executor.models.gemma4 import Gemma4MLP
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
     Gemma4DummyInputsBuilder,
@@ -79,7 +78,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
 
@@ -147,7 +145,7 @@ class EmbeddingGemma2Attention(nn.Module):
         )
 
         window = config.sliding_window if self.is_sliding else None
-        self.attn = Attention(
+        self.attn = EncoderOnlyAttention(
             self.num_heads,
             self.head_dim,
             scale=1.0,
@@ -157,7 +155,6 @@ class EmbeddingGemma2Attention(nn.Module):
             per_layer_sliding_window=(window + _WINDOW_OFFSET)
             if window is not None
             else None,
-            attn_type=AttentionType.ENCODER_ONLY,
             prefix=f"{prefix}.attn",
         )
 
@@ -244,7 +241,7 @@ class EmbeddingGemma2DecoderLayer(nn.Module):
         prefix: str,
     ):
         super().__init__()
-        lc = gemma4_layer_config(config, idx)
+        lc = config.per_layer_config[idx]
         self.self_attn = EmbeddingGemma2Attention(
             config,
             lc,
@@ -337,6 +334,7 @@ class EmbeddingGemma2TextPLE(nn.Module):
         return self.per_layer_projection_norm(proj)
 
 
+@support_torch_compile
 class EmbeddingGemma2TextModel(nn.Module):
     """Text embedding backbone for EmbeddingGemma2 with bidirectional attention."""
 
@@ -1013,8 +1011,16 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
-    _process_image_input = Gemma4ForConditionalGeneration._process_image_input
-    _process_video_input = Gemma4ForConditionalGeneration._process_video_input
+    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
+    _embed_patches = Gemma4ForConditionalGeneration._embed_patches
+    _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
+    _process_video_input = Gemma4ForConditionalGeneration._process_video_input_local
+    _process_image_input_local = (
+        Gemma4ForConditionalGeneration._process_image_input_local
+    )
+    _process_video_input_local = (
+        Gemma4ForConditionalGeneration._process_video_input_local
+    )
     _process_audio_input = Gemma4ForConditionalGeneration._process_audio_input
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
@@ -1056,6 +1062,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
         if getattr(config, "vision_config", None) is not None:
             with self._mark_tower_model(vllm_config, {"image", "video"}):
                 self.vision_tower = AutoModel.from_config(config=config.vision_config)
+                self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
                 self.embed_vision = Gemma4MultimodalEmbedder(
                     config.vision_config,
                     config.text_config,

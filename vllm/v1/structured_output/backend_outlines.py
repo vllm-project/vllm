@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import ast
 import json
 from dataclasses import dataclass, field
 from re import _constants, _parser  # type: ignore[attr-defined]
@@ -68,7 +67,7 @@ class OutlinesBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
-            choices = ast.literal_eval(grammar_spec)
+            choices = json.loads(grammar_spec)
             choices = [regex_escape(c) for c in choices]
             regex = "(" + "|".join(choices) + ")"
         else:
@@ -199,9 +198,9 @@ def validate_structured_output_request_outlines(params: SamplingParams):
 
     so_params = params.structured_outputs
 
-    if so_params.regex:
+    if so_params.regex is not None:
         validate_regex_is_buildable(so_params.regex)
-    elif so_params.json:
+    elif so_params.json is not None:
         if isinstance(so_params.json, str):
             try:
                 # make sure schema is valid json
@@ -236,6 +235,16 @@ def validate_structured_output_request_outlines(params: SamplingParams):
         raise VLLMValidationError(
             "Outlines structured outputs backend "
             "does not support grammar specifications"
+        )
+    elif so_params.structural_tag:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support structural_tag specifications"
+        )
+    else:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support this structured outputs specification"
         )
 
 
@@ -327,9 +336,11 @@ def _check_unsupported(parsed) -> None:
             for branch in tval[1]:
                 _check_unsupported(branch)
 
-        # tval is (min, max, subpattern)
-        elif ttype == _parser.MAX_REPEAT:
-            _check_unsupported(tval[2])
+        else:
+            nested = tval if isinstance(tval, tuple) else (tval,)
+            for sub in nested:
+                if isinstance(sub, _parser.SubPattern):
+                    _check_unsupported(sub)
 
 
 def validate_regex_is_buildable(pattern: str) -> None:

@@ -10,8 +10,9 @@ import pytest
 import torch
 from utils import skip_unsupported
 
+import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
-    init_batch_invariance,
+    enable_batch_invariant_mode,
     matmul_batch_invariant,
     matmul_persistent,
 )
@@ -135,6 +136,52 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     assert torch.equal(single_output[0], batch_output[0])
 
 
+@pytest.fixture
+def batch_invariant_mode():
+    # The overrides are process-global: remove them so later tests compare
+    # against the stock aten kernels again.
+    enable_batch_invariant_mode()
+    yield
+    assert bi._batch_invariant_LIB is not None
+    bi._batch_invariant_LIB._destroy()
+    bi._batch_invariant_MODE = False
+
+
+@skip_unsupported
+@pytest.mark.usefixtures("batch_invariant_mode")
+@pytest.mark.parametrize("op", ["mm", "addmm", "bmm"])
+def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
+    """Inductor lowers mm/addmm/bmm to ``extern_kernels.<op>(..., out=buf)``,
+    i.e. the ``.out`` overload, which eager never dispatches."""
+    if (
+        op != "bmm"
+        and current_platform.is_cuda()
+        and not current_platform.is_device_capability_family(80)
+    ):
+        pytest.skip("mm/addmm are not overridden on SM90+")
+    torch.manual_seed(0)
+    dtype, k, n, needle = torch.bfloat16, 1024, 768, 37
+    w = torch.randn(4, k, n, device=DEVICE_TYPE, dtype=dtype)
+    bias = torch.randn(n, device=DEVICE_TYPE, dtype=dtype)
+    fn = {
+        "mm": lambda x: torch.mm(x[0], w[0]),
+        # Bare addmm: a following pointwise op would make Inductor unfuse the bias.
+        "addmm": lambda x: torch.addmm(bias, x[0], w[0]),
+        "bmm": lambda x: torch.bmm(x, w),
+    }[op]
+    compiled = torch.compile(fn, fullgraph=True)
+    x = torch.randn(4, 256, k, device=DEVICE_TYPE, dtype=dtype)
+    row = None
+    for m in (64, 256, 128):
+        xs = x[:, :m].clone()
+        # With dynamic=True, a specialization on M would silently recompile.
+        torch._dynamo.mark_dynamic(xs, 1)
+        out = compiled(xs)
+        assert torch.equal(out, fn(xs)), f"compiled {op} bypassed the BI kernel (M={m})"
+        row = out[..., needle, :] if row is None else row
+        assert torch.equal(out[..., needle, :], row)
+
+
 requires_matmul_overrides = pytest.mark.skipif(
     not current_platform.is_device_capability_family(80),
     reason="Triton matmul overrides are only installed on SM8x",
@@ -143,8 +190,8 @@ requires_matmul_overrides = pytest.mark.skipif(
 
 @skip_unsupported
 @requires_matmul_overrides
+@pytest.mark.usefixtures("batch_invariant_mode")
 def test_mm_out_dtype_batch_invariance():
-    init_batch_invariance()
     device = torch.device(DEVICE_TYPE)
     torch.manual_seed(42)
     a = torch.randn((32, 4096), dtype=torch.bfloat16, device=device)
@@ -164,8 +211,8 @@ def test_mm_out_dtype_batch_invariance():
 
 @skip_unsupported
 @requires_matmul_overrides
+@pytest.mark.usefixtures("batch_invariant_mode")
 def test_mm_out_dtype_keeps_aten_dtype_checks():
-    init_batch_invariance()
     a = torch.randn((4, 64), dtype=torch.bfloat16, device=DEVICE_TYPE)
     b = torch.randn((64, 32), dtype=torch.bfloat16, device=DEVICE_TYPE)
     with pytest.raises(RuntimeError, match="same as input dtype or fp32"):
