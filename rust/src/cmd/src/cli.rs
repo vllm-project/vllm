@@ -28,7 +28,7 @@ use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{MediaFetchPolicy, MmLimitPerPrompt};
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
@@ -392,6 +392,21 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
 
+    /// Allowing API requests to read local images or videos from directories
+    /// specified by the server file system. This is a security risk. Should
+    /// only be enabled in trusted environments.
+    #[arg(long, value_name = "PATH")]
+    #[serde(default)]
+    pub allowed_local_media_path: Option<PathBuf>,
+
+    /// If set, only media URLs that belong to this domain can be used for
+    /// multi-modal inputs. Listed hosts are fetched by name even when they
+    /// resolve to loopback or private addresses; without the list only
+    /// public addresses are fetched.
+    #[arg(long, num_args = 1.., value_name = "DOMAIN")]
+    #[serde(default)]
+    pub allowed_media_domains: Option<Vec<String>>,
+
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
     /// Requires `--enable-lora`; startup fails if any adapter cannot be loaded.
@@ -421,6 +436,18 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub return_tokens_as_token_ids: bool,
+
+    /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
+    /// and `media_io_kwargs`). If False, the server rejects non-empty values
+    /// because they can change multimodal preprocessing resource usage. Only
+    /// the gRPC `Generate` path accepts them.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub trust_request_mm_kwargs: bool,
 
     /// Log a summary line for each completed request, including prompt/output
     /// token counts and finish reason.
@@ -768,6 +795,18 @@ impl SharedRuntimeArgs {
     ///
     /// Round-tripping the parsed map rather than the raw argument keeps the
     /// engine's own profiling options (`num_frames`, `width`, ...) intact.
+    /// The `--allowed-local-media-path` / `--allowed-media-domains` policy;
+    /// an empty path disables local media, as in Python.
+    fn media_fetch_policy(&self) -> MediaFetchPolicy {
+        MediaFetchPolicy {
+            allowed_local_media_path: self
+                .allowed_local_media_path
+                .clone()
+                .filter(|path| !path.as_os_str().is_empty()),
+            allowed_media_domains: self.allowed_media_domains.clone(),
+        }
+    }
+
     pub fn limit_mm_per_prompt_json(&self) -> Option<String> {
         (!self.limit_mm_per_prompt.is_empty()).then(|| {
             serde_json::to_string(&self.limit_mm_per_prompt)
@@ -843,6 +882,7 @@ impl SharedRuntimeArgs {
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
+        let media_fetch_policy = self.media_fetch_policy();
         let ModelFileSources {
             model,
             tokenizer,
@@ -885,6 +925,7 @@ impl SharedRuntimeArgs {
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            media_fetch_policy,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
@@ -932,6 +973,7 @@ impl SharedRuntimeArgs {
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
+        let media_fetch_policy = self.media_fetch_policy();
         let ModelFileSources {
             model,
             tokenizer,
@@ -973,6 +1015,7 @@ impl SharedRuntimeArgs {
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            media_fetch_policy,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
@@ -1008,6 +1051,7 @@ impl SharedRuntimeArgs {
             },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
+            trust_request_mm_kwargs: self.trust_request_mm_kwargs,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),

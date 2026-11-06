@@ -64,6 +64,12 @@ message GenerateRequest {
   // output after reasoning. Prefer a constraint that covers the full output
   // from the first generated token.
   EngineReasoningGate engine_reasoning_gate = 18;
+
+  // Per-request preprocessing options for raw `media`, as in the OpenAI
+  // request body. Processor kwargs override the image/video preprocessor
+  // config; media IO kwargs accept `video.num_frames` and `video.fps`.
+  google.protobuf.Struct mm_processor_kwargs = 19;
+  google.protobuf.Struct media_io_kwargs = 20;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
@@ -212,6 +218,24 @@ message PromptInfo {
   repeated float logprobs = 3;  // If requested
   repeated uint32 ranks = 4;  // If logprobs were requested
   repeated CandidateTokenInfo candidate_tokens = 5;
+  // Placeholder ranges after media expansion. Empty for text-only prompts.
+  // The encoder publishes these so a consumer can reuse the expanded token
+  // ids without running the pixel preprocessor.
+  repeated PromptPlaceholder mm_placeholders = 6;
+}
+
+// One expanded multimodal span in the prompt the engine actually ran.
+message PromptPlaceholder {
+  Modality modality = 1;
+  string mm_hash = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+  // Which positions in the range take embeddings. Empty means all of them.
+  // Video ranges carry per-frame timestamp text and vision delimiters.
+  repeated bool is_embed = 5;
+  // Encoder cache key: the item's uuid when one was given, else `mm_hash`.
+  // `ec_transfer_params` entries are keyed by this.
+  string identifier = 6;
 }
 
 // Finish info, returned in the final response
@@ -272,23 +296,40 @@ enum Modality {
 message MediaItem {
   Modality modality = 1;
   oneof source {
-    string url = 2;       // http:// or https://
+    string url = 2;       // http://, https://, or file:// under --allowed-local-media-path
     string data_uri = 3;  // data:
     bytes raw_bytes = 4;
     PreprocessedMediaFeatures features = 7;
   }
   string mime_type = 5;
   string uuid = 6;
+  // Per-item preprocessing options, the same knobs the OpenAI content parts
+  // carry. Ignored for preprocessed features.
+  optional string detail = 8;  // image: "auto", "low" or "high"
+  optional double fps = 9;  // video
+  optional uint32 max_long_side_pixel = 10;  // image, video
+  // Raw item only: prompt position of its single placeholder marker.
+  // Required on every raw item when raw media and features are mixed; the
+  // raw item expands there and later feature offsets shift by its growth.
+  optional uint64 marker_offset = 11;
 }
 
 // Engine-ready multimodal features produced by a version-compatible frontend.
 // `kwargs` is the MessagePack wire representation of one MmKwargsItem.
 message PreprocessedMediaFeatures {
-  // Required inline payload. Cache-only references are not accepted.
+  // Inline tensor payload. Omit when `metadata` carries the placeholder
+  // fields and `GenerateRequest.kv.ec_transfer_params` names the embedding.
   optional bytes kwargs = 1;
   string identifier = 2;
   uint64 offset = 3;
   uint64 length = 4;
   optional string mm_hash = 5;
   repeated bool is_embed = 6;
+  // Flattened placeholder metadata, the same JSON an HTTP `image_embeds`
+  // body carries (for example `image_grid_thw`). Not pixel tensors.
+  google.protobuf.Struct metadata = 7;
+  // NumPy `.npy` tensors joined to the `metadata` kwargs, for example a
+  // caller-supplied `image_embeds`. A `*_embeds` tensor is flat over the item;
+  // the rest are batched. With tensors, no EC transfer is needed.
+  map<string, bytes> tensors = 8;
 }

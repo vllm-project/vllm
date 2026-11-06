@@ -12,7 +12,7 @@ use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{MediaFetchPolicy, MmLimitPerPrompt};
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
@@ -77,6 +77,9 @@ pub struct ApiServerOptions {
     /// Format logprob tokens as `token_id:{id}` unless the request sets
     /// `return_tokens_as_token_ids` itself.
     pub default_return_tokens_as_token_ids: bool,
+    /// Accept per-request `mm_processor_kwargs` / `media_io_kwargs`
+    /// (`--trust-request-mm-kwargs`).
+    pub trust_request_mm_kwargs: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
@@ -377,6 +380,8 @@ pub struct Config {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Where request media may be fetched from.
+    pub media_fetch_policy: MediaFetchPolicy,
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,

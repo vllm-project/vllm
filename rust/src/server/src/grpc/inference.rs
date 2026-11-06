@@ -12,6 +12,8 @@ use tonic::{Request, Response, Status};
 use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
+use vllm_engine_core_client::protocol::tensor::{WireArrayData, WireTensor};
 use vllm_llm::current_unix_timestamp_secs;
 use vllm_text::{
     DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
@@ -133,6 +135,19 @@ impl InferenceServiceImpl {
 
         let result = async {
             let media = std::mem::take(&mut proto_request.media);
+            let media_options = super::media::options_from_proto(
+                proto_request.mm_processor_kwargs.take(),
+                proto_request.media_io_kwargs.take(),
+            );
+            if !self.state.api_server_options.trust_request_mm_kwargs
+                && (!media_options.processor_kwargs.is_empty()
+                    || !media_options.media_io_kwargs.is_empty())
+            {
+                return Err(Status::invalid_argument(
+                    "per-request mm_processor_kwargs and media_io_kwargs are disabled; start \
+                     the server with --trust-request-mm-kwargs",
+                ));
+            }
             let mut text_request =
                 convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
             text_request.arrival_time = Some(arrival_time);
@@ -150,23 +165,31 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let media = super::media::from_proto(media)?;
+            let ec_transfer_present = text_request
+                .sampling_params
+                .vllm_xargs
+                .as_ref()
+                .and_then(|args| args.get("ec_transfer_params"))
+                .is_some();
+            let media = super::media::from_proto(media, ec_transfer_present)?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
                         "multimodal gRPC requests must provide token_ids input",
                     ));
                 };
-                let mm_features =
-                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
-                        |error| {
-                            if error.is_request_validation_error() {
-                                Status::invalid_argument(error.to_report_string())
-                            } else {
-                                Status::internal(error.to_report_string())
-                            }
-                        },
-                    )?;
+                let mm_features = self
+                    .state
+                    .chat
+                    .prepare_media_with_options(media, &media_options, &mut token_ids)
+                    .await
+                    .map_err(|error| {
+                        if error.is_request_validation_error() {
+                            Status::invalid_argument(error.to_report_string())
+                        } else {
+                            Status::internal(error.to_report_string())
+                        }
+                    })?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
@@ -196,6 +219,56 @@ impl InferenceServiceImpl {
             request_span,
             started_at,
         })
+    }
+}
+
+fn prompt_placeholders(text_request: &TextRequest) -> Vec<pb::PromptPlaceholder> {
+    text_request
+        .mm_features
+        .iter()
+        .flatten()
+        .map(|feature| pb::PromptPlaceholder {
+            modality: match feature.modality {
+                MmModality::Image => pb::Modality::Image,
+                MmModality::Audio => pb::Modality::Audio,
+                MmModality::Video => pb::Modality::Video,
+            } as i32,
+            mm_hash: feature
+                .mm_hash
+                .clone()
+                .filter(|hash| !hash.is_empty())
+                .unwrap_or_else(|| feature.identifier.clone()),
+            offset: u64::try_from(feature.mm_position.offset).unwrap_or(u64::MAX),
+            length: u64::try_from(feature.mm_position.length).unwrap_or(u64::MAX),
+            is_embed: is_embed_mask(feature.mm_position.is_embed.as_ref()),
+            identifier: feature.identifier.clone(),
+        })
+        .collect()
+}
+
+/// An all-true mask is sent as empty, which the consumer reads as "every
+/// position takes an embedding".
+fn is_embed_mask(mask: Option<&WireTensor>) -> Vec<bool> {
+    let Some(WireArrayData::RawView(bytes)) = mask.map(|mask| &mask.data) else {
+        return Vec::new();
+    };
+    if bytes.iter().all(|&byte| byte != 0) {
+        return Vec::new();
+    }
+    bytes.iter().map(|&byte| byte != 0).collect()
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn all_true_masks_are_sent_empty_and_partial_masks_verbatim() {
+        let all = WireTensor::from_bool(vec![2], vec![true, true]).unwrap();
+        assert!(is_embed_mask(Some(&all)).is_empty());
+        let partial = WireTensor::from_bool(vec![3], vec![false, true, false]).unwrap();
+        assert_eq!(is_embed_mask(Some(&partial)), [false, true, false]);
+        assert!(is_embed_mask(None).is_empty());
     }
 }
 
@@ -232,6 +305,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             started_at,
         } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
 
+        let mm_placeholders = prompt_placeholders(&text_request);
         let stream = self
             .state
             .chat
@@ -247,11 +321,12 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "collection", error))?;
         // Build the single aggregated response.
-        let prompt_info = convert::to_prompt_info(
+        let mut prompt_info = convert::to_prompt_info(
             &collected.prompt_token_ids,
             collected.prompt_logprobs.as_ref(),
             &response_opts,
         );
+        prompt_info.mm_placeholders = mm_placeholders;
 
         let finish_info = vllm_text::Finished {
             usage: collected.usage,
@@ -299,6 +374,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
             .await?;
 
+        let mm_placeholders = prompt_placeholders(&text_request);
         let stream = self
             .state
             .chat
@@ -308,9 +384,14 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
-        let response_stream =
-            generate_stream_responses(stream, response_opts, request_span.clone(), started_at)
-                .instrument(request_span);
+        let response_stream = generate_stream_responses(
+            stream,
+            response_opts,
+            request_span.clone(),
+            started_at,
+            mm_placeholders,
+        )
+        .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
 }
@@ -325,6 +406,7 @@ async fn generate_stream_responses(
     response_opts: ResponseOpts,
     request_span: Span,
     started_at: Instant,
+    mm_placeholders: Vec<pb::PromptPlaceholder>,
     mut y: TryYielder<pb::GenerateResponse, Status>,
 ) -> Result<(), Status> {
     pin_mut!(stream);
@@ -336,11 +418,12 @@ async fn generate_stream_responses(
                 prompt_token_ids,
                 prompt_logprobs,
             }) => {
-                let prompt_info = convert::to_prompt_info(
+                let mut prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
                     prompt_logprobs.as_ref(),
                     &response_opts,
                 );
+                prompt_info.mm_placeholders = mm_placeholders.clone();
                 Ok(pb::GenerateResponse {
                     prompt_info: Some(prompt_info),
                     outputs: None,

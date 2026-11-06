@@ -11,11 +11,13 @@
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use itertools::{Either, izip};
 use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
@@ -26,6 +28,8 @@ use llm_multimodal::{
     VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use sha2::{Digest as _, Sha256};
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -33,7 +37,9 @@ use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, M
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use crate::error::{
+    Error, Result, bail_invalid_preprocessed_multimodal, bail_multimodal, multimodal,
+};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
@@ -48,8 +54,8 @@ mod tensor;
 mod timing;
 mod video;
 
-use self::expand::expand_prompt_token_ids;
-pub use self::input::MultimodalInput;
+use self::expand::{expand_prompt_token_ids, place_replacement};
+pub use self::input::{MediaOptions, MultimodalInput, PlacedMedia};
 use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
 
@@ -63,8 +69,48 @@ pub struct MultimodalModelInfo {
     video: Option<VisionModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
+    /// Canonical `--allowed-local-media-path`; `file://` media is refused
+    /// without it.
+    local_media_root: Option<PathBuf>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
+}
+
+/// Where request media may be fetched from, beyond `data:` URLs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct MediaFetchPolicy {
+    /// `--allowed-local-media-path`: `file://` media must resolve inside this
+    /// directory.
+    pub allowed_local_media_path: Option<PathBuf>,
+    /// `--allowed-media-domains`: the only host names HTTP(S) media may name.
+    /// Unlike Python, with no list only public addresses are fetched; a host
+    /// on the list is fetched by name even when it is loopback or private.
+    pub allowed_media_domains: Option<Vec<String>>,
+}
+
+fn media_connector(policy: &MediaFetchPolicy) -> Result<MediaConnector> {
+    let allowed_domains =
+        llm_multimodal::effective_allowed_domains(policy.allowed_media_domains.as_deref());
+    Ok(MediaConnector::new(
+        // The connector finishes the build (forcing its redirect policy
+        // and DNS resolver). llm-multimodal enables no reqwest TLS
+        // backend; this workspace's `native-tls` feature provides it.
+        reqwest_0_13::Client::builder(),
+        MediaConnectorConfig {
+            allow_private_hosts: allowed_domains.is_some(),
+            allowed_domains,
+            ..MediaConnectorConfig::default()
+        },
+    )?)
+}
+
+/// The path a `file:` URL names, or `None` for any other URL.
+fn file_url_path(url: &str) -> Option<std::result::Result<PathBuf, ()>> {
+    let (scheme, _) = url.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+    Some(url::Url::parse(url).map_err(drop).and_then(|url| url.to_file_path()))
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -460,13 +506,7 @@ impl MultimodalModelInfo {
             return Ok(None);
         }
 
-        let media_connector = Arc::new(MediaConnector::new(
-            // The connector finishes the build (forcing its redirect policy
-            // and DNS resolver). llm-multimodal enables no reqwest TLS
-            // backend; this workspace's `native-tls` feature provides it.
-            reqwest_0_13::Client::builder(),
-            MediaConnectorConfig::default(),
-        )?);
+        let media_connector = Arc::new(media_connector(&MediaFetchPolicy::default())?);
 
         let placeholder_token_ids = [
             image.as_ref().map(|support| support.placeholder.marker_token_ids.as_slice()),
@@ -486,8 +526,70 @@ impl MultimodalModelInfo {
             video,
             audio,
             media_connector,
+            local_media_root: None,
             limit_mm_per_prompt,
         }))
+    }
+
+    /// Apply `--allowed-local-media-path` and `--allowed-media-domains`.
+    pub fn with_media_fetch_policy(mut self, policy: &MediaFetchPolicy) -> Result<Self> {
+        self.media_connector = Arc::new(media_connector(policy)?);
+        self.local_media_root = policy
+            .allowed_local_media_path
+            .as_deref()
+            .map(|path| {
+                let root = fs::canonicalize(path).map_err(|error| {
+                    multimodal!("--allowed-local-media-path {}: {error}", path.display())
+                })?;
+                if !root.is_dir() {
+                    bail_multimodal!(
+                        "--allowed-local-media-path {} must be a directory",
+                        path.display()
+                    );
+                }
+                Ok::<_, Error>(root)
+            })
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// Replace a `file:` URL with the file's bytes as a `data:` URL, once the
+    /// file is checked to lie under `--allowed-local-media-path`.
+    async fn inline_local_file(&self, mut part: MediaContentPart) -> Result<MediaContentPart> {
+        let (url, kind) = match &mut part {
+            MediaContentPart::ImageUrl { url, .. } => (url, "image"),
+            MediaContentPart::VideoUrl { url, .. } => (url, "video"),
+            MediaContentPart::AudioUrl { url, .. } => (url, "audio"),
+            _ => return Ok(part),
+        };
+        let Some(path) = file_url_path(url) else {
+            return Ok(part);
+        };
+        let path = path.map_err(|()| Error::LocalMedia(format!("invalid file URL `{url}`")))?;
+        let Some(root) = &self.local_media_root else {
+            return Err(Error::LocalMedia(
+                "Cannot load local files without `--allowed-local-media-path`.".into(),
+            ));
+        };
+        let outside = || {
+            Error::LocalMedia(format!(
+                "The file path {} must be a subpath of `--allowed-local-media-path {}`.",
+                path.display(),
+                root.display()
+            ))
+        };
+        let canonical = tokio::fs::canonicalize(&path).await.map_err(|_| outside())?;
+        if canonical == *root || !canonical.starts_with(root) {
+            return Err(outside());
+        }
+        let bytes = tokio::fs::read(&canonical).await.map_err(|error| {
+            Error::LocalMedia(format!("failed to read {}: {error}", path.display()))
+        })?;
+        *url = format!(
+            "data:{kind}/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        Ok(part)
     }
 
     /// Resolve the spec-backed vision lanes (image and video).
@@ -623,6 +725,90 @@ impl MultimodalModelInfo {
         VisionPreprocessingContext {
             token_budget: max_model_len.map(|limit| limit.saturating_sub(text_prompt_length)),
         }
+    }
+}
+
+/// The `media_io_kwargs` the Rust media loader understands.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct VideoIo {
+    /// Loader frame budget; `0` keeps every frame, as vLLM reads `-1`.
+    num_frames: Option<usize>,
+    fps: Option<f64>,
+}
+
+impl VideoIo {
+    fn parse(kwargs: &Map<String, Value>) -> Result<Self> {
+        let invalid = |message: String| Error::InvalidMediaOptions(message);
+        let mut io = Self::default();
+        for (modality, options) in kwargs {
+            if modality != "video" {
+                return Err(invalid(format!(
+                    "media_io_kwargs.{modality} is not supported"
+                )));
+            }
+            let options = options
+                .as_object()
+                .ok_or_else(|| invalid("media_io_kwargs.video must be an object".into()))?;
+            for (key, value) in options {
+                match key.as_str() {
+                    "num_frames" => {
+                        let frames = value.as_i64().ok_or_else(|| {
+                            invalid("media_io_kwargs.video.num_frames must be an integer".into())
+                        })?;
+                        io.num_frames = Some(usize::try_from(frames).unwrap_or(0));
+                    }
+                    "fps" => {
+                        let fps =
+                            value.as_f64().filter(|fps| fps.is_finite() && *fps > 0.0).ok_or_else(
+                                || invalid("media_io_kwargs.video.fps must be positive".into()),
+                            )?;
+                        io.fps = Some(fps);
+                    }
+                    other => {
+                        return Err(invalid(format!(
+                            "media_io_kwargs.video.{other} is not supported"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(io)
+    }
+}
+
+/// Content hashes describe the bytes; preprocessing options change the
+/// tensors, so they change the cache identity too. Caller uuids stay as given.
+fn salt_identity(features: &mut MmFeatures, options: &MediaOptions) {
+    if options.is_empty() {
+        return;
+    }
+    let salt = serde_json::to_string(&(&options.processor_kwargs, &options.media_io_kwargs))
+        .unwrap_or_default();
+    for feature in features {
+        let Some(hash) = feature.mm_hash.as_mut() else {
+            continue;
+        };
+        let salted = hex::encode(Sha256::digest(format!("{hash}\n{salt}")));
+        if feature.identifier == *hash {
+            feature.identifier = salted.clone();
+        }
+        *hash = salted;
+    }
+}
+
+fn media_part_modality(part: &MediaContentPart) -> Option<Modality> {
+    match media_part_limit_modality(part)? {
+        MmModality::Image => Some(Modality::Image),
+        MmModality::Video => Some(Modality::Video),
+        MmModality::Audio => Some(Modality::Audio),
+    }
+}
+
+fn mm_modality(modality: Modality) -> MmModality {
+    match modality {
+        Modality::Image | Modality::ImageEmbeds => MmModality::Image,
+        Modality::Video => MmModality::Video,
+        Modality::Audio => MmModality::Audio,
     }
 }
 
@@ -861,11 +1047,209 @@ impl MultimodalModelInfo {
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
+        self.prepare_multimodal_with(
+            media_parts,
+            prompt_token_ids,
+            model_dtype,
+            max_model_len,
+            &MediaOptions::default(),
+        )
+        .await
+    }
+
+    /// [`Self::prepare_multimodal`] with per-request preprocessing options.
+    pub(crate) async fn prepare_multimodal_with(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+        options: &MediaOptions,
+    ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
-            .await
+        let info = self.with_processor_kwargs(&options.processor_kwargs)?;
+        let video_io = VideoIo::parse(&options.media_io_kwargs)?;
+        let mut features = info
+            .prepare_multimodal_timed(
+                media_parts,
+                prompt_token_ids,
+                model_dtype,
+                max_model_len,
+                video_io,
+            )
+            .await?;
+        salt_identity(&mut features, options);
+        Ok(features)
+    }
+
+    /// Prepare raw items that still sit at their single marker next to
+    /// features already placed in the prompt. Each raw item expands in
+    /// place and the features after it shift by its growth.
+    pub(crate) async fn prepare_mixed(
+        &self,
+        mut raw: Vec<PlacedMedia>,
+        mut features: MmFeatures,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+        options: &MediaOptions,
+    ) -> Result<MmFeatures> {
+        if raw.is_empty() {
+            return self.prepare_preprocessed(features, prompt_token_ids.len());
+        }
+        raw.sort_by_key(|placed| placed.marker_offset);
+        if raw.windows(2).any(|pair| pair[0].marker_offset == pair[1].marker_offset) {
+            bail_invalid_preprocessed_multimodal!(
+                "two raw media items share one placeholder marker"
+            );
+        }
+        let info = self.with_processor_kwargs(&options.processor_kwargs)?;
+        let video_io = VideoIo::parse(&options.media_io_kwargs)?;
+        let mut placeholders = Vec::with_capacity(raw.len());
+        for placed in &raw {
+            let modality = media_part_modality(&placed.part)
+                .ok_or_else(|| multimodal!("raw media item must not be text"))?;
+            let placeholder = info.placeholder_for(modality)?;
+            if placeholder.marker_token_ids.len() != 1
+                || prompt_token_ids.get(placed.marker_offset)
+                    != placeholder.marker_token_ids.first()
+            {
+                bail_invalid_preprocessed_multimodal!(
+                    "no `{}` marker at prompt offset {}",
+                    placeholder.token,
+                    placed.marker_offset
+                );
+            }
+            if features.iter().any(|feature| {
+                let range = &feature.mm_position;
+                (range.offset..range.offset + range.length).contains(&placed.marker_offset)
+            }) {
+                bail_invalid_preprocessed_multimodal!(
+                    "raw media marker at offset {} lies inside a feature range",
+                    placed.marker_offset
+                );
+            }
+            placeholders.push((modality, placeholder.clone()));
+        }
+        info.validate_modality_limits(
+            placeholders
+                .iter()
+                .map(|(modality, _)| mm_modality(*modality))
+                .chain(features.iter().map(|feature| feature.modality)),
+        )?;
+
+        let parts = raw.iter().map(|placed| placed.part.clone()).collect();
+        let prepared = info
+            .prepare_parts(
+                parts,
+                prompt_token_ids,
+                model_dtype,
+                max_model_len,
+                video_io,
+            )
+            .await?;
+        let mut lanes: HashMap<Modality, VecDeque<(PromptReplacement, PreparedItem)>> =
+            HashMap::new();
+        for media in prepared {
+            let lane = lanes.entry(media.modality).or_default();
+            lane.extend(izip!(media.replacements, media.items));
+        }
+
+        let mut expanded = Vec::with_capacity(prompt_token_ids.len());
+        let mut growth = Vec::with_capacity(raw.len());
+        let mut placed_features = Vec::with_capacity(raw.len());
+        let mut cursor = 0;
+        for (placed, (modality, placeholder)) in izip!(&raw, &placeholders) {
+            let (replacement, item) = lanes
+                .get_mut(modality)
+                .and_then(VecDeque::pop_front)
+                .ok_or_else(|| multimodal!("missing prepared `{modality}` item"))?;
+            expanded.extend_from_slice(&prompt_token_ids[cursor..placed.marker_offset]);
+            let range = place_replacement(
+                &mut expanded,
+                &replacement,
+                placeholder.embed_token_id,
+                &placeholder.token,
+            )?;
+            growth.push((placed.marker_offset, replacement.tokens.len() as isize - 1));
+            placed_features.push(MmFeatureSpec {
+                data: Some(item.data),
+                modality: mm_modality(*modality),
+                identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
+                mm_position: range,
+                mm_hash: Some(item.hash),
+            });
+            cursor = placed.marker_offset + 1;
+        }
+        expanded.extend_from_slice(&prompt_token_ids[cursor..]);
+        *prompt_token_ids = expanded;
+        salt_identity(&mut placed_features, options);
+
+        for feature in &mut features {
+            let delta: isize = growth
+                .iter()
+                .filter(|(offset, _)| *offset < feature.mm_position.offset)
+                .map(|(_, delta)| delta)
+                .sum();
+            feature.mm_position.offset = feature
+                .mm_position
+                .offset
+                .checked_add_signed(delta)
+                .ok_or_else(|| multimodal!("feature offset underflows after expansion"))?;
+        }
+        features.extend(placed_features);
+        self.prepare_preprocessed(features, prompt_token_ids.len())
+    }
+
+    fn placeholder_for(&self, modality: Modality) -> Result<&ResolvedPlaceholder> {
+        let placeholder = match modality {
+            Modality::Image => self.image.as_ref().map(|support| &support.placeholder),
+            Modality::Video => self.video.as_ref().map(|support| &support.placeholder),
+            Modality::Audio => self.audio.as_ref().map(|support| &support.placeholder),
+            Modality::ImageEmbeds => None,
+        };
+        placeholder.ok_or_else(|| Error::UnsupportedModality {
+            modality: modality.to_string(),
+        })
+    }
+
+    /// This model with the request's processor kwargs merged into its image
+    /// and video preprocessor configs, the way the Python frontend hands them
+    /// to the HF processor. Audio keeps its checkpoint config.
+    fn with_processor_kwargs(&self, kwargs: &Map<String, Value>) -> Result<Cow<'_, Self>> {
+        if kwargs.is_empty() {
+            return Ok(Cow::Borrowed(self));
+        }
+        if self.image.is_none() && self.video.is_none() {
+            return Err(Error::InvalidMediaOptions(
+                "mm_processor_kwargs need an image or video processor".into(),
+            ));
+        }
+        let mut info = self.clone();
+        for support in [info.image.as_mut(), info.video.as_mut()].into_iter().flatten() {
+            let mut config = serde_json::to_value(&support.config)
+                .map_err(|error| multimodal!("preprocessor config: {error}"))?;
+            let Some(fields) = config.as_object_mut() else {
+                bail_multimodal!("preprocessor config is not an object");
+            };
+            fields.extend(kwargs.clone());
+            let config = PreProcessorConfig::from_value(config).map_err(|error| {
+                Error::InvalidMediaOptions(format!("mm_processor_kwargs: {error}"))
+            })?;
+            support.processor = self
+                .context
+                .resolve_vision_processor(support.spec.raw, &config, support.spec.modality)?
+                .ok_or_else(|| {
+                    multimodal!(
+                        "mm_processor_kwargs left no {} processor",
+                        support.spec.modality
+                    )
+                })?;
+            support.config = config;
+        }
+        Ok(Cow::Owned(info))
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -882,31 +1266,19 @@ impl MultimodalModelInfo {
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
+        video_io: VideoIo,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
-        let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
-        let fetched = self.fetch_media(media_parts).await?;
-
-        let mut prepared = Vec::new();
-        if !fetched.images.is_empty() {
-            prepared.push(
-                self.prepare_images(
-                    fetched.images,
-                    fetched.image_uuids,
-                    model_dtype,
-                    vision_context,
-                )
-                .await?,
-            );
-        }
-        if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
-        }
-        if !fetched.audios.is_empty() {
-            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
-        }
+        let prepared = self
+            .prepare_parts(
+                media_parts,
+                prompt_token_ids,
+                model_dtype,
+                max_model_len,
+                video_io,
+            )
+            .await?;
 
         let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
 
@@ -949,6 +1321,40 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// Fetch and preprocess media per modality, without touching the prompt.
+    async fn prepare_parts(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &[u32],
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+        video_io: VideoIo,
+    ) -> Result<Vec<PreparedMedia>> {
+        let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
+        let fetched = self.fetch_media(media_parts, video_io).await?;
+        let mut prepared = Vec::new();
+        if !fetched.images.is_empty() {
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    vision_context,
+                )
+                .await?,
+            );
+        }
+        if !fetched.videos.is_empty() {
+            prepared
+                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+        }
+        if !fetched.audios.is_empty() {
+            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
+        }
+
+        Ok(prepared)
+    }
+
     /// The resolved video spec's sampling policy for the media tracker: how
     /// the connector picks a clip's frames, and the frame rate a request
     /// without `fps` is sampled at — both read from the video preprocessor
@@ -973,15 +1379,19 @@ impl MultimodalModelInfo {
         skip_all,
         fields(stage = "media_fetch")
     )]
-    async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
+    async fn fetch_media(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        video_io: VideoIo,
+    ) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         if let Some((sampling, default_fps)) = self.video_sampling_policy() {
             tracker = tracker
-                .with_video_frame_sampling(sampling)
-                .with_default_video_sample_fps(default_fps);
+                .with_video_frame_sampling(sampling.with_frame_budget(video_io.num_frames))
+                .with_default_video_sample_fps(video_io.fps.or(default_fps));
         }
         for part in media_parts {
-            tracker.push_part(part)?;
+            tracker.push_part(self.inline_local_file(part).await?)?;
         }
 
         let mut tracker_output = tracker.finalize().await?;
@@ -1940,5 +2350,284 @@ mod tests {
         let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
 
         assert_eq!(encoded, source);
+    }
+
+    const RED_64_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC";
+
+    fn red_image(uuid: Option<&str>) -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url: RED_64_PNG.to_string(),
+            detail: None,
+            uuid: uuid.map(str::to_string),
+            max_long_side_pixel: None,
+        }
+    }
+
+    fn metadata_feature(identifier: &str, offset: usize, length: usize) -> MmFeatureSpec {
+        use vllm_engine_core_client::protocol::multimodal::{
+            MmBatchedField, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
+        };
+        use vllm_engine_core_client::protocol::tensor::WireTensor;
+        MmFeatureSpec {
+            data: Some(BTreeMap::from([(
+                "image_grid_thw".to_string(),
+                MmFieldElem {
+                    data: Some(MmKwargValue::Tensor(
+                        WireTensor::from_i64(vec![3], vec![1, 2, 2]).unwrap(),
+                    )),
+                    field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
+                },
+            )])),
+            modality: MmModality::Image,
+            identifier: identifier.to_string(),
+            mm_position: PlaceholderRange {
+                offset,
+                length,
+                is_embed: None,
+            },
+            mm_hash: Some(identifier.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_raw_items_expand_in_place_and_shift_later_features() {
+        let info = qwen3_vl_info();
+        let pad = QWEN3_IMAGE_PAD_ID;
+        // [text, feature a (2 pads), text, raw marker, text, feature b (2 pads)]
+        let mut tokens = vec![1, pad, pad, 2, pad, 3, pad, pad];
+        let mut reference = vec![9, pad];
+        let expected = info
+            .prepare_multimodal(
+                vec![red_image(None)],
+                &mut reference,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap();
+        let raw_len = expected[0].mm_position.length;
+
+        let features = info
+            .prepare_mixed(
+                vec![PlacedMedia {
+                    part: red_image(None),
+                    marker_offset: 4,
+                }],
+                vec![metadata_feature("a", 1, 2), metadata_feature("b", 6, 2)],
+                &mut tokens,
+                ModelDtype::Float32,
+                None,
+                &MediaOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tokens.len(), 8 - 1 + raw_len);
+        let placed: Vec<_> = features
+            .iter()
+            .map(|feature| (feature.identifier.clone(), feature.mm_position.offset))
+            .collect();
+        assert_eq!(placed[0], ("a".to_string(), 1));
+        assert_eq!(placed[1].1, 4);
+        assert_eq!(placed[1].0, expected[0].identifier);
+        assert_eq!(placed[2], ("b".to_string(), 6 + raw_len - 1));
+        assert_eq!(features[1].mm_position.length, raw_len);
+        assert!(features[1].data.as_ref().unwrap().contains_key("pixel_values"));
+    }
+
+    #[tokio::test]
+    async fn mixed_raw_items_need_a_free_marker_at_their_offset() {
+        let info = qwen3_vl_info();
+        let pad = QWEN3_IMAGE_PAD_ID;
+        for (offset, features) in [(0, vec![]), (1, vec![metadata_feature("a", 1, 2)])] {
+            let mut tokens = vec![1, pad, pad];
+            let error = info
+                .prepare_mixed(
+                    vec![PlacedMedia {
+                        part: red_image(None),
+                        marker_offset: offset,
+                    }],
+                    features,
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    None,
+                    &MediaOptions::default(),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.is_request_validation_error(), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn options_salt_content_hashes_but_not_caller_uuids() {
+        let info = qwen3_vl_info();
+        let options = MediaOptions {
+            media_io_kwargs: serde_json::json!({"video": {"num_frames": 4}})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ..Default::default()
+        };
+        let prepare = |part, options: MediaOptions| {
+            let info = info.clone();
+            async move {
+                let mut tokens = vec![QWEN3_IMAGE_PAD_ID];
+                info.prepare_multimodal_with(
+                    vec![part],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    None,
+                    &options,
+                )
+                .await
+                .unwrap()
+                .remove(0)
+            }
+        };
+        let plain = prepare(red_image(None), MediaOptions::default()).await;
+        let salted = prepare(red_image(None), options.clone()).await;
+        assert_ne!(plain.mm_hash, salted.mm_hash);
+        assert_eq!(salted.identifier, *salted.mm_hash.as_ref().unwrap());
+        let pinned = prepare(red_image(Some("caller")), options).await;
+        assert_eq!(pinned.identifier, "caller");
+    }
+
+    fn image_url(url: String) -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url,
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        }
+    }
+
+    async fn prepare_one(
+        info: &MultimodalModelInfo,
+        part: MediaContentPart,
+    ) -> Result<MmFeatureSpec> {
+        let mut tokens = vec![QWEN3_IMAGE_PAD_ID];
+        Ok(info
+            .prepare_multimodal(vec![part], &mut tokens, ModelDtype::Float32, None)
+            .await?
+            .remove(0))
+    }
+
+    fn png_bytes(rgb: [u8; 3]) -> Vec<u8> {
+        let image = ::image::RgbImage::from_pixel(64, 64, ::image::Rgb(rgb));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[tokio::test]
+    async fn file_urls_load_only_under_the_allowed_local_media_path() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let base64_png = RED_64_PNG.split_once(',').unwrap().1;
+        let png = base64::engine::general_purpose::STANDARD.decode(base64_png).unwrap();
+        fs::write(root.path().join("red.png"), &png).unwrap();
+        fs::write(outside.path().join("red.png"), &png).unwrap();
+        let file_url = |path: &Path| url::Url::from_file_path(path).unwrap().to_string();
+        let inside_url = file_url(&root.path().join("red.png"));
+
+        let refused =
+            prepare_one(&qwen3_vl_info(), image_url(inside_url.clone())).await.unwrap_err();
+        assert!(refused.is_request_validation_error(), "{refused}");
+        assert!(refused.to_string().contains("--allowed-local-media-path"));
+
+        let info = qwen3_vl_info()
+            .with_media_fetch_policy(&MediaFetchPolicy {
+                allowed_local_media_path: Some(root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+        let from_file = prepare_one(&info, image_url(inside_url)).await.unwrap();
+        let from_data = prepare_one(&info, red_image(None)).await.unwrap();
+        assert_eq!(from_file.mm_hash, from_data.mm_hash);
+        assert_eq!(from_file.identifier, from_data.identifier);
+        assert_eq!(from_file.mm_position.length, from_data.mm_position.length);
+
+        let escapes = [
+            file_url(&outside.path().join("red.png")),
+            format!("{}/../{}/red.png", file_url(root.path()), {
+                outside.path().file_name().unwrap().to_str().unwrap()
+            }),
+            file_url(root.path()),
+            file_url(&root.path().join("missing.png")),
+        ];
+        for url in escapes {
+            let error = prepare_one(&info, image_url(url.clone())).await.unwrap_err();
+            assert!(error.is_request_validation_error(), "{url}: {error}");
+        }
+    }
+
+    #[test]
+    fn allowed_local_media_path_must_be_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        fs::write(&file, b"").unwrap();
+        for path in [file, root.path().join("missing")] {
+            let policy = MediaFetchPolicy {
+                allowed_local_media_path: Some(path),
+                ..Default::default()
+            };
+            assert!(qwen3_vl_info().with_media_fetch_policy(&policy).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn content_identity_separates_different_images_of_one_size() {
+        let info = qwen3_vl_info();
+        let data_url = |rgb| {
+            image_url(format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png_bytes(rgb))
+            ))
+        };
+        let red = prepare_one(&info, data_url([255, 0, 0])).await.unwrap();
+        let red_again = prepare_one(&info, data_url([255, 0, 0])).await.unwrap();
+        let blue = prepare_one(&info, data_url([0, 0, 255])).await.unwrap();
+        assert_eq!(red.mm_position.length, blue.mm_position.length);
+        assert_eq!(red.identifier, red_again.identifier);
+        assert_ne!(red.identifier, blue.identifier);
+        assert_ne!(red.mm_hash, blue.mm_hash);
+    }
+
+    #[tokio::test]
+    async fn processor_kwargs_override_the_vision_config() {
+        let info = qwen3_vl_info();
+        let prepare = |kwargs: serde_json::Value| {
+            let info = info.clone();
+            async move {
+                let mut tokens = vec![QWEN3_IMAGE_PAD_ID];
+                let options = MediaOptions {
+                    processor_kwargs: kwargs.as_object().unwrap().clone(),
+                    ..Default::default()
+                };
+                info.prepare_multimodal_with(
+                    vec![red_image(None)],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    None,
+                    &options,
+                )
+                .await
+                .map(|features| features[0].mm_position.length)
+            }
+        };
+        let default_len = prepare(serde_json::json!({})).await.unwrap();
+        let larger = prepare(serde_json::json!({"min_pixels": 512 * 512})).await.unwrap();
+        assert!(larger > default_len, "{larger} <= {default_len}");
+        assert!(VideoIo::parse(serde_json::json!({"image": {}}).as_object().unwrap()).is_err());
+        assert_eq!(
+            VideoIo::parse(
+                serde_json::json!({"video": {"num_frames": -1, "fps": 2}}).as_object().unwrap()
+            )
+            .unwrap(),
+            VideoIo {
+                num_frames: Some(0),
+                fps: Some(2.0)
+            }
+        );
     }
 }

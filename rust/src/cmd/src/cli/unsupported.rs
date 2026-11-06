@@ -178,17 +178,6 @@ pub struct TopLevelUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
-    /// Allowing API requests to read local images or videos from directories
-    /// specified by the server file system. This is a security risk. Should
-    /// only be enabled in trusted environments.
-    #[arg(long)]
-    pub allowed_local_media_path: Option<Unsupported>,
-
-    /// If set, only media URLs that belong to this domain can be used for
-    /// multi-modal inputs.
-    #[arg(long)]
-    pub allowed_media_domains: Option<Unsupported>,
-
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///
@@ -353,17 +342,6 @@ pub struct EngineUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
-    /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
-    /// and `media_io_kwargs`). If False, the server rejects non-empty values
-    /// because they can change multimodal preprocessing resource usage.
-    #[arg(
-        long,
-        visible_alias = "no-trust-request-mm-kwargs",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub trust_request_mm_kwargs: Option<Unsupported>,
-
     /// The role name to return if `request.add_generation_prompt=true`.
     #[arg(long)]
     pub response_role: Option<Unsupported>,
