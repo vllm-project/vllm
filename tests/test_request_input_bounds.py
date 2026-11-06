@@ -95,31 +95,31 @@ def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids
 
 
 @pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
-def test_routed_experts_offset_validated_before_engine_submission(offset):
-    """Reject invalid offsets even when routed-expert output is disabled."""
+@pytest.mark.parametrize(
+    "field", ["routed_experts_prompt_start", "indexer_topk_prompt_start"]
+)
+def test_aux_output_offset_validated_before_engine_submission(offset, field):
+    """Reject invalid offsets even when auxiliary output is disabled."""
     processor = Mock(spec=InputProcessor)
     processor.tokenizer = None
     processor.generation_config_fields = {}
     processor.renderer = Mock()
     processor.renderer.get_eos_token_id.return_value = None
     processor.vllm_config = Mock()
-    params = SamplingParams(routed_experts_prompt_start=offset)
+    params = SamplingParams(**{field: offset})
     prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
 
     if not 0 <= offset <= 3:
-        with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
+        with pytest.raises(VLLMValidationError, match=field):
             InputProcessor.process_inputs(
                 processor, "invalid", prompt, params, ("generate",)
             )
-        params.routed_experts_prompt_start = 0
+        setattr(params, field, 0)
 
     request = InputProcessor.process_inputs(
         processor, "valid", prompt, params, ("generate",)
     )
-    assert (
-        request.sampling_params.routed_experts_prompt_start
-        == params.routed_experts_prompt_start
-    )
+    assert getattr(request.sampling_params, field) == getattr(params, field)
 
 
 def _process_inputs_with_max_model_len(
@@ -372,6 +372,43 @@ def test_chat_beam_conversion_accepts_n_at_sequence_cap(
     params = request.to_beam_search_params(max_tokens=1, default_sampling_params={})
 
     assert params.beam_width == 4
+
+
+@pytest.mark.parametrize("request_cls", [ChatCompletionRequest, CompletionRequest])
+@pytest.mark.parametrize("conversion", ["to_sampling_params", "to_beam_search_params"])
+@pytest.mark.parametrize("requested", [None, False, True])
+@pytest.mark.parametrize("default", [None, False, True])
+def test_skip_special_tokens_resolves_before_decoding(
+    request_cls, conversion, requested, default
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    inputs = (
+        {"messages": [{"role": "user", "content": "hello"}]}
+        if request_cls is ChatCompletionRequest
+        else {"prompt": "hello"}
+    )
+    request = request_cls(model="test", skip_special_tokens=requested, **inputs)
+    defaults = {} if default is None else {"skip_special_tokens": default}
+    params = getattr(request, conversion)(
+        max_tokens=1, default_sampling_params=defaults
+    )
+    expected = (
+        requested
+        if requested is not None
+        else defaults.get("skip_special_tokens", True)
+    )
+    assert params.skip_special_tokens is expected
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "[EOS]": 1})),
+        unk_token="[UNK]",
+        eos_token="[EOS]",
+    )
+    assert tokenizer.decode([1], skip_special_tokens=params.skip_special_tokens) == (
+        "" if expected else "[EOS]"
+    )
 
 
 # --- DeepSeek encoders: the last-user scan runs once per conversation ------

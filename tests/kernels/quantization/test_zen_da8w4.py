@@ -272,9 +272,9 @@ def test_da8w4_process_weights_layout(mock_zentorch_ops, monkeypatch):
     )
     assert layer._zentorch_da8w4_packed.is_contiguous()
     assert layer._zentorch_da8w4_scale.is_contiguous()
-    # The checkpoint parameters are released once repacked.
-    assert layer.weight_packed.numel() == 0
-    assert layer.weight_scale.numel() == 0
+    # The repacked tensors live in the checkpoint parameters' storage.
+    assert layer._zentorch_da8w4_packed.data_ptr() == layer.weight_packed.data_ptr()
+    assert layer._zentorch_da8w4_scale.data_ptr() == layer.weight_scale.data_ptr()
 
 
 def test_da8w4_apply_weights_matches_dequantized_reference(

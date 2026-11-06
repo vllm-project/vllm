@@ -323,7 +323,6 @@ def test_select_cuda_flashinfer_trtllm_backend(
         moe_config.moe_backend = "flashinfer_trtllm"
         # TRTLLM requires EP and does not support DP
         moe_config.moe_parallel_config.use_ep = True
-        moe_config.moe_parallel_config.use_dp = False
 
         selected_backend, experts_cls = select_unquantized_moe_backend(
             moe_config=moe_config
@@ -362,7 +361,6 @@ def test_select_cuda_flashinfer_trtllm_modular_backend(
         moe_config = make_dummy_moe_config()
         moe_config.moe_backend = "flashinfer_trtllm"
         moe_config.moe_parallel_config.use_ep = True
-        moe_config.moe_parallel_config.use_dp = False
 
         selected_backend, experts_cls = select_unquantized_moe_backend(
             moe_config=moe_config
@@ -382,6 +380,7 @@ def test_select_cuda_flashinfer_trtllm_modular_backend(
     [
         "mori_high_throughput",
         "mori_low_latency",
+        "mori",
         "flashinfer_nvlink_two_sided",
         "flashinfer_nvlink_one_sided",
     ],
@@ -572,7 +571,6 @@ def test_select_cuda_flashinfer_cutlass_backend(
         moe_config.moe_backend = "flashinfer_cutlass"
         # CUTLASS requires EP and does not support DP
         moe_config.moe_parallel_config.use_ep = True
-        moe_config.moe_parallel_config.use_dp = False
 
         selected_backend, experts_cls = select_unquantized_moe_backend(
             moe_config=moe_config

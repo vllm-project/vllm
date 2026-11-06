@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
@@ -118,16 +119,18 @@ def _dcp_lse_merge(
     return merged_out, merged_lse
 
 
-class _FakeDCPGroup:
-    """Single-process stand-in: ``all_gather`` returns the pre-built
+class _FakeDCPGroup(GroupCoordinator):
+    """Single-process stand-in: ``all_gather`` returns the pre-built dim-0
     concatenation of every rank's packed ``(score, global_id)`` candidates,
-    mirroring the one packed all-gather the merge issues."""
+    mirroring the one packed all-gather the merge issues.
+
+    ``GroupCoordinator.__init__`` is never run, so no process group exists."""
 
     def __init__(self, gathered_packed: torch.Tensor) -> None:
         self.gathered_packed = gathered_packed
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        assert dim == 1
+        assert dim == 0
         return self.gathered_packed.clone()
 
 
@@ -231,14 +234,15 @@ def _merge_local_topks_global_with_fake_dcp(
             torch.stack((scores.float(), global_ids.to(torch.float32)), dim=-1)
         )
 
-    fake_group = _FakeDCPGroup(torch.cat(packed_per_rank, dim=1).contiguous())
+    fake_group = _FakeDCPGroup(torch.cat(packed_per_rank, dim=0).contiguous())
     original_get_dcp_group = sparse_indexer.get_dcp_group
     sparse_indexer.get_dcp_group = lambda: fake_group
     try:
         merged = []
         for rank, (logits, indices) in enumerate(zip(local_logits, local_topks)):
             rank_indices = indices.clone()
-            result = sparse_indexer._merge_dcp_topk_global(
+            # in-place merge; the None return is asserted below
+            result = sparse_indexer._merge_dcp_topk_global(  # type: ignore[func-returns-value]
                 logits,
                 rank_indices,
                 topk,
@@ -570,13 +574,15 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
         torch.testing.assert_close(packed[..., 1], expected_ids)
         packed_by_rank.append(packed)
 
-    gathered = torch.cat(packed_by_rank, dim=1).contiguous()
+    # Rank-major [world, rows, topk, 2], as a dim-0 all-gather produces.
+    gathered = torch.stack(packed_by_rank)
     actual = torch.empty((rows, topk), device=device, dtype=torch.int32)
     returned = stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=actual)
     assert returned is actual
+    all_candidates = torch.cat(packed_by_rank, dim=1)
     expected = _ref_stable_topk_from_candidates_fp64(
-        gathered[..., 0],
-        gathered[..., 1].to(torch.int32),
+        all_candidates[..., 0],
+        all_candidates[..., 1].to(torch.int32),
         topk,
     )
 

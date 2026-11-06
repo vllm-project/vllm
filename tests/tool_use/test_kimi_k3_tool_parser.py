@@ -449,15 +449,20 @@ def test_delegating_parser_tool_choice_none_strips_xtml_and_suppresses_calls():
     assert all(not message.tool_calls for message in messages)
 
 
-def test_adjust_request_keeps_xtml_markers_contiguous():
+@pytest.mark.parametrize(
+    "req",
+    [
+        _request(),
+        _responses_request(),
+    ],
+)
+def test_adjust_request_keeps_xtml_markers_contiguous(req):
     parser = KimiK3ToolParser(_dummy_tokenizer())
-    request = _request()
 
-    adjusted = parser.adjust_request(request)
+    adjusted = parser.adjust_request(req)
 
     assert adjusted.skip_special_tokens is False
-    if hasattr(adjusted, "spaces_between_special_tokens"):
-        assert adjusted.spaces_between_special_tokens is False
+    assert adjusted.spaces_between_special_tokens is False
     assert KimiK3ToolParser.supports_required_and_named is False
 
 
@@ -469,8 +474,7 @@ def test_adjust_request_required_uses_xtml_parser_not_json_guidance():
 
     assert adjusted.structured_outputs is None
     assert adjusted.skip_special_tokens is False
-    if hasattr(adjusted, "spaces_between_special_tokens"):
-        assert adjusted.spaces_between_special_tokens is False
+    assert adjusted.spaces_between_special_tokens is False
 
 
 @pytest.mark.parametrize(

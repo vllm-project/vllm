@@ -13,30 +13,35 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.artifacts import (
+    AuxOutputBuffer,
+    aux_output_keys,
+    materialize_aux_output,
+    publish_aux_output,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
-)
-from vllm.distributed.aux_output_connector.routed_experts import (
-    RoutedExpertsBuffer,
-    materialize_routed_experts,
-    publish_routed_experts,
-    routed_experts_keys,
 )
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.indexer_capture import IndexerCapturer
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -53,18 +58,20 @@ class _WorkerRequestState:
 
 @dataclass
 class PendingAuxOutput:
-    """Own one step's R3 snapshot until its asynchronous copy is consumed."""
+    """Own one step's capture snapshots until the asynchronous copy completes."""
 
     connector: AuxOutputWorkerConnector
     request_ids: list[str]
     token_starts: np.ndarray
     query_start_loc: np.ndarray
-    # GPU snapshot taken on the main stream.
-    routed_experts_gpu: torch.Tensor
+    # GPU snapshots taken on the main stream.
+    routed_experts_snapshot: torch.Tensor | None
     # Filled by enqueue_cpu_copy on the output copy stream.
     routed_experts: np.ndarray | None = None
     num_sampled: np.ndarray | None = None
     num_rejected: np.ndarray | None = None
+    indexer_snapshot: torch.Tensor | None = None
+    indexer: np.ndarray | None = None
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -72,9 +79,16 @@ class PendingAuxOutput:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
         self.num_sampled = num_sampled
         self.num_rejected = num_rejected
-        self.routed_experts = self.routed_experts_gpu.to(
-            "cpu", non_blocking=True
-        ).numpy()
+
+        def copy_rows(tensor: torch.Tensor) -> np.ndarray:
+            host = torch.empty_like(tensor, device="cpu", pin_memory=tensor.is_cuda)
+            host.copy_(tensor, non_blocking=True)
+            return host.numpy()
+
+        if self.routed_experts_snapshot is not None:
+            self.routed_experts = copy_rows(self.routed_experts_snapshot)
+        if self.indexer_snapshot is not None:
+            self.indexer = copy_rows(self.indexer_snapshot)
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
         return self.connector.process_output(self)
@@ -88,16 +102,29 @@ class AuxOutputWorkerConnector:
         *,
         vllm_config: VllmConfig,
         model: torch.nn.Module,
-        kv_cache_config: KVCacheConfig,
     ) -> None:
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=max_num_batched_tokens, vllm_config=vllm_config
-        )
-        bind_routed_experts_capturer(model, capturer)
-        self._capturer = capturer
+        self._vllm_config = vllm_config
+        self._routed_experts_capturer: RoutedExpertsCapturer | None = None
+        self._indexer: IndexerCapturer | None = None
+        try:
+            if vllm_config.aux_output_config.enable_return_routed_experts:
+                self._routed_experts_capturer = RoutedExpertsCapturer(
+                    max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                    vllm_config=vllm_config,
+                )
+                bind_routed_experts_capturer(model, self._routed_experts_capturer)
+            if vllm_config.aux_output_config.enable_return_indexer_topk:
+                self._indexer = IndexerCapturer(
+                    model, vllm_config, output_rank=get_tp_group().is_first_rank
+                )
+        except BaseException:
+            self._close_capture()
+            raise
+        self._r3_shape: tuple[int, ...] = ()
+        self._r3_dtype: np.dtype[Any] = np.dtype("uint8")
+        self._r3_nbytes = 0
         self._store: BackgroundBlockObjectStore | None = None
-        self._buffer: RoutedExpertsBuffer | None = None
+        self._buffer: AuxOutputBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
@@ -107,38 +134,96 @@ class AuxOutputWorkerConnector:
         self._pending_outputs: list[PendingAuxOutput] = []
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
-        # Every TP rank participates in capture collectives, but only the
-        # first TP rank of each PP stage owns the auxiliary output data plane.
+
+    def _close_capture(self) -> None:
+        """Release both capturers; safe to call on a partially built connector."""
+        capturers = self._routed_experts_capturer, self._indexer
+        self._routed_experts_capturer = None
+        self._indexer = None
+        for capturer in capturers:
+            if capturer is None:
+                continue
+            try:
+                capturer.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close auxiliary-output capture", exc_info=True
+                )
+
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
+        """Initialize the SHM data plane after KV capacity is resolved."""
+        vllm_config = self._vllm_config
+        if vllm_config.aux_output_config.enable_return_routed_experts:
+            assert self._routed_experts_capturer is not None, (
+                "capture must be initialized before storage"
+            )
+        if vllm_config.aux_output_config.enable_return_indexer_topk:
+            assert self._indexer is not None, (
+                "capture must be initialized before storage"
+            )
+        if self._store is not None or self._buffer is not None:
+            raise RuntimeError("auxiliary-output storage is already initialized")
         if not get_tp_group().is_first_rank:
             return
-
-        shape_per_token = self._capturer.shape_per_token
-        dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        shape_per_token, dtype = self._get_storage_layout(max_num_batched_tokens)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        hashes_per_kv_block = scheduler_block_size // hash_block_size
-        block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
+        bytes_per_token = int(np.prod(shape_per_token)) * dtype.itemsize
+        block_nbytes = hash_block_size * bytes_per_token
         max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
-            num_slots = kv_cache_config.num_blocks * hashes_per_kv_block
-        else:
-            # max_bytes covers all PP stages, which must hold the same blocks.
+            max_bytes = (
+                kv_cache_config.num_blocks * scheduler_block_size * bytes_per_token
+            )
+        elif vllm_config.parallel_config.pipeline_parallel_size > 1:
+            # R3 max_bytes covers all stages, which must hold the same blocks.
             num_layers = vllm_config.model_config.get_total_num_hidden_layers()
-            num_slots = max_bytes // (block_nbytes // shape_per_token[0] * num_layers)
-        self._store = BackgroundBlockObjectStore(
-            BlockObjectStore(
-                max_bytes=num_slots * block_nbytes, object_nbytes=block_nbytes
-            ),
+            global_block_nbytes = block_nbytes // shape_per_token[0] * num_layers
+            max_bytes = (max_bytes // global_block_nbytes) * block_nbytes
+        store = BackgroundBlockObjectStore(
+            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
-        self._buffer = RoutedExpertsBuffer(
-            dtype,
-            shape_per_token,
-            hash_block_size,
-            vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens,
-            vllm_config.max_concurrent_batches,
+        try:
+            buffer = AuxOutputBuffer(
+                dtype,
+                shape_per_token,
+                hash_block_size,
+                vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens,
+                vllm_config.max_concurrent_batches,
+            )
+        except BaseException:
+            try:
+                store.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close the auxiliary-output store after "
+                    "initialization failed",
+                    exc_info=True,
+                )
+            raise
+        self._store = store
+        self._buffer = buffer
+
+    def _get_storage_layout(
+        self, max_num_batched_tokens: int
+    ) -> tuple[tuple[int, ...], np.dtype[Any]]:
+        if self._routed_experts_capturer is not None:
+            self._r3_shape = self._routed_experts_capturer.shape_per_token
+            self._r3_dtype = np.dtype(self._routed_experts_capturer.output_dtype_name)
+            self._r3_nbytes = int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
+        if self._indexer is None:
+            assert self._routed_experts_capturer is not None
+            return self._r3_shape, self._r3_dtype
+        assert len(self._indexer.device_buffer) >= max_num_batched_tokens, (
+            "auxiliary-output capture capacity is smaller than the token budget"
+        )
+        return (
+            (self._r3_nbytes + self._indexer.fixed_bytes_per_token,),
+            np.dtype("uint8"),
         )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
@@ -149,12 +234,18 @@ class AuxOutputWorkerConnector:
         request_ids = list(input_batch.req_ids)
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
+        snapshot = self._indexer.snapshot(num_rows) if self._indexer else None
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
-            token_starts=input_batch.num_computed_tokens_np,
+            token_starts=input_batch.num_computed_tokens_np[: len(request_ids)],
             query_start_loc=query_start_loc,
-            routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
+            routed_experts_snapshot=(
+                self._routed_experts_capturer.snapshot_routing_data(num_rows)
+                if self._routed_experts_capturer
+                else None
+            ),
+            indexer_snapshot=snapshot,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -195,11 +286,30 @@ class AuxOutputWorkerConnector:
         assert buffer is not None and store is not None
         block_size = buffer.block_size
 
-        routed_experts = pending.routed_experts
+        packed_rows = pending.routed_experts
+        if self._indexer is not None:
+            assert pending.indexer is not None
+            indexer_rows = (
+                np.ascontiguousarray(pending.indexer)
+                .view(np.uint8)
+                .reshape(len(pending.indexer), -1)
+            )
+            if packed_rows is None:
+                packed_rows = indexer_rows
+            else:
+                packed_rows = np.concatenate(
+                    (
+                        np.ascontiguousarray(packed_rows)
+                        .view(np.uint8)
+                        .reshape(len(packed_rows), -1),
+                        indexer_rows,
+                    ),
+                    axis=1,
+                )
         num_sampled = pending.num_sampled
         num_rejected = pending.num_rejected
         assert (
-            routed_experts is not None
+            packed_rows is not None
             and num_sampled is not None
             and num_rejected is not None
         ), "auxiliary output CPU copy was not enqueued"
@@ -231,7 +341,7 @@ class AuxOutputWorkerConnector:
             assert 0 <= rejected <= request_num_tokens, (
                 "auxiliary output rejected-token count is invalid"
             )
-            rows = routed_experts[start : end - rejected]
+            rows = packed_rows[start : end - rejected]
 
             capture_start = token_start
             capture_cursor = state.capture_cursor
@@ -258,8 +368,21 @@ class AuxOutputWorkerConnector:
 
             if sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
+                    output_slice = slice(
+                        start + emit_start - capture_start, end - rejected
+                    )
                     outputs[request_id] = AuxRequestOutput(
-                        emit_start, rows[emit_start - capture_start :]
+                        token_start=emit_start,
+                        routed_rows=(
+                            pending.routed_experts[output_slice]
+                            if pending.routed_experts is not None
+                            else None
+                        ),
+                        indexer_rows=(
+                            pending.indexer[output_slice]
+                            if pending.indexer is not None
+                            else None
+                        ),
                     )
                     state.emit_cursor = token_end
                 else:
@@ -275,7 +398,7 @@ class AuxOutputWorkerConnector:
             )
             if emit_start < stored_end:
                 first_block = emit_start // block_size
-                stored = materialize_routed_experts(
+                stored = materialize_aux_output(
                     store,
                     state.aux_output_keys[first_block : stored_end // block_size],
                     shape_per_token=buffer.shape_per_token,
@@ -289,9 +412,47 @@ class AuxOutputWorkerConnector:
                     )
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
-            outputs[request_id] = AuxRequestOutput(emit_start, rows)
+            outputs[request_id] = self._make_output(emit_start, rows)
             state.emit_cursor = token_end
         return outputs
+
+    def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
+        if self._indexer is None:
+            return AuxRequestOutput(token_start=token_start, routed_rows=rows)
+        routed_rows = None
+        combined = self._routed_experts_capturer is not None
+        if combined:
+            routed_rows = self._unpack_rows(
+                rows[:, : self._r3_nbytes],
+                self._r3_dtype,
+                self._r3_shape,
+                copy=True,
+            )
+        indexer = self._unpack_rows(
+            rows[:, self._r3_nbytes :],
+            np.dtype("int32"),
+            self._indexer.shape_per_token,
+            copy=combined,
+        )
+        return AuxRequestOutput(
+            token_start=token_start,
+            routed_rows=routed_rows,
+            indexer_rows=indexer,
+        )
+
+    @staticmethod
+    def _unpack_rows(
+        rows: np.ndarray,
+        dtype: np.dtype[Any],
+        shape_per_token: tuple[int, ...],
+        *,
+        copy: bool,
+    ) -> np.ndarray:
+        # Detach packed artifacts into contiguous arrays and keep store-backed
+        # outputs writable. A writable single-artifact array can remain a view.
+        if copy or not rows.flags.writeable:
+            rows = rows.copy()
+        return rows.view(dtype).reshape(len(rows), *shape_per_token)
 
     def _publish_blocks(
         self,
@@ -315,7 +476,7 @@ class AuxOutputWorkerConnector:
             if ready:
                 ready_batches.append((state.aux_output_keys, ready))
         if ready_batches or retain_keys or release_keys:
-            publish_routed_experts(
+            publish_aux_output(
                 store,
                 batches=ready_batches,
                 block_size=buffer.block_size,
@@ -336,6 +497,14 @@ class AuxOutputWorkerConnector:
                 buffer.release_block(rows)
             buffer.discard(request_id)
 
+    def _get_namespace(self, generation: int) -> str:
+        namespace = str(generation)
+        if self._indexer is not None:
+            namespace += "/" + self._indexer.namespace
+            if self._routed_experts_capturer is not None:
+                namespace += f"/r3-{self._r3_shape}-{self._r3_dtype.name}"
+        return namespace
+
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates.
 
@@ -352,7 +521,11 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
-            release_keys: list[str] = []
+            namespace = self._get_namespace(self._generation)
+            hashes = metadata.retained_block_hashes or ()
+            retained_keys = aux_output_keys(hashes, namespace)
+            hashes = metadata.released_block_hashes or ()
+            release_keys = aux_output_keys(hashes, namespace)
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
@@ -380,10 +553,10 @@ class AuxOutputWorkerConnector:
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
-            retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
-                keys = routed_experts_keys(block_hashes, str(self._generation))
+                namespace = self._get_namespace(self._generation)
+                keys = aux_output_keys(block_hashes, namespace)
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)
                 block_batches.append((state, []))
@@ -401,18 +574,18 @@ class AuxOutputWorkerConnector:
     def close(self) -> None:
         with self._lock:
             self._pending_outputs.clear()
-            if self._store is not None:
-                try:
-                    self._store.close()
-                finally:
-                    self._store = None
+            store, self._store = self._store, None
+            try:
+                if store is not None:
+                    store.close()
+            finally:
+                self._buffer = None
+                self._requests.clear()
+                self._step_metadata = None
+                self._close_capture()
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    model: torch.nn.Module, vllm_config: VllmConfig
 ) -> AuxOutputWorkerConnector:
-    return AuxOutputWorkerConnector(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=vllm_config,
-    )
+    return AuxOutputWorkerConnector(model=model, vllm_config=vllm_config)

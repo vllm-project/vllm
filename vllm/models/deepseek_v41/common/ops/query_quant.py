@@ -140,12 +140,19 @@ def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
         FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
     )
+    from vllm.model_executor.kernels.linear.mxfp8.pytorch import (
+        TorchMxFp8LinearKernel,
+    )
 
     # QuantKey does not encode scale layout; restrict this producer to the
     # consumers that accept F8_128x4 swizzled scales.
     return all(
         get_input_quant_key(linear) == kMxfp8Dynamic
         and type(getattr(getattr(linear, "quant_method", None), "kernel", None))
-        in (FlashInferCutedslMxfp8LinearKernel, FlashInferCutlassMxfp8LinearKernel)
+        in (
+            FlashInferCutedslMxfp8LinearKernel,
+            FlashInferCutlassMxfp8LinearKernel,
+            TorchMxFp8LinearKernel,
+        )
         for linear in linears
     )

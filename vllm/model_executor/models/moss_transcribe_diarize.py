@@ -81,6 +81,8 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
+# Appended to the prompt to bias decoding, per the model card's hotword recipe.
+MOSS_HOTWORDS_HINT = "热词提示："
 
 _MOSS_DIARIZED_HEADER_RE = re.compile(
     r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
@@ -632,6 +634,8 @@ class MossTranscribeDiarizeForConditionalGeneration(
         stt_config = stt_params.stt_config
         question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
         question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
+        if hotwords := (stt_params.hotwords or "").strip():
+            question += f"{MOSS_HOTWORDS_HINT}{hotwords}"
         prompt = (
             "<|im_start|>system\n"
             "You are a helpful assistant.<|im_end|>\n"

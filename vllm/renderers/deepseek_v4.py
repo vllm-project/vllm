@@ -34,7 +34,23 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         )
 
     def _apply_chat_template(self, *args, **kwargs):
-        return self.get_tokenizer().apply_chat_template(*args, **kwargs)
+        return self.get_tokenizer().apply_chat_template(*args, **kwargs), None
+
+    def _build_prompt(self, rendered, mm_data, mm_uuids) -> DictPrompt:
+        prompt_raw, image_order = rendered
+        prompt = parse_dec_only_prompt(prompt_raw)
+        if image_order is not None:
+            for items in (mm_data, mm_uuids):
+                if items is not None and "image" in items:
+                    if image_order:
+                        items["image"] = [items["image"][i] for i in image_order]
+                    else:
+                        del items["image"]
+        if mm_data:
+            prompt["multi_modal_data"] = mm_data
+        if mm_uuids:
+            prompt["multi_modal_uuids"] = mm_uuids
+        return prompt
 
     def render_completion_suffix(self, prompt: str, suffix: str) -> str | None:
         return f"{_FIM_BEGIN}{prompt}{_FIM_HOLE}{suffix}{_FIM_END}"
@@ -52,19 +68,13 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        prompt_raw = self._apply_chat_template(
+        rendered = self._apply_chat_template(
             conversation=conversation,
             messages=messages,
             **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = parse_dec_only_prompt(prompt_raw)
-        if mm_data is not None:
-            prompt["multi_modal_data"] = mm_data
-        if mm_uuids is not None:
-            prompt["multi_modal_uuids"] = mm_uuids
-
-        return conversation, prompt
+        return conversation, self._build_prompt(rendered, mm_data, mm_uuids)
 
     async def render_messages_async(
         self,
@@ -79,16 +89,18 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        prompt_raw = await self._apply_chat_template_async(
+        rendered = await self._apply_chat_template_async(
             conversation=conversation,
             messages=messages,
             **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = parse_dec_only_prompt(prompt_raw)
-        if mm_data is not None:
-            prompt["multi_modal_data"] = mm_data
-        if mm_uuids is not None:
-            prompt["multi_modal_uuids"] = mm_uuids
+        return conversation, self._build_prompt(rendered, mm_data, mm_uuids)
 
-        return conversation, prompt
+
+class DeepseekV41Renderer(DeepseekV4Renderer):
+    def _apply_chat_template(self, *args, **kwargs):
+        image_order: list[int] = []
+        kwargs["image_order"] = image_order
+        prompt_raw = self.get_tokenizer().apply_chat_template(*args, **kwargs)
+        return prompt_raw, image_order

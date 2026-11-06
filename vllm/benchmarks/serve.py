@@ -122,8 +122,22 @@ async def _align_prompts_to_server_tokenizer(
 
         try:
             first_tokens = await _tokenize(input_requests[0].prompt)
-        except Exception:
-            print("WARNING: /tokenize unavailable, skipping alignment.")
+        except aiohttp.ClientConnectionError as e:
+            print(f"WARNING: {base_url} unreachable ({e!r}), skipping alignment.")
+            return input_requests
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                hint = (
+                    "404 Not Found: either this server has no /tokenize route,"
+                    f" or it does not serve a model named `{model_id}`"
+                    " (its served names are listed by GET /v1/models)"
+                )
+            else:
+                hint = f"HTTP {e.status}"
+            print(f"WARNING: /tokenize unavailable ({hint}), skipping alignment.")
+            return input_requests
+        except Exception as e:
+            print(f"WARNING: /tokenize probe failed ({e!r}), skipping alignment.")
             return input_requests
 
         expected = input_requests[0].prompt_len
@@ -372,6 +386,21 @@ class EmbedBenchmarkMetrics:
     std_e2el_ms: float
     median_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+
+
+def _get_server_metrics_results(
+    outputs: list[RequestFuncOutput],
+) -> dict[str, list[float | None]]:
+    if not any(
+        output.server_queue_time is not None or output.server_ttft is not None
+        for output in outputs
+    ):
+        return {}
+
+    return {
+        "server_queue_times": [output.server_queue_time for output in outputs],
+        "server_ttfts": [output.server_ttft for output in outputs],
+    }
 
 
 def _get_current_request_rate(
@@ -1325,6 +1354,8 @@ async def benchmark(
             "errors": [output.error for output in outputs],
         }
 
+    result.update(_get_server_metrics_results(outputs))
+
     queue_times: list[float] | None = None
     e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
@@ -1537,7 +1568,14 @@ def save_to_pytorch_benchmark_format(
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
+    ignored_metrics = [
+        "ttfts",
+        "itls",
+        "generated_texts",
+        "errors",
+        "server_queue_times",
+        "server_ttfts",
+    ]
     pt_records = convert_to_pytorch_benchmark_format(
         args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
@@ -2397,6 +2435,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "itls",
             "generated_texts",
             "errors",
+            "server_queue_times",
+            "server_ttfts",
         ]:
             if field in result_json:
                 del result_json[field]

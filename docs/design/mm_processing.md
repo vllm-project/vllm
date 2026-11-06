@@ -90,6 +90,9 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `llama-nemotron-vl-embed`  | `LlamaNemotronVLForEmbedding`              | `nvidia/llama-nemotron-embed-vl-1b-v2`                |
 | `llama-nemotron-vl-rerank` | `LlamaNemotronVLForSequenceClassification` | `nvidia/llama-nemotron-rerank-vl-1b-v2`               |
 | `mistral3`                 | `Mistral3ForConditionalGeneration`         | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, etc. |
+| `nano-nemotron-vl`         | `NemotronH_Nano_VL_V2`                     | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`          |
+| `nano-nemotron-omni`       | `NemotronH_Nano_Omni_Reasoning_V3`         | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` |
+| `nemotron-omni`            | `NemotronH_Omni_Reasoning_V3`              | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` |
 | `nemotron-parse`           | `NemotronParseForConditionalGeneration`    | `nvidia/NVIDIA-Nemotron-Parse-2.0`, etc.              |
 | `qwen2-vl`                 | `Qwen2VLForConditionalGeneration`          | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
 | `qwen2.5-vl`               | `Qwen2_5_VLForConditionalGeneration`       | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |

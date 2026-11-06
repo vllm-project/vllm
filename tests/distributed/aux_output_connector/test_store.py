@@ -5,24 +5,26 @@ import threading
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import Mock
+from typing import Any, cast
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import store as store_module
+from vllm.distributed.aux_output_connector.artifacts import (
+    AuxOutputBuffer,
+    aux_output_keys,
+    materialize_aux_output,
+    publish_aux_output,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputAggregator,
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
     PackedBlockHashes,
-)
-from vllm.distributed.aux_output_connector.routed_experts import (
-    RoutedExpertsBuffer,
-    materialize_routed_experts,
-    publish_routed_experts,
-    routed_experts_keys,
 )
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
@@ -36,8 +38,10 @@ from vllm.distributed.aux_output_connector.worker import (
 from vllm.model_executor.layers.fused_moe import (
     routed_experts_capturer as capturer_module,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -68,8 +72,27 @@ def test_background_store_publishes_without_blocking_caller():
     underlying.close.assert_called_once_with()
 
 
+def _kv_cache_manager(
+    cached: dict, hashes_per_block: int = 1, num_blocks: int = 0
+) -> SimpleNamespace:
+    block_pool = SimpleNamespace(
+        get_cached_block=lambda block_hash, _: cached.get(block_hash),
+        hash_block_size=_BLOCK_SIZE,
+    )
+    manager = SimpleNamespace(
+        block_size=hashes_per_block * _BLOCK_SIZE, block_pool=block_pool
+    )
+    return SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[manager], scheduler_block_size=manager.block_size
+        ),
+        block_pool=block_pool,
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+    )
+
+
 def _make_connector():
-    return AuxOutputSchedulerConnector()
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
 
 
 @dataclass
@@ -169,11 +192,20 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
+    indexer_shape: tuple[int, int] | None = None,
+    enable_r3: bool = True,
     *,
     shape_per_token: tuple[int, int] = _SHAPE,
     dtype: np.dtype = _DTYPE,
 ) -> AuxOutputWorkerConnector:
-    object_nbytes = _BLOCK_SIZE * int(np.prod(shape_per_token)) * dtype.itemsize
+    r3_nbytes = int(np.prod(shape_per_token)) * dtype.itemsize if enable_r3 else 0
+    shape = (
+        (r3_nbytes + int(np.prod(indexer_shape)) * 4,)
+        if indexer_shape
+        else shape_per_token
+    )
+    storage_dtype = np.dtype("uint8") if indexer_shape else dtype
+    object_nbytes = _BLOCK_SIZE * int(np.prod(shape)) * storage_dtype.itemsize
     store = _make_store(
         max_bytes=(
             1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
@@ -181,10 +213,24 @@ def _make_worker(
         object_nbytes=object_nbytes,
     )
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._indexer = (
+        SimpleNamespace(
+            shape_per_token=indexer_shape,
+            fixed_bytes_per_token=int(np.prod(indexer_shape)) * 4,
+            namespace="synthetic-indexer",
+            close=lambda: None,
+        )
+        if indexer_shape
+        else None
+    )
+    worker._routed_experts_capturer = Mock() if enable_r3 else None
+    worker._r3_nbytes = r3_nbytes
+    worker._r3_dtype = dtype
+    worker._r3_shape = shape_per_token
     worker._store = store
-    worker._buffer = RoutedExpertsBuffer(
-        dtype,
-        shape_per_token,
+    worker._buffer = AuxOutputBuffer(
+        storage_dtype,
+        shape,
         _BLOCK_SIZE,
         max_num_seqs,
         max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
@@ -234,22 +280,23 @@ def _input_batch(request_ids, token_starts, query_start_loc):
 
 def test_non_output_rank_skips_capture_snapshot():
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._indexer = None
     worker._store = None
     worker._buffer = None
-    worker._capturer = Mock()
+    worker._routed_experts_capturer = Mock()
     worker._step_metadata = Mock()
     assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
-    worker._capturer.snapshot_routing_data.assert_not_called()
+    worker._routed_experts_capturer.snapshot_routing_data.assert_not_called()
 
 
 def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker = _make_worker(1)
-    worker._capturer = Mock()
+    worker._routed_experts_capturer = Mock()
 
     worker.begin_step(None)
 
     assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
-    worker._capturer.snapshot_routing_data.assert_not_called()
+    worker._routed_experts_capturer.snapshot_routing_data.assert_not_called()
     worker.close()
 
 
@@ -263,8 +310,8 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
     )
     rows = torch.ones((1, *_SHAPE), dtype=torch.uint8)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = rows
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = rows
     process_output = Mock(wraps=worker.process_output)
     monkeypatch.setattr(worker, "process_output", process_output)
     pending = worker.prepare_output(
@@ -292,8 +339,9 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
+    assert result.aux_output_connector_output is not None
     np.testing.assert_array_equal(
-        result.aux_output_connector_output["request"].rows, rows.numpy()
+        result.aux_output_connector_output["request"].routed_rows, rows.numpy()
     )
     process_output.assert_called_once()
     assert worker._pending_outputs == []
@@ -305,7 +353,7 @@ def test_aux_only_outputs_keep_step_counts_and_accumulate_prefill(monkeypatch):
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Mock())
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
     worker = _make_worker(2)
-    worker._capturer = Mock()
+    worker._routed_experts_capturer = Mock()
     # Request IDs, token starts, scheduled tokens, sampled and rejected counts.
     steps = [
         (["decode", "prefill"], [4, 0], [3, 1], [2, 0], [1, 0]),
@@ -336,7 +384,9 @@ def test_aux_only_outputs_keep_step_counts_and_accumulate_prefill(monkeypatch):
                 + step * 32
             )
             captures.append(rows)
-            worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+            worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+                torch.from_numpy(rows)
+            )
             pending = worker.prepare_output(
                 _input_batch(request_ids, np.array(starts), np.cumsum([0, *scheduled]))
             )
@@ -379,7 +429,7 @@ def test_aux_only_outputs_keep_step_counts_and_accumulate_prefill(monkeypatch):
             assert result.keys() == requests.keys()
             for request_id, (token_start, rows) in requests.items():
                 assert result[request_id].token_start == token_start
-                np.testing.assert_array_equal(result[request_id].rows, rows)
+                np.testing.assert_array_equal(result[request_id].routed_rows, rows)
     finally:
         worker.close()
 
@@ -389,8 +439,10 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
     """Terminal cleanup waits for every outstanding output, not just the first."""
     worker = _make_worker(1)
     rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, *_SHAPE)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+        torch.from_numpy(rows)
+    )
     pending_outputs = []
     for i in range(num_pending):
         request = _request_metadata("request", 4 * i, 4, 4 * i, [bytes([i]) * 4])
@@ -406,23 +458,26 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
     worker.begin_step(_metadata(0, [], {"request": []}).metadata)
     assert "request" in worker._requests
 
+    store = worker._store
+    assert store is not None
+    references = cast(Any, store)._references
     for i, pending in enumerate(pending_outputs):
         output = worker.process_output(pending)
-        np.testing.assert_array_equal(output["request"].rows, rows)
+        np.testing.assert_array_equal(output["request"].routed_rows, rows)
         if i + 1 < num_pending:
             assert "request" in worker._requests
-            assert worker._store._references
+            assert references
     assert "request" not in worker._requests
     # The finished request's store keys must be released after commit.
-    assert not worker._store._references
+    assert not references
     worker.close()
 
 
 def test_pending_outputs_bounded_by_max_concurrent_batches():
     worker = _make_worker(1, max_concurrent_batches=2)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.side_effect = lambda num_rows: torch.zeros(
-        (num_rows, *_SHAPE), dtype=torch.uint8
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.side_effect = (
+        lambda num_rows: torch.zeros((num_rows, *_SHAPE), dtype=torch.uint8)
     )
     metadata = _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
     batch = _input_batch(["request"], np.array([0]), np.array([0, 1]))
@@ -459,7 +514,7 @@ def test_worker_rejects_invalid_rejected_token_count():
     worker.close()
 
 
-def _process_output(
+def _prepare_output(
     worker,
     step,
     rows,
@@ -470,14 +525,21 @@ def _process_output(
     token_starts=None,
     num_tokens=None,
     query_start_loc=None,
+    indexer_rows=None,
 ):
     if num_sampled is None:
         num_sampled = np.ones(len(request_ids), dtype=np.int32)
     if token_starts is None or num_tokens is None:
         assert isinstance(step, _WorkerStep)
         token_starts, num_tokens = _execution_ranges(step, request_ids)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    worker._routed_experts_capturer = None
+    if worker._r3_nbytes:
+        worker._routed_experts_capturer = Mock()
+        worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+            torch.from_numpy(rows)
+        )
+    if worker._indexer is not None:
+        worker._indexer.snapshot = lambda n: torch.from_numpy(indexer_rows[:n].copy())
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
@@ -489,7 +551,11 @@ def _process_output(
     )
     assert pending is not None
     pending.enqueue_cpu_copy(num_sampled, num_rejected)
-    return worker.process_output(pending)
+    return pending
+
+
+def _process_output(worker, *args, **kwargs):
+    return _prepare_output(worker, *args, **kwargs).process_output()
 
 
 def test_worker_ignores_cudagraph_query_padding():
@@ -513,8 +579,8 @@ def test_worker_ignores_cudagraph_query_padding():
         query_start_loc=np.array([0, 1, 2, 2], dtype=np.int32),
     )
 
-    np.testing.assert_array_equal(output["first"].rows, logical[:1])
-    np.testing.assert_array_equal(output["second"].rows, logical[1:])
+    np.testing.assert_array_equal(output["first"].routed_rows, logical[:1])
+    np.testing.assert_array_equal(output["second"].routed_rows, logical[1:])
     worker.close()
 
 
@@ -581,7 +647,7 @@ def test_worker_rejects_mismatched_capture_profile(routing):
 def test_logical_buffer_rejects_noncontiguous_capture(
     initial_start, initial_rows, invalid_start
 ):
-    buffer = RoutedExpertsBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
+    buffer = AuxOutputBuffer(np.dtype("uint8"), (1,), 4, 1, 4, 1)
     if initial_start is not None:
         rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
         assert buffer.capture("request", initial_start, rows) == []
@@ -593,7 +659,7 @@ def test_logical_buffer_rejects_noncontiguous_capture(
 
 
 def test_logical_buffer_captures_one_row_per_decode_step():
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, 3, 2)
 
     completed = []
@@ -605,7 +671,7 @@ def test_logical_buffer_captures_one_row_per_decode_step():
 
 
 def test_logical_buffer_copies_borrowed_block_when_retained():
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4, 2)
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, *_SHAPE)
 
     expected = logical.copy()
@@ -629,14 +695,14 @@ def _make_store(
     )
 
 
-def test_publish_routed_experts_publishes_full_blocks():
+def test_publish_aux_output_publishes_full_blocks():
     store = _make_store(object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE)))
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
+    buffer = AuxOutputBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8, 2)
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
-    keys = routed_experts_keys(hashes, "0")
+    keys = aux_output_keys(hashes, "0")
     blocks = buffer.capture("request", 0, logical)
-    publish_routed_experts(
+    publish_aux_output(
         store,
         batches=[(keys, blocks)],
         block_size=_BLOCK_SIZE,
@@ -645,7 +711,7 @@ def test_publish_routed_experts_publishes_full_blocks():
     logical[:] = 0
 
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             store,
             keys,
             shape_per_token=_SHAPE,
@@ -668,7 +734,7 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, first, logical[:8], ["first"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["first"].rows, logical[:8])
+    np.testing.assert_array_equal(output["first"].routed_rows, logical[:8])
 
     second = _metadata(
         generation=0,
@@ -677,7 +743,7 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     )
     output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
     assert output is not None
-    np.testing.assert_array_equal(output["second"].rows, logical)
+    np.testing.assert_array_equal(output["second"].routed_rows, logical)
     worker.close()
 
 
@@ -720,7 +786,7 @@ def test_pp_capture_aggregation_preserves_layers_and_cached_token_range(monkeypa
                 dtype=np.dtype(capturer.output_dtype_name),
             )
             stack.callback(worker.close)
-            worker._capturer = capturer
+            worker._routed_experts_capturer = capturer
             workers.append(worker)
 
         for request_id, token_start, token_end in [("first", 0, 8), ("second", 8, 10)]:
@@ -733,7 +799,7 @@ def test_pp_capture_aggregation_preserves_layers_and_cached_token_range(monkeypa
             outputs = []
             for worker in workers:
                 _begin_step(worker, step)
-                capturer = worker._capturer
+                capturer = worker._routed_experts_capturer
                 for layer_id in range(
                     capturer.start_layer,
                     capturer.start_layer + capturer.shape_per_token[0],
@@ -765,9 +831,9 @@ def test_pp_capture_aggregation_preserves_layers_and_cached_token_range(monkeypa
             assert output.aux_output_connector_output is not None
             result = output.aux_output_connector_output[request_id]
             assert result.token_start == 2
-            assert result.token_start + len(result.rows) == token_end
-            assert result.rows.dtype == np.uint16
-            np.testing.assert_array_equal(result.rows, logical[2:token_end])
+            assert result.token_start + len(result.routed_rows) == token_end
+            assert result.routed_rows.dtype == np.uint16
+            np.testing.assert_array_equal(result.routed_rows, logical[2:token_end])
 
 
 def test_worker_matches_kv_eviction_order_after_requests_finish():
@@ -802,18 +868,18 @@ def test_worker_matches_kv_eviction_order_after_requests_finish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([hashes[1], hashes[3], hashes[4]], "0"),
+            aux_output_keys([hashes[1], hashes[3], hashes[4]], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         np.concatenate([blocks[1], blocks[3], blocks[4]]),
     )
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([hashes[2]], "0"),
+            aux_output_keys([hashes[2]], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         )
@@ -893,14 +959,14 @@ def test_worker_replays_rejected_speculative_gap():
         np.array([0]),
     )
 
-    np.testing.assert_array_equal(first_output["request"].rows, logical[:1])
+    np.testing.assert_array_equal(first_output["request"].routed_rows, logical[:1])
     assert queued_output["request"].token_start == 1
     np.testing.assert_array_equal(
-        queued_output["request"].rows,
+        queued_output["request"].routed_rows,
         logical[1:2],
     )
     np.testing.assert_array_equal(
-        rolled_back_output["request"].rows,
+        rolled_back_output["request"].routed_rows,
         logical[2:],
     )
     assert worker._requests["request"].capture_cursor == len(logical)
@@ -963,8 +1029,8 @@ def test_worker_publishes_entire_batch_before_materializing_prefix():
     )
 
     assert output is not None
-    np.testing.assert_array_equal(output["consumer"].rows, logical)
-    np.testing.assert_array_equal(output["producer"].rows, logical[:4])
+    np.testing.assert_array_equal(output["consumer"].routed_rows, logical)
+    np.testing.assert_array_equal(output["producer"].routed_rows, logical[:4])
     worker.close()
 
 
@@ -986,7 +1052,7 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     )
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical[:4])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[:4])
     assert worker._requests["request"].pending_blocks[0][0] == 0
 
     block_hash = b"a" * 32
@@ -998,13 +1064,13 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
     output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1066,6 +1132,58 @@ def test_worker_releases_newly_keyed_blocks_before_capture():
     worker.close()
 
 
+def test_worker_does_not_pin_unscheduled_prompt_blocks():
+    worker = _make_worker(2, max_num_batched_tokens=16, max_store_blocks=4)
+    connector = _make_connector()
+    prompt_hashes = [bytes([value]) * 32 for value in range(4)]
+    logical = np.arange(16 * 3 * 2, dtype=np.uint8).reshape(16, 3, 2)
+
+    def run(requests, token_counts, rows):
+        token_starts = [request.num_computed_tokens for request in requests]
+        metadata = connector.build_connector_meta(
+            _step_output(
+                [request.request_id for request in requests],
+                token_starts,
+                token_counts,
+            ),
+            {request.request_id: request for request in requests},
+        )
+        _process_output(
+            worker,
+            metadata,
+            rows,
+            [request.request_id for request in requests],
+            np.zeros(len(requests), dtype=np.int32),
+            token_starts=tuple(token_starts),
+            num_tokens=tuple(token_counts),
+        )
+        for request, num_tokens in zip(requests, token_counts):
+            request.num_computed_tokens += num_tokens
+
+    first = _scheduler_request("first", prompt_hashes, num_tokens=17)
+    first.num_computed_tokens = 0
+    run([first], [16], logical)
+    connector.request_finished(first)
+    worker.begin_step(connector.build_connector_meta(_step_output([], [], []), {}))
+
+    second = _scheduler_request("second", prompt_hashes, num_tokens=17)
+    second.num_computed_tokens = 0
+    other = _scheduler_request("other", [b"x" * 32], num_tokens=5)
+    other.num_computed_tokens = 0
+    run([second, other], [4, 4], np.concatenate((logical[:4], logical[4:8])))
+
+    np.testing.assert_array_equal(
+        materialize_aux_output(
+            worker._store,
+            aux_output_keys([b"x" * 32], "0"),
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+        ),
+        logical[4:8],
+    )
+    worker.close()
+
+
 def test_worker_publishes_pending_block_without_forward():
     worker = _make_worker(1)
     _begin_step(
@@ -1088,9 +1206,9 @@ def test_worker_publishes_pending_block_without_forward():
     assert not worker._requests["request"].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1170,7 +1288,9 @@ def test_worker_does_not_rematerialize_emitted_rows():
     assert output is not None
 
     assert worker._store is not None
-    worker._store.get_concatenated = Mock(wraps=worker._store.get_concatenated)
+    store = worker._store
+    assert store is not None
+    cast(Any, store).get_concatenated = Mock(wraps=store.get_concatenated)
     second = _metadata(
         0,
         # Async scheduling may build this before the scheduler consumes first.
@@ -1180,8 +1300,8 @@ def test_worker_does_not_rematerialize_emitted_rows():
     output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
 
     assert output is not None
-    np.testing.assert_array_equal(output["request"].rows, logical[4:])
-    worker._store.get_concatenated.assert_not_called()
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
+    cast(Any, worker._store).get_concatenated.assert_not_called()
     worker.close()
 
 
@@ -1197,7 +1317,7 @@ def test_worker_resumes_from_scheduler_emit_boundary():
     output = _process_output(worker, resumed, logical[4:], ["request"], np.array([0]))
 
     assert output["request"].token_start == 4
-    np.testing.assert_array_equal(output["request"].rows, logical[4:])
+    np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
     assert worker._requests["request"].emit_cursor == 5
     worker.close()
 
@@ -1228,7 +1348,7 @@ def test_worker_emits_mid_block_chunked_prefill():
     )
     output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].routed_rows, logical)
     worker.close()
 
 
@@ -1258,7 +1378,7 @@ def test_worker_emits_published_block_and_mid_block_tail():
     )
     output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].routed_rows, logical)
     worker.close()
 
 
@@ -1285,7 +1405,7 @@ def test_worker_output_does_not_alias_released_tail_buffer():
     )
 
     output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
-    emitted = output["request"].rows
+    emitted = output["request"].routed_rows
     expected = logical.copy()
 
     replacement = np.full_like(logical, 99)
@@ -1376,9 +1496,9 @@ def test_worker_finish_publishes_keyed_block_and_discards_request_state():
     assert "request" not in worker._buffer._requests
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1415,22 +1535,18 @@ def test_worker_fails_when_cached_aux_output_is_missing():
     worker.close()
 
 
-def test_store_rejects_oversized_batch_without_partial_write():
+def test_store_grows_with_a_warning_when_every_object_is_referenced():
     store = _make_store(max_bytes=6, object_nbytes=3)
-    store.put([BlockObject("retained", b"rrr")])
+    store.put([BlockObject("unused", b"uuu"), BlockObject("kept", b"kkk")])
+    store.put([], retain_keys=["kept"])
 
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put(
-            [
-                BlockObject("first", b"111"),
-                BlockObject("second", b"222"),
-                BlockObject("third", b"333"),
-            ]
-        )
+    with patch.object(store_module.logger, "warning") as warning:
+        store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
 
-    assert store.get_concatenated(["retained"]) == b"rrr"
+    warning.assert_called_once()
+    assert store.get_concatenated(["kept", "first", "second"]) == b"kkk111222"
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["first"])
+        store.get_concatenated(["unused"])
     store.close()
 
 
@@ -1442,8 +1558,20 @@ def test_store_lru_and_immutable_put():
     store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(BlockObjectStoreError, match="Increase aux_output_config"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
+    store.close()
+
+
+def test_store_replaces_only_unreferenced_aux_outputs():
+    store = _make_store(max_bytes=8)
+    store.put([BlockObject("block", b"1111")], retain_keys=["block"])
+    store.put([], release_keys=["block"])
+    store.put([BlockObject("block", b"2222")], retain_keys=["block"])
+    assert store.get_concatenated(["block"]) == b"2222"
+
+    store.put([BlockObject("block", b"3333")])
+    assert store.get_concatenated(["block"]) == b"2222"
     store.close()
 
 
@@ -1459,6 +1587,33 @@ def test_store_does_not_evict_referenced_aux_outputs():
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.put([], release_keys=["first"])
+    store.close()
+
+
+def test_store_eviction_does_not_rescan_referenced_keys():
+    hashes = 0
+
+    class CountingKey(str):
+        def __hash__(self):
+            nonlocal hashes
+            hashes += 1
+            return super().__hash__()
+
+    store = _make_store(max_bytes=4 * 1000)
+    referenced = [CountingKey(f"referenced-{i}") for i in range(900)]
+    store.put([BlockObject(key, b"rrrr") for key in referenced], retain_keys=referenced)
+    old = [f"old-{i}" for i in range(100)]
+    store.put([BlockObject(key, b"oooo") for key in old])
+    hashes = 0
+
+    for i in range(100):
+        store.put([BlockObject(f"new-{i}", b"nnnn")])
+
+    assert hashes < len(referenced)
+    assert store.get_concatenated(referenced) == b"rrrr" * 900
+    for key in old:
+        with pytest.raises(BlockObjectStoreError):
+            store.get_concatenated([key])
     store.close()
 
 
@@ -1600,7 +1755,32 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
-    np.testing.assert_array_equal(connector.take_output(request, output), routing)
+    np.testing.assert_array_equal(connector.take_output(request, output)[0], routing)
+
+
+@pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
+def test_scheduler_connector_sends_only_computed_hashes_off_schedule(finish):
+    connector = _make_connector()
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=9)
+    request.num_computed_tokens = 0
+    requests = {request.request_id: request}
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [4]), requests
+    )
+    assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+    request.block_hashes.append(b"b" * 32)
+    request.num_computed_tokens = 7
+    if finish:
+        connector.request_finished(request)
+    metadata = connector.build_connector_meta(_step_output([], [], []), requests)
+    assert request.request_id not in metadata.block_hashes
+    assert metadata.finished_requests == ((request.request_id,) if finish else ())
+
+    if not finish:
+        request.num_computed_tokens = 8
+        metadata = connector.build_connector_meta(_step_output([], [], []), requests)
+        assert list(metadata.block_hashes[request.request_id]) == [b"b" * 32]
 
 
 def test_scheduler_starts_worker_output_at_requested_prompt_token():
@@ -1710,18 +1890,18 @@ def test_worker_preemption_terminal_keeps_inflight_hashes_for_publish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys(block_hashes[:1], "0"),
+            aux_output_keys(block_hashes[:1], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         logical[:_BLOCK_SIZE],
     )
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys(block_hashes[1:], "0"),
+            aux_output_keys(block_hashes[1:], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1765,16 +1945,16 @@ def test_worker_releases_terminal_pins_before_same_step_publish():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([producer_hash], "0"),
+            aux_output_keys([producer_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
         producer_rows,
     )
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        worker._store.get_concatenated(routed_experts_keys([victim_hash], "0"))
+        worker._store.get_concatenated(aux_output_keys([victim_hash], "0"))
     worker.close()
 
 
@@ -1810,9 +1990,9 @@ def test_terminal_request_publishes_hash_discovered_after_last_schedule():
 
     assert worker._store is not None
     np.testing.assert_array_equal(
-        materialize_routed_experts(
+        materialize_aux_output(
             worker._store,
-            routed_experts_keys([block_hash], "0"),
+            aux_output_keys([block_hash], "0"),
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
         ),
@@ -1845,7 +2025,7 @@ def test_scheduler_connector_recreates_preempted_request_state():
 
 def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=6)
+    request = _scheduler_request("request", [], num_tokens=6, num_output_tokens=0)
     connector.build_connector_meta(
         _step_output([request.request_id], [0], [4]),
         {request.request_id: request},
@@ -1857,10 +2037,10 @@ def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector.request_finished(request)
 
     request.num_tokens = 5
-    np.testing.assert_array_equal(connector.take_output(request, first), first_rows)
+    np.testing.assert_array_equal(connector.take_output(request, first)[0], first_rows)
     request.num_tokens = 6
     np.testing.assert_array_equal(
-        connector.take_output(request, second), second_rows[:1]
+        connector.take_output(request, second)[0], second_rows[:1]
     )
 
 
@@ -1896,7 +2076,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
     }
 
     with pytest.raises(AssertionError, match="invalid token range"):
-        connector.take_output(request, output)
+        connector.take_output(request, output)[0]
 
 
 def test_scheduler_rejects_aux_output_past_finished_request():
@@ -1917,7 +2097,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
     with pytest.raises(
         AssertionError, match="finished auxiliary output output has no accepted"
     ):
-        connector.take_output(request, output)
+        connector.take_output(request, output)[0]
 
 
 @pytest.mark.parametrize("chunk_size", [2, 4])
@@ -1951,7 +2131,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         request.num_tokens = 5
         request.num_output_tokens = 1
         request.finished = max_tokens == 1
-        result = connector.take_output(request, output)
+        result = connector.take_output(request, output)[0]
         np.testing.assert_array_equal(result, rows[:0])
 
         if max_tokens == 2:
@@ -1971,7 +2151,7 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
             request.num_tokens = 6
             request.finished = True
             np.testing.assert_array_equal(
-                connector.take_output(request, output), rows[4:]
+                connector.take_output(request, output)[0], rows[4:]
             )
     finally:
         worker.close()
@@ -2045,3 +2225,412 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+@pytest.mark.parametrize("enable_r3", [False, True])
+def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
+    worker = _make_worker(2, indexer_shape=(1, 2), enable_r3=enable_r3)
+    indexer = np.arange(12, dtype=np.int32).reshape(6, 1, 2)
+    routing = np.arange(36, dtype=np.uint8).reshape(6, *_SHAPE)
+    first = _metadata(0, [_request_metadata("producer", 0, 6, 0, [b"a" * 32])], {})
+    output = _process_output(
+        worker,
+        first,
+        routing,
+        ["producer"],
+        np.array([2]),
+        indexer_rows=indexer,
+    )["producer"]
+    np.testing.assert_array_equal(output.indexer_rows, indexer[:4])
+    assert output.get_num_rows() == 4
+    if enable_r3:
+        np.testing.assert_array_equal(output.routed_rows, routing[:4])
+    else:
+        assert output.routed_rows is None
+    # A different request skips the cached prefix's forward entirely.
+    cached = _metadata(0, [_request_metadata("cached", 4, 1, 0, [b"a" * 32])], {})
+    output = _process_output(
+        worker,
+        cached,
+        routing[4:5],
+        ["cached"],
+        np.array([0]),
+        indexer_rows=indexer[4:5],
+    )["cached"]
+    np.testing.assert_array_equal(output.indexer_rows, indexer[:5])
+    if enable_r3:
+        np.testing.assert_array_equal(output.routed_rows, routing[:5])
+    worker.close()
+
+
+def test_preemption_discards_partial_block_before_request_resumes():
+    worker = _make_worker(1)
+    rows = np.arange(30, dtype=np.uint8).reshape(5, *_SHAPE)
+    first = _metadata(0, [_request_metadata("request", 0, 3, 0, [])], {})
+    _process_output(worker, first, rows[:3] + 100, ["request"], np.array([0]))
+    _begin_step(worker, _metadata(0, [], {"request": []}))
+    resumed = _metadata(0, [_request_metadata("request", 0, 5, 3, [b"a" * 32])], {})
+    output = _process_output(worker, resumed, rows, ["request"], np.array([0]))[
+        "request"
+    ]
+    assert output.token_start == 3
+    np.testing.assert_array_equal(output.routed_rows, rows[3:])
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    ("routed", "indexer_enabled"), [(True, False), (False, True), (True, True)]
+)
+def test_indexer_and_routing_prompt_offsets_are_independent(routed, indexer_enabled):
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}),
+        enable_routed_experts=routed,
+        enable_indexer=indexer_enabled,
+    )
+    request = Request(
+        "request",
+        [0, 1, 2, 3],
+        SamplingParams(
+            max_tokens=2, routed_experts_prompt_start=3, indexer_topk_prompt_start=1
+        ),
+        None,
+    )
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [4]), {"request": request}
+    )
+    assert metadata.requests["request"] == (1 if indexer_enabled else 3)
+    request.append_output_token_ids([4, 5])
+    routing = np.arange(24, dtype=np.uint8).reshape(4, *_SHAPE)
+    indexer = np.arange(8, dtype=np.int32).reshape(4, 1, 2)
+    outputs = {
+        "request": AuxRequestOutput(
+            1, routing if routed else None, indexer if indexer_enabled else None
+        )
+    }
+    assert outputs["request"].get_num_rows() == 4
+    routed_rows, selections = connector.take_output(request, outputs)
+    if routed:
+        np.testing.assert_array_equal(routed_rows, routing[2:])
+    else:
+        assert routed_rows is None
+    if indexer_enabled:
+        np.testing.assert_array_equal(selections, indexer)
+    else:
+        assert selections is None
+
+
+def test_shared_output_validation_rejects_mismatched_artifact_rows():
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager({}), enable_indexer=True)
+    request = Request("request", [0, 1], SamplingParams(max_tokens=1), None)
+    output = AuxRequestOutput(
+        0, np.empty((1, 1, 2), dtype=np.uint8), np.empty((2, 1, 2), dtype=np.int32)
+    )
+    with pytest.raises(AssertionError, match="artifact row counts differ"):
+        connector.take_output(request, {"request": output})
+
+
+def test_indexer_only_checks_accepted_range_without_routing_placeholder():
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}), enable_routed_experts=False, enable_indexer=True
+    )
+    request = Request("request", [0, 1, 2, 3], SamplingParams(max_tokens=1), None)
+    request.append_output_token_ids(4)
+    output = AuxRequestOutput(0, indexer_rows=np.empty((3, 1, 2), dtype=np.int32))
+    with pytest.raises(AssertionError, match="invalid token range"):
+        connector.take_output(request, {"request": output})
+
+
+def test_fixed_store_rejects_payload_size_before_retaining_keys():
+    store = BlockObjectStore(max_bytes=16, object_nbytes=8)
+    with pytest.raises(ValueError, match="fixed slot size"):
+        store.put([BlockObject("bad", b"short")], retain_keys=["bad"])
+    assert not cast(Any, store)._references
+    store.close()
+
+
+_HASHES = [bytes([index]) * 32 for index in range(4)]
+
+
+def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    retained, released = metadata.retained_block_hashes, metadata.released_block_hashes
+    return list(retained or ()), list(released or ())
+
+
+def _finished_request_with_cached_blocks(num_blocks: int = 1):
+    cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == (_HASHES, [])
+    return cached, connector, request
+
+
+def _finish_empty_request(connector: AuxOutputSchedulerConnector):
+    connector.request_finished(_SchedulerRequest("empty", [], 1))
+    return _kv_cache_metadata(connector)
+
+
+def test_connector_releases_oldest_uncached_blocks_past_capacity():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    assert _finish_empty_request(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 16
+
+    del cached[_HASHES[3]]
+    assert _finish_empty_request(connector) == ([], _HASHES[2:])
+    assert connector.max_cache_hit(request) == 8
+
+    del cached[_HASHES[1]]
+    assert _finish_empty_request(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 8
+
+
+def test_connector_releases_retained_blocks_on_reset():
+    cached, connector, _ = _finished_request_with_cached_blocks()
+    connector.reset()
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    assert metadata.generation == 1
+    assert list(metadata.released_block_hashes) == _HASHES
+
+
+def test_connector_keeps_pending_load_blocks_retained():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    connector.request_loading(request, 16)
+    cached.clear()
+    assert _finish_empty_request(connector) == ([], [])
+
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == ([], _HASHES[:2])
+
+
+def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
+    worker = _make_worker(1)
+    store = worker._store
+    assert store is not None
+    references = cast(Any, store)._references
+    keys = aux_output_keys(_HASHES[:2], "0")
+    step = _metadata(0, [], {})
+    step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
+    _begin_step(worker, step)
+    assert all(references[key] == 1 for key in keys)
+
+    step = _metadata(0, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[0], 32)
+    _begin_step(worker, step)
+    assert keys[0] not in references
+
+    step = _metadata(1, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
+    _begin_step(worker, step)
+    assert not references
+
+
+class _SnapshotIndexer:
+    shape_per_token = (2, 2)
+    fixed_bytes_per_token = 16
+    namespace = "fake-indexer"
+
+    def snapshot(self, num_rows):
+        return torch.full((num_rows, 2, 2), num_rows, dtype=torch.int32)
+
+    def close(self):
+        pass
+
+
+def test_two_pending_steps_keep_independent_indexer_snapshots():
+    worker = _make_worker(2, indexer_shape=(2, 2), enable_r3=False)
+    worker._indexer = _SnapshotIndexer()
+    worker.begin_step(
+        _metadata(0, [_request_metadata("request", 0, 3, 0, [])], {}).metadata
+    )
+
+    first = worker.prepare_output(
+        _input_batch(["request"], np.array([0]), np.array([0, 2]))
+    )
+    second = worker.prepare_output(
+        _input_batch(["request"], np.array([2]), np.array([0, 3]))
+    )
+
+    assert first is not None and second is not None
+    first_snapshot = first.indexer_snapshot
+    second_snapshot = second.indexer_snapshot
+    assert first_snapshot is not None and second_snapshot is not None
+    assert first_snapshot.data_ptr() != second_snapshot.data_ptr()
+    assert first_snapshot[0, 0, 0].item() == 2
+    assert second_snapshot[0, 0, 0].item() == 3
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    ("enable_r3", "enable_indexer"), [(True, False), (False, True), (True, True)]
+)
+def test_current_step_outputs_reuse_only_accepted_host_rows(enable_r3, enable_indexer):
+    worker = _make_worker(
+        2,
+        indexer_shape=(3, 2) if enable_indexer else None,
+        enable_r3=enable_r3,
+    )
+    routed = np.arange(42, dtype=_DTYPE).reshape(7, *_SHAPE)
+    indexer = np.arange(42, dtype=np.int32).reshape(7, 3, 2) - 1
+    step = _metadata(
+        0,
+        [
+            _request_metadata("first", 0, 3, 1, []),
+            _request_metadata("second", 0, 4, 1, []),
+        ],
+        {},
+    )
+    pending = _prepare_output(
+        worker,
+        step,
+        routed,
+        ["first", "second"],
+        np.array([1, 2]),
+        indexer_rows=indexer,
+    )
+
+    outputs = pending.process_output()
+
+    for request_id, expected_slice in (("first", slice(1, 2)), ("second", slice(4, 5))):
+        output = outputs[request_id]
+        assert output.token_start == 1
+        for actual, host, expected in (
+            (output.routed_rows, pending.routed_experts, routed),
+            (output.indexer_rows, pending.indexer, indexer),
+        ):
+            if host is None:
+                assert actual is None
+            else:
+                assert actual is not None
+                assert np.shares_memory(actual, host)
+                assert actual.flags.c_contiguous and actual.flags.writeable
+                np.testing.assert_array_equal(actual, expected[expected_slice])
+
+    del pending
+    worker.close()
+    if enable_indexer:
+        np.testing.assert_array_equal(outputs["second"].indexer_rows, indexer[4:5])
+    if enable_r3:
+        np.testing.assert_array_equal(outputs["second"].routed_rows, routed[4:5])
+
+
+def test_indexer_only_output_is_a_typed_view_of_the_host_rows():
+    indexer_shape = (3, 2)
+    worker = _make_worker(1, indexer_shape=indexer_shape, enable_r3=False)
+    typed = np.arange(12, dtype=np.int32).reshape(2, *indexer_shape)
+
+    output = worker._make_output(0, typed.view(np.uint8).reshape(2, -1))
+
+    assert output.routed_rows is None
+    indexer_rows = output.indexer_rows
+    assert indexer_rows is not None
+    assert indexer_rows.dtype == np.int32
+    assert indexer_rows.shape == (2, *indexer_shape)
+    assert not indexer_rows.flags.owndata
+    np.testing.assert_array_equal(indexer_rows, typed)
+
+
+def test_indexer_only_output_copies_read_only_store_rows():
+    indexer_shape = (3, 2)
+    worker = _make_worker(1, indexer_shape=indexer_shape, enable_r3=False)
+    typed = np.arange(12, dtype=np.int32).reshape(2, *indexer_shape)
+    packed = typed.view(np.uint8).reshape(2, -1)
+    packed.setflags(write=False)
+
+    output = worker._make_output(0, packed)
+
+    indexer_rows = output.indexer_rows
+    assert indexer_rows is not None and indexer_rows.flags.writeable
+    np.testing.assert_array_equal(indexer_rows, typed)
+
+
+def test_combined_output_artifacts_are_independent_copies():
+    indexer_shape = (3, 2)
+    worker = _make_worker(1, indexer_shape=indexer_shape, enable_r3=True)
+    routed = np.arange(12, dtype=_DTYPE).reshape(2, *_SHAPE)
+    indexer = np.arange(12, dtype=np.int32).reshape(2, *indexer_shape)
+    packed = np.concatenate(
+        (routed.reshape(2, -1), indexer.view(np.uint8).reshape(2, -1)), axis=1
+    )
+
+    output = worker._make_output(0, packed)
+
+    routed_rows = output.routed_rows
+    indexer_rows = output.indexer_rows
+    assert routed_rows is not None and indexer_rows is not None
+    np.testing.assert_array_equal(routed_rows, routed)
+    np.testing.assert_array_equal(indexer_rows, indexer)
+    assert not np.shares_memory(routed_rows, indexer_rows)
+    assert not np.shares_memory(routed_rows, packed)
+    assert not np.shares_memory(indexer_rows, packed)
+    indexer_rows[:] = -1
+    np.testing.assert_array_equal(routed_rows, routed)
+
+
+def test_connector_close_is_idempotent():
+    worker = _make_worker(1)
+    worker.close()
+    worker.close()
+    assert worker._store is None
+    assert worker._buffer is None
+    assert worker._routed_experts_capturer is None
+    assert worker._indexer is None
+
+
+def test_connector_rolls_back_routed_experts_when_indexer_capture_fails(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_worker
+
+    routed = Mock()
+    monkeypatch.setattr(aux_worker, "RoutedExpertsCapturer", Mock(return_value=routed))
+    monkeypatch.setattr(aux_worker, "bind_routed_experts_capturer", Mock())
+    monkeypatch.setattr(
+        aux_worker,
+        "IndexerCapturer",
+        Mock(side_effect=RuntimeError("indexer init failed")),
+    )
+    monkeypatch.setattr(
+        aux_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_return_indexer_topk=True
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+
+    with pytest.raises(RuntimeError, match="indexer init failed"):
+        AuxOutputWorkerConnector(vllm_config=config, model=Mock())
+
+    routed.close.assert_called_once()
+
+
+def test_connector_rolls_back_capture_when_routed_experts_binding_fails(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_worker
+
+    routed = Mock()
+    monkeypatch.setattr(aux_worker, "RoutedExpertsCapturer", Mock(return_value=routed))
+    monkeypatch.setattr(
+        aux_worker,
+        "bind_routed_experts_capturer",
+        Mock(side_effect=ValueError("no supported MoE router")),
+    )
+    monkeypatch.setattr(
+        aux_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_return_indexer_topk=False
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+
+    with pytest.raises(ValueError, match="no supported MoE router"):
+        AuxOutputWorkerConnector(vllm_config=config, model=Mock())
+
+    routed.close.assert_called_once()

@@ -7,38 +7,99 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    JsonValue,
     NonNegativeInt,
     PrivateAttr,
     Tag,
+    field_serializer,
     field_validator,
     model_validator,
 )
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
     validate_cache_salt,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
+    ChatCompletionToolsParam,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
+logger = init_logger(__name__)
+
 ####### Tokens IN <> Tokens OUT #######
 
-OutputMode: TypeAlias = Literal["tokens", "text"]
+OutputMode: TypeAlias = Literal["tokens", "text", "derender"]
+
+
+class ParseContext(BaseModel):
+    """Chat request context the generate server needs to parse output.
+
+    Built by `/render` from the post-`adjust_request` chat request and read
+    only when `output_mode="derender"`. Unknown fields from a newer `/render`
+    are kept so `GenerateRequest` can reject them only in that mode.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    tools: list[ChatCompletionToolsParam] | None = None
+    tool_choice: (
+        Literal["none", "auto", "required"] | ChatCompletionNamedToolChoiceParam | None
+    ) = "none"
+    parallel_tool_calls: bool | None = True
+    include_reasoning: bool = True
+    chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
+    """Template kwargs with the render server's defaults already applied,
+    without the API server only entries a handler keeps out of the engine."""
+    history_tool_call_cnt: int = Field(default=0, ge=0)
+    """Tool calls already in the rendered conversation, for sequential IDs."""
+
+    def to_chat_request(self) -> ChatCompletionRequest:
+        """Build the message less chat request the parser reads.
+
+        Built without the chat request validators: the Anthropic converter
+        assigns tool fields that they would reject (e.g. `tools: []`) and the
+        coupled path serves those as is.
+
+        Raises:
+            VLLMValidationError: If a named `tool_choice` matches no tool.
+
+        """
+        if isinstance(self.tool_choice, ChatCompletionNamedToolChoiceParam):
+            name = self.tool_choice.function.name
+            if not any(tool.function.name == name for tool in self.tools or ()):
+                raise VLLMValidationError(
+                    "The tool specified in `tool_choice` does not match any"
+                    " of the specified `tools`",
+                    parameter="tool_choice",
+                )
+        return ChatCompletionRequest.model_construct(
+            messages=[],
+            tools=self.tools,
+            tool_choice=self.tool_choice,
+            parallel_tool_calls=self.parallel_tool_calls,
+            include_reasoning=self.include_reasoning,
+            chat_template_kwargs=self.chat_template_kwargs,
+        )
 
 
 class PlaceholderRangeInfo(BaseModel):
@@ -247,8 +308,19 @@ class GenerateRequest(BaseModel):
         description=(
             "Response level. 'tokens' returns token IDs only. 'text' also "
             "returns the detokenized text and logprobs with decoded token "
-            "strings. 'text' needs a server that loads a tokenizer and "
-            "sampling_params.detokenize to be true."
+            "strings. 'derender' returns the parsed assistant message and "
+            "needs `parse_context` when the server has a parser. 'text' and "
+            "'derender' need a server that loads a tokenizer and "
+            "sampling_params.detokenize to be true. With `stream`, "
+            "'derender' returns a parsed chat `delta` per chunk."
+        ),
+    )
+    parse_context: ParseContext | None = Field(
+        default=None,
+        description=(
+            "Chat context from `/render`. Read only when "
+            "output_mode='derender' and ignored at other levels, so a "
+            "rendered request can be sent to a prefill leg unchanged."
         ),
     )
 
@@ -326,6 +398,25 @@ class GenerateRequest(BaseModel):
                 f"output_mode={self.output_mode!r} requires "
                 "sampling_params.detokenize to be true"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_parse_context_fields(self) -> "GenerateRequest":
+        """Fail on fields from a newer `/render` only where they are read."""
+        if self.parse_context is None or not (
+            unknown := sorted(self.parse_context.model_extra or ())
+        ):
+            return self
+        if self.output_mode == "derender":
+            raise ValueError(
+                f"Unknown parse_context fields {unknown}; the render server "
+                "is newer than this generate server"
+            )
+        logger.warning_once(
+            "Ignoring unknown parse_context fields %s at output_mode=%r",
+            ", ".join(unknown),
+            self.output_mode,
+        )
         return self
 
     @model_validator(mode="after")
@@ -414,6 +505,9 @@ class GenerateChoiceBase(BaseModel):
     # `None` if (a) the request was aborted before any forward pass,
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
+    indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -451,6 +545,9 @@ class GenerateStreamChoiceBase(BaseModel):
     stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     sampling_mask: list[list[int]] | None = None
     # Set on the final chunk only; covers the whole output.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -465,6 +562,19 @@ class GenerateTextStreamChoice(GenerateStreamChoiceBase):
     """Text delta since the previous chunk of this choice."""
 
     logprobs: ChatCompletionLogProbs | None = None
+
+
+class GenerateDerenderStreamChoice(GenerateStreamChoiceBase):
+    delta: DeltaMessage
+    """Parsed delta since the previous chunk of this choice."""
+
+    logprobs: ChatCompletionLogProbs | None = None
+    """Logprobs with decoded token strings and `bytes`. None when reasoning
+    is hidden by `include_reasoning=false`."""
+
+    @field_serializer("delta")
+    def _serialize_delta(self, delta: DeltaMessage) -> dict[str, Any]:
+        return delta.model_dump(exclude_none=True)
 
 
 class GenerateStreamResponseBase(BaseModel):
@@ -490,6 +600,20 @@ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
 class GenerateTextStreamResponse(GenerateStreamResponseBase):
     output_mode: Literal["text"] = "text"
     choices: list[GenerateTextStreamChoice]
+
+
+class GenerateDerenderStreamResponse(GenerateStreamResponseBase):
+    output_mode: Literal["derender"] = "derender"
+    choices: list[GenerateDerenderStreamChoice]
+
+
+class GenerateDerenderChoice(GenerateChoiceBase):
+    message: ChatMessage
+    """Assistant message parsed from the output text."""
+
+    logprobs: ChatCompletionLogProbs | None = None
+    """Logprobs with decoded token strings and `bytes`. None when reasoning
+    is hidden by `include_reasoning=false`."""
 
 
 class GenerateResponseBase(BaseModel):
@@ -532,6 +656,11 @@ class GenerateTextResponse(GenerateResponseBase):
     choices: list[GenerateTextChoice]
 
 
+class GenerateDerenderResponse(GenerateResponseBase):
+    output_mode: Literal["derender"] = "derender"
+    choices: list[GenerateDerenderChoice]
+
+
 def output_mode_or_tokens(value: Any) -> Any:
     """Discriminator for `GenerateResponse` and `GenerateStreamResponse`.
 
@@ -548,14 +677,22 @@ def output_mode_or_tokens(value: Any) -> Any:
 # `Generate<Level>...` classes to construct.
 GenerateResponse: TypeAlias = Annotated[
     Annotated[GenerateTokensResponse, Tag("tokens")]
-    | Annotated[GenerateTextResponse, Tag("text")],
+    | Annotated[GenerateTextResponse, Tag("text")]
+    | Annotated[GenerateDerenderResponse, Tag("derender")],
     Discriminator(output_mode_or_tokens),
 ]
 GenerateStreamResponse: TypeAlias = Annotated[
     Annotated[GenerateTokensStreamResponse, Tag("tokens")]
-    | Annotated[GenerateTextStreamResponse, Tag("text")],
+    | Annotated[GenerateTextStreamResponse, Tag("text")]
+    | Annotated[GenerateDerenderStreamResponse, Tag("derender")],
     Discriminator(output_mode_or_tokens),
 ]
+
+
+class AbortRequestsRequest(BaseModel):
+    """Request for the /inference/v1/abort_requests endpoint."""
+
+    request_ids: str | list[str]
 
 
 class DerenderChatRequest(BaseModel):
@@ -742,7 +879,8 @@ class DerenderStreamState(BaseModel):
     ``_correct_decoded_token`` reads."""
 
     logprob_text_offset: int = Field(default=0, ge=0)
-    """Cumulative emitted text length. Seeds ``text_offset`` for completion
+    """Cumulative length of reported logprob tokens, including special tokens.
+    Seeds ``text_offset`` for completion
     streaming logprobs so offsets stay absolute across chunks, mirroring
     ``initial_text_offset`` in the generate streaming path."""
 

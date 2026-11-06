@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import GenerationError, RetryableRequestError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -25,6 +26,13 @@ class RequestError:
     code: str
     message: str
     retryable: bool = False
+
+    def to_exception(self) -> GenerationError | VLLMValidationError:
+        if self.code == "validation_error":
+            return VLLMValidationError(self.message)
+        if self.retryable:
+            return RetryableRequestError(self.message)
+        return GenerationError(self.message)
 
 
 @dataclass
@@ -88,6 +96,7 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
+    indexer_topk: np.ndarray | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -235,6 +244,8 @@ class RequestOutput:
                         # aggregation with earlier chunks that have no R3.
                         if next_completion.routed_experts is not None:
                             completion.routed_experts = next_completion.routed_experts
+                        if next_completion.indexer_topk is not None:
+                            completion.indexer_topk = next_completion.indexer_topk
                         # Like finish_reason, spans come only with the terminal output.
                         completion.weight_versions = next_completion.weight_versions
                         completion.finish_reason = next_completion.finish_reason

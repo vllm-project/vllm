@@ -63,9 +63,11 @@ class _ExpandPageIndicesKernel:
         stride_0,
         stride_1,
         paged_kv_indptr,
+        num_real_tokens,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
+        CLAMP_TAIL=False,
     ):
         # Both block-table strides are passed explicitly: the kernel no longer
         # assumes the column stride is 1. This stand-in indexes the tensor
@@ -145,6 +147,7 @@ def _builder(
             )
         ),
         _mtp_decode_qlen=mtp_decode_qlen,
+        _varlen_decode_qlen=0,
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
@@ -500,6 +503,7 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = 576**-0.5
     decode = SimpleNamespace(
+        varlen_q_rows=None,
         max_qo_len=4,
         qo_indptr=torch.tensor([0, 4], dtype=torch.int32),
         paged_kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
@@ -563,6 +567,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     impl.qk_rope_head_dim = 64
     impl.scale = head_dim**-0.5
     decode = SimpleNamespace(
+        varlen_q_rows=None,
         max_qo_len=1,
         qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
         paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32),
@@ -787,6 +792,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             torch.tensor([global_seq_len], dtype=torch.int32, device=device),
         )
         decode = SimpleNamespace(
+            varlen_q_rows=None,
             max_qo_len=qlen,
             paged_kv_indptr=torch.tensor(
                 [0, local_kv.shape[0]], dtype=torch.int32, device=device
@@ -967,13 +973,14 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     assert info_calls == [
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
-            "max_qo_len": builder.reorder_batch_threshold,
+            "max_qo_len": qlen,
             "num_attention_heads": AiterMLAHelper.get_actual_mla_num_heads(num_heads),
             "q_dtype": dtypes.fp8,
             "kv_dtype": dtypes.fp8,
             "is_sparse": False,
             "fast_mode": True,
         }
+        for qlen in range(1, builder.reorder_batch_threshold + 1)
     ]
     assert builder._mla_q_dtype == dtypes.fp8
     assert builder._mla_kv_dtype == dtypes.fp8
@@ -1006,6 +1013,118 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     assert build_rows.call_args_list == (
         [mock.call(chunk, torch.device("cpu"))] * 2 if needs_row_map else []
     )
+
+
+def test_builder_sizes_metadata_for_every_decode_qlen(monkeypatch):
+    """Size the persistent metadata for the largest need of any served qlen.
+
+    The builder serves every qlen up to reorder_batch_threshold (a DSpark draft
+    runs k-token blocks under a k + 1 threshold). On gfx950, aiter tiles a bf16
+    block of fewer than 128 packed rows by 64, so 16 heads x 7 tokens needs
+    twice the buffers of 16 heads x 8 tokens.
+    """
+
+    def get_mla_metadata_info_v1(
+        max_batch_size,
+        max_qo_len,
+        num_attention_heads,
+        q_dtype,
+        kv_dtype,
+        *,
+        is_sparse,
+        fast_mode,
+    ):
+        packed = max_qo_len * num_attention_heads
+        tiles = math.ceil(packed / (64 if 64 <= packed < 128 else 128))
+        work = max_batch_size * tiles
+        return (
+            (2, torch.uint64),
+            (257, torch.int32),
+            ((work + 255, 8), torch.int32),
+            (work + 1, torch.int32),
+            ((work, 2), torch.int32),
+            (2 * work, torch.int32),
+        )
+
+    def init_common_builder(self, *args, **kwargs):
+        self.num_heads = 16
+        self.q_data_type = torch.bfloat16
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        self.dcp_world_size = 1
+        self.cp_kv_cache_interleave_size = 1
+        self.reorder_batch_threshold = 8
+
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(
+            dtypes=SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16"),
+            get_mla_metadata_info_v1=get_mla_metadata_info_v1,
+        ),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder, "__init__", init_common_builder
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="deepseek_mtp", num_speculative_tokens=7, parallel_drafting=False
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=4,
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=16,
+            dtype=torch.bfloat16,
+            get_num_attention_heads=lambda parallel_config: 16,
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        cache_config=SimpleNamespace(cache_dtype="auto", num_gpu_blocks=None),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
+            static_forward_context={},
+        ),
+    )
+    builder = AiterMLAMetadataBuilder(
+        kv_cache_spec=SimpleNamespace(
+            block_size=1, dtype=torch.bfloat16, cache_dtype_str="auto"
+        ),
+        layer_names=["layer.0"],
+        vllm_config=config,
+        device=torch.device("cpu"),
+    )
+
+    infos = [
+        get_mla_metadata_info_v1(
+            4, qlen, 16, torch.bfloat16, "bf16", is_sparse=False, fast_mode=True
+        )
+        for qlen in range(1, 9)
+    ]
+    buffers = [
+        builder._mla_work_meta_data,
+        builder._mla_work_indptr,
+        builder._mla_work_info_set,
+        builder._mla_reduce_indptr,
+        builder._mla_reduce_final_map,
+        builder._mla_reduce_partial_map,
+    ]
+    for i, buffer in enumerate(buffers):
+        needed = [
+            torch.Size(torch.empty(info[i][0], device="meta").shape) for info in infos
+        ]
+        assert all(
+            all(have >= need for have, need in zip(buffer.shape, shape))
+            for shape in needed
+        ), (i, buffer.shape, needed)
 
 
 def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
@@ -1204,6 +1323,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
 
     assert metadata.max_qo_len == 1
     assert torch.equal(metadata.paged_kv_indptr, expected_paged_kv_indptr)
+    assert metadata.paged_kv_indices is not None
     assert torch.equal(
         metadata.paged_kv_indices[: expected_indices.numel()],
         expected_indices,
@@ -1452,3 +1572,132 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
+
+
+def _adaptive_config(
+    *,
+    adaptive: bool = True,
+    dcp: int = 1,
+    num_speculative_tokens: int = 7,
+    cp_interleave: int = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            enable_adaptive_verification=adaptive,
+            parallel_drafting=False,
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp,
+            cp_kv_cache_interleave_size=cp_interleave,
+        ),
+        use_v2_model_runner=True,
+    )
+
+
+def test_varlen_cudagraph_bound_follows_adaptive_verification(monkeypatch):
+    monkeypatch.setattr(rocm_aiter_mla, "_asm_dcp_verify_configured", lambda *a: True)
+    for route in ("_segmented_dcp_verify_supported", "_triton_dcp_verify_supported"):
+        monkeypatch.setattr(rocm_aiter_mla, route, lambda *a: False)
+    bound = AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len
+    assert bound(_adaptive_config(), SimpleNamespace()) == 8
+    assert bound(_adaptive_config(adaptive=False), SimpleNamespace()) is None
+    assert bound(_adaptive_config(dcp=8), SimpleNamespace()) == 8
+    assert bound(_adaptive_config(dcp=8, cp_interleave=2), SimpleNamespace()) is None
+    assert (
+        bound(_adaptive_config(dcp=8, num_speculative_tokens=1), SimpleNamespace())
+        is None
+    )
+    # Kimi-K3 DSpark draft layers share the target's group; causality is
+    # decided per batch, so the merged non-causal spec keeps the bound.
+    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
+    assert bound(_adaptive_config(), shared_draft_group) == 8
+
+
+def test_backend_rejects_unsupported_adaptive_dcp(monkeypatch):
+    import vllm.config
+
+    monkeypatch.setattr(
+        vllm.config,
+        "get_current_vllm_config_or_none",
+        lambda: _adaptive_config(dcp=8, cp_interleave=2),
+    )
+
+    def validate(**flags):
+        return rocm_aiter_mla.AiterMLABackend.validate_configuration(
+            head_size=576,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=None,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            use_per_head_quant_scales=False,
+            device_capability=None,
+            attn_type="decoder",
+            **flags,
+        )
+
+    with pytest.raises(ValueError, match="decode context parallelism"):
+        validate(use_adaptive_verification=True, use_dcp=True)
+    validate(use_dcp=True)
+
+
+class _RecordingExpandKernel(_NoOpTritonKernel):
+    def __call__(self, *args, CLAMP_TAIL=False, **kwargs):
+        self.clamp_tail = CLAMP_TAIL
+
+
+def test_dcp_varlen_right_aligns_rows_and_keeps_lengths(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "aiter", SimpleNamespace(get_mla_metadata_v1=mock.MagicMock())
+    )
+    expand = _RecordingExpandKernel()
+    monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand)
+    width, num_reqs = 5, 4
+    builder = _builder(
+        mtp_decode_qlen=width,
+        dcp_world_size=8,
+        max_decode_rows=num_reqs * width,
+        num_heads=12,
+        asm_dcp_verify=True,
+        supports_segmented_dcp_verify=True,
+    )
+    rows = torch.arange(num_reqs * width, dtype=torch.int64)
+    builder._varlen_decode_qlen = width
+    builder._varlen_right_align = AiterMLAMetadataBuilder.__dict__[
+        "_varlen_right_align"
+    ].__get__(builder)
+    builder._varlen_row_req = rows // width
+    builder._varlen_row_pos = rows % width
+    builder._varlen_row_ids = rows
+    builder._varlen_q_rows = torch.zeros_like(rows)
+    builder._varlen_o_rows = torch.zeros(num_reqs * width + 1, dtype=torch.int64)
+    builder._fill_varlen_rows = AiterMLAMetadataBuilder._fill_varlen_rows.__get__(
+        builder
+    )
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(num_reqs * 8, dtype=torch.int32).view(-1, 8),
+        seq_lens_device=torch.tensor([5, 3, 2, 0], dtype=torch.int32),
+        max_seq_len=40,
+        query_start_loc_cpu=torch.tensor([0, 3, 5, 7, 9], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, 1, 6, 9, 9], dtype=torch.int32),
+        num_decode_tokens=9,
+        max_query_len=width,
+        dcp_tot_seq_lens_device=torch.tensor([40, 21, 9, 0], dtype=torch.int32),
+    )
+
+    assert metadata.dcp_route is rocm_aiter_mla._DCPDecodeRoute.CPRR
+    assert metadata.seq_lens.tolist() == [5, 3, 2, width]
+    assert metadata.g_kv_indptr is not None
+    assert metadata.g_kv_indptr.tolist()[: num_reqs + 1] == [0, 40, 61, 70, 110]
+    assert metadata.qo_indptr is not None
+    assert metadata.qo_indptr.tolist() == [0, 5, 10, 15, 20]
+    assert expand.clamp_tail is False
+    assert metadata.varlen_q_rows is not None and metadata.varlen_o_rows is not None
+    real_rows = [4, 5, 6, 7, 8, 9, 12, 13, 14]
+    assert metadata.varlen_o_rows[:9].tolist() == real_rows
+    assert metadata.varlen_q_rows[real_rows].tolist() == list(range(9))

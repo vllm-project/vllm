@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for AsyncLookupManager."""
 
+import queue
 import threading
 from collections.abc import Iterable
 
@@ -19,6 +20,16 @@ def _ctx(req_id: str = "r1") -> ReqContext:
     return ReqContext(req_id=req_id)
 
 
+class _SignalingQueue(queue.SimpleQueue):
+    """Sets ``ready`` once a posted batch is visible to drain_results()."""
+
+    ready: threading.Event
+
+    def put(self, item, block=True, timeout=None):
+        super().put(item, block, timeout)
+        self.ready.set()
+
+
 class InMemoryLookupManager(AsyncLookupManager):
     """Test subclass backed by an in-memory set."""
 
@@ -26,18 +37,50 @@ class InMemoryLookupManager(AsyncLookupManager):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
         self._results_ready = threading.Event()
+        self._pending_results = _SignalingQueue()
+        self._pending_results.ready = self._results_ready
         self.batch_lookup_calls = 0
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
         self.batch_lookup_calls += 1
-        results = [k in self._existing for k in keys]
-        self._results_ready.set()
-        return results
+        return [k in self._existing for k in keys]
 
 
 class TestAsyncLookupManager:
+    @pytest.mark.parametrize("fail_after", [0, 1])
+    def test_iterator_failure_returns_misses_and_preserves_progress(self, fail_after):
+        class FailingIteratorLookupManager(AsyncLookupManager):
+            def batch_lookup(
+                self, keys: list[OffloadKey], req_context: ReqContext
+            ) -> Iterable[bool]:
+                for index, _ in enumerate(keys):
+                    if req_context.req_id == "failing" and index == fail_after:
+                        raise OSError("storage lookup failed during iteration")
+                    yield True
+
+        mgr = FailingIteratorLookupManager(tier_type="test")
+        failing_ctx = _ctx("failing")
+        healthy_ctx = _ctx("healthy")
+        later_ctx = _ctx("later")
+        try:
+            assert mgr.lookup(_key(1), failing_ctx) is None
+            assert mgr.lookup(_key(2), failing_ctx) is None
+            assert mgr.lookup(_key(3), healthy_ctx) is None
+            mgr.flush()
+
+            assert mgr.lookup(_key(4), later_ctx) is None
+            mgr.flush()
+        finally:
+            # The FIFO shutdown sentinel waits for both batches and drains results.
+            mgr.shutdown()
+
+        assert mgr.lookup(_key(1), failing_ctx) is False
+        assert mgr.lookup(_key(2), failing_ctx) is False
+        assert mgr.lookup(_key(3), healthy_ctx) is True
+        assert mgr.lookup(_key(4), later_ctx) is True
+
     def test_new_key_returns_none(self):
         mgr = InMemoryLookupManager()
         assert mgr.lookup(_key(1), _ctx()) is None
@@ -360,3 +403,105 @@ class TestAsyncLookupManager:
         with pytest.raises(AssertionError):
             mgr.drain_results()
         mgr.shutdown()
+
+    def test_store_drops_orphaned_in_flight_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A store must not retain an in-flight state after its request ended."""
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+
+        def blocking_lookup(keys, req_context):
+            results = list(batch_lookup(keys, req_context))
+            probe_started.set()
+            if not release_probe.wait(timeout=5):
+                raise TimeoutError("Test did not release the backend probe")
+            return results
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            assert mgr.lookup(key, _ctx("req_a")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+            mgr.cleanup("req_a")
+            assert key in mgr._lookup_state
+            assert not mgr._lookup_state[key].request_ids
+
+            mgr._existing.add(key)
+            mgr.mark_present([key])
+            assert key not in mgr._lookup_state
+            release_probe.set()
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        assert key not in mgr._lookup_state
+
+    def test_mark_present_handles_mixed_phases(self, monkeypatch: pytest.MonkeyPatch):
+        """One call updates pending, in-flight and resolved keys independently."""
+        pending_key, in_flight_key, resolved_key, unknown_key = (
+            _key(1),
+            _key(2),
+            _key(3),
+            _key(99),
+        )
+        mgr = InMemoryLookupManager()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+        calls = 0
+
+        def blocking_lookup(keys, req_context):
+            nonlocal calls
+            calls += 1
+            results = list(batch_lookup(keys, req_context))
+            if calls == 2:
+                probe_started.set()
+                if not release_probe.wait(timeout=5):
+                    raise TimeoutError("Test did not release the backend probe")
+            return results
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            # Resolved: a probe delivered a miss.
+            assert mgr.lookup(resolved_key, _ctx("req_c")) is None
+            mgr.flush()
+            assert mgr._results_ready.wait(timeout=5)
+            mgr._results_ready.clear()
+            assert mgr.lookup(resolved_key, _ctx("req_c")) is False
+
+            # In flight: the worker is still inside this probe.
+            assert mgr.lookup(in_flight_key, _ctx("req_b")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+
+            # Pending: accumulated this step, not flushed yet.
+            assert mgr.lookup(pending_key, _ctx("req_a")) is None
+
+            mgr.mark_present([pending_key, in_flight_key, resolved_key, unknown_key])
+
+            for key in (pending_key, in_flight_key, resolved_key):
+                state = mgr._lookup_state[key]
+                assert state.result is True
+                assert state.phase is LookupPhase.RESOLVED
+            assert unknown_key not in mgr._lookup_state
+
+            # A stale pending entry is skipped when its batch is flushed.
+            mgr.flush()
+
+            assert mgr.lookup(pending_key, _ctx("req_a")) is True
+            assert mgr.lookup(in_flight_key, _ctx("req_b")) is True
+            assert mgr.lookup(resolved_key, _ctx("req_c")) is True
+            assert mgr.lookup(unknown_key, _ctx("req_d")) is None
+
+            release_probe.set()
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        # Only the two flushed probes ran: the pending batch was dropped, the
+        # in-flight result was ignored, and unknown_key was never probed.
+        assert calls == 2

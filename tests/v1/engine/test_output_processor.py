@@ -19,11 +19,13 @@ from tests.v1.engine.utils import (
 )
 from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingRequestOutput,
+    RequestError,
     RequestOutput,
     SamplingMask,
     WeightVersionSpan,
@@ -68,6 +70,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.indexer_chunks = []
     state.spec_decode_metrics = None
 
     output = state._new_completion_output([], None, None)
@@ -93,6 +96,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
         SamplingMaskLists(token_ids=np.array([30, 31, 32])),
     ]
     state.routed_experts_chunks = []
+    state.indexer_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1520,7 +1524,7 @@ async def test_request_output_collector():
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
 
 
-def test_routed_experts_are_accumulated_until_finish():
+def test_aux_outputs_are_accumulated_until_finish():
     state = RequestState(
         request_id="request-int",
         external_req_id="request",
@@ -1546,11 +1550,15 @@ def test_routed_experts_are_accumulated_until_finish():
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
     state.routed_experts_chunks.append(prompt_chunk)
+    selections = np.arange(12, dtype=np.int32).reshape(6, 1, 2)
+    state.indexer_chunks = [selections[:4]]
 
     partial = state.make_request_output([5], None, None, None)
     assert partial is not None
     assert partial.outputs[0].routed_experts is None
+    assert partial.outputs[0].indexer_topk is None
 
+    state.indexer_chunks.append(selections[4:])
     state.routed_experts_chunks.append(decode_chunk)
     finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
     assert finished is not None
@@ -1558,6 +1566,8 @@ def test_routed_experts_are_accumulated_until_finish():
         finished.outputs[0].routed_experts,
         np.concatenate((prompt_chunk, decode_chunk)),
     )
+    result = finished.outputs[0]
+    np.testing.assert_array_equal(result.indexer_topk, selections)
 
 
 @pytest.mark.asyncio
@@ -1811,6 +1821,60 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.external_req_id], internal=False)
 
 
+@pytest.mark.parametrize("runner", ["generate", "pooling"])
+@pytest.mark.parametrize(
+    "error,exception_type",
+    [
+        (
+            RequestError(code="engine_paused", message="paused", retryable=True),
+            RetryableRequestError,
+        ),
+        (
+            RequestError(code="validation_error", message="incompatible backend"),
+            VLLMValidationError,
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_request_rejected_by_engine(runner: str, error, exception_type):
+    """A request the engine rejects on arrival (e.g. while paused) raises its
+    corresponding exception to the caller, leaves no stats behind, and ends a
+    streaming-input session, including any input chunks sent since."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams() if runner == "generate" else None,
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+        resumable=runner == "generate",
+    )
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+    output_processor.add_request(request, None, queue=queue)
+    iteration_stats = IterationStats()
+
+    result = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request.request_id, [], finish_reason=FinishReason.ERROR, error=error
+            )
+        ],
+        iteration_stats=iteration_stats,
+    )
+
+    assert not output_processor.has_request(request.request_id)
+    assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
+    assert not iteration_stats.finished_requests
+    assert not iteration_stats.time_to_first_tokens_iter
+    with pytest.raises(exception_type, match=error.message):
+        queue.get_nowait()
+
+
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))
 def test_sampling_masks_follow_output_kind(output_kind):
     state = RequestState.__new__(RequestState)
@@ -1823,6 +1887,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.indexer_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 

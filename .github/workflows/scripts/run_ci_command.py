@@ -76,11 +76,9 @@ ACTIVE_BUILD_STATES = {
 }
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
-SETUP_STEP_KEYS = {
-    "ensure-ci-base-amd",
-    "pre-commit",
-    "refresh-rocm-base-amd",
-}
+# ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
+# for branches that predate .buildkite/scripts/rocm/build.sh.
+SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
 
 
 class ApiError(RuntimeError):
@@ -621,6 +619,16 @@ def blocks_new_run(command: str, build: Mapping[str, Any]) -> bool:
     return is_active_build(build)
 
 
+def list_commit_builds(
+    buildkite: BuildkiteClient, command: str, commit: str
+) -> list[dict[str, Any]]:
+    builds = buildkite.list_builds(commit)
+    if command not in AMD_CI_COMMANDS:
+        return builds
+    # bootstrap-amd.sh exits before uploading any test steps for PR webhook builds.
+    return [build for build in builds if build.get("source") != "webhook"]
+
+
 def select_latest_build(
     builds: Sequence[dict[str, Any]],
     pr_number: int,
@@ -968,7 +976,7 @@ def handle_run_ci(
             f"{ci_name} was already requested by this comment: {duplicate['web_url']}"
         )
 
-    current_builds = buildkite.list_builds(pr["head"]["sha"])
+    current_builds = list_commit_builds(buildkite, command, pr["head"]["sha"])
     active_build = next(
         (
             build
@@ -1023,7 +1031,7 @@ def handle_retry_failed(
     ci_name = ci_name_for_command(command)
     run_command = run_command_for_command(command)
     retry_command = retry_command_for_command(command)
-    builds = buildkite.list_builds(pr["head"]["sha"])
+    builds = list_commit_builds(buildkite, command, pr["head"]["sha"])
     build = select_latest_build(builds, pr["number"])
     if build:
         metadata = build.get("meta_data") or {}

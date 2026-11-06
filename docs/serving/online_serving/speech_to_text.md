@@ -99,6 +99,12 @@ For `verbose_json` response format:
     ```
 Currently “verbose_json” response format doesn’t support no_speech_prob.
 
+For models with hotword support, `hotwords` takes a comma-separated list of terms
+(names, jargon) to bias recognition toward. Currently, this is supported by
+`FunAudioLLM/Fun-ASR-Nano-2512-vllm` and `OpenMOSS-Team/MOSS-Transcribe-Diarize`.
+Keep the list short and relevant to the audio: long or unrelated lists can
+degrade accuracy.
+
 For models with diarization support, `diarized_json` returns OpenAI-compatible
 speaker segments. Currently, this is supported by
 `OpenMOSS-Team/MOSS-Transcribe-Diarize`.

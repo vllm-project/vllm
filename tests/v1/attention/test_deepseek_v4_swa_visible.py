@@ -883,3 +883,106 @@ def test_dspark_noncausal_draft_decode_update_matches_build():
     assert md.decode_swa_width == builder.noncausal_index_width
     torch.testing.assert_close(md.decode_swa_lens, expected.decode_swa_lens)
     torch.testing.assert_close(md.decode_swa_indices, expected.decode_swa_indices)
+
+
+class _StubLinear(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.weight_block_size = None
+
+
+def _prefix_replay_attention_cls():
+    from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+
+    class _Backend:
+        @staticmethod
+        def get_name() -> str:
+            return "STUB"
+
+    class Layer(DeepseekV4Attention):
+        backend_cls = _Backend
+
+        @classmethod
+        def get_padded_num_q_heads(cls, num_heads: int) -> int:
+            return num_heads
+
+        def forward_mqa(
+            self,
+            q: torch.Tensor,
+            kv: torch.Tensor,
+            positions: torch.Tensor,
+            output: torch.Tensor,
+        ) -> None:
+            return None
+
+        def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor):
+            return attn_out
+
+    return Layer
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "is_rocm,cdna,flag,replays_window",
+    [
+        (False, 0, True, True),
+        (True, 4, True, True),
+        (True, 3, True, False),
+        (True, 4, False, False),
+    ],
+)
+def test_prefix_cache_replays_the_swa_window(
+    monkeypatch, is_rocm, cdna, flag, replays_window
+):
+    """Prefix caching stays on, and the window is replayed only on CDNA4.
+
+    tests/v1/core/test_prefix_replay.py already checks that a
+    bounded-replay SWA spec makes a prefix hit recompute the window.
+    This is the spec the attention layer actually publishes. Forcing
+    the window back into the prefix cache, on CDNA4 or off it, fails here.
+    The replay_start clamp used by the gather kernels is covered by
+    test_builder_replay_start_bounds_prefill_window_and_gather.
+    """
+    from vllm.config import set_current_vllm_config
+    from vllm.models.deepseek_v41 import attention as attn
+    from vllm.platforms import current_platform
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(attn, "MergedColumnParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "ColumnParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "RowParallelLinear", _StubLinear)
+    monkeypatch.setattr(attn, "RMSNorm", _StubLinear)
+    monkeypatch.setattr(attn, "build_deepseek_v4_rope", lambda *a, **k: None)
+    monkeypatch.setattr(attn, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "Event", lambda *a, **k: object())
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    if is_rocm:
+        import vllm.platforms.rocm as rocm_platform
+
+        monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+
+    window = 128
+    vllm_config = create_vllm_config(
+        max_model_len=256, max_num_seqs=4, max_num_batched_tokens=64
+    )
+    vllm_config.cache_config.swa_bounded_replay = flag
+    assert vllm_config.cache_config.enable_prefix_caching
+    vllm_config.model_config.hf_config = DeepseekV4Config(
+        num_hidden_layers=1,
+        hidden_size=128,
+        num_attention_heads=8,
+        q_lora_rank=32,
+        o_lora_rank=32,
+        head_dim=64,
+        qk_rope_head_dim=16,
+        o_groups=8,
+        sliding_window=window,
+        compress_ratios=[0],
+    )
+    layer_cls = _prefix_replay_attention_cls()
+    with set_current_vllm_config(vllm_config):
+        layer = layer_cls(vllm_config, prefix="model.layers.0.self_attn")
+    spec = layer.swa_cache_layer.get_kv_cache_spec(vllm_config)
+    assert spec.bounded_replay is replays_window
+    assert spec.prefix_cacheable is not replays_window
+    assert spec.prefix_replay_tokens == (window if replays_window else 0)

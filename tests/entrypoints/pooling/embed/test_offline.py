@@ -58,10 +58,10 @@ def test_list_prompts(llm: LLM):
     prompts: list[PromptType] = [prompt, prompt_token_ids]
     outputs = llm.embed(prompts, use_tqdm=False)
     assert len(outputs) == 2
-    for i in range(len(outputs)):
-        assert isinstance(outputs[i], EmbeddingRequestOutput)
-        assert outputs[i].prompt_token_ids == prompt_token_ids
-        assert len(outputs[i].outputs.embedding) == embedding_size
+    for output in outputs:
+        assert isinstance(output, EmbeddingRequestOutput)
+        assert output.prompt_token_ids == prompt_token_ids
+        assert len(output.outputs.embedding) == embedding_size
 
 
 @pytest.mark.skip_global_cleanup
@@ -72,7 +72,11 @@ def test_pooling_params(llm: LLM):
             pooling_params=PoolingParams(use_activation=normalize),
             use_tqdm=False,
         )
-        return torch.tensor([x.outputs.embedding for x in outputs])
+        embeddings = []
+        for output in outputs:
+            assert isinstance(output, EmbeddingRequestOutput)
+            embeddings.append(output.outputs.embedding)
+        return torch.tensor(embeddings)
 
     default = get_outputs(normalize=None)
     w_normal = get_outputs(normalize=True)

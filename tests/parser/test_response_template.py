@@ -442,10 +442,14 @@ def streamed_reasoning_end(reasoner, output, prompt=PROMPT_TOKEN_IDS):
     return None
 
 
-def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding():
+def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding(
+    monkeypatch,
+):
     tokenizer = FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE)
     reasoner = ResponseTemplateReasoningParser(tokenizer)
-    tokenizer.decode = lambda *_args, **_kwargs: pytest.fail("decoded")  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        tokenizer, "decode", lambda *_args, **_kwargs: pytest.fail("decoded")
+    )
     output = [50, 101] + [102] * 100 + [51, 103]
 
     assert streamed_reasoning_end(reasoner, output) == len(output) - 2
@@ -1164,7 +1168,9 @@ def test_tool_choice_none_preserves_raw_call_as_content():
 
 
 def test_adjust_request_preserves_parser_delimiters_without_forcing_stop_text():
-    req = request()
+    # The annotation stops ``adjust_request(req) is req`` below from narrowing
+    # this SimpleNamespace stand-in to a real request model.
+    req: SimpleNamespace = request()
     parser = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         TOOLS,
@@ -1199,7 +1205,10 @@ def test_call_cut_off_before_its_closer_is_parsed():
     assert content is None
     assert normalize_calls(calls) == [("set_alarm", {"hour": 7, "label": "morning"})]
     assert streamed is not None
-    assert [call.function.name for call in streamed.tool_calls] == ["set_alarm"]
+    assert len(streamed.tool_calls) == 1
+    function = streamed.tool_calls[0].function
+    assert function is not None
+    assert function.name == "set_alarm"
 
 
 @pytest.mark.parametrize(

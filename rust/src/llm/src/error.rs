@@ -20,4 +20,9 @@ pub enum Error {
         token_count: usize,
         row_count: usize,
     },
+    #[error("{artifact} for request `{request_id}` changed dtype or shape")]
+    AuxOutputShapeMismatch {
+        request_id: String,
+        artifact: &'static str,
+    },
 }

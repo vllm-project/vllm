@@ -76,6 +76,20 @@ def test_aux_output_capture_changes_compilation_hash():
     assert disabled.compute_hash() != enabled.compute_hash()
 
 
+def test_aux_output_hash_separates_every_flag_combination():
+    """Both flags always contribute, so a later `False` key cannot alias a hash."""
+    hashes = {
+        (routed, indexer): AuxOutputConfig(
+            enable_return_routed_experts=routed,
+            enable_return_indexer_topk=indexer,
+        ).compute_hash()
+        for routed in (False, True)
+        for indexer in (False, True)
+    }
+
+    assert len(set(hashes.values())) == 4
+
+
 def test_legacy_routed_experts_flag_updates_aux_output_config():
     args = EngineArgs(enable_return_routed_experts=True)
 
@@ -160,3 +174,26 @@ def test_aux_output_guards_are_inactive_when_capture_is_disabled():
     config.aux_output_config = AuxOutputConfig()
 
     config._verify_aux_output_compatibility()
+
+
+@pytest.mark.parametrize(
+    "routed,indexer", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_aux_output_flags_are_independent(routed, indexer):
+    config = AuxOutputConfig(
+        enable_return_routed_experts=routed,
+        enable_return_indexer_topk=indexer,
+    )
+    assert config.enabled == (routed or indexer)
+    assert (
+        EngineArgs(
+            enable_return_indexer_topk=indexer
+        ).aux_output_config.enable_return_indexer_topk
+        == indexer
+    )
+
+
+def test_indexer_only_does_not_require_moe_routing():
+    config = _config(is_moe=False)
+    config.aux_output_config = AuxOutputConfig(enable_return_indexer_topk=True)
+    VllmConfig._verify_aux_output_compatibility(config)

@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSV4.1 output projection with a small-batch SM100/SM103 fusion."""
 
+from collections.abc import Callable
+
 import torch
 from torch import nn
 
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.pytorch import TorchMxFp8LinearKernel
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -36,7 +39,8 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
         and layer._einsum_recipe == (1, 1, 32)
         and get_input_quant_key(layer.wo_b) == kMxfp8Dynamic
         and isinstance(
-            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
+            getattr(method, "kernel", None),
+            (FlashInferCutedslMxfp8LinearKernel, TorchMxFp8LinearKernel),
         )
         # A group's heads form one portable (<= 8 CTA) cluster.
         and layer.n_local_heads // layer.n_local_groups <= 8
@@ -61,9 +65,14 @@ def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
 
 
 def dsv41_o_proj(
-    layer: nn.Module, attn_out: torch.Tensor, positions: torch.Tensor
+    layer: nn.Module,
+    attn_out: torch.Tensor,
+    positions: torch.Tensor,
+    wo_b_proj: Callable[..., torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches."""
+    """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches;
+    ``wo_b_proj`` replaces ``layer._wo_b_proj``."""
+    wo_b_proj = wo_b_proj or layer._wo_b_proj
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache
     if 1 <= o.shape[0] <= _fused_wo_a_max_tokens(layer) and _can_fuse_wo_a(layer):
@@ -76,7 +85,7 @@ def dsv41_o_proj(
             weight=layer.wo_a.weight,
             weight_scale=layer.wo_a.weight_scale,
         )
-        return layer._wo_b_proj(
+        return wo_b_proj(
             QuantizedActivation(q, scales, o.dtype, q.shape, kMxfp8Dynamic)
         )
     return deep_gemm_fp8_o_proj(
@@ -84,7 +93,7 @@ def dsv41_o_proj(
         positions,
         cos_sin_cache,
         layer.wo_a,
-        layer._wo_b_proj,
+        wo_b_proj,
         n_groups=layer.n_local_groups,
         heads_per_group=layer.n_local_heads // layer.n_local_groups,
         nope_dim=layer.nope_head_dim,

@@ -13,10 +13,11 @@ use vllm_chat::{
     ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
 };
 use vllm_text::TextRequestProcessor;
-use vllm_text::backend::hf::HfOverrides;
+use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::model_names::ServedModelNames;
 use crate::{
-    HttpListenerMode, TlsConfig,
+    HttpListenerMode, ReasoningEffort, TlsConfig,
     listener::{Listener, MaybeTlsListener},
     tls,
 };
@@ -26,8 +27,14 @@ use crate::{
 pub struct RenderConfig {
     pub model: String,
     pub revision: Option<String>,
+    /// Source of the tokenizer files and the chat template, or `None` for `model`.
+    pub tokenizer: Option<ModelSource>,
+    /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
+    pub hf_config: Option<ModelSource>,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
+    /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
     pub host: String,
     pub port: u16,
     pub tool_call_parser: ParserSelection,
@@ -36,6 +43,9 @@ pub struct RenderConfig {
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    pub reasoning_effort_map: HashMap<ReasoningEffort, String>,
+    pub trust_request_chat_template: bool,
+    pub exclude_tools_when_tool_choice_none: bool,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
@@ -59,7 +69,7 @@ impl RenderConfig {
 
 pub(crate) struct RenderState {
     pub(crate) model: String,
-    pub(crate) served_model_names: Vec<String>,
+    pub(crate) served_model_names: ServedModelNames,
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
@@ -72,11 +82,14 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         &config.model,
         LoadModelBackendsOptions {
             revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            hf_config: config.hf_config.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: Default::default(),
@@ -84,8 +97,11 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     )
     .await
     .context("failed to load renderer/tokenizer backends")?;
-    let served_model_names =
-        crate::effective_served_model_names(&config.model, &config.served_model_name);
+    let served_model_names = ServedModelNames::new(crate::effective_served_model_names(
+        &config.model,
+        &config.served_model_name,
+    ))
+    .with_accept_any(config.skip_model_name_validation);
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
@@ -94,7 +110,15 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
         )
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_reasoning_effort_map(
+            config
+                .reasoning_effort_map
+                .iter()
+                .map(|(effort, value)| (effort.as_str().to_owned(), value.clone()))
+                .collect(),
+        )
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -160,8 +184,11 @@ mod tests {
                 tool_strict_level: None,
                 model: "test-model".to_string(),
                 revision: None,
+                tokenizer: None,
+                hf_config: None,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
+                skip_model_name_validation: false,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 tool_call_parser: ParserSelection::Auto,
@@ -169,6 +196,9 @@ mod tests {
                 renderer: RendererSelection::Auto,
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                reasoning_effort_map: HashMap::new(),
+                trust_request_chat_template: false,
+                exclude_tools_when_tool_choice_none: false,
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,

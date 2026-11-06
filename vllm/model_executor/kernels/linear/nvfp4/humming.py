@@ -11,6 +11,11 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     quant_key_to_input_schema,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_kernel_parameter,
+)
 from vllm.platforms import current_platform
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
@@ -52,19 +57,19 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
             "strategy": "group",
             "group_size": 16,
         }
-        # CT pack-quantized reads `weight_packed`; the scheme renamed it to `weight`.
-        if not hasattr(layer, "weight_packed"):
-            layer.weight_packed = layer.weight
-            del layer.weight
+        # CT pack-quantized reads `weight_packed`: make it the weight's runtime name
+        # (a CT checkpoint already has it as an alias of `weight`).
+        move_parameter(layer, "weight", "weight_packed")
         # The CT linear scheme inverts the global scale (1/scale) for
         # marlin/cutlass; humming wants the original.
-        layer.weight_global_scale = torch.nn.Parameter(
-            1.0 / layer.weight_global_scale, requires_grad=False
-        )
+        replace_parameter(layer, "weight_global_scale", 1.0 / layer.weight_global_scale)
         input_quant_key = None
         if hasattr(layer, "input_global_scale"):
-            layer.input_scale_2 = torch.nn.Parameter(
-                layer.input_global_scale.reshape(-1), requires_grad=False
+            # Quark keeps its loaded (retired) `input_scale_2`: revive that one.
+            if "input_scale_2" not in layer._parameters:
+                move_parameter(layer, "input_global_scale", "input_scale_2")
+            set_kernel_parameter(
+                layer, "input_scale_2", layer.input_global_scale.reshape(-1)
             )
             input_quant_key = kNvfp4Dynamic
         input_schema = quant_key_to_input_schema(input_quant_key)

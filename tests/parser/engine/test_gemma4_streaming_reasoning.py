@@ -1824,6 +1824,7 @@ class TestGemma4ArgValueExtender:
                 nonlocal calls
                 if partial:
                     calls += 1
+                assert base.arg_converter is not None
                 return base.arg_converter(raw_args, partial)
 
             parser = Gemma4Parser(

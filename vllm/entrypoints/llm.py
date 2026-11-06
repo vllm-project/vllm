@@ -29,16 +29,17 @@ from vllm.config.model import (
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
+from vllm.entrypoints.common.startup import log_non_default_args
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
-from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
+from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -51,8 +52,6 @@ from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
-
-from ..renderers import ChatParams
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -109,7 +108,8 @@ class LLM(
             reserve for the model weights, activations, and KV cache. Higher
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
-            memory (OOM) errors.
+            memory (OOM) errors. Defaults to 1.0 with the extensible KV cache
+            (which sizes the cache from measured memory) and to 0.92 otherwise.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -118,6 +118,10 @@ class LLM(
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
+        enable_extensible_kv_cache: Reserve the KV cache address range with
+            device virtual memory and commit physical pages after warmup, so
+            the cache is sized from the memory actually free after CUDA graph
+            capture. Defaults to on for CUDA and ROCm with the V2 model runner.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -139,6 +143,7 @@ class LLM(
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
         enable_return_routed_experts: Whether to return routed experts.
+        enable_return_indexer_topk: Whether to return sparse-attention selections.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -194,7 +199,7 @@ class LLM(
         tokenizer_revision: str | None = None,
         chat_template: Path | str | None = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.92,
+        gpu_memory_utilization: float | None = None,
         cpu_offload_gb: float = 0,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
@@ -202,6 +207,7 @@ class LLM(
         offload_params: set[str] | None = None,
         enforce_eager: bool = False,
         enable_return_routed_experts: bool = False,
+        enable_return_indexer_topk: bool = False,
         return_sampling_mask: bool = False,
         disable_custom_all_reduce: bool = False,
         hf_token: bool | str | None = None,
@@ -214,6 +220,7 @@ class LLM(
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
+        enable_extensible_kv_cache: bool | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -311,6 +318,7 @@ class LLM(
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
+            enable_extensible_kv_cache=enable_extensible_kv_cache,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
@@ -318,6 +326,7 @@ class LLM(
             offload_params=offload_params or set(),
             enforce_eager=enforce_eager,
             enable_return_routed_experts=enable_return_routed_experts,
+            enable_return_indexer_topk=enable_return_indexer_topk,
             return_sampling_mask=return_sampling_mask,
             disable_custom_all_reduce=disable_custom_all_reduce,
             hf_token=hf_token,
@@ -804,6 +813,7 @@ class LLM(
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides.
 
@@ -815,12 +825,15 @@ class LLM(
                 profiling starts.
             max_iterations: Optional maximum number of worker iterations to profile.
                 Zero means no limit.
+            profiler_kwargs: Optional dictionary of keyword arguments to pass to
+                the underlying profiler.
 
         """
         self.llm_engine.start_profile(
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def stop_profile(self) -> None:

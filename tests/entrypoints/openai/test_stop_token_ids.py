@@ -91,6 +91,7 @@ class TestChatCompletionStopTokenIds:
             model="test-model",
             messages=[{"role": "user", "content": "hello"}],
             routed_experts_prompt_start=3,
+            indexer_topk_prompt_start=1,
         )
 
         sampling_params = request.to_sampling_params(
@@ -99,6 +100,7 @@ class TestChatCompletionStopTokenIds:
         )
 
         assert sampling_params.routed_experts_prompt_start == 3
+        assert sampling_params.indexer_topk_prompt_start == 1
 
     def test_duplicate_stop_token_ids_deduplicated(self):
         """Overlapping stop_token_ids between client and server are deduplicated."""

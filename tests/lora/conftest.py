@@ -77,7 +77,7 @@ def dist_init():
 
 
 class DummyLoRAModel(nn.Sequential, SupportsLoRA):
-    pass
+    embedding_modules = {"lm_head": "lm_head"}
 
 
 @pytest.fixture
@@ -108,7 +108,6 @@ def dummy_model(default_vllm_config) -> nn.Module:
         )
     )
     model.config = MagicMock()
-    model.embedding_modules = {"lm_head": "lm_head"}
     model.unpadded_vocab_size = 32064
     return model
 
@@ -147,7 +146,6 @@ def dummy_model_gate_up(default_vllm_config) -> nn.Module:
             "up_proj",
         ],
     }
-    model.embedding_modules = {"lm_head": "lm_head"}
     model.unpadded_vocab_size = 32064
 
     return model

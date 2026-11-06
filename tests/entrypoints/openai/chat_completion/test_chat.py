@@ -707,7 +707,7 @@ async def test_extra_fields_allowed(client: openai.AsyncOpenAI):
                 "content": "what is 1+1?",
                 "extra_field": "0",
             }
-        ],  # type: ignore
+        ],
         temperature=0,
         seed=0,
     )
@@ -751,7 +751,7 @@ async def test_custom_role(client: openai.AsyncOpenAI):
                 "role": "my-custom-role",
                 "content": "what is 1+1?",
             }
-        ],  # type: ignore
+        ],
         temperature=0,
         seed=0,
     )
@@ -763,7 +763,7 @@ async def test_custom_role(client: openai.AsyncOpenAI):
                 "role": "my-custom-role",
                 "content": [{"type": "text", "text": "what is 1+1?"}],
             }
-        ],  # type: ignore
+        ],
         temperature=0,
         seed=0,
     )
