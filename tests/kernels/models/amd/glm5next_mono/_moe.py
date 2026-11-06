@@ -10,8 +10,9 @@ vLLM's mHC op, the MoE against ``Glm5NextMoE.forward`` on the kernel's own FFN
 input, and both against an fp32 MoE on the dequantized weights and unquantized
 inputs. vLLM quantizes expert inputs to MXFP4 and the kernel to MXFP8, so the gap
 between them is vLLM's own error (~0.2 relative on random weights): the test checks
-that, that the kernel is the closer of the two to the exact result, and that both
-route alike."""
+that, that the kernel is the closer of the two to the exact result, that it is
+within 1% of the same fp32 MoE with both expert GEMMs' inputs rounded to MXFP8 as
+it rounds them, and that both route alike."""
 
 from types import SimpleNamespace
 
@@ -61,9 +62,24 @@ def _random_moe(moe, gd, gr) -> None:
     )
 
 
-def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared):
+def _mxfp8(v: torch.Tensor) -> torch.Tensor:
+    """``v`` rounded as the kernel rounds expert inputs (AITER's W4A8): per 32
+    values an E8M0 scale, amax / 448 rounded up to a power of two, and the
+    values to E4M3."""
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import FP8_MAX
+
+    b = v.float().reshape(-1, 32)
+    bits = (b.abs().amax(-1, keepdim=True) * (1.0 / FP8_MAX)).view(torch.int32)
+    e = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).int()
+    scale = (e.clamp(1, 254) << 23).view(torch.float32)
+    q = (b / scale).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn).float()
+    return (q * scale).reshape(v.shape)
+
+
+def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared, act=None):
     """``shared``: the shared expert's slot in the routed tensors, or its own
-    (gate_up, scale, down, scale) MXFP4 shards."""
+    (gate_up, scale, down, scale) MXFP4 shards; ``act``: how both expert GEMMs'
+    inputs are rounded (None: not at all)."""
     """fp32 MoE on dequantized MXFP4 weights and unquantized inputs, vLLM's
     routing (sigmoid + bias, top-8, renormalized, x2.5) and SwiGLU clamp."""
     from vllm.models.glm5next.amd.specialized_decode.mono.config import (
@@ -86,11 +102,12 @@ def _exact_moe(x, gate, bias, w13, s13, w2, s2, shared):
     for s in range(x.shape[0]):
         for e, wt in zip([shared] + order[s].tolist(), [1.0] + weights[s].tolist()):
             a13, b13, a2, b2 = expert(e)
-            gu = _dequant(a13, b13) @ x[s].float()
+            gu = _dequant(a13, b13) @ (act or torch.Tensor.float)(x[s])
             n = gu.shape[0] // 2
             g = gu[:n].clamp(max=SWIGLU_LIMIT)
             u = gu[n:].clamp(-SWIGLU_LIMIT, SWIGLU_LIMIT)
-            out[s] += wt * (_dequant(a2, b2) @ (torch.nn.functional.silu(g) * u))
+            mid = torch.nn.functional.silu(g) * u
+            out[s] += wt * (_dequant(a2, b2) @ (act or torch.Tensor.float)(mid))
     return out
 
 
@@ -241,13 +258,30 @@ def _check(rank: int, tp: int, device) -> None:
             shared,
         )
         dist.all_reduce(ref)  # this rank's intermediate shard
+        # the same with both expert GEMMs' inputs rounded as the kernel rounds
+        # them: what is left is the kernel's own arithmetic
+        ref8 = _exact_moe(
+            k_in,
+            moe.gate.weight,
+            moe.gate.e_score_correction_bias,
+            w13,
+            s13,
+            w2,
+            s2,
+            shared,
+            act=_mxfp8,
+        )
+        dist.all_reduce(ref8)
         e_kv = _rel(x, y)
         msg = f"TP{tp} S={S}: kernel vs vLLM {e_kv:.4f}"
-        e_k, e_v = _rel(x, ref), _rel(y, ref)
+        e_k, e_v, e_k8 = _rel(x, ref), _rel(y, ref), _rel(x, ref8)
         msg += f", vs exact: kernel {e_k:.4f} vLLM {e_v:.4f}"
+        msg += f", vs MXFP8-input exact: kernel {e_k8:.5f}"
         print(msg, flush=True)
-        # vLLM's MXFP4 expert inputs make its own error the gap between the two
-        assert e_k < 0.06 and e_k < 0.5 * e_v, msg
+        # vLLM's MXFP4 expert inputs make its own error the gap between the two;
+        # with the kernel's own rounding only accumulation order is left (0.0023
+        # to 0.0044 seen at TP2, TP4 and TP8)
+        assert e_k8 < 0.01 and e_k < 0.06 and e_k < 0.5 * e_v, msg
         assert abs(e_kv - e_v) < 0.25 * e_v, msg
         # routing: the kernel's top-8 is vLLM's (sigmoid + bias) on the same input
         scores = torch.sigmoid(k_in.float() @ moe.gate.weight.float().T)
