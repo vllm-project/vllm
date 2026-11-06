@@ -3280,9 +3280,19 @@ def test_aiter_consolidated_qknorm_rejects_fp8_e5m2(monkeypatch):
 
 
 def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
-    slots = torch.tensor([0, 15, 16, 127, 128, 129, -1])
+    slots = torch.tensor([0, 15, 16, 127, 128, 129, -1], device="cuda")
     actual = minimax_m3_rebase_slots_to_page16(slots, block_size=128)
-    expected = torch.tensor([0, 15, 16, 127, 256, 257, -1])
+    expected = torch.tensor([0, 15, 16, 127, 256, 257, -1], device="cuda")
+    assert torch.equal(actual, expected)
+
+    # More slots than one program takes, padding among them: the block part
+    # doubles, the in-block offset stays, a padding slot stays negative.
+    g = torch.Generator(device="cuda").manual_seed(0)
+    slots = torch.randint(-1, 1 << 20, (3000,), generator=g, device="cuda")
+    out = torch.empty_like(slots)
+    actual = minimax_m3_rebase_slots_to_page16(slots, block_size=128, out=out)
+    expected = slots.clamp(min=0) // 128 * 128 + slots
+    assert actual is out
     assert torch.equal(actual, expected)
 
 

@@ -59,6 +59,7 @@ from vllm.models.minimax_m3.common.varlen_decode import (
     build_decode_query_layout,
     make_token_to_req_buffer,
 )
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -102,9 +103,24 @@ def minimax_m3_rebase_slots_to_page16(
     """
     if out is None:
         out = torch.empty_like(slot_mapping)
-    torch.clamp(slot_mapping, min=0, out=out)
-    return (
-        out.div_(block_size, rounding_mode="floor").mul_(block_size).add_(slot_mapping)
+    n = slot_mapping.numel()
+    if n:
+        # one launch instead of clamp, floor-divide, multiply and add
+        _rebase_slots_to_page16_kernel[(triton.cdiv(n, 1024),)](
+            slot_mapping, out, n, block_size, BLOCK=1024
+        )
+    return out
+
+
+@triton.jit
+def _rebase_slots_to_page16_kernel(
+    slot_ptr, out_ptr, n, block_size, BLOCK: tl.constexpr
+):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = i < n
+    slot = tl.load(slot_ptr + i, mask=mask)
+    tl.store(
+        out_ptr + i, tl.maximum(slot, 0) // block_size * block_size + slot, mask=mask
     )
 
 
