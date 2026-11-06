@@ -58,6 +58,7 @@ def pack_replayssm_rows(
     offsets: torch.Tensor | None = None,
     padding_value: float = 0.0,
     uniform: bool = False,
+    allow_strided_rows: bool = False,
 ) -> torch.Tensor:
     """Pack variable-length token rows into ``[num_rows, executed_width, ...]``.
 
@@ -65,10 +66,20 @@ def pack_replayssm_rows(
     followed by ``padding_value``. With ``uniform``, every row has exactly
     ``executed_width`` tokens, so the result is a view of ``values`` when it
     is contiguous and aligned for CuTe, and a contiguous copy otherwise.
+    ``allow_strided_rows`` also preserves aligned, non-overlapping 2D rows.
     """
     num_rows = query_start_loc.numel() - 1
     if uniform and values.shape[0] == num_rows * executed_width:
-        if values.data_ptr() % _CUTE_ALIGNMENT_BYTES or not values.is_contiguous():
+        aligned_rows = (
+            allow_strided_rows
+            and values.ndim == 2
+            and values.stride(1) == 1
+            and values.stride(0) >= values.shape[1]
+            and values.stride(0) * values.element_size() % _CUTE_ALIGNMENT_BYTES == 0
+        )
+        if values.data_ptr() % _CUTE_ALIGNMENT_BYTES or not (
+            values.is_contiguous() or aligned_rows
+        ):
             values = values.clone(memory_format=torch.contiguous_format)
         return values.view(num_rows, executed_width, *values.shape[1:])
     if num_rows == 0:
@@ -124,7 +135,13 @@ def run_gdn_replayssm(
     """
     uniform = uniform_query_length == executed_width
     packed_qkv = pack_replayssm_rows(
-        mixed_qkv, query_start_loc, executed_width, offsets, uniform=uniform
+        mixed_qkv,
+        query_start_loc,
+        executed_width,
+        offsets,
+        uniform=uniform,
+        # UMMA makes contiguous Q/K/V copies after splitting the packed view.
+        allow_strided_rows=True,
     )
     # Padded token lanes must not change the state: a=-inf makes the decay
     # exp(-softplus(a + dt_bias) * exp(A_log)) one, and zero q/k/v/b make the

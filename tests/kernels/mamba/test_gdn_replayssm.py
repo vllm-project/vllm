@@ -85,6 +85,55 @@ def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
     assert padded[1].eq(0).all()
 
 
+@pytest.mark.parametrize("width", [4, 8])
+def test_uniform_replayssm_passes_qkv_views_and_aligned_gates(width):
+    tokens, dim = 2 * width, 128
+    projection = torch.arange(tokens * 4 * dim).to(torch.bfloat16).view(tokens, -1)
+    mixed_qkv = projection[:, : 3 * dim]
+    gates = torch.ones(tokens, 2, dtype=torch.bfloat16)
+    a, b = gates[:, :1], gates[:, 1:]
+
+    def kernel(**kwargs):
+        # UMMA makes its own contiguous Q/K/V copies. Keep the packed view.
+        assert kwargs["q"].data_ptr() == mixed_qkv.data_ptr()
+        for name, expected in zip(("q", "k", "v"), mixed_qkv.split(dim, -1)):
+            torch.testing.assert_close(
+                kwargs[name].flatten(0, 2), expected, rtol=0, atol=0
+            )
+        for name, expected in (("a", a), ("b", b)):
+            assert kwargs[name].is_contiguous()
+            assert kwargs[name].data_ptr() % 16 == 0
+            torch.testing.assert_close(kwargs[name].flatten(0, 1), expected)
+        kwargs["output"].copy_(kwargs["q"])
+
+    output = run_gdn_replayssm(
+        kernel=kernel,
+        executed_width=width,
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        checkpoint_state=torch.zeros(3, 1, dim, dim, dtype=torch.float16),
+        replayssm_cache=(
+            torch.zeros(3, 1, 32, dim, dtype=torch.bfloat16),
+            torch.zeros(3, 1, 32, dim, dtype=torch.bfloat16),
+            torch.zeros(3, 1, 32),
+        ),
+        ring_start=torch.zeros(3, dtype=torch.int32),
+        num_committed=torch.zeros(3, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, width, tokens], dtype=torch.int32),
+        state_indices=torch.tensor([1, 2], dtype=torch.int32),
+        output_indices=torch.arange(tokens),
+        num_k_heads=1,
+        num_v_heads=1,
+        head_k_dim=dim,
+        head_v_dim=dim,
+        uniform_query_length=width,
+    )
+    torch.testing.assert_close(output[:, 0], mixed_qkv[:, :dim], rtol=0, atol=0)
+
+
 def _reference_gdn_step(
     state,
     q,
