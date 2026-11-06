@@ -158,6 +158,7 @@ When batch invariance is enabled, vLLM:
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
+7. For sparse-MLA (DSA) models such as GLM-5.3, runs every prefill row through the sparse MQA kernel instead of the dense or masked-MHA prefill routes (which are selected per batch), and canonicalizes the indexer's top-k selection (ascending index order, ties broken by the smaller index) so the sparse kernels reduce in a fixed order. The `FLASHMLA_SPARSE` backend requires an unquantized KV cache in this mode (`--kv-cache-dtype bfloat16`); short-prompt prefill is slower than the default dense route.
 
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
