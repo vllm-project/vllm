@@ -47,6 +47,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.config.profiler import ProfilerConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -2120,6 +2121,16 @@ def test_max_num_new_slots_for_drafting(method, expected_slots):
     speculative_config.method = method
 
     assert speculative_config.max_num_new_slots_for_drafting == expected_slots
+
+
+def test_capture_torch_profiler_is_deprecated(caplog_vllm):
+    msg = "capture_torch_profiler is deprecated"
+    kwargs = {"profiler": "torch", "torch_profiler_dir": "/tmp/mock"}
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        ProfilerConfig(**kwargs)
+        assert msg not in caplog_vllm.text
+        ProfilerConfig(**kwargs, capture_torch_profiler=True)
+    assert msg in caplog_vllm.text
 
 
 def test_parallel_drafting_is_deprecated(caplog_vllm):
