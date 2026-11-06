@@ -216,6 +216,7 @@ fn rejects_image_placeholder_in_message_text() {
         ChatMessage::user(text),
         ChatMessage::user(vec![ChatContentPart::text(text)]),
         ChatMessage::tool_response(text, "call-1"),
+        ChatMessage::tool_response(vec![ChatContentPart::tool_reference(text)], "call-1"),
         ChatMessage::assistant_blocks(vec![AssistantContentBlock::Reasoning { text: text.into() }]),
     ] {
         let request = ChatRequest {
@@ -225,6 +226,42 @@ fn rejects_image_placeholder_in_message_text() {
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
+}
+
+/// Like Python's V4.1 encoding: the system prompt already lists every tool,
+/// deferred ones included, so a tool reference is written as the tool's name.
+#[test]
+fn renders_tool_references_as_tool_names() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                AssistantToolCall {
+                    id: "call-1".to_string(),
+                    name: "tool_search".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            )]),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::tool_reference("get_weather"),
+                    ChatContentPart::tool_reference("get_time"),
+                ],
+                "call-1",
+            ),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), Value::Bool(false));
+    let prompt = render(&request);
+    assert!(
+        prompt.ends_with(
+            "<｜User｜><tool_result>get_weather\n\nget_time</tool_result><｜Assistant｜></think>"
+        ),
+        "{prompt}"
+    );
 }
 
 fn image_part(uuid: &str) -> ChatContentPart {

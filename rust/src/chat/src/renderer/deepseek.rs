@@ -433,9 +433,14 @@ fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
         | ChatMessage::ToolResponse { content, .. }
         | ChatMessage::Custom { content, .. } => match content {
             ChatContent::Text(text) => has_placeholder(text),
-            ChatContent::Parts(parts) => parts.iter().any(
-                |part| matches!(part, ChatContentPart::Text { text } if has_placeholder(text)),
-            ),
+            ChatContent::Parts(parts) => parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ChatContentPart::Text { text: text_or_name }
+                        | ChatContentPart::ToolReference { name: text_or_name }
+                        if has_placeholder(text_or_name)
+                )
+            }),
         },
         ChatMessage::Assistant { content } => content.iter().any(|block| {
             matches!(
@@ -801,8 +806,9 @@ fn encode_arguments_to_dsml(
 /// Content parts are joined by a blank line for every role, as the reference
 /// Chat Completions conversion joins content blocks. The V4.1 dialect inlines
 /// the image placeholder at each image part's position unconditionally
-/// (matching the Python encoding's `IMAGE_PLACEHOLDER`); other dialects reject
-/// multimodal parts.
+/// (matching the Python encoding's `IMAGE_PLACEHOLDER`) and writes a tool
+/// reference as the tool's name, since the system prompt already lists every
+/// tool; other dialects reject both.
 fn write_chat_content(
     out: &mut String,
     content: &ChatContent,
@@ -824,6 +830,9 @@ fn write_chat_content(
                             message_index,
                             content_part_index: index,
                         });
+                    }
+                    ChatContentPart::ToolReference { name } if dialect == DsDialect::V41 => {
+                        out.push_str(name);
                     }
                     _ => out.push_str(part.as_text()?),
                 }

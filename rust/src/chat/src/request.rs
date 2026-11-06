@@ -58,6 +58,10 @@ pub enum ChatContentPart {
         audio_url: String,
         uuid: Option<String>,
     },
+    /// A reference to a tool by name, as tool search returns it in a tool
+    /// result. Renderers that support it expand or name the referenced tool;
+    /// the others reject it.
+    ToolReference { name: String },
     // ImageData...
     // VideoData...
     // ImageEmbeds...
@@ -103,8 +107,13 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one tool reference content part naming the given tool.
+    pub fn tool_reference(name: impl Into<String>) -> Self {
+        Self::ToolReference { name: name.into() }
+    }
+
     /// Return the text content of this part when it's a text block, or an
-    /// "unsupported multimodal content" error otherwise.
+    /// "unsupported content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
@@ -112,6 +121,7 @@ impl ChatContentPart {
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
             Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
+            Self::ToolReference { .. } => Err(Error::UnsupportedContentPart("tool_reference")),
         }
     }
 
@@ -123,7 +133,7 @@ impl ChatContentPart {
     /// Return whether this part contains any multimodal content.
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
-            Self::Text { .. } => false,
+            Self::Text { .. } | Self::ToolReference { .. } => false,
             Self::ImageUrl { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }

@@ -842,3 +842,24 @@ fn custom_roles_are_rejected_as_request_errors() {
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
 }
+
+/// Unlike V4.1, Python's V4 encoding accepts only text and image blocks.
+#[test]
+fn tool_references_are_rejected_as_request_errors() {
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("find the weather tool"),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::tool_reference("get_weather")],
+                "call-1",
+            ),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
+
+    assert!(error.is_request_validation_error());
+    expect!["`tool_reference` content parts are not supported by this chat renderer"]
+        .assert_eq(&error.to_report_string());
+}

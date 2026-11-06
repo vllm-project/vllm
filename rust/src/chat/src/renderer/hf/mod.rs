@@ -359,10 +359,17 @@ enum TemplateContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TemplateContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image,
     Video,
     Audio,
+    /// Kept structured, like Python, for templates that expand the referenced
+    /// tool.
+    ToolReference {
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -576,6 +583,9 @@ fn to_template_openai_content(
                         .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
                     Ok(TemplateContentPart::Audio)
                 }
+                ChatContentPart::ToolReference { name } => {
+                    Ok(TemplateContentPart::ToolReference { name: name.clone() })
+                }
             })
             .collect(),
     }
@@ -589,9 +599,9 @@ fn to_template_string_content(
         ChatContent::Text(text) => Ok(text.clone()),
         ChatContent::Parts(parts) => {
             // Same as Python with `--interleave-mm-strings`: each part becomes one segment,
-            // media as its modality's placeholder in place, empty text parts are dropped, and
-            // the segments are joined with "\n". Python's default moves placeholders to the
-            // front instead.
+            // media as its modality's placeholder in place, a tool reference as the tool's
+            // name, empty text parts are dropped, and the segments are joined with "\n".
+            // Python's default moves placeholders to the front instead.
             let segments: Vec<&str> = parts
                 .iter()
                 .filter(|part| !part.is_empty_text())
@@ -608,6 +618,7 @@ fn to_template_string_content(
                             .and_then(|multimodal| multimodal.audio_token.as_deref())
                             .ok_or(Error::UnsupportedMultimodalContent("audio"))
                     }
+                    ChatContentPart::ToolReference { name } => Ok(name.as_str()),
                 })
                 .collect::<Result<_>>()?;
             Ok(segments.join("\n"))
@@ -637,7 +648,8 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Resul
             TemplateContentPart::Text { text } => Some(text),
             TemplateContentPart::Image
             | TemplateContentPart::Video
-            | TemplateContentPart::Audio => None,
+            | TemplateContentPart::Audio
+            | TemplateContentPart::ToolReference { .. } => None,
         }),
     };
     let text = text.ok_or_else(|| {
@@ -1268,6 +1280,13 @@ mod tests {
                 ],
                 "call_1",
             ),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("x"),
+                    ChatContentPart::tool_reference("get_weather"),
+                ],
+                "call_1",
+            ),
         ]);
         let template = "{% for m in messages %}{{ m.content | tojson }}\n{% endfor %}";
         let rendered: String = [
@@ -1294,12 +1313,14 @@ mod tests {
             "x\ny"
             "x"
             "x\n<image>"
+            "x\nget_weather"
             OpenAi:
             [{"type": "text", "text": "a"}, {"type": "text", "text": ""}, {"type": "text", "text": "b"}]
             []
             "x\ny"
             "x"
             [{"type": "text", "text": "x"}, {"type": "image"}]
+            [{"type": "text", "text": "x"}, {"type": "tool_reference", "name": "get_weather"}]
         "#]].assert_eq(&rendered);
     }
 

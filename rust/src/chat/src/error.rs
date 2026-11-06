@@ -42,6 +42,8 @@ pub enum Error {
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error("`{0}` content parts are not supported by this chat renderer")]
+    UnsupportedContentPart(&'static str),
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
@@ -134,6 +136,7 @@ impl Error {
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedContentPart(_)
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
