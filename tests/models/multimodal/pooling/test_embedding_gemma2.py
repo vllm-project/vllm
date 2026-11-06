@@ -9,11 +9,16 @@ import textwrap
 import pytest
 import torch
 
+from vllm import PoolingParams
+from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.video import EmbeddingGemma2VideoBackend
 
 MODEL = os.environ.get("EG2_MODEL_PATH")
 needs_model = pytest.mark.skipif(not MODEL, reason="EG2_MODEL_PATH not set")
 TEXT_COS, MM_COS = 0.999, 0.999
+
+MODEL = MODEL or "google/embeddinggemma-2"
 
 
 def _cos(a, b):
@@ -96,8 +101,7 @@ def test_matryoshka_parity(vllm_runner, st_model):
     from vllm import PoolingParams
 
     prompt = "task: search result | query: what is vllm"
-    # 768 also needs embedding_size to report the 768-d output (#60978).
-    dims = [128, 256, 512]
+    dims = [128, 256, 512, 768]
     with vllm_runner(MODEL, runner="pooling", max_model_len=8192) as vm:
         outs = vm.embed(
             [prompt] * len(dims),
@@ -108,6 +112,33 @@ def test_matryoshka_parity(vllm_runner, st_model):
         assert len(out) == d
         sim = _cos([out], ref).min().item()
         assert sim >= TEXT_COS, f"Matryoshka {d}d cosine {sim} < {TEXT_COS}"
+
+
+def test_embeddinggemma2_embedding_size_matches_native_dim():
+    """EG2 projects hidden_size(512) -> embedding_dim(768)."""
+    model_config = ModelConfig(
+        MODEL,
+        runner="pooling",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="bfloat16",
+    )
+
+    emb_dim = getattr(model_config.hf_text_config, "embedding_dim", None)
+    hidden = model_config.get_hidden_size()
+    assert emb_dim == 768
+    assert hidden == 512
+    assert model_config.embedding_size == emb_dim
+    assert model_config.is_matryoshka
+
+    for dim in (128, 256, 512, 768):
+        PoolingParams(task="embed", dimensions=dim).verify(model_config)
+
+    with pytest.raises(VLLMValidationError):
+        PoolingParams(task="embed", dimensions=769).verify(model_config)
+    with pytest.raises(VLLMValidationError):
+        PoolingParams(task="embed", dimensions=0).verify(model_config)
 
 
 @needs_model
