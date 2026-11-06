@@ -435,6 +435,20 @@ def init_kv_cache(
                 kernel_block_sizes,
                 allocate=allocate,
             )
+            if any(
+                hasattr(layer, "dynamic_pp_cache_component")
+                for layer in forward_context.values()
+            ):
+                from vllm.v1.worker.pp.cache import prepare_pp_cache
+
+                prepare_pp_cache(
+                    kv_cache_config,
+                    kv_caches,
+                    forward_context,
+                    vllm_config.cache_config.get_resolved_kv_cache_layout(),
+                    kernel_block_sizes,
+                    device,
+                )
     return bind_kv_caches(
         kv_caches, forward_context, kv_cache_config, vllm_config, attn_groups
     )

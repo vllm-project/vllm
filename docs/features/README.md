@@ -1,5 +1,7 @@
 # Features
 
+Experimental MRv2 [dynamic pipeline parallelism](dynamic_pipeline_parallelism.md) supports buffered activations and movable prefill stage boundaries.
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
