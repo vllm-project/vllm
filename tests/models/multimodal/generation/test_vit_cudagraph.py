@@ -666,7 +666,9 @@ def _check_eonly_encoder_outputs(worker, batches):
 
 @pytest.mark.parametrize(
     "model_id",
-    params_with_marks({key: MODEL_CONFIGS[key] for key in ("qwen3_vl", "qwen3_5")}),
+    params_with_marks(
+        {key: MODEL_CONFIGS[key] for key in ("qwen3_vl", "qwen3_5", "glm4_1v")}
+    ),
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
 def test_eonly_vit_cudagraph_outputs(
