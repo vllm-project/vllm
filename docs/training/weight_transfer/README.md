@@ -150,6 +150,21 @@ engine = WeightTransferTrainerFactory.trainer_init(
 engine.send_weights()  # called on every rank
 ```
 
+## Verifying a New Model Without a Trainer
+
+To check that weight updates work for a new model before wiring up an RL
+framework, the [checkpoint publisher and weight-update verifier](https://github.com/vllm-project/vllm/tree/vllm-state-transition-verifier/tools/state_transition_verifier) on the
+`vllm-state-transition-verifier` branch pushes a local Hugging Face checkpoint
+into a running `vllm serve` over NCCL, without a trainer, and compares
+fixed-token outputs and GSM8K accuracy before and after the update. Get it with:
+
+```bash
+git fetch origin vllm-state-transition-verifier
+git checkout FETCH_HEAD -- tools/state_transition_verifier
+```
+
+and start from `tools/state_transition_verifier/README.md`.
+
 ## API Endpoints
 
 When running vLLM as an HTTP server, the following endpoints are available for weight transfer. `HTTPVLLMWeightSyncClient` speaks the first five for you. A trainer may also implement the protocol directly without importing vLLM: see the wire contracts in [NCCL](nccl.md#trainer-without-vllm-over-http) and [IPC](ipc.md#trainer-without-vllm-over-http). This keeps the trainer decoupled from vLLM: it needs no vLLM install or version pin, only this documented HTTP and wire contract, so trainer and server can upgrade independently (non-PyTorch trainers such as JAX can use it too).

@@ -468,8 +468,8 @@ def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
     [
         ("_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
         ("_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 3),
-        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
-        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 1),
+        ("_run_fused_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
+        ("_run_fused_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 1),
         ("_multi_step_decode", CUDAGraphMode.FULL, 3, 0, 2),
     ],
 )
@@ -491,9 +491,9 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator.idx_mapping = torch.arange(2)
     speculator.attn_groups = []
     speculator.block_tables = SimpleNamespace(input_block_tables=[])
-    generate_draft = Mock()
+    decode = Mock()
     # Stub the bound method on a hand-built speculator to count eager draft calls.
-    monkeypatch.setattr(speculator, "_generate_draft", generate_draft)
+    monkeypatch.setattr(speculator, "_decode", decode)
     run_fullgraph = Mock()
     speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
     batch_desc = BatchExecutionDescriptor(
@@ -511,7 +511,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         num_speculative_steps=num_speculative_steps,
     )
 
-    assert generate_draft.call_count == expected_eager_calls
+    assert decode.call_count == expected_eager_calls
     assert run_fullgraph.call_count == expected_graph_replays
 
 
@@ -546,7 +546,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
         )
     )
 
-    speculator._fused_multi_step_decode(
+    speculator._run_fused_multi_step_decode(
         num_reqs=2,
         skip_attn=False,
         batch_desc=BatchExecutionDescriptor(

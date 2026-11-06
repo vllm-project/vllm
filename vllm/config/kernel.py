@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -37,14 +37,14 @@ class IrOpPriorityConfig:
     gelu_and_mul_sparse: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
 
         Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
         """
-        factors = get_hash_factors(self, set())
+        factors = get_compile_factors(self, set())
 
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
@@ -61,7 +61,7 @@ class IrOpPriorityConfig:
             for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
-        return hash_factors(factors)
+        return factors
 
     @field_validator("*", mode="before")
     @classmethod
@@ -291,6 +291,12 @@ class KernelConfig:
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
+    enable_rocm_aiter_gemm_warmup: bool = False
+    """If True, run a dummy forward at every AITER tuned-GEMM token bucket up to
+    `max_num_batched_tokens` during kernel warmup on ROCm, so AITER builds those
+    kernels at startup instead of stalling the first requests that hit each
+    bucket. Costs one dummy forward per bucket (164 at 8192 tokens)."""
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -366,9 +372,9 @@ class KernelConfig:
 
     Explicit values raise RuntimeError when their constraints are not met.
 
-    On SM100 decode without DCP, persistent (including auto selecting it)
-    reads BF16 logits directly and widens scores inside the kernel, avoiding
-    a full FP32 logits copy. Cooperative still requires FP32 logits.
+    On SM100 decode without DCP, cooperative and persistent (including auto
+    selecting them) read BF16 logits directly and widen scores inside the
+    kernel, avoiding a full FP32 logits copy.
     """
 
     linear_backend: LinearBackend = "auto"
@@ -454,7 +460,7 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
@@ -464,13 +470,11 @@ class KernelConfig:
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "enable_rocm_segmented_attn_autotune",
-            "ir_op_priority",  # handled separately below
+            "enable_rocm_aiter_gemm_warmup",
         }
         if self.linear_backend_per_quant is None:
             ignored_factors.add("linear_backend_per_quant")
-        factors = get_hash_factors(self, ignored_factors)
-        factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     @field_validator(
         "enable_flashinfer_autotune",
