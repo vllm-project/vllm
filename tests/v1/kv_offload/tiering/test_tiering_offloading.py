@@ -2093,3 +2093,23 @@ def test_put_credits_do_not_gate_one_shot_stores():
     assert manager.get_put_admission_budget() == 0
     output = manager.prepare_store(to_keys([10]), _CTX)
     assert output is not None and output.keys_to_store == to_keys([10])
+
+
+def test_put_credits_ignore_store_jobs_served_to_peers():
+    primary = CPUPrimaryTierOffloadingManager(8, _mock_mmap_region(8))
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="test",
+    )
+    manager = TieringOffloadingManager(primary, [tier])
+    manager.configure_put_batching(2, 4, 0)
+    keys = to_keys(range(4))
+    peer = ReqContext("peer")
+    assert primary.prepare_store(keys, peer) is not None
+    primary.complete_store(keys, peer)
+    assert manager.get_put_admission_budget() == 4
+    # A peer pulling resident chunks pins them, but holds no local PUT credit.
+    job = manager.create_store_job(keys, peer)
+    assert manager.get_put_admission_budget() == 4
+    manager.primary_tier.complete_read(job.keys, peer)

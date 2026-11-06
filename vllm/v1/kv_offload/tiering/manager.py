@@ -1099,9 +1099,10 @@ class TieringOffloadingManager(OffloadingManager):
         The caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
         """
+        # No PUT credit is charged here: local cascades read keys already
+        # charged by prepare_store(), and store jobs served to remote peers
+        # must not let a slow peer pin local PUT admission.
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
-        if hasattr(self, "_put_max_inflight"):
-            self._put_staging_keys.update(keys)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
         job_metadata = TransferJob(
