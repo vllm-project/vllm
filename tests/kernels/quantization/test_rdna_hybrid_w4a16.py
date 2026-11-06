@@ -339,7 +339,7 @@ def test_triton_prefill_gemm_matches_reference(dtype, has_zp, M, K, N, G):
         (96, 17408, 5120, 32, (128, 128, 32, 8)),
     ],
 )
-def test_gfx1151_bf16_medium_m_tile_selection(M, K, N, G, expected):
+def test_gfx1151_bf16_decode_tile_selection(M, K, N, G, expected):
     """bf16 decode-sized M on gfx1151 picks the swept tiles."""
     tile = _select_skinny_gfx1151_config(M, N, K, G, torch.bfloat16)[:4]
     assert tile == expected
