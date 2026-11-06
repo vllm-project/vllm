@@ -169,7 +169,8 @@ def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader(shard: str) -> 
             weight_dtype="gpt_oss_mxfp4",
             dtype=torch.uint8,
         )
-        loaded_weight = torch.arange(1024).to(torch.uint8).reshape(256, 2, 2)
+        # one distinct value per row, so a wrong row offset is caught
+        loaded_weight = (torch.arange(1024) // 4).to(torch.uint8).reshape(256, 2, 2)
         expected = loaded_weight.reshape(256, 4)[128:]
         written, padding = experts.w13_weight[0, :128], experts.w13_weight[:, 128:]
     else:
