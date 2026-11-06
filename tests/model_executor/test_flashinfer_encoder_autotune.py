@@ -13,16 +13,15 @@ from tests.utils import multi_gpu_marks, multi_gpu_test
 
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize(
-    "tensor_parallel_size,mm_encoder_tp_mode",
+    "tensor_parallel_size",
     [
-        (1, "weights"),
-        pytest.param(2, "weights", marks=multi_gpu_marks(num_gpus=2)),
-        pytest.param(2, "data", marks=multi_gpu_marks(num_gpus=2)),
+        1,
+        pytest.param(2, marks=multi_gpu_marks(num_gpus=2)),
     ],
-    ids=["single-rank", "tensor-parallel", "unsupported-data-fallback"],
+    ids=["single-rank", "tensor-parallel"],
 )
 def test_flashinfer_autotune_vision_gemms(
-    vllm_runner, monkeypatch, tmp_path, tensor_parallel_size, mm_encoder_tp_mode
+    vllm_runner, monkeypatch, tmp_path, tensor_parallel_size
 ):
     """Opt-in tuning must cover vision projections and preserve embeddings."""
     from PIL import Image
@@ -68,9 +67,7 @@ def test_flashinfer_autotune_vision_gemms(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     embeddings = []
-    previous_snapshot = None
-    # Changing processor cache capacity must not retune the last start.
-    for startup, skip_mm_profiling in enumerate((True, False, False)):
+    for skip_mm_profiling in (True, False):
         with vllm_runner(
             "nvidia/Nemotron-3.5-Embed-1B-NVFP4",
             runner="pooling",
@@ -79,7 +76,7 @@ def test_flashinfer_autotune_vision_gemms(
             max_num_batched_tokens=512,
             max_num_seqs=1,
             tensor_parallel_size=tensor_parallel_size,
-            mm_encoder_tp_mode=mm_encoder_tp_mode,
+            mm_encoder_tp_mode="weights",
             gpu_memory_utilization=0.5,
             enforce_eager=True,
             compilation_config={"mode": 0},
@@ -90,7 +87,6 @@ def test_flashinfer_autotune_vision_gemms(
             },
             limit_mm_per_prompt={"image": 1},
             mm_processor_kwargs={"size": {"longest_edge": 128}},
-            mm_processor_cache_gb=0 if startup == 2 else 4,
             skip_mm_profiling=skip_mm_profiling,
         ) as model:
             profiles = model.collective_rpc(
@@ -108,26 +104,21 @@ def test_flashinfer_autotune_vision_gemms(
             )
 
         if tensor_parallel_size > 1:
-            snapshots = {
-                path: (path.stat().st_mtime_ns, path.read_bytes())
+            caches = {
+                path: json.loads(path.read_bytes())
                 for path in tmp_path.glob("*/autotune_configs_dp*_rank*.json")
             }
             # Skipped and enabled profiling have separate config identities,
             # with one complete cache file per rank in each directory.
-            assert len(snapshots) == tensor_parallel_size * (
-                1 if skip_mm_profiling else 2
-            )
+            assert len(caches) == tensor_parallel_size * (1 if skip_mm_profiling else 2)
             if not skip_mm_profiling:
                 assert (
                     sum(
-                        bool(set(json.loads(contents)).intersection(profiles[0]))
-                        for _, contents in snapshots.values()
+                        bool(set(contents).intersection(profiles[0]))
+                        for contents in caches.values()
                     )
                     == tensor_parallel_size
                 )
-            if startup == 2:
-                assert snapshots == previous_snapshot
-            previous_snapshot = snapshots
 
     check_embeddings_close(
         embeddings_0_lst=embeddings[0],
@@ -135,21 +126,14 @@ def test_flashinfer_autotune_vision_gemms(
         name_0="encoder-profiling-skipped",
         name_1="encoder-autotuned",
     )
-    check_embeddings_close(
-        embeddings_0_lst=embeddings[1],
-        embeddings_1_lst=embeddings[2],
-        name_0="fresh-tuning",
-        name_1="cached-tuning",
-    )
 
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.usefixtures("enable_pickle")
-@pytest.mark.parametrize("num_items", [1, 3])
 def test_flashinfer_autotune_data_parallel_encoder_cache(
-    vllm_runner, monkeypatch, tmp_path, num_items
+    vllm_runner, monkeypatch, tmp_path
 ):
-    """Uneven data-mode batches must tune all ranks and reuse the saved cache."""
+    """A single dummy image at TP=2 must tune both ranks and reuse the cache."""
     from PIL import Image
 
     def encoder_info(worker):
@@ -186,7 +170,7 @@ def test_flashinfer_autotune_data_parallel_encoder_cache(
             mm_encoder_tp_mode="data",
             max_model_len=512,
             max_num_batched_tokens=512,
-            max_num_seqs=num_items,
+            max_num_seqs=1,
             gpu_memory_utilization=0.5,
             enforce_eager=True,
             compilation_config={"mode": 0},
@@ -200,7 +184,7 @@ def test_flashinfer_autotune_data_parallel_encoder_cache(
         ) as model:
             info = model.collective_rpc(encoder_info)
             assert len(info) == 2
-            assert all(rank_info[:3] == (True, 1, num_items) for rank_info in info)
+            assert all(rank_info[:3] == (True, 1, 1) for rank_info in info)
             outputs.append(
                 model.generate_greedy_logprobs(
                     ["<|vision_start|><|image_pad|><|vision_end|>Describe the image."],

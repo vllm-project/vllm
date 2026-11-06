@@ -67,6 +67,32 @@ def test_encoder_autotune_identity_ignores_processor_cache_and_ipc(overrides):
     ) == _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
 
 
+def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_components(
+    tmp_path,
+):
+    """Processor cache capacity must not change either part of the cache key."""
+    from transformers import Qwen2_5_VLConfig
+
+    from vllm.config import DeviceConfig, KernelConfig, ModelConfig, VllmConfig
+
+    Qwen2_5_VLConfig().save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            str(tmp_path), skip_tokenizer_init=True, max_model_len=512
+        ),
+        device_config=DeviceConfig("cpu"),
+        kernel_config=KernelConfig(enable_flashinfer_mm_encoder_autotune=True),
+    )
+    mm_config = config.model_config.get_multimodal_config()
+    config_hash = config.compute_hash(include_version=False)
+    encoder_hash = _flashinfer_mm_encoder_autotune_hash(mm_config)
+
+    assert mm_config.mm_processor_cache_gb > 0
+    mm_config.mm_processor_cache_gb = 0
+    assert config.compute_hash(include_version=False) == config_hash
+    assert _flashinfer_mm_encoder_autotune_hash(mm_config) == encoder_hash
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

@@ -204,9 +204,9 @@ steps:
   - vllm/model_executor/models/qwen2_5_vl.py
   - vllm/utils/flashinfer.py
   - vllm/v1/worker/gpu/
-  - tests/models/multimodal/test_nemotron_embed.py
+  - tests/model_executor/test_flashinfer_encoder_autotune.py
   commands:
-    - pytest -v -s models/multimodal/test_nemotron_embed.py
+    - pytest -v -s model_executor/test_flashinfer_encoder_autotune.py
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
