@@ -35,6 +35,10 @@ from vllm.distributed import (
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.quantization.modelopt import (
+    NVFP4_INPUT_SCALE_DENOMINATOR,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -54,7 +58,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _INKLING_LL_BF16_MAX_TOKENS = 64
-_NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
 
 
 def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -456,6 +459,24 @@ class InklingMoE(nn.Module):
         # per-rank partial sum instead of all-reducing.
         self.experts.moe_config.skip_final_all_reduce = True
 
+        # The checkpoint stores each projection's activation amax instead of
+        # its input scale; post-load processing derives the scale from it.
+        routed_experts = self.experts.routed_experts
+        if getattr(routed_experts, "w13_input_scale", None) is not None:
+            for projection in ("w13", "w2"):
+                amax = Parameter(
+                    torch.empty(1, dtype=torch.bfloat16), requires_grad=False
+                )
+                set_weight_attrs(
+                    amax,
+                    {
+                        "weight_loader": default_weight_loader,
+                        # dummy input scale 1e-2, as for other NVFP4 layers
+                        "dummy_weight_value": 1e-2 * NVFP4_INPUT_SCALE_DENOMINATOR,
+                    },
+                )
+                routed_experts.register_parameter(f"{projection}_input_amax", amax)
+
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
         sink_experts_cls = (
@@ -564,13 +585,9 @@ class InklingMoE(nn.Module):
             return []
         if key.endswith(".input_amax"):
             projection = "w13" if key.startswith("w13") else "w2"
-            amax = float(weight.max())
-            assert math.isfinite(amax) and amax > 0, (
-                f"bad {projection} input_amax: {amax}"
-            )
-            input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / _NVFP4_INPUT_SCALE_DENOMINATOR)
-            return [f"experts.routed_experts.{projection}_input_scale"]
+            amax = getattr(experts, f"{projection}_input_amax")
+            amax.weight_loader(amax, weight)
+            return [f"experts.routed_experts.{projection}_input_amax"]
 
         param = getattr(experts, key)
         slots = self._local_expert_slots()
@@ -619,7 +636,12 @@ class InklingMoE(nn.Module):
     def finalize_load(self) -> list[str]:
         """Post-load fixups for zeroed padding experts."""
         experts = self.experts.routed_experts
-        out: list[str] = []
+        # Post-load processing derives the input scales from the amax.
+        out = [
+            f"experts.routed_experts.{projection}_input_scale"
+            for projection in ("w13", "w2")
+            if hasattr(experts, f"{projection}_input_amax")
+        ]
         # Zero the EP-alignment padding experts (if any) so their
         # (never-routed) slots hold defined values.
         slots = self._local_expert_slots()
