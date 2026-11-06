@@ -3098,11 +3098,14 @@ class MoRIIOConnectorWorker:
                     len(statuses),
                 )
                 raise
-            if not (self._block_load_errors_supported or self._failed_reads_are_quiet):
+            if not (
+                self._block_load_errors_supported
+                or self._failed_reads_are_quiet(statuses)
+            ):
                 logger.exception(
                     "MoRIIO READ failed before the forward; failing the step "
-                    "because with qp_per_transfer > 1 a failed transfer may "
-                    "still be writing into its blocks."
+                    "because a failed transfer may still be writing into its "
+                    "blocks (qp_per_transfer > 1, or a failure while posting)."
                 )
                 raise
             logger.exception(
@@ -3110,19 +3113,33 @@ class MoRIIOConnectorWorker:
                 "to transfer cleanup."
             )
 
-    @property
-    def _failed_reads_are_quiet(self) -> bool:
-        """Whether a failed READ whose statuses are all terminal has stopped
-        writing, so request-level recovery may release its blocks.
+    def _failed_reads_are_quiet(self, statuses: list[Any]) -> bool:
+        """Whether failed READs whose statuses are all terminal have stopped
+        writing, so request-level recovery may release their blocks.
 
         MoRI-IO reports a transfer failed at its first error completion. On a
         single QP, later work requests are flushed without DMA; an xGMI status
         completes with its copy. With several QPs per transfer, the others may
-        still be writing.
+        still be writing. A failure while posting is reported at once, while
+        work requests posted before it may still be writing on a healthy QP.
         """
+        if any(self._is_post_failure_status(status) for status in statuses):
+            return False
         return (
             self.moriio_config.backend == "xgmi"
             or self.moriio_config.qp_per_transfer == 1
+        )
+
+    @staticmethod
+    def _is_post_failure_status(status) -> bool:
+        """True if a transfer failed while its work requests were being posted.
+
+        MoRI-IO has no distinct code for it, so match its messages, as
+        _is_sq_full_status does.
+        """
+        message = status.Message() or ""
+        return bool(status.Failed()) and (
+            "SQ full" in message or "ibv_post_send" in message
         )
 
     @property
