@@ -158,6 +158,9 @@ class EngineCore:
         self.log_stats = log_stats
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
+        # Error outputs for requests failed outside a step, collected by the
+        # in-process client's next get_output.
+        self._pending_error_outputs: list[EngineCoreOutput] = []
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -1128,6 +1131,10 @@ class EngineCore:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
+        # Whether this call remaps weights that level-2 sleep discarded.
+        remaps_discarded_weights = (
+            tags is None or "weights" in tags
+        ) and "weights" in self.model_executor.discarded_tags
         if tags is None or tags:
             self.model_executor.wake_up(tags)
             if tags is None or "kv_cache" in tags:
@@ -1138,8 +1145,45 @@ class EngineCore:
         # Resume scheduling only once all executor memory is resident again.
         fully_awake = not self.model_executor.is_sleeping
         if fully_awake:
+            if remaps_discarded_weights:
+                # Nothing can restore the weights between their remap and the
+                # resume below, so the next step would run every queued
+                # request on discarded weights.
+                self._fail_requests_on_discarded_weights()
             self.resume_scheduler()
         return fully_awake
+
+    def _fail_requests_on_discarded_weights(self) -> None:
+        failed = self.scheduler.finish_requests(None, RequestStatus.FINISHED_ERROR)
+        if not failed:
+            return
+        logger.warning(
+            "Failed %d request(s) queued during level-2 sleep: wake_up resumed "
+            "before the weights were restored. To serve across the wake, wake "
+            "'weights', restore them, then wake 'kv_cache'.",
+            len(failed),
+        )
+        error = RequestError(
+            code="weights_not_restored",
+            message="Model weights were not restored after sleep; please retry.",
+            retryable=True,
+        )
+        self._send_error_outputs(failed, error)
+
+    def _send_error_outputs(self, requests: list[Request], error: RequestError) -> None:
+        """Send final error outputs for requests finished outside a step.
+        In-process there is no output queue: the client's next get_output
+        collects them."""
+        self._pending_error_outputs.extend(
+            EngineCoreOutput(
+                request.request_id, [], finish_reason=FinishReason.ERROR, error=error
+            )
+            for request in requests
+        )
+
+    def take_pending_error_outputs(self) -> list[EngineCoreOutput]:
+        outputs, self._pending_error_outputs = self._pending_error_outputs, []
+        return outputs
 
     def release_kv_cache_memory(self) -> None:
         """Discard KV cache physical memory. Requires a completed pause
@@ -2519,6 +2563,15 @@ class EngineCoreProc(EngineCore):
                 by_client[request.client_index].add(request.request_id)
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
+
+    def _send_error_outputs(self, requests: list[Request], error: RequestError) -> None:
+        by_client = defaultdict[int, list[str]](list)
+        for request in requests:
+            by_client[request.client_index].append(request.request_id)
+        for client_index, req_ids in by_client.items():
+            self._send_finish_outputs_to_client(
+                req_ids, client_index, FinishReason.ERROR, error
+            )
 
 
 class DPEngineCoreProc(EngineCoreProc):

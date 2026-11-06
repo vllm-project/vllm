@@ -422,7 +422,11 @@ class InprocClient(EngineCoreClient):
         self.engine_core.post_step(model_executed=model_executed)
         # Read by LLMEngine.step() to keep the DP ranks' collectives aligned.
         self.last_step_model_executed = model_executed
-        return outputs and outputs.get(0) or EngineCoreOutputs()
+        engine_outputs = outputs and outputs.get(0) or EngineCoreOutputs()
+        if failed := self.engine_core.take_pending_error_outputs():
+            # Requests the engine failed between steps, e.g. on wake_up.
+            engine_outputs.outputs = [*failed, *engine_outputs.outputs]
+        return engine_outputs
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
