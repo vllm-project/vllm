@@ -9,13 +9,13 @@ import contextlib
 import functools
 import importlib
 import os
-import re
 import shutil
 import subprocess
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
 
+import regex as re
 import torch
 
 import vllm.envs as envs
