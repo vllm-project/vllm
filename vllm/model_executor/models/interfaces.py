@@ -71,6 +71,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 logger = init_logger(__name__)
 
@@ -355,7 +356,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         as a tower model component.
 
         Tower model components are automatically skipped when `--limit-mm-per-prompt`
-        is set to zero for all of their modalities.
+        is set to zero for all of their modalities, and on pipeline stages after the
+        first under Model Runner V2, which runs encoders on the first stage only.
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
@@ -364,6 +366,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         it supports tower offloading), since `make_layers` only ever sees the
         decoder layer stack.
         """
+        from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
 
         from .utils import StageMissingLayer, collect_children, no_init_weights
@@ -386,6 +389,9 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                or (
+                    vllm_config.use_v2_model_runner and not get_pp_group().is_first_rank
+                )
                 else nullcontext()
             ):
                 yield
@@ -731,7 +737,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
-    lora_manager: "LoRAModelManager | None"
+    lora_manager: "LoRAModelManager | None" = None
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1109,8 +1115,14 @@ class MixtureOfExperts(Protocol):
         """
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(list(layer.get_expert_weights()))
+            # Register the expert weights. EPLB only moves bytes, so 1-byte
+            # dtypes NCCL lacks (e.g. E8M0, FP4x2) go as uint8 views.
+            self.expert_weights.append(
+                [
+                    w.view(torch.uint8) if w.element_size() == 1 else w
+                    for w in layer.get_expert_weights()
+                ]
+            )
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -1524,6 +1536,20 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
+
+@runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """The interface of a speculative decoding draft model which declares the
+    speculator it's for. This is read through the model registry, so that it's
+    available without importing the model.
+    """
+
+    speculator_config_class: ClassVar[type["SpeculatorConfig"]]
+    """The config class of the speculator that this is a draft model of.
+    Unless a speculative method is configured that the checkpoint can't
+    override, a draft checkpoint with this model's architecture uses this
+    speculator."""
 
 
 @runtime_checkable

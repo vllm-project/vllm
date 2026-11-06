@@ -197,6 +197,14 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
@@ -268,7 +276,14 @@ class DeepseekCompressor(nn.Module):
             requires_grad=False,
         )
 
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        # CPU packs the weight for its GEMM and frees the raw copy, so it keeps
+        # the quant-method forward and upcasts the BF16 output itself.
+        kv_score_linear = (
+            MergedColumnParallelLinear
+            if current_platform.is_cpu()
+            else DeepseekV4CompressorKVScoreLinear
+        )
+        self.fused_wkv_wgate = kv_score_linear(
             self.hidden_size,
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,
@@ -374,10 +389,7 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
-        token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
-        num_actual = slot_mapping.shape[0]
-        block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
@@ -418,6 +430,34 @@ class DeepseekCompressor(nn.Module):
             and state_metadata.c128_boundary is False
         ):
             return
+
+        self._compress_norm_rope_store(
+            state_metadata,
+            state_cache,
+            state_width,
+            positions,
+            rotary_emb,
+            attn_metadata,
+            pdl_kwargs,
+        )
+
+    def _compress_norm_rope_store(
+        self,
+        state_metadata: CompressorMetadata,
+        state_cache: torch.Tensor,
+        state_width: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        attn_metadata: dict[str, Any],
+        pdl_kwargs: dict,
+    ) -> None:
+        """Compress the saved states and write K to the cache; a platform
+        subclass overrides it to write its own cache layout."""
+        token_to_req_indices = state_metadata.token_to_req_indices
+        slot_mapping = state_metadata.slot_mapping
+        num_actual = slot_mapping.shape[0]
+        block_table = state_metadata.block_table
+        block_size = state_metadata.block_size
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
