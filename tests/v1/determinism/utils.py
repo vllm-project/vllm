@@ -66,6 +66,10 @@ BACKENDS: list[str] = sorted(
     {b for cfg in DEVICE_BACKENDS.values() if cfg.available for b in cfg.backends}
 )
 
+# Backend for tests that only need one backend. MLA models cannot be served
+# by the standard backends, so use TRITON_MLA for them.
+DEFAULT_BACKEND: str = "TRITON_MLA" if "TRITON_MLA" in BACKENDS else "FLASH_ATTN"
+
 skip_unsupported = pytest.mark.skipif(
     not any(cfg.available for cfg in DEVICE_BACKENDS.values()),
     reason="Requires CUDA >= Ampere (SM80), ROCm, or Intel XPU with Triton",
