@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-05
+  date_updated: 2026-11-06
   tasks:
     - multimodal
     - text
@@ -483,6 +483,11 @@ strategy_overrides:
           - "a2a"
           - "--max-model-len"
           - "135168"
+          # K3.1 keeps per-sequence KDA state. The default of 1024 is more
+          # than the state slots this node has (899 with prefix caching off),
+          # and startup aborts before serving. 64 was verified to start.
+          - "--max-num-seqs"
+          - "64"
           - "--gpu-memory-utilization"
           - "0.9"
           - "--no-enable-prefix-caching"
@@ -546,9 +551,10 @@ notes:
       Use the image `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. The
       generic `kimi-k31` ROCm image does not run this configuration on gfx942.
 
-      MI325X is single-node TP8 with DCP8 (`a2a`). Speculative decoding was
-      not part of that run. The tool-call parser is on by default in this
-      recipe and was not in that command either.
+      MI325X is single-node TP8 with DCP8 (`a2a`) and `--max-num-seqs 64`.
+      The default of 1024 does not start: it exceeds the KDA state slots.
+      Speculative decoding was not part of that run. The tool-call parser is
+      on by default in this recipe and was not in that command either.
 
 troubleshooting:
   - title: "fp8_ds_mla requires gfx950, or gfx942 with an fnuz aiter"
@@ -675,9 +681,12 @@ guide: |
   experts and the vision tower stay BF16. The KV cache is `fp8_ds_mla`.
 
   The command is single-node TP8 with DCP8 and `--dcp-comm-backend a2a`. Context is capped at
-  135,168 tokens, which covers the 128k RULER prompts. Prefix caching is off. Concurrency and
-  prefill chunk size are left at vLLM's defaults; the accuracy and throughput runs used
-  `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. CUDA graphs are `FULL_AND_PIECEWISE`
+  135,168 tokens, which covers the 128k RULER prompts. Prefix caching is off. `--max-num-seqs`
+  is 64: K3.1 keeps per-sequence KDA state, and vLLM's default of 1024 is more than the 899
+  state slots this configuration has, so startup aborts with `max_num_seqs (1024) exceeds
+  available Mamba cache blocks`. 64 was verified to start on this node. Prefill chunk size stays
+  at vLLM's default; the accuracy and throughput runs used `--max-num-seqs 8` and
+  `--max-num-batched-tokens 4096`. CUDA graphs are `FULL_AND_PIECEWISE`
   with `VLLM_USE_BREAKABLE_CUDAGRAPH=1`:
   K3.1 has no `torch.compile` submodule, so without breakable graphs vLLM captures decode only.
   `VLLM_ROCM_USE_AITER=1` and `SAFETENSORS_FAST_GPU=1` are set. The accuracy numbers below were
