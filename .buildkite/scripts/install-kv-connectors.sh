@@ -44,6 +44,22 @@ PY
 read -r CUDA_MAJOR NIXL_VERSION MOONCAKE_VERSION <<<"${KV_METADATA}"
 MOONCAKE_VERSION="${MOONCAKE_VERSION:-}"
 
+# The lmcache wheel targets one torch release; its CUDA extension fails to load
+# against any other. Rebuild it against the installed torch if so.
+if ! python3 -c "import torch, lmcache.cuda_ops" 2>/dev/null; then
+    LMCACHE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('lmcache'))")
+    GRPCIO_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('grpcio'))")
+    CUDA_VERSION_DASH=$(python3 -c 'import torch; print(torch.version.cuda.replace(".", "-"))')
+    LMCACHE_BUILD_PKGS=("libcusparse-dev-${CUDA_VERSION_DASH}" "libcusolver-dev-${CUDA_VERSION_DASH}")
+    apt-get update -y
+    apt-get install -y --no-install-recommends --allow-change-held-packages "${LMCACHE_BUILD_PKGS[@]}"
+    uv pip install --system -c "${CONSTRAINTS_DIR}/constraints.txt" "grpcio-tools==${GRPCIO_VERSION}" setuptools-scm
+    BUILD_WITH_CUDA=1 LMCACHE_CUDA_MAJOR="${CUDA_MAJOR}" \
+        uv pip install --system --no-cache --no-deps --no-build-isolation \
+        --no-binary lmcache --reinstall-package lmcache "lmcache==${LMCACHE_VERSION}"
+    python3 -c "import torch, lmcache.cuda_ops"
+fi
+
 # nixl>=1.1.0 can install multiple CUDA wheel variants. Keep only the variant
 # matching this CI image so nixl_ep_cpp links against the available libcudart.
 uv pip uninstall --system nixl-cu12 nixl-cu13 2>/dev/null || true

@@ -1227,6 +1227,22 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
+        # The lmcache wheel targets one torch release; its CUDA extension fails to
+        # load against any other. Rebuild it against the installed torch if so.
+        if ! python3 -c "import torch, lmcache.cuda_ops" 2>/dev/null; then \
+            LMCACHE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('lmcache'))"); \
+            GRPCIO_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('grpcio'))"); \
+            LMCACHE_BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} libcusolver-dev-${CUDA_VERSION_DASH}"; \
+            apt-get update -y; \
+            apt-get install -y --no-install-recommends --allow-change-held-packages ${LMCACHE_BUILD_PKGS}; \
+            uv pip install --system -c /tmp/kv-constraints.txt "grpcio-tools==${GRPCIO_VERSION}" setuptools-scm; \
+            BUILD_WITH_CUDA=1 LMCACHE_CUDA_MAJOR="${CUDA_MAJOR}" \
+                uv pip install --system --no-cache --no-deps --no-build-isolation \
+                --no-binary lmcache --reinstall-package lmcache "lmcache==${LMCACHE_VERSION}"; \
+            python3 -c "import torch, lmcache.cuda_ops"; \
+            apt-get purge -y ${LMCACHE_BUILD_PKGS}; \
+            rm -rf /var/lib/apt/lists/*; \
+        fi; \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # Mirrors .buildkite/scripts/install-kv-connectors.sh.
