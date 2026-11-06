@@ -61,7 +61,8 @@ run vLLM's attention ops, then K2, and startup logs why. That fallback supports
 ordinary decode at DCP1 or DCP8 and speculative decode at DCP8; speculative
 DCP1 requires M1. The KDA layers run K1 and K2 either way.
 
-KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
+KV transfer support is limited to built-in MoRIIO READ and WRITE consumers and
+the built-in Mooncake consumer.
 Keep the producer on `decode_backend=auto` and use matching cache layouts.
 
 If you request the specialized decode for anything else, startup fails with one
