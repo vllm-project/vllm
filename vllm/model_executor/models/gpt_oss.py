@@ -213,6 +213,8 @@ class GptOssRoutedExperts(RoutedExperts):
         blocks = moe.intermediate_size // (OCP_MX_BLOCK_SIZE if mx else 1)
         per_rank = cdiv(blocks, tp_size)
         length = loaded_weight.shape[dim]
+        if length == 1:  # not partitioned (e.g. a channelwise w2 scale)
+            return loaded_weight
         start = min(tp_rank * per_rank, blocks) * length // blocks
         end = min((tp_rank + 1) * per_rank, blocks) * length // blocks
         return loaded_weight.narrow(dim, start, end - start)

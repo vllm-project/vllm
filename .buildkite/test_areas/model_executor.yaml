@@ -83,3 +83,18 @@ steps:
   dind: false
   depends_on:
   - image-build-amd
+
+- label: ":nvidia: (B200) KV scale reload"
+  key: kv-scale-reload-b200
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla_sparse.py
+  - vllm/v1/attention/backends/mla/tokenspeed_mla.py
+  - vllm/model_executor/layers/quantization/kv_cache.py
+  - tests/model_executor/model_loader/test_reload.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_reload.py -k test_kv_scale_reload

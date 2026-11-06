@@ -301,8 +301,6 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self.bmm1_scale: float | None = None
-        self.bmm2_scale: float | None = None
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
         # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
         # (config is in scope during construction) so the byte size can be
@@ -378,15 +376,13 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             # trtllm API requires extra dimension q_len_per_request for MTP
             q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
-        if self.bmm1_scale is None:
-            self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-
-        if self.bmm2_scale is None:
-            self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm2_scale *= layer._k_scale_float
+        # Derived at every forward, as in FlashInferImpl: a weight reload can
+        # change the q/k scales.
+        bmm1_scale = self.scale
+        bmm2_scale = 1.0
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+            bmm2_scale *= layer._k_scale_float
 
         return_lse = self.need_to_return_lse_for_decode
         workspace_buffer = _get_workspace_buffer(return_lse)
@@ -451,8 +447,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             block_tables=block_table,
             seq_lens=seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
+            bmm1_scale=bmm1_scale,
+            bmm2_scale=bmm2_scale,
             return_lse=return_lse,
             **extra_kwargs,
         )

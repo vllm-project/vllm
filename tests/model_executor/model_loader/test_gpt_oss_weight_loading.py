@@ -189,3 +189,20 @@ def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader(shard: str) -> 
     assert _load(experts, f"{shard}_weight", loaded_weight, f"gpt_oss_{shard}")
     assert torch.equal(written, expected)
     assert torch.count_nonzero(padding) == 0
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_streamed_channelwise_w2_scale_is_not_split(tp_rank: int) -> None:
+    """A per-output-channel w2 scale has no intermediate extent to split: every
+    rank loads it whole."""
+    experts = _TestExperts(
+        "w2_weight_scale",
+        (2, 4, 1),
+        tp_rank=tp_rank,
+        intermediate_size=128,
+        quant_method_name="CompressedTensorsWNA16MoEMethod",
+    )
+    loaded_weight = torch.arange(1.0, 5.0).reshape(4, 1)
+
+    assert _load(experts, "w2_weight_scale", loaded_weight, "gpt_oss_w2")
+    assert torch.equal(experts.w2_weight_scale[0], loaded_weight)
