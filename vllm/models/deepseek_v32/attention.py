@@ -627,7 +627,7 @@ class DeepseekV32Attention(MLAAttention):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
         num_query_tokens = (
             shardq.num_tokens_per_rank[get_tp_group().rank_in_group]
-            if sequence_parallel
+            if sequence_parallel and shardq is not None
             else num_actual
         )
         if self._fp8_query:
