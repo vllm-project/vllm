@@ -69,7 +69,10 @@ def test_deepseek_v4_rocm_dspark_disables_unloaded_confidence_head(
     _prepare_loader_model(model, [])
     _disable_distributed_loader_paths(monkeypatch)
 
-    assert model.load_weights([]) == set()
+    loaded = model.load_weights([])
+    assert loaded == set()
+    assert model.model.confidence_head is not None  # may be one bucket of an update
+    model.finish_checkpoint_load(loaded)
     assert model.model.confidence_head is None
 
 

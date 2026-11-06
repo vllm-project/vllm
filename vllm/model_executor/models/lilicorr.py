@@ -522,24 +522,11 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
                 for parameter, _ in module.named_parameters(recurse=False)
                 if parameter not in required
             )
-        expected = {
-            name.removeprefix("model.")
-            for name, _ in self.named_parameters()
-            if (
-                name.startswith("model.lilicorr.")
-                or ".attention_conv." in name
-                or ".mlp_conv." in name
-                or (self.has_own_lm_head and name.startswith("lm_head."))
-            )
-            and name.removeprefix("model.") not in quantized_metadata
-        }
-        seen: set[str] = set()
         head_weights: list[tuple[str, torch.Tensor]] = []
 
         def normalized_weights():
             for name, value in weights:
                 name = name.removeprefix("model.")
-                seen.add(name)
                 # The backbone stacks up_proj into gate_up_proj. Load the
                 # nongated correlator separately to avoid that transformation.
                 if name.startswith("lilicorr."):
@@ -549,11 +536,6 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
 
         super().load_weights(normalized_weights())
         AutoWeightsLoader(self.model.lilicorr).load_weights(head_weights)
-        missing = expected - seen
-        if missing:
-            raise ValueError(
-                f"LiLiCorr checkpoint coverage mismatch: missing={sorted(missing)}"
-            )
         head = self.model.lilicorr
         parameter = head.slot_embedding
         head.materialize_inference_buffers(parameter.device, parameter.dtype)

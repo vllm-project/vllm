@@ -32,9 +32,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -235,6 +232,7 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
+    _loaded_confidence_head = False
     # The speculator this is a draft model of (see SpeculativeDraftModel).
     speculator_config_class = DSparkSpeculatorConfig
     model_cls = Qwen3DSparkModel
@@ -321,12 +319,16 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
+    def finish_checkpoint_load(self, loaded: set[str] | None) -> None:
+        # Cold start only: one bucket of an update may lack this optional head.
+        if not self._loaded_confidence_head:
+            self.model.confidence_head = None
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_embed_tokens = False
         includes_lm_head = False
         includes_draft_id_mapping = False
-        includes_confidence_head = False
         for name, loaded_weight in weights:
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
@@ -341,7 +343,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             if "lm_head" in name:
                 includes_lm_head = True
             if "confidence_head" in name:
-                includes_confidence_head = True
+                self._loaded_confidence_head = True
             model_weights[name] = loaded_weight
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
@@ -350,24 +352,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
-        uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
-        complete = is_mtp_completeness_check_enabled()
-        if complete and uses_expanded_input_vocab and not includes_embed_tokens:
-            raise ValueError(
-                "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
-                "the target vocabulary must include embed_tokens weights."
-            )
-        if complete and uses_reduced_vocab and not includes_lm_head:
-            raise ValueError(
-                "Reduced-vocabulary Qwen3 DSpark checkpoints must include "
-                "lm_head weights; the full target lm_head cannot be shared."
-            )
-        if complete and uses_reduced_vocab and not includes_draft_id_mapping:
-            raise ValueError(
-                "Reduced-vocabulary Qwen3 DSpark checkpoints must include a "
-                "d2t mapping so sampled draft ids can be converted to target ids."
-            )
 
         orig_to_new_substr = {"mask_embedding": None}
         if not includes_embed_tokens:
@@ -376,8 +360,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if complete and not includes_confidence_head:
-            self.model.confidence_head = None
         if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)

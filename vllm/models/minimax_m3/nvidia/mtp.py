@@ -20,9 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -230,6 +227,11 @@ class MiniMaxM3MTP(nn.Module):
             return name.replace(".mtp.", ".")
         return None
 
+    def finish_checkpoint_load(self, loaded: set[str]) -> None:
+        # A complete checkpoint without embeddings borrows the target's.
+        if self._tracks_own_embed:
+            self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Map q/k/v projections to qkv_proj, and gate/up projections to gate_up_proj.
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
@@ -255,9 +257,7 @@ class MiniMaxM3MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_mtp_layers: set[int] = set()
         for name, loaded_weight in weights:
-            mtp_layer = self._get_mtp_layer_idx_from_weight_name(name)
             mapped_name = self._map_checkpoint_name(name)
             if mapped_name is None:
                 # This weight does not belong to the MTP module, so skip it.
@@ -314,23 +314,7 @@ class MiniMaxM3MTP(nn.Module):
                     weight_loader(param, loaded_weight)
 
             loaded_params.add(name)
-            if mtp_layer is not None:
-                loaded_mtp_layers.add(mtp_layer)
 
-        # Validate that weights were loaded for each MTP layer.
-        for layer_idx in range(self.model.num_mtp_layers):
-            if (
-                layer_idx not in loaded_mtp_layers
-                and is_mtp_completeness_check_enabled()
-            ):
-                raise ValueError(
-                    f"Failed to load MTP layer {layer_idx} weights from checkpoint."
-                )
-
-        if self._tracks_own_embed:
-            if "model.embed_tokens.weight" in loaded_params:
-                self.has_own_embed_tokens = True
-            elif is_mtp_completeness_check_enabled():
-                # A complete checkpoint without embeddings borrows the target's.
-                self.has_own_embed_tokens = False
+        if self._tracks_own_embed and "model.embed_tokens.weight" in loaded_params:
+            self.has_own_embed_tokens = True
         return loaded_params

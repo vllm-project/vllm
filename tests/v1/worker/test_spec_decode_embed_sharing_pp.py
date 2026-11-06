@@ -9,9 +9,6 @@ import torch.nn as nn
 
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import ParallelConfig
-from vllm.model_executor.model_loader.mtp_validation import (
-    disable_mtp_completeness_check,
-)
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     spec_decode_needs_target_embed,
@@ -197,8 +194,8 @@ def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
         weights.append((key, torch.ones(VOCAB, HIDDEN)))
     loaded = draft.load_weights(weights)
     assert ("model.embed_tokens.weight" in loaded) is (key is not None)
-    with disable_mtp_completeness_check():
-        draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
+    draft.finish_checkpoint_load(loaded)
+    draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
     assert draft.has_own_embed_tokens is (key is not None)
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
@@ -220,8 +217,7 @@ def test_m3_direct_loader_embedding_ownership(make_m3_draft, m3_config, load_for
     draft.load_state_dict(
         {key: torch.ones_like(value) for key, value in draft.state_dict().items()}
     )
-    with disable_mtp_completeness_check():
-        draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
+    draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
     eagle_utils.maybe_share_target_embed(draft, draft.model, target)
@@ -290,13 +286,12 @@ def test_m3_weight_transfer_updates_embedding_ownership(make_m3_draft, initial_e
     weights = [("model.mtp.layers.0.weight", torch.ones(1, 1))]
     if initial_embed:
         weights.append(("model.embed_tokens.weight", torch.ones(VOCAB, HIDDEN)))
-    draft.load_weights(weights)
-    with disable_mtp_completeness_check():
-        draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
-        assert draft.has_own_embed_tokens is initial_embed
-        draft.load_weights(
-            [("model.embed_tokens.weight", torch.full((VOCAB, HIDDEN), 3.0))]
-        )
+    draft.finish_checkpoint_load(draft.load_weights(weights))
+    draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
+    assert draft.has_own_embed_tokens is initial_embed
+    draft.load_weights(
+        [("model.embed_tokens.weight", torch.full((VOCAB, HIDDEN), 3.0))]
+    )
     assert draft.has_own_embed_tokens
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens

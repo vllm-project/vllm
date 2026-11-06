@@ -19,9 +19,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import refill_derived
 
@@ -331,7 +328,6 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
         params = dict(self.named_parameters())
         params.update(dict(self.named_buffers()))
         loaded: set[str] = set()
-        includes_confidence_head = False
         for name, w in weights:
             if "lm_head" not in name:
                 name = "model." + name
@@ -346,7 +342,5 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
                     if "confidence_head" in name:
-                        includes_confidence_head = True
-        if not includes_confidence_head and is_mtp_completeness_check_enabled():
-            self.model.confidence_head = None
+                        self._loaded_confidence_head = True
         return loaded

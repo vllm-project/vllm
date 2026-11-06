@@ -374,5 +374,3 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         head = self.model.xpress_head
         if raw_mix_L is not None:
             head.fold_from_raw_(raw_mix_L.to(head.mix_L.dtype))
-        elif not head._mix_L_loaded:
-            raise ValueError("XPress checkpoint is missing xpress_head.mix.L")

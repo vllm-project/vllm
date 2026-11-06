@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -12,7 +14,10 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.model_loader import get_model_loader, register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.default_loader import (
+    DefaultModelLoader,
+    _check_draft_layers_loaded,
+)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 
@@ -145,6 +150,27 @@ def test_weights_track_keeps_unquantized_models_unchanged():
     model.norm = _layer(weight=(4,))
     assert _track(model, {"norm.weight"}, quantized=False) == ""
     assert "norm.weight" in _track(model, set(), quantized=False)
+
+
+@pytest.mark.parametrize(
+    "runner,loaded,raises",
+    [
+        ("draft", {"model.embed_tokens.weight"}, True),
+        ("draft", {"model.layers.0.proj.weight"}, False),
+        ("generate", {"model.embed_tokens.weight"}, False),
+    ],
+    ids=["draft-no-layers", "draft-layers", "target"],
+)
+def test_draft_cold_start_needs_layer_weights(runner, loaded, raises):
+    model = nn.Module()
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([_layer(proj=(1,))])
+    config = SimpleNamespace(runner_type=runner)
+    if raises:
+        with pytest.raises(ValueError, match="without the MTP layers"):
+            _check_draft_layers_loaded(model, config, loaded)
+    else:
+        _check_draft_layers_loaded(model, config, loaded)
 
 
 def test_moe_runner_reports_registered_expert_names():
