@@ -1241,6 +1241,24 @@ def unified_attention(
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
         use_3d = False
 
+    # Widen single-query SM80 KV tiles while limiting pipeline storage.
+    if (
+        use_3d
+        and num_seqs == 1
+        and max_seqlen_q == 1
+        and num_query_heads == 16
+        and num_kv_heads == 8
+        and head_size == 128
+        and num_par_softmax_segments == 16
+        and q.dtype == torch.float16
+        and k.dtype == torch.float16
+        and sliding_window_val == 0
+        and not use_td
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(80)
+    ):
+        TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = 64, 8, 1
+
     # RDNA launch tuning, after vLLM's 2D/3D choice (it keeps vLLM's split-KV
     # threshold). Only launch parameters change; sliding window, sinks, softcap and
     # ALiBi are applied per element inside each tile. Batch-invariant mode keeps the

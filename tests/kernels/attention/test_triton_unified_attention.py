@@ -442,6 +442,73 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires CUDA graphs")
+@torch.inference_mode()
+def test_single_query_decode_graph_tracks_context_length(block_size: int) -> None:
+    """A captured decode must mask stale split-K states as the context changes."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(173)
+    max_context = 32768
+    num_blocks = max_context // block_size
+    query = torch.randn(1, 16, 128, dtype=torch.float16)
+    key_cache = torch.randn(num_blocks, block_size, 8, 128, dtype=query.dtype)
+    value_cache = torch.randn_like(key_cache)
+    block_table = torch.randperm(num_blocks, dtype=torch.int32).unsqueeze(0)
+    query_starts = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([max_context], dtype=torch.int32)
+    output = torch.empty_like(query)
+    scratch = [
+        torch.empty(shape, dtype=torch.float32)
+        for shape in [(1, 16, 16, 128), (1, 16, 16), (1, 16, 16)]
+    ]
+
+    def decode():
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=query_starts,
+            seqused_k=seq_lens,
+            max_seqlen_q=1,
+            max_seqlen_k=max_context,
+            softmax_scale=128**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            seq_threshold_3D=16,
+            num_par_softmax_segments=16,
+            softmax_segm_output=scratch[0],
+            softmax_segm_max=scratch[1],
+            softmax_segm_expsum=scratch[2],
+        )
+
+    decode()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        decode()
+
+    for context in [max_context, 128, 513, 8193, max_context]:
+        seq_lens.fill_(context)
+        graph.replay()
+        reference = ref_paged_attn(
+            query=query.clone(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=[1],
+            kv_lens=[context],
+            block_tables=block_table,
+            scale=128**-0.5,
+        )
+        torch.testing.assert_close(output, reference, atol=1e-3, rtol=1e-3)
+
+
 @torch.inference_mode()
 def test_fp8_softmax_preserves_small_probabilities() -> None:
     """Keep exp(-8) contributions that underflow when cast directly to E4M3."""
