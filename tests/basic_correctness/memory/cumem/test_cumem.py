@@ -446,7 +446,7 @@ def test_workspace_scratch_discarded_on_sleep():
         scratch.add_(1)
 
     backend = CuMemBackend()
-    backend.suspend(level=1)
+    backend.suspend()
     assert mapped_usage(allocator) == 0
     # Discarded, not copied.
     assert all(
@@ -465,7 +465,7 @@ def test_workspace_scratch_discarded_on_sleep():
     del small
     (big,) = manager.get_simultaneous(((128 << 20,), torch.uint8))
     assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
-    backend.suspend(level=1)
+    backend.suspend()
     backend.resume(tags=["weights"])
     assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
 
@@ -503,11 +503,10 @@ def test_reentered_tag(free_x_early):
     allocator.release_pools()
 
 
-@pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
-def test_runtime_state_survives_sleep(level):
-    """Runtime state is offloaded at both levels and restored by the first
+def test_runtime_state_survives_sleep():
+    """Runtime state is offloaded and restored by the first
     selective wake; a nested kv_cache pool keeps its own tag."""
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
 
@@ -523,7 +522,7 @@ def test_runtime_state_survives_sleep(level):
 
     backend = CuMemBackend()
     host_before = host_cache_bytes()
-    backend.suspend(level=level)
+    backend.suspend()
     assert mapped_usage(allocator) == 0
     assert host_cache_bytes() == host_before
     backups = cpu_backups(allocator, {"runtime"})
@@ -550,7 +549,7 @@ def test_level2_keeps_what_the_update_does_not_rewrite():
     # ``weight`` has its own allocation; ``table`` shares one with ``small_weight``.
     weight_data = allocator.pointer_to_data[weight.data_ptr()]
     backend = CuMemBackend()
-    backend.suspend(level=2, discardable={weight.data_ptr(), small_weight.data_ptr()})
+    backend.suspend({weight.data_ptr(), small_weight.data_ptr()})
     assert mapped_usage(allocator) == 0
     assert weight_data.cpu_backup_tensor is None
     assert any(
@@ -685,7 +684,7 @@ def test_cudagraph_pool_sleep(level):
 
     held, backend = capture(), CuMemBackend()
     mapped = graph_pool()
-    backend.suspend(level=level)
+    backend.suspend({weight.data_ptr()} if level == 2 else ())
     backend.resume(tags=["kv_cache"])
     assert graph_pool() == mapped
     backend.resume(tags=["weights"])
