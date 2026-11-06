@@ -254,13 +254,17 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
     assert compilation_counter.num_gpu_runner_capture_triggers == triggers_before
 
 
-def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
+@pytest.mark.parametrize("extensible", [False, True])
+def test_model_runner_delegates_to_cudagraph_utils(monkeypatch, extensible):
+    """The extensible KV cache measures the capture footprint after warmup
+    instead of estimating it."""
     runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.cache_config = SimpleNamespace(enable_extensible_kv_cache=extensible)
     runner.eplb = EPLBController(
         SimpleNamespace(enable_eplb=False), torch.device("cpu")
     )
     monkeypatch.setattr(mrv2, "_profile_cudagraph_memory", lambda r: 42)
-    assert runner.profile_cudagraph_memory() == 42
+    assert runner.profile_cudagraph_memory() == (0 if extensible else 42)
 
 
 def test_extrapolate_full_graph_memory():
