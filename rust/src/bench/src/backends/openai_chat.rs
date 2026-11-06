@@ -5,8 +5,11 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use super::streaming::{StreamedResponseHandler, trim_bytes};
-use super::{ChatChunk, RequestFuncInput, RequestFuncOutput, build_headers, update_server_metrics};
+use super::streaming::StreamedResponseHandler;
+use super::{
+    ChatChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
+    update_server_metrics,
+};
 use crate::error::Result;
 
 /// Backend for OpenAI Chat Completions API (/v1/chat/completions).
@@ -67,30 +70,16 @@ impl OpenAIChatBackend {
                             }
                         };
 
-                        let trimmed_bytes = trim_bytes(&chunk_bytes);
-                        if trimmed_bytes.is_empty() {
-                            continue;
-                        }
-
-                        let messages = handler.add_chunk(trimmed_bytes);
+                        let messages = handler.add_chunk(&chunk_bytes);
                         for message in messages {
-                            // Skip SSE comments
-                            if message.starts_with(':') {
+                            // Take the data: line of each event, which may carry other
+                            // fields (Dynamo sends "event: message\ndata: {...}").
+                            // Comments and other events without data are skipped.
+                            let Some(chunk) =
+                                message.lines().find_map(|l| l.strip_prefix("data: "))
+                            else {
                                 continue;
-                            }
-
-                            // Handle multi-field SSE events (e.g., Dynamo sends
-                            // "event: message\ndata: {...}"). Extract the data: line.
-                            let raw = if message.contains('\n') {
-                                match message.lines().find(|l| l.starts_with("data: ")) {
-                                    Some(l) => l,
-                                    None => continue,
-                                }
-                            } else {
-                                message.as_str()
                             };
-
-                            let chunk = raw.strip_prefix("data: ").unwrap_or(raw);
 
                             if chunk == "[DONE]" {
                                 continue;
@@ -139,8 +128,13 @@ impl OpenAIChatBackend {
                         }
                     }
 
+                    if first_token_received {
+                        output.success = true;
+                    } else {
+                        output.success = false;
+                        output.error = NO_VALID_CHUNK_ERROR.to_string();
+                    }
                     output.generated_text = generated_text;
-                    output.success = true;
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
                 } else {
                     let status = response.status();
@@ -385,7 +379,28 @@ mod tests {
         delay_at: usize,
         delay: std::time::Duration,
     ) -> String {
-        use std::io::{BufRead, BufReader, Read, Write};
+        spawn_sse_server_with_body(move |stream| {
+            use std::io::Write;
+
+            let mut send = |s: &str| {
+                stream.write_all(s.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            };
+            send("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n");
+            for (i, event) in events.iter().enumerate() {
+                if i == delay_at {
+                    std::thread::sleep(delay);
+                }
+                send(&format!("data: {event}\n\n"));
+            }
+            send("data: [DONE]\n\n");
+        })
+    }
+
+    fn spawn_sse_server_with_body(
+        write_body: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> String {
+        use std::io::{BufRead, BufReader, Read};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -405,20 +420,114 @@ mod tests {
             }
             reader.read_exact(&mut vec![0; content_length]).unwrap();
 
-            let mut send = |s: &str| {
-                stream.write_all(s.as_bytes()).unwrap();
-                stream.flush().unwrap();
-            };
-            send("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n");
-            for (i, event) in events.iter().enumerate() {
-                if i == delay_at {
-                    std::thread::sleep(delay);
-                }
-                send(&format!("data: {event}\n\n"));
-            }
-            send("data: [DONE]\n\n");
+            write_body(&mut stream);
         });
         format!("http://{addr}/v1/chat/completions")
+    }
+
+    #[tokio::test]
+    async fn test_streaming_backends_preserve_transport_chunk_whitespace() {
+        use std::io::Write;
+
+        use crate::backends::get_backend;
+        use crate::cli::BackendKind;
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for line_ending in ["\n", "\r\n", "\r"] {
+            for kind in [BackendKind::Openai, BackendKind::OpenaiChat] {
+                let api_url = spawn_sse_server_with_body(move |stream| {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n").unwrap();
+                    for chunk in [
+                        "data: {\"choices\":[{\"text\":\"leading ",
+                        " ",
+                        "trailing\",\"delta\":{\"content\":\"leading ",
+                        " ",
+                        "trailing\"}}]}",
+                        "\n",
+                        "\n",
+                        "event: message\ndata: {\"choices\":[{\"text\":\"!\",\"delta\":{\"content\":\"!\"}}]}\n\n",
+                        "data: {\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n",
+                        "data: [DONE]\n\n",
+                    ] {
+                        let chunk = chunk.replace('\n', line_ending);
+                        write!(stream, "{:x}\r\n{chunk}\r\n", chunk.len()).unwrap();
+                    }
+                    stream.write_all(b"0\r\n\r\n").unwrap();
+                });
+                let input = RequestFuncInput {
+                    api_url,
+                    model: "test-model".to_string(),
+                    output_len: 2,
+                    ..Default::default()
+                };
+                let output =
+                    get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
+                assert!(output.success, "{}", output.error);
+                assert_eq!(output.generated_text, "leading  trailing!");
+                assert_eq!(output.output_tokens, 2);
+                assert_eq!(output.itl.len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_backends_preserve_data_with_comments() {
+        use std::io::Write;
+
+        use crate::backends::get_backend;
+        use crate::cli::BackendKind;
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for kind in [BackendKind::Openai, BackendKind::OpenaiChat] {
+            for (events, text, tokens, itl_count) in [
+                (
+                    concat!(
+                        ": heartbeat\n\n",
+                        ": content\ndata: {\"choices\":[{\"text\":\"hi\",\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                        "event: message\ndata: {\"choices\":[{\"text\":\"!\",\"delta\":{\"content\":\"!\"}}]}\n: trailing\n\n",
+                        "data: {\"choices\":[],\"usage\":{\"completion_tokens\":3}}\n\n",
+                        ": heartbeat\n\n",
+                    ),
+                    "hi!",
+                    3,
+                    1,
+                ),
+                (
+                    concat!(
+                        "data: {\"choices\":[{\"text\":\"hi\",\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                        ": usage\nevent: message\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":7}}\n\n",
+                        ": heartbeat\n\n",
+                    ),
+                    "hi",
+                    7,
+                    0,
+                ),
+            ] {
+                let api_url = spawn_sse_server_with_body(move |stream| {
+                    write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{events}data: [DONE]\n\n").unwrap();
+                });
+                let input = RequestFuncInput {
+                    api_url,
+                    model: "test-model".to_string(),
+                    output_len: tokens,
+                    ..Default::default()
+                };
+                let output =
+                    get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
+                assert!(output.success, "{kind:?}: {}", output.error);
+                assert_eq!(output.generated_text, text, "{kind:?}");
+                assert_eq!(output.output_tokens, tokens, "{kind:?}");
+                assert_eq!(output.itl.len(), itl_count, "{kind:?}");
+            }
+        }
     }
 
     async fn run_chat(events: &[&str]) -> RequestFuncOutput {
@@ -508,6 +617,33 @@ mod tests {
             (decode_time - itl_sum).abs() < 1e-6,
             "latency - ttft ({decode_time}s) != sum(itl) ({itl_sum}s)"
         );
+    }
+
+    /// A clean 200 stream that never carries a token must fail, as in the
+    /// completions backend and Python; otherwise it counts as a success with
+    /// zero TTFT and E2EL.
+    #[tokio::test]
+    async fn test_tokenless_stream_is_failed() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(0, std::time::Duration::ZERO, None),
+            model: "test-model".to_string(),
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(!output.success);
+        assert_eq!(output.error, NO_VALID_CHUNK_ERROR);
+    }
+
+    /// What vLLM actually streams when it generates nothing: the opening role
+    /// chunk, then usage. The role chunk carries no token, so this must fail too.
+    #[tokio::test]
+    async fn test_role_only_stream_is_failed() {
+        let output = run_chat(&[ROLE, USAGE]).await;
+        assert!(!output.success);
+        assert_eq!(output.error, NO_VALID_CHUNK_ERROR);
     }
 
     /// ignore_eos and extra_body must survive the raw-splice path.

@@ -315,7 +315,7 @@ def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
 
 
-def _run_qsa_tp_prefill(rank: int, port: int) -> None:
+def _run_qsa_tp_prefill(rank: int, port: int, tp_size: int = 4) -> None:
     """Check real collectives, ragged rows, offset views and exact score ties."""
     from vllm.distributed import get_tp_group
     from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as ops
@@ -323,15 +323,17 @@ def _run_qsa_tp_prefill(rank: int, port: int) -> None:
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
     init_distributed_environment(
-        world_size=4,
+        world_size=tp_size,
         rank=rank,
         local_rank=rank,
         distributed_init_method=f"tcp://127.0.0.1:{port}",
     )
     try:
-        config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=4))
+        config = VllmConfig(
+            parallel_config=ParallelConfig(tensor_parallel_size=tp_size)
+        )
         with set_current_vllm_config(config):
-            initialize_model_parallel(tensor_model_parallel_size=4)
+            initialize_model_parallel(tensor_model_parallel_size=tp_size)
             device = torch.device(f"cuda:{rank}")
             gen = torch.Generator().manual_seed(37)
             cache = torch.randn(32, 208, 1, 128, generator=gen).bfloat16().to(device)
@@ -404,3 +406,9 @@ def _run_qsa_tp_prefill(rank: int, port: int) -> None:
 @multi_gpu_test(num_gpus=4)
 def test_qsa_tp_prefill_preserves_selection() -> None:
     mp.spawn(_run_qsa_tp_prefill, args=(get_open_port(),), nprocs=4)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVIDIA QSA indexer")
+@multi_gpu_test(num_gpus=8)
+def test_qsa_tp_prefill_preserves_selection_tp8() -> None:
+    mp.spawn(_run_qsa_tp_prefill, args=(get_open_port(), 8), nprocs=8)

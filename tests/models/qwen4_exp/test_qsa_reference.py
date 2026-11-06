@@ -1444,6 +1444,7 @@ def test_qsa_tp_prefill_keeps_unmeasured_workloads_replicated(
         (1, 1, 1, "PIECEWISE", None),
         (2, 1, 1, "PIECEWISE", None),
         (8, 1, 1, "PIECEWISE", None),
+        (16, 1, 1, "PIECEWISE", None),
         (4, 2, 1, "PIECEWISE", None),
         (4, 1, 2, "PIECEWISE", None),
         (4, 1, 1, "FULL", None),
@@ -1476,7 +1477,8 @@ def test_qsa_tp_prefill_configuration_fallbacks(
     expected = (
         current_platform.is_cuda()
         and current_platform.is_device_capability(90)
-        and (tp, dcp, pcp, graph, disabled_env) == (4, 1, 1, "PIECEWISE", None)
+        and tp in (4, 8)
+        and (dcp, pcp, graph, disabled_env) == (1, 1, "PIECEWISE", None)
     )
     assert qsa_indexer._tp_prefill_sharding_supported(config) is expected
 
