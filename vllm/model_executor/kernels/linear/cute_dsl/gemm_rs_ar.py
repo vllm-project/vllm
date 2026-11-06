@@ -13,7 +13,6 @@ process-wide workspace through ``maybe_init_gemm_rs_ar`` + ``GemmRsAr.apply``.
 # The MXFP8 path follows the block-scaled SM100 GEMM template from
 # https://github.com/gau-nernst/gn-kernels (sm100_mm_mxfp8.py).
 
-from contextlib import nullcontext
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -40,7 +39,6 @@ from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
-from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -1154,18 +1152,11 @@ def maybe_init_gemm_rs_ar(
         return False
 
     try:
-        # Level-2 sleep discards the weights pool; the kernel reads the peer pointer
-        # table rendezvous allocates on every call.
-        with (
-            get_mem_allocator_instance().use_memory_pool(tag="runtime")
-            if vllm_config.model_config.enable_sleep_mode
-            else nullcontext()
-        ):
-            init_gemm_rs_ar(
-                max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-                N=N,
-                all_reduce=all_reduce,
-            )
+        init_gemm_rs_ar(
+            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+            N=N,
+            all_reduce=all_reduce,
+        )
     except RuntimeError as e:
         logger.warning_once(
             "%s is disabled because initialization failed: %s. This may mean "

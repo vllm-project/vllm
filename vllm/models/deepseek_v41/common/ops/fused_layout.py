@@ -64,7 +64,6 @@ def _bytes_view(t: torch.Tensor) -> torch.Tensor:
 
 def permute_on_load(param: torch.Tensor, perm: torch.Tensor, dim: int) -> None:
     """Make ``param``'s weight loader gather the loaded shard by ``perm``."""
-    perm = perm.cpu()  # level-2 sleep discards the weights pool; reloads still read it
 
     def gather(t: torch.Tensor) -> torch.Tensor:
         return _bytes_view(t).index_select(dim, perm.to(t.device)).view(t.dtype)
