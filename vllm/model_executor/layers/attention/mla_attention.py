@@ -661,6 +661,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # reference CPU MLA backend calls it but isn't perf-critical. Skip
         # the packed-kernel dispatch either way.
         kv_b_proj._cpu_skip_gemm_dispatch = True
+        # Selects the LoRA wrapper that adds adapters to the absorbed BMMs.
+        kv_b_proj.is_mla_kv_b_proj = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -1173,6 +1175,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
+            has_mla_lora = hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
+            use_fused_v_up_proj = self.W_UV_dcp is not None and not has_mla_lora
             mqa_output_slice = output[:num_mqa_tokens]
             if mqa_q_prepared is not None:
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
@@ -1227,7 +1231,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Under PCP+DCP the prefill rows attended over the gathered KV,
                 # so only the decode rows carry an LSE and take part in the merge.
                 num_merge_rows = lse.shape[0]
-                if self.W_UV_dcp is not None:
+                if use_fused_v_up_proj:
                     assert self.dcp_manager.v_up_proj_combine is not None
                     self.dcp_manager.v_up_proj_combine(
                         attn_out,
@@ -1255,7 +1259,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection, unless the DCP merge already applied it
-            if self.W_UV_dcp is None:
+            if not use_fused_v_up_proj:
                 self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
@@ -1345,7 +1349,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _fused_decode_query_heads(self, attn_metadata: Any) -> int | None:
         # The impl picks the decode path per batch, so this stays per step.
-        if not self.is_aiter_fused_decode_query_enabled:
+        # The fused query kernel cannot add kv_b_proj adapters.
+        if not self.is_aiter_fused_decode_query_enabled or hasattr(
+            self.kv_b_proj, "apply_mla_absorbed_kv_b_lora"
+        ):
             return None
         return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
 

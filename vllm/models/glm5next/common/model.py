@@ -1645,7 +1645,7 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
 
 
 def _lora_base_layer_name(name: str) -> str:
-    """Where a LoRA wrapper keeps parameter ``name``: on its ``base_layer``."""
+    """Where a LoRA wrapper keeps parameter `name`: on its `base_layer`."""
     module, _, leaf = name.rpartition(".")
     return f"{module}.base_layer.{leaf}"
 

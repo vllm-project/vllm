@@ -194,7 +194,7 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
 
 
 class Glm5NextIndexerWkWeightsLinear(MergedColumnParallelLinear):
-    """Fused ``wk``/``weights_proj``: returns ``k`` and the FP32 head gate.
+    """Fused `wk`/`weights_proj`: returns `k` and the FP32 head gate.
 
     BF16 error in the gate can change near-tie pool rankings on long-context
     tasks, so it is recomputed in FP32 from a copy built after loading.
