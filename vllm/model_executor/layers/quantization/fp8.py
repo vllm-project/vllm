@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -73,6 +74,7 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
     replace_parameter,
+    retire_parameter,
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
@@ -130,6 +132,8 @@ class Fp8Config(QuantizationConfig):
                 )
         self.weight_block_size = weight_block_size
         self.use_deep_gemm: bool | None = None
+        # linear layers run in BF16 (`dequantized_fp8_config`)
+        self.dequantize_linear = False
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -182,6 +186,8 @@ class Fp8Config(QuantizationConfig):
                 match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
+            if self.dequantize_linear:
+                return Fp8DequantLinearMethod(self)
             return Fp8LinearMethod(self)
         elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
@@ -447,6 +453,56 @@ class Fp8LinearMethod(LinearMethodBase):
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
+
+
+def dequantized_fp8_config(
+    quant_config: QuantizationConfig | None,
+) -> Fp8Config | None:
+    """The checkpoint's block-FP8 config for linear layers the model runs in
+    BF16 (see `Fp8DequantLinearMethod`); None for any other config."""
+    if not isinstance(quant_config, Fp8Config) or not quant_config.weight_block_size:
+        return None
+    config = copy.copy(quant_config)
+    config.dequantize_linear = True
+    return config
+
+
+class Fp8DequantLinearMethod(Fp8LinearMethod):
+    """A block-FP8 checkpoint layer that runs in BF16.
+
+    ``weight`` and ``weight_scale_inv`` are the checkpoint's own parameters, so
+    they load independently (in any order and any number of ``load_weights``
+    calls). Post-load processing dequantizes the weight to BF16 and retires the
+    scale. A reload first restores the checkpoint layout (direct reload views
+    the BF16 storage as FP8, layerwise reload restages the layer), so each
+    update dequantizes what it loaded."""
+
+    def __init__(self, quant_config: Fp8Config):
+        super().__init__(quant_config)
+        self.bf16_method = UnquantizedLinearMethod()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not is_weights_pre_processed():  # pre-processed: BF16 already
+            fp8, scale = layer.weight, layer.weight_scale_inv.to(torch.float32)
+            block_n, block_k = layer.weight_block_size
+            weight = torch.empty(fp8.shape, dtype=layer.orig_dtype, device=fp8.device)
+            for start in range(0, fp8.shape[0], 8 * block_n):  # bounds temporaries
+                rows = fp8[start : start + 8 * block_n].to(torch.float32)
+                s = scale[start // block_n : start // block_n + 8]
+                s = s.repeat_interleave(block_n, dim=0)[: rows.shape[0]]
+                s = s.repeat_interleave(block_k, dim=1)[:, : rows.shape[1]]
+                weight[start : start + rows.shape[0]] = rows * s
+            replace_parameter(layer, "weight", weight)
+        retire_parameter(layer, "weight_scale_inv")
+        self.bf16_method.process_weights_after_loading(layer)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.bf16_method.apply(layer, x, bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

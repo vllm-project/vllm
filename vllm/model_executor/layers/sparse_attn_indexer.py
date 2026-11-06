@@ -6,6 +6,7 @@ import math
 
 import torch
 import torch.distributed as dist
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -42,9 +43,17 @@ from vllm.model_executor.layers.indexer_topk import (
     get_indexer_topk,
     is_deep_select_supported,
 )
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import dequantized_fp8_config
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
     get_fp8_min_max,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -1621,3 +1630,47 @@ class SparseAttnIndexer(CustomOp):
                 )
 
         return topk_indices_buffer
+
+
+def init_indexer_wk_weights_proj(
+    indexer: nn.Module,
+    hidden_size: int,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> None:
+    """Build the indexer's checkpoint layers ``wk`` (quantized as the checkpoint
+    stores it) and ``weights_proj`` (BF16), and ``wk_weights_proj``, the BF16
+    linear that runs both as one GEMM. Its weight is not a parameter: it is
+    derived from theirs after every load (`fuse_indexer_wk_weights_proj`)."""
+    indexer.wk = ReplicatedLinear(
+        hidden_size,
+        indexer.head_dim,
+        bias=False,
+        quant_config=dequantized_fp8_config(quant_config) or quant_config,
+        prefix=f"{prefix}.wk",
+    )
+    indexer.weights_proj = ReplicatedLinear(
+        hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
+    )
+    fused = MergedColumnParallelLinear(
+        hidden_size,
+        [indexer.head_dim, indexer.n_head],
+        bias=False,
+        disable_tp=True,
+        prefix=f"{prefix}.wk_weights_proj",
+    )
+    weight = fused.weight.data
+    del fused.weight
+    fused.weight = weight  # a plain attribute: loaders and reloads skip it
+    indexer.wk_weights_proj = fused
+
+
+def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
+    """Refill the fused BF16 ``wk_weights_proj`` weight from the loaded ``wk``
+    and ``weights_proj``, in place so captured CUDA graphs keep its address."""
+    dtype = indexer.wk_weights_proj.weight.dtype
+    parts = [
+        get_and_maybe_dequant_weights(layer, out_dtype=dtype)
+        for layer in (indexer.wk, indexer.weights_proj)
+    ]
+    refill_derived(indexer.wk_weights_proj, "weight", torch.cat(parts))
