@@ -99,18 +99,6 @@ def _supports_router_bf16x3_device() -> bool:
     return on_gfx950()
 
 
-def _pooler_uses_default_gemm() -> bool:
-    if not current_platform.is_rocm():
-        return False
-
-    # Importing a foreign platform can reload torch extension libraries.
-    from vllm.platforms.rocm import get_cdna_version
-
-    # Benchmarked on CDNA3 only. On CDNA4, AITER's tuned-GEMM table picks lossy
-    # split-K BF16-accumulating kernels for the pooler shape.
-    return get_cdna_version() == 3
-
-
 def norm_residual_then_norm(
     x: MuseSpark1xResidualStream,
     pre_norm: MuseSpark1xRMSNorm,
@@ -233,7 +221,7 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.pooler",
         )
-        if not _pooler_uses_default_gemm():
+        if not current_platform.is_rocm():
             self.pooler.quant_method = MuseSparkTorchLinearMethod()
         self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
             hidden_size,
