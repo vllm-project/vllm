@@ -12,6 +12,10 @@ from vllm.model_executor.layers.dash_attention import (
 )
 from vllm.platforms import current_platform
 
+requires_cuda_dash = pytest.mark.skipif(
+    current_platform.is_rocm(), reason="requires CUDA DASH backend"
+)
+
 
 def test_page_coordinates_continue_across_prompt_and_response():
     roles = torch.tensor([0, 2, 1, 1, 2, 1, 1, 1, 0, 2, 0, 0, 2, 0])
@@ -107,6 +111,7 @@ def test_page_filter_excludes_other_page_remote_values():
         (torch.bfloat16, "FLASHINFER", None),
     ],
 )
+@requires_cuda_dash
 @pytest.mark.parametrize("block_size", [16, 32])
 def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
     dtype, backend, fa_version, block_size, rswa
@@ -117,6 +122,7 @@ def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
         _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache=False)
 
 
+@requires_cuda_dash
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_paged_decode_large_physical_cache_offsets(backend):
     """Read/write offsets beyond int32 while replaying the real paged kernels."""
@@ -335,6 +341,7 @@ def test_rswa_keeps_input_and_bounds_1000_output_tokens(block_size):
     "backend,fa_version",
     [("FLASH_ATTN", None), ("FLASH_ATTN", 2), ("FLASHINFER", None)],
 )
+@requires_cuda_dash
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_flash_prefill_preserves_route_priors_and_gqa(backend, fa_version, dtype):
     """Compare real kernels with DASH math across page and partial-block edges."""
@@ -387,6 +394,7 @@ def test_decode_rope_preserves_long_position_rounding(dtype, main):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
+@requires_cuda_dash
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(backend):
     """Chunks can end before an image, inside it, or at the instruction tail."""
@@ -516,6 +524,7 @@ def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(ba
         torch.testing.assert_close(actual, expected, atol=0.00390625, rtol=0.01)
 
 
+@requires_cuda_dash
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.parametrize("extra_marker", [False, True])
 @pytest.mark.parametrize("tail_tokens", [1, 2])
@@ -643,6 +652,7 @@ def test_recomputed_output_remains_outside_remote_input_prefix(
     torch.testing.assert_close(actual, expected[start:], atol=0.00390625, rtol=0.01)
 
 
+@requires_cuda_dash
 def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
     """Tail plans are evicted while captured plans keep their buffers alive."""
     from vllm.v1.attention.ops.dash_attention import (
@@ -675,6 +685,7 @@ def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
     torch.testing.assert_close(captured, captured_expected, atol=0.00390625, rtol=0.01)
 
 
+@requires_cuda_dash
 def test_dash_mixed_forward_does_not_read_cuda_metadata(dist_init):
     """A decode sharing a prefill batch must keep metadata on the host."""
     from tests.v1.attention.utils import (
