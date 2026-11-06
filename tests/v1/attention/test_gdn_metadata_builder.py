@@ -218,6 +218,38 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
         assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
+@pytest.mark.parametrize(
+    ("query_lens", "draft_tokens", "expected"),
+    [
+        pytest.param([3, 50], [2, -1], 3, id="spec-then-prefill"),
+        pytest.param([3, 2, 50], [2, 1, -1], 5, id="ragged-spec-then-prefill"),
+        pytest.param([3, 1], [2, -1], 3, id="spec-then-reclassified-decode"),
+        pytest.param([3, 50, 0], [2, -1, -1], 3, id="trailing-padding"),
+        pytest.param([50, 3], [-1, 2], None, id="spec-not-a-prefix"),
+        pytest.param([3, 50, 3], [2, -1, 2], None, id="spec-prefill-spec"),
+        pytest.param([3, 3], [2, 2], None, id="pure-spec"),
+        pytest.param([1, 50], None, None, id="no-spec"),
+    ],
+)
+def test_num_leading_spec_tokens(
+    query_lens: list[int], draft_tokens: list[int] | None, expected: int | None
+):
+    """Set only on mixed steps whose spec rows lead the batch."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=[q + 64 for q in query_lens], query_lens=query_lens)
+    meta = _build(builder, batch, draft_tokens)
+
+    assert meta.num_leading_spec_tokens == expected
+    if expected is not None:
+        # Slicing at the prefix selects the same tokens as the gather indices.
+        assert meta.spec_token_indx is not None
+        assert meta.non_spec_token_indx is not None
+        assert meta.spec_token_indx.tolist() == list(range(expected))
+        assert meta.non_spec_token_indx.tolist() == list(
+            range(expected, sum(query_lens))
+        )
+
+
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 @pytest.mark.parametrize("full_cuda_graph", [False, True])
 @pytest.mark.parametrize(

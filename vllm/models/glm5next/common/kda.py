@@ -580,7 +580,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # num_accepted_tokens for rejection-sampling rollback; non-spec tokens
         # are one-per-request. Mirrors olmo_gdn_linear_attn.py. Projections are
         # [n, *] (token dim 0); g1/beta are [1, n, h, d] (token dim 1).
-        if use_spec:
+        lead = attn_metadata_narrowed.num_leading_spec_tokens
+        if lead is not None:
+            # Spec rows form a prefix: views, no gather; outputs are written in place.
+            qkv_spec, qkv_ns = qkv_proj_states[:lead], qkv_proj_states[lead:]
+            g1_spec, g1_ns = g1[:, :lead], g1[:, lead:]
+            beta_spec, beta_ns = beta[:, :lead], beta[:, lead:]
+        elif use_spec:
             # In a pure spec-verify step (no non-spec tokens) the metadata
             # builder sets spec_token_indx = arange(num_actual_tokens), making
             # the index_select calls below identity copies. Skip them on this
@@ -664,12 +670,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # In a pure spec-verify step (no non-spec tokens) the recurrent kernel
         # can write straight into the layer output buffer, skipping the
         # fresh allocation + copy below. Mixed steps must scatter via
-        # spec_token_indx, so they keep the kernel-managed output.
+        # spec_token_indx, unless spec rows lead: those write in place too.
         spec_out = (
             core_attn_out[0, :num_actual_tokens].unsqueeze(0)
             if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
             else None
         )
+        if lead is not None:
+            spec_out = core_attn_out[:, :lead]
         if use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
@@ -698,9 +706,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # --- core attention: non-spec path (prefill or plain decode) ---
         core_attn_out_non_spec = None
-        # Only the plain-decode recurrent kernel can write straight into the
-        # layer output buffer; the chunked prefill kernel cannot, so this
-        # stays None there and the merge copy below runs as before.
+        # The plain-decode recurrent kernel and FlashKDA prefill can write
+        # straight into the layer output buffer; the Triton chunked prefill
+        # kernel cannot, so its output is copied below.
         ns_out = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert q_ns is not None
@@ -712,8 +720,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if self.kda_prefill_backend == "flashkda":
                 # Non-spec step: write straight into the layer output buffer
                 # (dense token order, no merge copy). Step with spec-decode
-                # tokens: write to the workspace buffer and scatter below.
+                # tokens: write to the workspace buffer and scatter below,
+                # unless they lead: the rows after them are dense too.
                 ns_out = None if use_spec else core_attn_out[:, :num_actual_tokens]
+                if lead is not None:
+                    ns_out = core_attn_out[:, lead:num_actual_tokens]
                 core_attn_out_non_spec, last_recurrent_state = self._flashkda_prefill(
                     q=_rearr(q_ns),
                     k=_rearr(k_ns),
@@ -749,6 +760,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
                 )
+                if lead is not None:
+                    core_attn_out[:, lead:num_actual_tokens] = core_attn_out_non_spec
             # Init cache
             scatter_states(
                 recurrent_state,
@@ -785,7 +798,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
 
         # --- merge spec / non-spec outputs back into token order ---
-        if use_spec and core_attn_out_non_spec is not None:
+        if use_spec and lead is None and core_attn_out_non_spec is not None:
             assert core_attn_out_spec is not None
             core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
