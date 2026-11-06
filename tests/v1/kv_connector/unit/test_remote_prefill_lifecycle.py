@@ -36,6 +36,178 @@ def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
+def _remote_scheduler(max_num_seqs: int, max_num_inflight_kv_loads: int):
+    vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_num_inflight_kv_loads
+    return create_scheduler(vllm_config), vllm_config.cache_config.block_size
+
+
+def test_inflight_kv_loads_start_while_batch_full():
+    """With --max-num-inflight-kv-loads, loads start while the running batch is
+    full, up to the cap, and a finished load counts until its request runs."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [local]
+
+    remote = [
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(4)
+    ]
+    for request in remote:
+        scheduler.add_request(request)
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [local]
+    assert [r.status for r in remote] == [RequestStatus.WAITING_FOR_REMOTE_KVS] * 2 + [
+        RequestStatus.WAITING
+    ] * 2
+    assert list(scheduler.async_kv_waiting) == remote[2:]
+
+    # A finished load holds its blocks until its request runs.
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([local], finished_recving={remote[0].request_id}),
+    )
+    scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler)[1:] == (1, 1)
+    assert remote[2].status == RequestStatus.WAITING
+
+    # The freed slot goes to the finished load, which lets the next one start.
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.finish_requests(local.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.schedule()
+    assert scheduler.running == [remote[0]]
+    assert remote[2].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert list(scheduler.async_kv_waiting) == remote[3:]
+
+
+def test_early_kv_load_does_not_overtake_finished_load():
+    """A load started while the batch is full queues behind older loads, so
+    a finished load gets the next free slot."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    older, newer = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    scheduler.add_request(older)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert older.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.add_request(newer)
+    for finished in (older, newer):
+        scheduler.update_from_output(
+            scheduler_output,
+            create_model_runner_output([local], finished_recving={finished.request_id}),
+        )
+        scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler)[1:] == (0, 2)
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.finish_requests(local.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.schedule()
+    assert scheduler.running == [older]
+
+
+def test_aborted_kv_load_counts_until_transfer_done():
+    """An aborted load keeps its place under the cap while its transfer still
+    writes its blocks, so cancelling loading requests can't exceed the cap."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=1
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    aborted, waiting = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    scheduler.add_request(aborted)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert aborted.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.finish_requests(aborted.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(waiting)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert waiting.status == RequestStatus.WAITING
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([local], finished_recving={aborted.request_id}),
+    )
+    scheduler.schedule()
+    assert aborted.request_id not in scheduler.requests
+    assert waiting.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_inflight_kv_load_cap_does_not_block_local_requests():
+    """Async-load requests past the cap don't hold back local ones."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=2, max_num_inflight_kv_loads=1
+    )
+    remote = [
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    ]
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    for request in (*remote, local):
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+    assert remote[0].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert remote[1].status == RequestStatus.WAITING
+    assert scheduler.running == [local]
+
+
+def test_inflight_kv_loads_follow_connector_may_load_async(monkeypatch):
+    """Only requests the connector's may_load_async flags start early loads."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    early, late = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    monkeypatch.setattr(
+        scheduler.connector, "may_load_async", lambda request: request is early
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for request in (early, late):
+        scheduler.add_request(request)
+    assert list(scheduler.async_kv_waiting) == [early]
+    assert list(scheduler.waiting) == [late]
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.schedule()
+    assert scheduler.running == [local]
+    assert early.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert late.status == RequestStatus.WAITING
+
+
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
     vllm_config = create_vllm_config()
@@ -86,7 +258,7 @@ def test_basic_lifecycle():
         0
     ].req_to_blocks[request_id]
     for block in blocks:
-        assert block._block_hash is None
+        assert block.block_hash is None
 
     # (1b): forward()
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
@@ -130,7 +302,7 @@ def test_basic_lifecycle():
     ].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
     # Confirm the rest of the prompt is scheduled in this step.
@@ -318,13 +490,13 @@ def test_no_spurious_prefix_caching():
     num_hashed_blocks = 0
     for block in local_blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks > 0
 
     # Remote blocks should not be cached.
     for block in remote_blocks:
         assert block.ref_cnt == 1
-        assert block._block_hash is None
+        assert block.block_hash is None
 
 
 def test_full_block_prompt():
