@@ -1324,6 +1324,8 @@ class DeepseekV4ForCausalLM(
     DeepseekV4MixtureOfExperts,
 ):
     model_cls = DeepseekV4Model
+    # MegaMoE routing reads token ids on every PP stage.
+    requires_raw_input_tokens = True
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
