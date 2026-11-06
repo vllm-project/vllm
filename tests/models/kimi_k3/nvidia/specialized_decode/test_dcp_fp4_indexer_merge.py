@@ -128,7 +128,7 @@ def _global_logits(cache, table, ends, q_rows, weights):
     row_table = table.repeat_interleave(Q, 0).contiguous()
     indices = torch.arange(rows, dtype=torch.int32, device="cuda")
     schedule = get_paged_mqa_logits_metadata(lens, UNIT, get_num_sms(), indices)
-    q_scale, w = mqa_logits_mx_inputs(query, q_scale, weights)
+    q_scale, w = mqa_logits_mx_inputs(query, q_scale, weights, torch.bfloat16)
     return fp8_fp4_paged_mqa_logits(
         (query, q_scale),
         kv_cache_as_quant_view(cache, 128, True),
@@ -137,6 +137,7 @@ def _global_logits(cache, table, ends, q_rows, weights):
         row_table,
         schedule,
         max_model_len=int(ends.max()) + 1,
+        logits_dtype=torch.bfloat16,
         indices=indices,
     )
 

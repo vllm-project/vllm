@@ -136,7 +136,8 @@ def _stock(attention, heads, projected, conv, state, table, accepted, q):
             query_start_loc=starts, max_query_len=q, validate_data=False,
             out=torch.empty_like(mixed),
         )  # fmt: skip
-        qkv = [x.reshape(1, n, heads, D) for x in mixed.split(dim, dim=-1)]
+        xq, xk, xv = (x.reshape(1, n, heads, D) for x in mixed.split(dim, dim=-1))
+        qkv = xq, xk, xv
         if attention.recoverssm_records is not None:
             core = kda_recoverssm_verify(
                 *qkv, g1, beta, attention.A_log, attention.dt_bias, LOWER_BOUND,
@@ -229,6 +230,7 @@ def test_verify_matches_stock(kernel, heads, requests, q, record, conv_dtype):
     # and the records of the stock RecoverSSM verify (its Triton kernel normalizes
     # keys with rsqrt: corrections agree to FP32 rounding, keys and gates exactly).
     torch.testing.assert_close(caches[1], state, atol=0, rtol=0)
+    assert records is not None
     ours_records = (records.correction.clone(), records.key_gate.clone())
     plain = SimpleNamespace(**{**vars(attention), "recoverssm_records": None})
     rows = torch.arange(1, 1 + requests * q, dtype=torch.int32, device=DEVICE)
@@ -370,7 +372,7 @@ def test_stream_matches_wide_bitwise(
         )
         out = torch.empty(requests * q, heads * D, device=DEVICE, dtype=torch.bfloat16)
         kda.prepare_caches(caches).run(projected, out, caches=caches, slots=table, **kw)
-        kept = (records.correction, records.key_gate) if record else ()
+        kept = (records.correction, records.key_gate) if records is not None else ()
         results.append((out, *caches, *kept))
     prepared.executable.cache_clear()
     for wide, stream in zip(*results):
@@ -473,7 +475,7 @@ def test_ws_conv_layouts_bitwise(monkeypatch, heads, requests, q, record):
         out = torch.empty(requests * q, heads * D, device=DEVICE, dtype=torch.bfloat16)
         kda.run(projected, out, caches=caches, slots=table, **kw)
         conv_out = caches[0] if dim_first else caches[0].transpose(1, 2)
-        kept = (records.correction, records.key_gate) if record else ()
+        kept = (records.correction, records.key_gate) if records is not None else ()
         results.append((out, conv_out, caches[1], *kept))
     prepared.executable.cache_clear()
     for first, window_first in zip(*results):

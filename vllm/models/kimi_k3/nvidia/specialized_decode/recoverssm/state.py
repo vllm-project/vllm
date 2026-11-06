@@ -124,7 +124,7 @@ class _DeferredStepCommit:
 
     def commit(self, *args, **kwargs) -> None:
         deferred = self.deferred
-        self.context.commit(
+        self.context.commit(  # type: ignore[misc]
             *args,
             **kwargs,
             record_rows=deferred.record_rows,
@@ -194,7 +194,9 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
         commit = metadata.recoverssm_commit
         if commit is not None and builder.recoverssm_pending is not None:
             context = metadata.recoverssm_context
+            assert context is not None
             if context.backend == FP32_DEFERRED:
+                assert isinstance(context, KDADeferredCommitContext)
                 deferred = _build_deferred(
                     builder,
                     common_attn_metadata,
@@ -204,8 +206,9 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
                     num_decode_draft_tokens_cpu,
                     commit.state_indices[:, 0],
                 )
-                metadata.recoverssm_context = _DeferredStepCommit(context, deferred)
-        metadata.recoverssm_deferred = deferred
+                step = _DeferredStepCommit(context, deferred)
+                metadata.recoverssm_context = step  # type: ignore[assignment]
+        metadata.recoverssm_deferred = deferred  # type: ignore[attr-defined]
         return metadata
 
     builder._get_recoverssm_context = get_context  # type: ignore[method-assign]
@@ -282,7 +285,7 @@ def install_layers(layers) -> None:
     the deferred verify (``deferred_recoverssm_verify``). CuTe RecoverSSM layers
     keep their own FP32-state commit and are left as they are."""
     for decoder in layers:
-        attn = getattr(decoder, "self_attn", None)
+        attn: Any = getattr(decoder, "self_attn", None)
         records = getattr(attn, "recoverssm_records", None)
         if records is None or attn.recoverssm_backend != "triton":
             continue

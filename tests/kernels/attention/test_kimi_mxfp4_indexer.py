@@ -174,6 +174,7 @@ def test_indexer_piecewise_replay_refreshes_batch_metadata(return_scores):
             )
             torch.testing.assert_close(cache, expected_cache, rtol=0, atol=0)
             if scores is not None:
+                assert expected_scores is not None
                 torch.testing.assert_close(
                     scores.gather(1, captured_out.argsort(dim=1)),
                     expected_scores.gather(1, expected.argsort(dim=1)),

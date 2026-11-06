@@ -416,7 +416,7 @@ def compile_sparse(batch, heads, padded, width, cap, device, push=None):
     lse = fake((batch, padded), None, torch.float32, 4)
     owners = None if push is None else (*push, cap)
     kernel = SparseDcpDecode(batch, heads, padded, width, owners)
-    args = (query, kv, rows, valid, latent, lse, Float32(1.0), Float32(1.0))
+    args: tuple = (query, kv, rows, valid, latent, lse, Float32(1.0), Float32(1.0))
     if push is not None:
         peers = fake((push[1],), None, torch.int64, 8)
         args += (peers, peers, Int32(0), Int32(0))
@@ -440,7 +440,7 @@ def run_sparse(
     rows), ``rows`` [>= B, K] / ``valid``: this rank's flat rows and counts ->
     ``latent`` [B, padded, 512] BF16 and ``lse`` [B, padded] FP32 (first ``heads``
     heads), or with ``push`` (DcpMailbox, parity, rank) into the owners' mailbox."""
-    args = (
+    args: tuple = (
         to_cute(query.view(torch.uint8)),
         to_cute(kv.view(torch.uint8)),
         to_cute(rows, 4),

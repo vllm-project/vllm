@@ -45,9 +45,9 @@ def _reference(q, kv, bt, seq, k):
         n = int(seq[r])
         rows = kv[bt[r]].reshape(-1, D)[:n].float()  # [n, D]
         qr = q[r * k : (r + 1) * k].float()  # [k, H, D]
-        s = torch.einsum("thd,nd->thn", qr, rows) * SCALE
+        s = torch.einsum("tkd,nd->tkn", qr, rows) * SCALE
         p = s.softmax(-1)
-        out.append(torch.einsum("thn,nl->thl", p, rows[:, :KV_LORA]))
+        out.append(torch.einsum("tkn,nl->tkl", p, rows[:, :KV_LORA]))
     return torch.cat(out)
 
 
@@ -331,8 +331,10 @@ def test_balanced_plan_matches_reference():
         sl[rows - 1] = 0
         tot = sl * 8 + 3
         bt = torch.randint(0, 1 << 20, (rows, 33), generator=g, dtype=torch.int32)
-        dev = [t.cuda() for t in (bt, sl, tot)]
-        dst, rest, tbt, tsl, ttot = A._balanced_tables(None, *dev, split, pairs)
+        bt_d, sl_d, tot_d = (t.cuda() for t in (bt, sl, tot))
+        dst, rest, tbt, tsl, ttot = A._balanced_tables(
+            None, bt_d, sl_d, tot_d, split, pairs
+        )
         order = sorted(range(rows), key=lambda i: (-int(sl[i]), i))[:split]
         total = int(sl.sum())
         num, den = A.MOVE
@@ -378,6 +380,7 @@ def test_balanced_dcp_decode_matches_one_launch(ctxs):
         A.balanced_tiers = policy
     o1, l1 = A.folded_decode(*args, **kwargs, table_cache={})
     torch.accelerator.synchronize()
+    assert l0 is not None and l1 is not None
     d_o = (o1.float() - o0.float()).abs().view(rows, -1).amax(1)
     d_l = (l1 - l0).abs().view(rows, -1).amax(1)
     same = (d_o == 0) & (d_l == 0)

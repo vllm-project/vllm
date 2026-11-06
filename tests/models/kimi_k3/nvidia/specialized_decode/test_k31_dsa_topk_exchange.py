@@ -170,7 +170,7 @@ def _same_logits(group, logits, row_ends, stock, ours, rows, max_local_len):
     every = group.all_gather(local.unsqueeze(0), dim=0)  # [W, rows, width]
     ends = group.all_gather(row_ends[:rows].contiguous().unsqueeze(0), dim=0)
     assert torch.equal(stock[1], ours[1]), "counts"
-    bad = {"stock": [], "exchange": []}
+    bad: dict[str, list] = {"stock": [], "exchange": []}
     for t in range(rows):
         row = torch.cat([every[r, t, : int(ends[r, t])] for r in range(world)])
         c = min(TOPK, row.numel())
@@ -273,6 +273,7 @@ def _check_requests(group, exchange, n, requests):
         _merge_local_select(fused, rows, logits, row_ends, merge_args(ref))
         torch.accelerator.synchronize()
         _same_logits(group, logits, row_ends, stock, ref, rows, max_local_len)
+    assert fused.workspace is not None
     sat = (fused.workspace.sat_word[:rows] >> 16).ne(0)
 
     def exchange_call(out):

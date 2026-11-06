@@ -664,6 +664,6 @@ def test_specialized_balanced_core_bitwise_matches_tokenspeed(lengths, heads, q,
     balanced.decode(
         query, cache, block_table, local_t, (softmax, output_scale), out, lse, **extra
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(out.view(torch.int16), stock_out.view(torch.int16))
     assert torch.equal(lse.view(torch.int32), stock_lse.view(torch.int32))

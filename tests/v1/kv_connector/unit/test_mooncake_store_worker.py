@@ -418,7 +418,7 @@ def _make_kv_cache_config(
     block_size: int = 16,
     num_kv_heads: int = 8,
     prefix_cache_retention_interval: int | None = 0,
-) -> object:
+) -> KVCacheConfig:
     """Minimal single-group KVCacheConfig for topology tests."""
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
