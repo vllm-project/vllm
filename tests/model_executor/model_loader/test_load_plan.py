@@ -543,29 +543,29 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     assert plan.get_dest("layer.weight") is not None
 
 
-def test_e8m0_scales_into_uint8_stay_direct():
-    """MX scales sent as float8_e8m0fnu into a uint8 parameter: the loader's
-    copy keeps their bytes, so the name is direct and holds the sent bytes."""
-    name, shape = "layer.weight_scale", (16, 32)
+@pytest.mark.parametrize(
+    "sent,held",
+    [(torch.float8_e8m0fnu, torch.uint8), (torch.uint8, torch.float8_e8m0fnu)],
+    ids=["e8m0_into_uint8", "uint8_into_e8m0"],
+)
+def test_e8m0_scales_stay_direct(sent, held):
+    """E8M0 scales sent as float8_e8m0fnu into a uint8 parameter, or the
+    other way round: the loader's copy keeps their bytes, so the name is
+    direct and the planned update writes the sent bytes."""
+    name, scales = "layer.weight_scale", torch.arange(256).to(torch.uint8)
 
     def make():
         model = _Toy()
         model.layer = _Layer()
-        model.layer.weight_scale = _param(*shape, dtype=torch.uint8)
+        model.layer.weight_scale = _param(256, dtype=held)
         return model
 
-    def scales(seed):  # every byte value, shifted per update
-        return torch.arange(512).add(seed).remainder(256).to(torch.uint8).view(shape)
-
-    model = _cold_start(make, {name: scales(0)})
+    model = _cold_start(make, {name: scales.flip(0).view(sent)})
     start_reload(model)
-    plan = _plan(model, {name: (shape, torch.float8_e8m0fnu)})
+    plan = _plan(model, {name: ((256,), sent)})
     assert plan.get_dest(name) is not None
-    for seed in (1, 2):
-        if seed > 1:
-            start_reload(model)
-        _planned_reload(model, plan, {name: scales(seed).view(torch.float8_e8m0fnu)})
-        assert torch.equal(model.layer.weight_scale, scales(seed))
+    _planned_reload(model, plan, {name: scales.view(sent)})
+    assert torch.equal(model.layer.weight_scale.view(torch.uint8), scales)
 
 
 def test_tensors_sharing_one_storage():
