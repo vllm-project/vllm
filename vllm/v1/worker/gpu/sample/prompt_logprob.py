@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +23,14 @@ CHUNK_SIZE = 1024
 # for 1024 rows at a 152k vocab). Only splits chunks when k is very large.
 TOPK_MAX_ELEMENTS = 64 << 20
 
+# token_logits_rows(start, end) wraps a logits_fn call on the hidden states of
+# batch tokens [start, end); see PunicaWrapperBase.token_logits_rows.
+TokenLogitsRowsFn = Callable[[int, int], AbstractContextManager]
+
+
+def _no_token_logits_rows(start: int, end: int) -> AbstractContextManager:
+    return nullcontext()
+
 
 @dataclass
 class _TokenIdScores:
@@ -36,10 +45,12 @@ class PromptLogprobsWorker:
         max_num_reqs: int,
         device: torch.device,
         logprobs_mode: LogprobsMode = "raw_logprobs",
+        token_logits_rows: TokenLogitsRowsFn = _no_token_logits_rows,
     ):
         self.max_num_reqs = max_num_reqs
         self.device = device
         self.logprobs_mode = logprobs_mode
+        self.token_logits_rows = token_logits_rows
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -108,7 +119,8 @@ class PromptLogprobsWorker:
             base = int(input_batch.query_start_loc_np[i]) - chunk_start
             for a in range(lo, hi, CHUNK_SIZE):
                 b = min(a + CHUNK_SIZE, hi)
-                logits = logits_fn(hidden_states[base + a : base + b])
+                with self.token_logits_rows(base + a, base + b):
+                    logits = logits_fn(hidden_states[base + a : base + b])
                 ids = req.token_ids[a - start : b - start]
                 req.scores[a - start : b - start] = (
                     logits.gather(-1, ids)
@@ -174,6 +186,7 @@ class PromptLogprobsWorker:
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                self.token_logits_rows,
             )
         )
 
@@ -293,6 +306,7 @@ def compute_prompt_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    token_logits_rows: TokenLogitsRowsFn = _no_token_logits_rows,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -305,7 +319,8 @@ def compute_prompt_logprobs_with_chunking(
     for start_idx in range(0, num_tokens, CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        with token_logits_rows(start_idx, end_idx):
+            prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
         requested_num = (
             prompt_logits.shape[-1]
             if num_prompt_logprobs == -1

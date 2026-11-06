@@ -11,10 +11,12 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
@@ -97,3 +99,98 @@ def test_qwen3_unembed_lora():
         )
         assert len(lora_outputs) == 1
         assert len(lora_outputs[0].outputs[0].text) > 0
+
+
+def _create_lm_head_lora(save_dir: str, seed: int, rank: int = 8) -> None:
+    """Like create_qwen3_lora_with_lm_head, but with a non-zero lm_head delta."""
+    create_qwen3_lora_with_lm_head(save_dir, rank=rank)
+    path = os.path.join(save_dir, "adapter_model.safetensors")
+    weights = load_file(path)
+    gen = torch.Generator().manual_seed(seed)
+    weights["base_model.model.lm_head.lora_B.weight"] = torch.randn(
+        VOCAB_SIZE, rank, generator=gen
+    ).to(torch.float16)
+    save_file(weights, path)
+
+
+def _prompt_lps(output, token_ids: list[int], last_n: int) -> torch.Tensor:
+    pairs = zip(output.prompt_logprobs[-last_n:], token_ids[-last_n:])
+    return torch.tensor([d[t].logprob for d, t in pairs])
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [True, False])
+def test_qwen3_unembed_lora_prompt_logprobs(monkeypatch, use_v2_model_runner):
+    """prompt_logprobs must include the lm_head LoRA delta of each request's
+    own adapter, and only that one (regression test for #51594)."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+    num_gen = 16
+    with tempfile.TemporaryDirectory() as tmpdir:
+        llm = LLM(
+            model=MODEL_PATH,
+            enable_lora=True,
+            max_loras=2,
+            max_lora_rank=8,
+            max_model_len=256,
+            gpu_memory_utilization=0.5,
+            enforce_eager=True,
+        )
+        loras = []
+        for i in range(2):
+            path = os.path.join(tmpdir, f"lora{i}")
+            _create_lm_head_lora(path, seed=i)
+            loras.append(LoRARequest(f"lm_head_lora{i}", i + 1, path))
+
+        prompts = ["Hello, my name is", "The capital of France is"]
+        gen_params = SamplingParams(temperature=0, max_tokens=num_gen, logprobs=0)
+        gen_outputs = llm.generate(
+            prompts, gen_params, lora_request=loras, use_tqdm=False
+        )
+
+        # Teacher-force prompt + generated tokens. Mix both adapters and no
+        # adapter in one batch so a mapping mix-up between requests shows up.
+        seqs, expected = [], []
+        for out in gen_outputs:
+            gen_ids = list(out.outputs[0].token_ids)
+            seqs.append(list(out.prompt_token_ids) + gen_ids)
+            expected.append(
+                torch.tensor(
+                    [lp[t].logprob for lp, t in zip(out.outputs[0].logprobs, gen_ids)]
+                )
+            )
+        score_params = SamplingParams(max_tokens=1, prompt_logprobs=0)
+        token_prompts = [TokensPrompt(prompt_token_ids=s) for s in seqs]
+        scored = llm.generate(
+            token_prompts + token_prompts,
+            score_params,
+            lora_request=loras + [None, None],
+            use_tqdm=False,
+        )
+        base_alone = llm.generate(token_prompts, score_params, use_tqdm=False)
+
+        for i, seq in enumerate(seqs):
+            lora_lps = _prompt_lps(scored[i], seq, num_gen)
+            base_lps = _prompt_lps(scored[2 + i], seq, num_gen)
+            # The adapter changes the scores by a lot ...
+            assert (lora_lps - base_lps).abs().mean() > 0.5
+            # ... prompt logprobs agree with the generation logprobs ...
+            torch.testing.assert_close(lora_lps, expected[i], atol=0.1, rtol=0)
+            # ... and no-adapter requests do not pick up a neighbour's delta.
+            torch.testing.assert_close(
+                base_lps, _prompt_lps(base_alone[i], seq, num_gen), atol=0.1, rtol=0
+            )
+
+        if use_v2_model_runner:
+            # Fixed-ID prompt scoring uses the same logits path.
+            id_params = [
+                SamplingParams(
+                    max_tokens=1,
+                    prompt_logprob_token_ids=[[t] for t in seq[1:]],
+                )
+                for seq in seqs
+            ]
+            id_scored = llm.generate(
+                token_prompts, id_params, lora_request=loras, use_tqdm=False
+            )
+            for out, exp in zip(id_scored, expected):
+                lps = torch.from_numpy(out.prompt_token_id_logprobs[-num_gen:, 0])
+                torch.testing.assert_close(lps.float(), exp, atol=0.1, rtol=0)
