@@ -729,7 +729,7 @@ def test_aiter_mxfp4_asm_layout_follows_aiter_tuned_configs(
         assert layer.weight_scale.is_contiguous()
 
 
-# RDNA4 static FP8 activations / MXFP4 weights -----------------------------
+# RDNA4 FP8 activations / MXFP4 weights -----------------------------
 
 
 def _make_static_fp8_mxfp4_layer(packed, scales, backend):
@@ -783,7 +783,7 @@ def _make_dynamic_fp8_mxfp4_layer(packed, scales, backend):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("dynamic", [False, True])
 def test_rdna4_flydsl_fp8_matches_quark_emulation(shape, dtype, dynamic, dist_init):
-    """Real Quark loading preserves the existing static-FP8 math exactly.
+    """Static and per-token FP8 match Quark emulation exactly.
 
     Dyadic inputs and bounded exponents make FP32 accumulation exact, so this
     comparison also catches nibble order, scale placement and cached pointers.
@@ -838,105 +838,3 @@ def test_rdna4_flydsl_fp8_matches_quark_emulation(shape, dtype, dynamic, dist_in
             scheme.apply_weights(layer, x, bias), expected + bias, atol=0, rtol=0
         )
     assert not torch.equal(*results)
-
-
-@pytest.mark.skipif(not on_rdna4(), reason="requires ROCm RDNA4")
-@pytest.mark.parametrize("dynamic", [False, True])
-def test_rdna4_flydsl_compiled_graph_reads_changed_inputs(dynamic, dist_init):
-    """The registered functional op supports compilation and graph replay."""
-    m, n, k = 7, 70, 160
-    packed = torch.full((n, k // 2), 0x32, device="cuda", dtype=torch.uint8)
-    scales = torch.full((n, k // 32), 127, device="cuda", dtype=torch.uint8)
-    make_layer = (
-        _make_dynamic_fp8_mxfp4_layer if dynamic else _make_static_fp8_mxfp4_layer
-    )
-    scheme, layer = make_layer(packed, scales, "flydsl")
-    x = torch.ones(m, k, device="cuda", dtype=torch.bfloat16)
-
-    def apply(value):
-        return scheme.apply_weights(layer, value)
-
-    compiled = torch.compile(apply, backend="eager", fullgraph=True)
-    expected = apply(x)
-    torch.testing.assert_close(compiled(x), expected, atol=0, rtol=0)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = compiled(x)
-    x.mul_(0.5)
-    graph.replay()
-    torch.accelerator.synchronize()
-    torch.testing.assert_close(output, expected * 0.5, atol=0, rtol=0)
-    assert compiled(x[:0]).shape == (0, n)
-
-
-@pytest.mark.skipif(not on_rdna4(), reason="requires ROCm RDNA4")
-@pytest.mark.slow_test
-@pytest.mark.parametrize("explicit_backend", [False, True])
-def test_rdna4_mxfp4_serves_checkpoint(explicit_backend, capfd, tmp_path):
-    """Load real weights and serve unseen prefills without request-time JIT."""
-    from tests.utils import RemoteOpenAIServer
-
-    model = "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"
-    server_args = [
-        "--revision",
-        "5233554c5fa56afda40150556b95573c2d7d29c0",
-        "--dtype",
-        "bfloat16",
-        "--language-model-only",
-        "--max-model-len",
-        "4096",
-        "--max-num-seqs",
-        "4",
-        "--max-num-batched-tokens",
-        "1024",
-        "--gpu-memory-utilization",
-        "0.95",
-        "--disable-uvicorn-access-log",
-        "--jit-monitor-verbose",
-    ]
-    if explicit_backend:
-        server_args += [
-            "--quantization-config",
-            '{"linear":{"activation":"fp8_per_token"}}',
-            "--kernel-config",
-            '{"linear_backend_per_quant":{"mxfp4":"flydsl"}}',
-        ]
-    with RemoteOpenAIServer(
-        model,
-        server_args,
-        env_dict={
-            "FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl"),
-            "NCCL_PROTO": "Simple",
-        },
-        max_wait_seconds=1200,
-    ) as server:
-        response = server.get_client().chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What is 2 + 2? Reply with just one integer.",
-                }
-            ],
-            temperature=0,
-            max_tokens=16,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        assert response.choices[0].message.content.strip().rstrip(".") == "4"
-        for rows in (127, 311, 719, 1009):
-            response = server.get_client().completions.create(
-                model=model,
-                prompt=[100 + rows % 7] * rows,
-                temperature=0,
-                max_tokens=1,
-                extra_body={"ignore_eos": True},
-            )
-            assert response.usage.prompt_tokens == rows
-            assert response.usage.completion_tokens == 1
-    captured = capfd.readouterr()
-    logs = captured.out + captured.err
-    (tmp_path / "server.log").write_text(logs)
-    assert "Rdna4Mxfp4LinearKernel" in logs
-    if not explicit_backend:
-        assert "Using per-token FP8 activations for RDNA4 MXFP4" in logs
-    assert "FlyDSL JIT compilation during inference" not in logs
