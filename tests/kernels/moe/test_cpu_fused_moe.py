@@ -744,3 +744,226 @@ def test_select_experts_sigmoid_scoring(with_bias):
     torch.testing.assert_close(
         topk_weights.gather(1, order), expected_weights.gather(1, expected_order)
     )
+
+
+# ===========================================================================
+# Tests for apply_router_weight_on_input=True (topk=1)
+# ===========================================================================
+
+def _test_apply_router_weight_on_input(
+    experts_cls,
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: MoEActivation,
+    expert_num: int,
+    ref_output: torch.Tensor,
+    layer: _StubMoELayer,
+    isa: str = "vec",
+) -> None:
+    """Helper to test apply_router_weight_on_input=True with topk=1."""
+    experts = experts_cls(moe_config, quant_config)
+    if hasattr(experts, "process_weights_after_loading"):
+        experts.process_weights_after_loading(layer)
+
+    output = torch.empty_like(input)
+    experts.apply(
+        output=output,
+        hidden_states=input,
+        w1=layer.w13_weight,
+        w2=layer.w2_weight,
+        topk_weights=topk_weight,
+        topk_ids=topk_ids,
+        activation=act,
+        global_num_experts=expert_num,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=True,
+    )
+
+    atol, rtol = get_default_atol(output), get_default_rtol(output)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("batch_size", BATCH_SIZE)
+@pytest.mark.parametrize("expert_num", EXPERT_NUM)
+@pytest.mark.parametrize("hidden_size", HIDDEN_DIM)
+@pytest.mark.parametrize("intermediate_size", INTERMEDIATE_DIM)
+@pytest.mark.parametrize("use_bias", USE_BIAS)
+@pytest.mark.parametrize("dtype", DTYPE)
+@pytest.mark.parametrize("act", ACT)
+@pytest.mark.parametrize("isa", ISA)
+def test_cpu_fused_moe_apply_router_weight_on_input(
+    default_vllm_config,
+    batch_size: int,
+    expert_num: int,
+    hidden_size: int,
+    intermediate_size: int,
+    use_bias: bool,
+    dtype: torch.dtype,
+    act: MoEActivation,
+    isa: str,
+):
+    """Test apply_router_weight_on_input=True for topk=1 unquantized MoE."""
+    set_random_seed(0)
+
+    topk_num = 1  # apply_router_weight_on_input only supports topk=1
+    up_dim = 2 * intermediate_size
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13 = torch.randn((expert_num, up_dim, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w2 = torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype) / (
+        0.5 * intermediate_size**0.5
+    )
+    router_logits = torch.randn((batch_size, expert_num), dtype=dtype)
+    w13_bias = None
+    w2_bias = None
+    if use_bias:
+        w13_bias = torch.randn((expert_num, up_dim), dtype=dtype) / (0.5 * up_dim**0.5)
+        w2_bias = torch.randn((expert_num, hidden_size), dtype=dtype) / (
+            0.5 * hidden_size**0.5
+        )
+    score = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk_num)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_output = ref_fused_moe(
+        input,
+        w13,
+        w2,
+        w13_bias,
+        w2_bias,
+        topk_weight,
+        topk_ids,
+        act,
+    )
+
+    packed_w13 = cpu_prepack_moe_weight(w13, isa)
+    packed_w2 = cpu_prepack_moe_weight(w2, isa)
+
+    # Test via modular kernel with apply_router_weight_on_input=True
+    layer = _StubMoELayer(
+        w13.clone(),
+        w2.clone(),
+        act,
+        w13_bias.clone() if w13_bias is not None else None,
+        w2_bias.clone() if w2_bias is not None else None,
+    )
+    quant_config = (
+        biased_moe_quant_config(layer.w13_bias, layer.w2_bias)
+        if use_bias
+        else FusedMoEQuantConfig.make()
+    )
+    moe_config = _make_moe_config(
+        expert_num, hidden_size, intermediate_size, topk_num, dtype, act, use_bias
+    )
+
+    experts_cls = {
+        "vec": CPUUnquantizedExperts,
+        "amx": X86CPUUnquantizedExperts,
+        "neon": ArmCPUUnquantizedExperts,
+        "vsx": PowerCPUUnquantizedExperts,
+    }[isa]
+
+    _test_apply_router_weight_on_input(
+        experts_cls=experts_cls,
+        moe_config=moe_config,
+        quant_config=quant_config,
+        input=input,
+        w13=w13,
+        w2=w2,
+        w13_bias=w13_bias,
+        w2_bias=w2_bias,
+        topk_weight=topk_weight,
+        topk_ids=topk_ids,
+        act=act,
+        expert_num=expert_num,
+        ref_output=ref_output,
+        layer=layer,
+        isa=isa,
+    )
+
+
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.X86
+    or not torch.cpu._is_amx_tile_supported(),
+    reason="CPUExpertsInt8 requires x86 AMX",
+)
+@pytest.mark.parametrize("act", [MoEActivation.SILU, MoEActivation.GELU_TANH])
+def test_cpu_experts_int8_apply_router_weight_on_input(
+    default_vllm_config, act: MoEActivation
+):
+    """Test apply_router_weight_on_input=True for INT8 MoE (topk=1)."""
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    expert_num, hidden_size, batch_size = 8, 128, 64
+    intermediate_size = 128
+    topk_num = 1  # apply_router_weight_on_input only supports topk=1
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13, w13_scale = quantize_per_channel(
+        torch.randn((expert_num, 2 * intermediate_size, hidden_size), dtype=dtype)
+        / (0.5 * hidden_size**0.5)
+    )
+    w2, w2_scale = quantize_per_channel(
+        torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype)
+        / (0.5 * intermediate_size**0.5)
+    )
+    router_logits = torch.randn((batch_size, expert_num), dtype=dtype)
+    topk_weight, topk_ids = _softmax_topk(router_logits, topk_num, False)
+
+    ref_output = ref_fused_moe_int8(
+        input, w13, w2, w13_scale, w2_scale, None, None, topk_weight, topk_ids, act
+    )
+
+    layer = _StubMoELayer(w13.clone(), w2.clone(), act)
+    layer.w13_weight_scale = torch.nn.Parameter(
+        w13_scale.unsqueeze(-1).clone(), requires_grad=False
+    )
+    layer.w2_weight_scale = torch.nn.Parameter(
+        w2_scale.unsqueeze(-1).clone(), requires_grad=False
+    )
+
+    moe_config = _make_moe_config(
+        expert_num, hidden_size, intermediate_size, topk_num, dtype, act
+    )
+    quant_config = int8_w8a8_moe_quant_config(
+        w1_scale=layer.w13_weight_scale,
+        w2_scale=layer.w2_weight_scale,
+        a1_scale=None,
+        a2_scale=None,
+        per_act_token_quant=True,
+    )
+
+    _test_apply_router_weight_on_input(
+        experts_cls=CPUExpertsInt8,
+        moe_config=moe_config,
+        quant_config=quant_config,
+        input=input,
+        w13=w13,
+        w2=w2,
+        w13_bias=None,
+        w2_bias=None,
+        topk_weight=topk_weight,
+        topk_ids=topk_ids,
+        act=act,
+        expert_num=expert_num,
+        ref_output=ref_output,
+        layer=layer,
+    )
