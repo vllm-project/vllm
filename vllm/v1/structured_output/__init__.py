@@ -165,6 +165,9 @@ class StructuredOutputManager:
                     vocab_size=vocab_size,
                 )
             elif request_backend == "guidance":
+                # A frontend that does not hold the tokenizer cannot check this
+                # before the request reaches the engine.
+                GuidanceBackend.validate_tokenizer(self.tokenizer)
                 self.backend = GuidanceBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,

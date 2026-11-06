@@ -1347,13 +1347,7 @@ class SamplingParams(
                     "Mistral model, the ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
                 )
-            if not GuidanceBackend.is_tokenizer_supported(tokenizer):
-                raise VLLMValidationError(
-                    "The 'guidance' structured output backend only supports fast "
-                    "Hugging Face tokenizers and Tekken-based Mistral tokenizers. "
-                    "Please use the 'xgrammar' backend or configure a fast "
-                    "tokenizer instead."
-                )
+            GuidanceBackend.validate_tokenizer(tokenizer)
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens

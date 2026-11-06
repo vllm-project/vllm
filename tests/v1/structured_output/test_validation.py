@@ -450,6 +450,29 @@ class TestValidateStructuredOutputs:
             params = self._validate_guidance(self._make_tokenizer(tokenizer_id))
             assert params.structured_outputs._backend == "guidance"
 
+        def test_engine_rejects_unsupported_tokenizer(self):
+            # The Rust frontend does not validate the tokenizer, so the
+            # engine's grammar_init must return the same validation error.
+            manager = object.__new__(StructuredOutputManager)
+            manager.backend = None
+            manager.backend_name = None
+            manager.vllm_config = SimpleNamespace(
+                model_config=SimpleNamespace(get_vocab_size=lambda: 128),
+                structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+            )
+            manager.tokenizer = self._StubSlowTokenizer()
+            request = SimpleNamespace(
+                request_id="req-guidance",
+                sampling_params=SimpleNamespace(
+                    structured_outputs=SimpleNamespace(_backend="guidance"),
+                ),
+                structured_output_request=SimpleNamespace(),
+            )
+
+            with pytest.raises(VLLMValidationError, match="only supports fast"):
+                manager.grammar_init(request)
+            assert manager.backend is None
+
     class TestPR49625Regression:
         def test_manager_rejects_mixed_structured_output_backends(self, monkeypatch):
             xgrammar_backend = Mock()
