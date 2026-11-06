@@ -931,12 +931,12 @@ def test_fused_indexer_dcp(case, mode):
     - packed: its select's B' rows are bit-exact the #63 pack kernel's of the
       same candidates, which are the exact local top-N of the logits (ties to the
       lowest key index), zero words past the count, and the counts."""
-    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
-        FusedIndexer,
-    )
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack,
         dcp_topk_pack_indices,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer import (
+        FusedIndexer,
     )
 
     contexts, q = DCP_INDEXER_CASES[case]
@@ -2606,7 +2606,7 @@ def dcp8_group():
         # The exact DCP top-k merge's rescue workspace (once per process, as the
         # model's first DSA layer does): sized for the widest DSpark verify step
         # the tests run (64 requests x 5 = 320 rows).
-        from vllm.v1.attention.ops.dcp_topk_merge import (
+        from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
             dcp_topk_merge_max_rows,
             init_dcp_topk_merge,
         )
@@ -2717,8 +2717,10 @@ def dcp_merge_vs_exact(world, saturate, repeats=1):
 
     from vllm.config import set_current_vllm_config
     from vllm.distributed import get_dcp_group
-    from vllm.v1.attention.ops import dcp_topk_merge as merge_pkg
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import dcp_topk_merge_rows
+    from vllm.models.kimi_k3.nvidia.ops import dcp_topk_merge as merge_pkg
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
+        dcp_topk_merge_rows,
+    )
 
     topk, local_len, rows, block = 2048, 4096, 6, UNIT
     rank = get_dcp_group().rank_in_group

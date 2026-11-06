@@ -52,6 +52,7 @@ from vllm.models.kimi_k3.nvidia.mla import (
     _GATE_MULTI_STREAM_TOKEN_THRESHOLD,
     _gate_sigmoid_mul,
 )
+from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import init_dcp_topk_merge
 from vllm.models.kimi_k3.nvidia.ops.dsa_indexer import (
     dsa_fused_prologue,
     indexer_k_norm_quant_insert,
@@ -67,7 +68,6 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backends.mla import indexer as v32_indexer
-from vllm.v1.attention.ops.dcp_topk_merge import init_dcp_topk_merge
 
 logger = init_logger(__name__)
 
