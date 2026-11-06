@@ -23,7 +23,7 @@ def test_token_offset_defaults_to_zero():
         num_micro_batches=2,
         compute_stream=object(),
         comm_stream=object(),
-        forward_contexts=[object(), object()],
+        forward_contexts=[object(), object()],  # type: ignore[list-item]  # stand-ins
         ready_barrier=ready_barrier,
     )
     assert [ctx.token_offset for ctx in ctxs] == [0, 0]
@@ -36,7 +36,7 @@ def test_token_offset_per_ubatch_thread():
         num_micro_batches=2,
         compute_stream=compute_stream,
         comm_stream=object(),
-        forward_contexts=[object(), object()],
+        forward_contexts=[object(), object()],  # type: ignore[list-item]  # stand-ins
         ready_barrier=ready_barrier,
         token_offsets=[0, 7],
     )

@@ -39,6 +39,7 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
+    encode_images,
     run_dp_sharded_vision_tower,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -49,6 +50,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    num_image_tokens,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from ..decoder_replay_layers import DecoderReplayLayers
@@ -157,7 +159,7 @@ class DeepseekV41ForCausalLM(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality.startswith("image"):
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
 
@@ -237,16 +239,9 @@ class DeepseekV41ForCausalLM(
                 self.vision, self.aligner, patches, vit_grid
             )
         else:
-            image_embeds_list = []
-            vit_offset = 0
-            for n_vit_h, n_vit_w in vit_grid:
-                n_vit = n_vit_h * n_vit_w
-                image_embeds_list.append(
-                    self._encode_image(
-                        patches[vit_offset : vit_offset + n_vit], n_vit_h, n_vit_w
-                    )
-                )
-                vit_offset += n_vit
+            image_embeds_list = encode_images(
+                self.vision, self.aligner, patches, vit_grid
+            )
 
         embeds: list[torch.Tensor] = []
         span_offset = 0
@@ -264,6 +259,13 @@ class DeepseekV41ForCausalLM(
         return tuple(embeds)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            llm_grid = kwargs["llm_grid"]
+            assert isinstance(image_embeds, torch.Tensor)
+            assert isinstance(llm_grid, torch.Tensor)
+            sizes = [num_image_tokens(h, w) for h, w in llm_grid.tolist()]
+            return image_embeds.split(sizes)
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -335,22 +337,5 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        # The child's load_weights already ran its post-load finalization.
-        self._weights_finalized = True
-        return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        # Model-level post-load hook (called by the loader after any load
-        # format). Under DummyModelLoader the child's load_weights — and
-        # hence its finalize step — is bypassed, so run it here instead.
-        if getattr(self, "_weights_finalized", False):
-            return
-        self.language_model.process_weights_after_loading()
+        return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))

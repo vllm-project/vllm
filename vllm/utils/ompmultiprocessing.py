@@ -29,6 +29,7 @@ class OMPProcessManager:
 
         self.local_world_size = config.parallel_config.local_world_size
         self.local_dp_rank = config.parallel_config.data_parallel_rank_local
+        self.assigned_node_ids = config.parallel_config.assigned_physical_gpu_ids
         # This is a bit tricky because the internal DP size
         # is always 1 for non-MoE models
         self.internal_dp_size = config.parallel_config._api_process_count
@@ -201,7 +202,7 @@ class OMPProcessManager:
 
         """
         # this memory node list has been sliced for DP offset
-        allowed_numa_nodes = cr_utils.get_visible_memory_node()
+        allowed_numa_nodes = cr_utils.get_visible_memory_node(self.assigned_node_ids)
         logical_cpu_list = cr_utils.get_allowed_cpu_list()
 
         local_world_size = self.local_world_size

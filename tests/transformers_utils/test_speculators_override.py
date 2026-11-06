@@ -19,6 +19,9 @@ import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.transformers_utils.config import maybe_override_with_speculators
+from vllm.v1.worker.gpu.spec_decode import speculator_config as speculator_config_module
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 
 _SPECULATORS_CONFIG_DICT: dict[str, Any] = {
     "architectures": ["DFlashDraftModel"],
@@ -124,6 +127,30 @@ def test_speculators_user_cannot_override_method_field():
 
     assert spec is not None
     assert spec["method"] == "dflash"
+
+
+def test_speculators_keeps_custom_method_based_on_checkpoint_method(monkeypatch):
+    monkeypatch.setattr(speculator_config_module, "_CUSTOM_CONFIGS", {})
+    register = speculator_config_module.register_speculative_method
+    register("my_dflash", DFlashSpeculatorConfig)
+    register("my_eagle3", Eagle3SpeculatorConfig)
+    with _patched_get_config_dict(_SPECULATORS_CONFIG_DICT):
+        _, _, spec = maybe_override_with_speculators(
+            model="fake-org/fake-dflash-spec",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={"method": "my_dflash"},
+        )
+        assert spec is not None
+        assert spec["method"] == "my_dflash"
+
+        with pytest.raises(ValueError, match="based on 'eagle3'"):
+            maybe_override_with_speculators(
+                model="fake-org/fake-dflash-spec",
+                tokenizer=None,
+                trust_remote_code=False,
+                vllm_speculative_config={"method": "my_eagle3"},
+            )
 
 
 def test_speculators_user_can_override_num_speculative_tokens():
@@ -235,3 +262,12 @@ def test_speculators_rejects_local_verifier_before_model_loading(
 
     with pytest.raises(ValueError, match="Speculators verifier must"):
         engine_args_cls(model=str(draft)).create_engine_config()
+
+
+def test_local_file_model_skips_speculators_detection(tmp_path):
+    """A single-file checkpoint (e.g. a .gguf) is not parsed as a config."""
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"GGUF")
+    assert maybe_override_with_speculators(
+        model=str(gguf), tokenizer="org/tok", trust_remote_code=False
+    ) == (str(gguf), "org/tok", None)

@@ -57,6 +57,16 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
     ULTRAQUANT_4BIT = 11  # packed FP4 values + UE8M0 group scales
+    # Hadamard-rotated Lloyd-Max codes, packed K+V per slot (ROCm).
+    OCTAVE_K3V4 = 12
+    OCTAVE_K3V3 = 13
+    OCTAVE_K3V3_COMPACT = 14
+
+    # Backend self-manages kernel dispatch. Reads as quantized but matches no
+    # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
+    # False). Registered handlers return this when they own kernel selection
+    # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
+    CUSTOM = 12
 
     @property
     def is_per_token_head(self) -> bool:
@@ -71,6 +81,15 @@ class KVQuantMode(IntEnum):
     def is_nvfp4(self) -> bool:
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
+
+    @property
+    def is_octave(self) -> bool:
+        """True for any Octave quantization mode."""
+        return self in (
+            KVQuantMode.OCTAVE_K3V4,
+            KVQuantMode.OCTAVE_K3V3,
+            KVQuantMode.OCTAVE_K3V3_COMPACT,
+        )
 
     @property
     def is_turboquant(self) -> bool:
@@ -90,6 +109,11 @@ class KVQuantMode(IntEnum):
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    from vllm.config.cache import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.quant_mode()
     if kv_cache_dtype == "int4_per_token_head":
         return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
@@ -104,6 +128,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode[kv_cache_dtype.upper()]
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("octave_"):
         return KVQuantMode[kv_cache_dtype.upper()]
     if kv_cache_dtype == "ultraquant_4bit":
         return KVQuantMode.ULTRAQUANT_4BIT
@@ -460,6 +486,9 @@ class HiSparseHotSpec(KVCacheSpec):
     def page_size_bytes(self) -> int:
         return self.page_size
 
+    def get_block_stride_alignment(self) -> int:
+        return math.lcm(self.page_size, super().get_block_stride_alignment())
+
     @property
     def block_table_token_alignment(self) -> int | None:
         return None
@@ -529,6 +558,10 @@ class AttentionSpec(KVCacheSpec):
     """
     state_content_bytes: int | None = None
     """C in bytes when packed; None means dense K/V content."""
+    kv_head_major_slots: bool = False
+    """Whether ``num_head_slots`` slots are grouped by KV head (``H2ND``: head
+    ``h``'s K and V slots are adjacent), so every KV head is one contiguous run
+    of the page and the page re-shards across TP by byte offset."""
     tokens_per_state: int | Fraction = 1
     """Tokens covered by one stored state. Ints > 1 compress multiple tokens
     into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
@@ -655,6 +688,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             tokens_per_state=specs[0].tokens_per_state,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
@@ -746,6 +780,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             cache_dtype_str=cache_dtype_str_set.pop(),
             topk_buffer_width=topk_buffer_width_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
@@ -812,6 +847,7 @@ class RSWASpec(FullAttentionSpec):
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
+            kv_head_major_slots=base.kv_head_major_slots,
             tokens_per_state=base.tokens_per_state,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
@@ -1031,9 +1067,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             dtype=specs[0].dtype,
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
+            kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             sliding_window=sliding_window_set.pop(),
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
@@ -1057,6 +1095,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
+    state_alignment: int = 1
+    """Byte alignment of each state within a page."""
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -1069,10 +1109,17 @@ class MambaSpec(KVCacheSpec):
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.page_size_padded is not None:
+            assert self.page_size_padded % self.state_alignment == 0, (
+                "page_size_padded must be aligned to state_alignment"
+            )
+
     @property
     def state_content_size_bytes(self) -> int:
         return sum(
-            prod(shape) * get_dtype_size(dtype)
+            round_up(prod(shape) * get_dtype_size(dtype), self.state_alignment)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
@@ -1082,10 +1129,7 @@ class MambaSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        page_size = sum(
-            prod(shape) * get_dtype_size(dtype)
-            for (shape, dtype) in zip(self.shapes, self.dtypes)
-        )
+        page_size = self.state_content_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded
@@ -1124,6 +1168,7 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
+            and spec.state_alignment == self.state_alignment
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
@@ -1133,11 +1178,16 @@ def get_mamba_prefill_checkpoint_position(
     num_tokens: int,
     hash_block_size: int,
     drop_eagle_block: bool,
+    num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Without EAGLE, leave one token to recompute on resend.
+    # Leave tokens for logits recomputation and the checkpoint's hash.
     # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    proof_limit = (
+        num_tokens
+        if drop_eagle_block
+        else num_tokens - max(1, num_hash_lookahead_tokens)
+    )
     checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size
@@ -1224,6 +1274,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            kv_head_major_slots=specs[0].kv_head_major_slots,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
@@ -1516,6 +1567,17 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    needs_kv_cache_zeroing: bool = field(init=False)
+    """Whether newly allocated attention blocks must be zeroed before use.
+
+    Resolved across workers before scheduler projection and worker initialization.
+    """
+
+    def __post_init__(self) -> None:
+        self.needs_kv_cache_zeroing = (
+            self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        )
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
@@ -1605,14 +1667,3 @@ class KVCacheConfig:
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1
-
-    @property
-    def needs_kv_cache_zeroing(self) -> bool:
-        """Whether newly allocated KV cache blocks must be zeroed before use.
-
-        Required for Mamba layers, whose state is read before it is fully written
-        (#35219), and for mixed-precision caches, where a block reused across
-        groups can be reinterpreted under a different precision and decode stale
-        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
-        """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache

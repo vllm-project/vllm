@@ -14,10 +14,13 @@ from vllm.logger import init_logger
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
+    BaseClassificationHeadWithLoRA,
     BaseLayerWithLoRA,
     ClassificationHeadWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
@@ -31,6 +34,9 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
+    TokenClassificationHeadWithLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
@@ -77,6 +83,10 @@ def get_lora_id():
 # Order matters here: more specific wrappers must be checked before generic
 # merged/column-parallel wrappers in from_layer().
 _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
+    DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
+    Step5FusedQKVIndexerWithLoRA,
+    Step5SparseIndexerWWithLoRA,
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -148,8 +158,15 @@ def from_layer_classification(
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: PreTrainedConfig | None = None,
-) -> ClassificationHeadWithLoRA:
-    instance_layer = ClassificationHeadWithLoRA(layer)
+    *,
+    is_token_level: bool = False,
+) -> BaseClassificationHeadWithLoRA:
+    head_cls = (
+        TokenClassificationHeadWithLoRA
+        if is_token_level
+        else ClassificationHeadWithLoRA
+    )
+    instance_layer = head_cls(layer)
     instance_layer.create_lora_weights(max_loras, lora_config, model_config)
     return instance_layer
 

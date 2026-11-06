@@ -31,6 +31,9 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+if (VLLM_TARGET_DEVICE STREQUAL "rocm" OR "$ENV{VLLM_KERNEL_SYMBOL_MAP}" STREQUAL "1")
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -365,6 +368,20 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
     "csrc/rocm/quickreduce/torch_bindings.cpp"
     "csrc/rocm/quickreduce/custom_quickreduce.cu")
+  # Octave KV cache (store, decode, rotation, prefill): only built for the
+  # validated architectures, gfx1100 (RDNA3) and gfx942 (MI300).
+  set(VLLM_OCTAVE_KV OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx942|gfx1100")
+    set(VLLM_OCTAVE_KV ON)
+    list(APPEND VLLM_EXT_SRC
+      "csrc/attention/octave_torch_bindings.cpp"
+      "csrc/attention/octave_attn.cu"
+      "csrc/attention/octave_decode_wmma_rdna3.cu"
+      "csrc/attention/octave_prefill_rdna3.cu"
+      "csrc/attention/octave_prefill_cdna.cu"
+      "csrc/attention/octave_decode_mfma_cdna.cu"
+    )
+  endif()
 
   message(STATUS "Enabling C extension.")
   define_extension_target(
@@ -376,6 +393,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+  if(VLLM_OCTAVE_KV)
+    # MFMA accumulators in VGPRs: in AGPRs every online-softmax rescale of the
+    # output copies it through 64 extra VGPRs and halves the occupancy.
+    set_source_files_properties(
+      "${CMAKE_CURRENT_BINARY_DIR}/csrc/attention/octave_decode_mfma_cdna.hip"
+      PROPERTIES COMPILE_FLAGS "-mllvm -amdgpu-mfma-vgpr-form")
+  endif()
 endif() # _C HIP endif
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
@@ -404,6 +428,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         COMMAND patch --batch --forward -p1
           "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} -c
+          "import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({sys.argv[2]: sys.argv[3:]}))"
+          "${CMAKE_CURRENT_BINARY_DIR}/generated-source-deps.json"
+          "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         COMMAND_ERROR_IS_FATAL ANY)
 
       include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
@@ -619,30 +652,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     # are not supported by Machete yet.
 
     # marlin arches for fp16 output
-    # Family-conditional 12.0f (one cubin for SM12x family) requires CUDA >= 13.0;
-    # fall back to architecture-specific 12.0a;12.1a on CUDA < 13.0 (e.g. 12.8).
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
+    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
     # marlin has limited support for turing
     cuda_archs_loose_intersection(MARLIN_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
     # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd PTX)
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
-    # marlin arches for fp8 input
-    # - sm80 doesn't support fp8 computation
-    # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-    # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
+    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
     # marlin arches for other files
     cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
 
@@ -721,21 +735,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
       endif()
 
-      if (MARLIN_FP8_ARCHS)
-        file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
-        set_gencode_flags_for_srcs(
-          SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
-          CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
-        if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-          set_source_files_properties(${MARLIN_TEMPLATE_FP8_KERNEL_SRC}
-            PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-        endif()
-        list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
-      endif()
-
       set(MARLIN_SRCS
          "csrc/quantization/marlin/marlin.cu"
-         "csrc/quantization/marlin/marlin_int4_fp8_preprocess.cu"
          "csrc/quantization/marlin/gptq_marlin_repack.cu"
          "csrc/quantization/marlin/awq_marlin_repack.cu")
       set_gencode_flags_for_srcs(
@@ -1150,6 +1151,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
   endif()
 
+  # Beam's kernels use NVLink multicast and thread-block clusters. Their norms
+  # must not contract into FMAs to keep the FP32 boundary exact.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(BEAM_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(BEAM_KERNEL_ARCHS)
+    set(BEAM_KERNEL_SRCS "csrc/beam/allreduce_norm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${BEAM_KERNEL_SRCS}"
+      CUDA_ARCHS "${BEAM_KERNEL_ARCHS}")
+    set_property(SOURCE ${BEAM_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${BEAM_KERNEL_SRCS}")
+    message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1168,6 +1189,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building Kimi K3 AttnRes for archs: ${KIMI_K3_ATTN_RES_ARCHS}")
   endif()
 
+  # Qwen4Exp HyperConnection up projection + gate mix (tcgen05).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS
+      "10.0f" "${CUDA_ARCHS}")
+  endif()
+  if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
+    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC "csrc/qwen4_exp/hc_up_gate_mix.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}"
+      CUDA_ARCHS "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}")
+    message(STATUS "Building Qwen4Exp HC up+gate mix for archs: "
+      "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
+  endif()
+
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
@@ -1177,6 +1213,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUDA_ARCHS "${HADACORE_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${HADACORE_SRCS}")
     message(STATUS "Building hadacore")
+  endif()
+
+  # Fused MQA logits + top-k prefill kernel (SM100 family). It compiles against
+  # DeepGEMM's headers, so DeepGEMM is fetched here.
+  include(cmake/external_projects/deepgemm.cmake)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+    cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
+  endif()
+  if(FUSED_MQA_TOPK_ARCHS)
+    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${FUSED_MQA_TOPK_SRC}"
+      CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
+    set_property(SOURCE ${FUSED_MQA_TOPK_SRC} APPEND PROPERTY INCLUDE_DIRECTORIES
+      "${deepgemm_SOURCE_DIR}/deep_gemm/include"
+      "${deepgemm_SOURCE_DIR}/third-party/cutlass/include")
+    list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_MQA_TOPK_SRC}")
+    message(STATUS
+      "Building fused MQA top-k for archs: ${FUSED_MQA_TOPK_ARCHS}")
   endif()
 
   # if CUDA endif
@@ -1243,6 +1298,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
     endif()
+    if(FUSED_MQA_TOPK_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_MQA_TOPK=1)
+    endif()
     if(FUSED_GDN_DECODE_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_GDN_DECODE=1)
@@ -1250,6 +1309,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
+    endif()
+    if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX=1)
+    endif()
+    if(BEAM_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_BEAM_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1290,11 +1357,28 @@ endif()
 # _moe_C_stable_libtorch extension
 #
 
+#
+# The softplus-sqrt topk kernels are instantiated one translation unit per
+# (gating dtype, topk_indices dtype) pair, in topk_softplus_sqrt_<dtype>_<idx>.cu,
+# so that ninja generates the device code for each pair in parallel instead of
+# serializing it onto a single core.
+set(VLLM_TOPK_SOFTPLUS_SQRT_SRC
+  "csrc/moe/topk_softplus_sqrt_f32_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f32_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_f16_int64.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_uint32.cu"
+  "csrc/moe/topk_softplus_sqrt_bf16_int64.cu")
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt.cu"
+  ${VLLM_TOPK_SOFTPLUS_SQRT_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1316,6 +1400,19 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(MUSE_SPARK_ROUTING_ARCHS "${CUDA_ARCHS}")
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+    # Native FP32 warp-max reduction requires the Blackwell family target.
+    list(TRANSFORM MUSE_SPARK_ROUTING_ARCHS
+      REPLACE "^10[.]0([+]PTX)?$" "10.0f")
+  endif()
+  set_gencode_flags_for_srcs(
+    SRCS "csrc/moe/muse_spark_routing.cu"
+    CUDA_ARCHS "${MUSE_SPARK_ROUTING_ARCHS}")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/muse_spark_routing.cu")
+endif()
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_MOE_WNA16_SRC
     "csrc/moe/moe_wna16.cu")
 
@@ -1324,25 +1421,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-  # moe marlin arches
-  # note that we always set `use_atomic_add=False` for moe marlin now,
-  # so we don't need 9.0 for bf16 atomicAdd PTX
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+
+  # Rubin LUT-B MoE GEMM; tcgen05 decompress::lut::b needs CUDA 13.4.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+    cuda_archs_loose_intersection(LUT_B_MOE_ARCHS "10.7f" "${CUDA_ARCHS}")
   endif()
+  if(LUT_B_MOE_ARCHS)
+    set(LUT_B_MOE_SRC "csrc/moe/lut_b_moe_sm107.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LUT_B_MOE_SRC}"
+      CUDA_ARCHS "${LUT_B_MOE_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${LUT_B_MOE_SRC}")
+    message(STATUS "Building LUT-B MoE for archs: ${LUT_B_MOE_ARCHS}")
+  endif()
+  # moe marlin arches
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   # moe marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
-  # moe marlin arches for fp8 input
-  # - sm80 doesn't support fp8 computation
-  # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
   # moe marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_OTHER_ARCHS)
@@ -1411,18 +1506,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SM75_SRC})
     endif()
 
-    if (MARLIN_MOE_FP8_ARCHS)
-      file(GLOB MARLIN_MOE_FP8_SRC "csrc/moe/marlin_moe_wna16/sm89_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_MOE_FP8_SRC}"
-        CUDA_ARCHS "${MARLIN_MOE_FP8_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_MOE_FP8_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_FP8_SRC})
-    endif()
-
     set(MARLIN_MOE_OTHER_SRC "csrc/moe/marlin_moe_wna16/ops.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_MOE_OTHER_SRC}"
@@ -1463,11 +1546,44 @@ target_compile_definitions(_moe_C_stable_libtorch PRIVATE
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
+  if(LUT_B_MOE_ARCHS)
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      VLLM_ENABLE_LUT_B_MOE=1)
+  endif()
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+
+  # The kernel is specialized on the wavefront size, but ROCm only exposes that
+  # value at runtime, so both arms are instantiated unless the build says which
+  # one the targeted archs can select (gfx9xx is wave64, every other supported
+  # arch is wave32 - that is what Utils::get_warp_size() returns). Keep the
+  # ^gfx9 predicate below in sync with the __GFX9__ branch of
+  # Utils::get_warp_size() in csrc/core/cuda_compat.h.
+  set(TOPK_WAVE_ONLY_DEFINE "")
+  set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
+  set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
+  if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave64 only (gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave32 only (non-gfx9 archs: ${VLLM_GPU_ARCHES})")
+    set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  else()
+    message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
+  if (TOPK_WAVE_ONLY_DEFINE)
+    # Set on the whole extension rather than per source: the dispatch unit also
+    # sees the launcher template body, and one definition for the target keeps
+    # every unit consistent (the dispatch does not instantiate it, see the
+    # extern declarations in the header).
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      ${TOPK_WAVE_ONLY_DEFINE})
+  endif()
 endif()
 
 # On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
@@ -1493,26 +1609,136 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The int4 skinny GEMM is instantiated one unit per N_in (a template over
+  # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
+  # build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
+  # with extern template keeping the device code in the five units.
+  set(VLLM_SKINNY_INT4_SRC
+    "csrc/rocm/skinny_gemms_int4_api.cu"
+    "csrc/rocm/skinny_gemms_int4_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_n5.cu")
+
+  # The paged attention instantiations are split over one generated translation
+  # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
+  # single file serialized ~10 min of device code generation onto one core. The
+  # same script emits the entry point prototypes and paged_attention()'s dispatch
+  # arms, so a unit cannot be compiled without being dispatched.
+  # attention_dispatch.cu only holds argument validation and is_navi detection,
+  # attention_kernels.cuh the kernels and launchers.
+  #
+  set(ROCM_ATTN_GEN_SCRIPT
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/generate_paged_attn.py)
+  # Editing the script has to re-run configure, otherwise the units on disk stay
+  # stale until something else triggers a reconfigure.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${ROCM_ATTN_GEN_SCRIPT})
+  file(MD5 ${ROCM_ATTN_GEN_SCRIPT} ROCM_ATTN_GEN_SCRIPT_HASH)
+  # The script records this key plus the exact list of files it wrote, in a stamp
+  # next to the outputs; the list is what CMake uses as the source list, so a
+  # stray `attention_paged_attn_*.cu` or a partially deleted set cannot slip in.
+  # The stamp lives in the source tree (not in a per-build-directory cache)
+  # because the outputs do. Whether the Navi kernel set is instantiated is a
+  # compile definition, not part of the generated text, so the units are identical
+  # for every build directory and arch list.
+  set(ROCM_ATTN_GEN_STAMP
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/.paged_attn_generated)
+
+  # Sets OUT_SRCS to the .cu files the stamp lists, or to nothing when the stamp
+  # is missing, written by another version of the script, or lists a missing file
+  # (all of which mean "regenerate").
+  function (vllm_rocm_attn_generated_srcs out_srcs)
+    set(${out_srcs} "" PARENT_SCOPE)
+    if (NOT EXISTS ${ROCM_ATTN_GEN_STAMP})
+      return()
+    endif()
+    file(STRINGS ${ROCM_ATTN_GEN_STAMP} _lines)
+    if (NOT _lines)
+      return()
+    endif()
+    list(GET _lines 0 _key)
+    list(REMOVE_AT _lines 0)
+    if (NOT _key STREQUAL "${ROCM_ATTN_GEN_SCRIPT_HASH}")
+      return()
+    endif()
+    set(_srcs)
+    foreach (_f ${_lines})
+      if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/${_f})
+        return()
+      endif()
+      if (_f MATCHES "\\.cu$")
+        list(APPEND _srcs csrc/rocm/${_f})
+      endif()
+    endforeach()
+    set(${out_srcs} ${_srcs} PARENT_SCOPE)
+  endfunction()
+
+  vllm_rocm_attn_generated_srcs(VLLM_ATTENTION_PAGED_ATTN_SRC)
+  if (NOT VLLM_ATTENTION_PAGED_ATTN_SRC)
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} ${ROCM_ATTN_GEN_SCRIPT}
+              ${ROCM_ATTN_GEN_SCRIPT_HASH}
+      RESULT_VARIABLE rocm_attn_generation_result
+      OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log
+      ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log
+    )
+
+    if (NOT rocm_attn_generation_result EQUAL 0)
+      message(FATAL_ERROR "Paged attention generation failed."
+                          " Result: \"${rocm_attn_generation_result}\""
+                          "\nCheck the log for details: "
+                          "${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log")
+    endif()
+    vllm_rocm_attn_generated_srcs(VLLM_ATTENTION_PAGED_ATTN_SRC)
+    if (NOT VLLM_ATTENTION_PAGED_ATTN_SRC)
+      message(FATAL_ERROR "Paged attention generation produced no sources; see "
+                          "${CMAKE_CURRENT_BINARY_DIR}/rocm_attn_generation.log")
+    endif()
+    message(STATUS "Paged attention generation completed successfully.")
+  else()
+    message(STATUS "Paged attention generation is up to date.")
+  endif()
+
+  # Configure deps too, so a plain `ninja` on an out-of-tree build dir regenerates
+  # a missing unit (e.g. after `git clean -X`) instead of failing on a missing
+  # source; see docs/contributing/incremental_build.md. pip install reruns anyway.
+  list(TRANSFORM VLLM_ATTENTION_PAGED_ATTN_SRC
+    PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/ OUTPUT_VARIABLE _attn_generated_abs)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${ROCM_ATTN_GEN_STAMP} ${_attn_generated_abs})
+
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/skinny_gemms_int4.cu"
-    "csrc/rocm/attention.cu")
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
+    ${VLLM_SKINNY_INT4_SRC}
+    "csrc/rocm/attention_dispatch.cu"
+    ${VLLM_ATTENTION_PAGED_ATTN_SRC})
+
+  # Compress the offloaded device binaries. The 9-arch release build packs
+  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
+  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
+  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
+  # .eh_frame out of range". --offload-compress keeps the device debug info
+  # (so the RelWithDebInfo build type is unchanged) while shrinking the
+  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
   list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_INT4_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
     set(VLLM_SKINNY_SRC
       "csrc/rocm/skinny_gemms.cu"
-      "csrc/rocm/skinny_gemms_int4.cu")
+      ${VLLM_SKINNY_INT4_SRC})
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
@@ -1537,7 +1763,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
-      "csrc/rocm/moe_q_gemm_rdna3.cu")
+      "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")
+  endif()
+
+  set(VLLM_ROCM_HAS_GFX115X OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx115[0-3]")
+    set(VLLM_ROCM_HAS_GFX115X ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/rdna35_gdn_chunked.cu")
   endif()
 
   define_extension_target(
@@ -1556,8 +1790,26 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
 
+  # The paged attention units are identical whatever the arch list is; whether the
+  # Navi (gfx11/gfx12) kernel set is needed is decided here, as a compile
+  # definition, so no generated file has to be rewritten for a different build
+  # directory. Keep this predicate in sync with is_navi_gpu() in
+  # csrc/rocm/attention_dispatch.cu.
+  set(_ROCM_NAVI_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _ROCM_NAVI_ARCHS INCLUDE REGEX "gfx1[12]")
+  set(_ROCM_NO_NAVI_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _ROCM_NO_NAVI_ARCHS EXCLUDE REGEX "gfx1[12]")
+  if(_ROCM_NO_NAVI_ARCHS AND NOT _ROCM_NAVI_ARCHS)
+    message(STATUS "paged attention: CDNA only (${VLLM_GPU_ARCHES}), "
+                   "Navi kernels not instantiated")
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_ATTN_NO_NAVI)
+  endif()
+
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
+  if(VLLM_ROCM_HAS_GFX115X)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX115X)
   endif()
 endif()
 
@@ -1586,12 +1838,10 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
-    include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/deepselect.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/flashkda.cmake)
-    include(cmake/external_projects/qutlass.cmake)
     include(cmake/external_projects/tml_fa4.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
