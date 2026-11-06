@@ -1108,7 +1108,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=swa_cu_seqlens,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=swa_max_seqlens,
-            min_seqlen_q=1,
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
@@ -1361,7 +1361,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                 max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                min_seqlen_q=1,
+                min_seqlen_q=0,
                 dropout_p=0.0,
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
@@ -1394,7 +1394,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 output=extend_outputs,
                 cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
-                min_seqlen_q=1,
+                min_seqlen_q=0,
                 max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
                 block_table=attn_metadata.block_table[
                     num_decodes : num_decodes + num_extends
