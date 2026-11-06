@@ -363,7 +363,10 @@ def selection_experts(intermediate, real, paired=False):
     weights = convert_weight_to_mxfp4_moe_kernel_format(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         torch.nn.Module(),
-        *map(expand, (q13, q2, s13, s2)),
+        expand(q13),
+        expand(q2),
+        expand(s13),
+        expand(s2),
         _cache_permute_indices={},
     )[:4]
     _WEIGHTS.clear()

@@ -83,7 +83,7 @@ def test_decode_projection_graph_and_pitch():
             xs[b].copy_(torch.randn(b, k, device="cuda"))
             buffers[b].fill_(float("nan"))
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         for b in rows:
             check(buffers[b][:b], reference(xs[b], weight))
             # Rows past the step stay untouched.

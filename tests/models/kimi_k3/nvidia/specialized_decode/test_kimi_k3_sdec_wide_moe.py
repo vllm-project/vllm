@@ -168,13 +168,13 @@ def check(config, device):
         with graph_capture(device) as ctx:
             with torch.cuda.stream(ctx.stream):
                 layer.run(x)  # warm up (compiles, plans)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             holder = {}
             with torch.cuda.graph(graph, stream=ctx.stream):
                 holder["y"] = layer.run(x)
         for _ in range(2):  # replays are the step's
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         ours = holder["y"].float()
         assert torch.isfinite(ours).all()
         err = float((ours - stock).norm() / stock.norm())
@@ -224,7 +224,7 @@ def check_listed(module, weights, device, beta, linear_beta):
         g = torch.Generator(device="cuda").manual_seed(2000 + call)
         x = torch.randn(rows, HIDDEN, generator=g, device="cuda").bfloat16()
         outs = {k: layer.run(x).float().clone() for k, layer in layers.items()}
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.isfinite(outs["sharded"]).all()
         assert torch.equal(outs["listed"], outs["grouped"]), (call, rows)
         ref = outs["listed"]

@@ -124,7 +124,7 @@ class KdaStream(KdaWide):
                     copy_g2s(at(convs, part, per * k), source)
         else:
             row_granules: cutlass.Constexpr = 128 // per
-            total: cutlass.Constexpr = 9 * row_granules
+            total: cutlass.Constexpr = 9 * row_granules  # type: ignore[no-redef]
             for j in cutlass.range_constexpr((total + THREADS - 1) // THREADS):
                 g = tid + THREADS * j
                 if g < total:

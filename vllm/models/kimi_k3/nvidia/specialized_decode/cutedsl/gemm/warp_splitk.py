@@ -153,7 +153,7 @@ def _issue_weight_tile(
 
     Plain Python control flow only: this helper is not preprocessed by the DSL.
     ``with_policy`` selects the ``.L2::cache_hint`` form; the pre-barrier
-    prologue tile must use the plain form because ptxas 13.0 mis-encodes the
+    prologue tile must use the plain form because ptxas 13.0 misencodes the
     hinted copy in that position (``LDGSTS ... [R+UR], desc[UR<odd>]``).
     """
     copy_count = output_tile * k_tile_size // (8 * _A_LOADER_THREADS)
@@ -614,7 +614,11 @@ def compile_warp_splitk(device_index: int, n: int, k: int, tactic: WarpSplitKTac
     check_tactic(tactic, n, k)
     dtype = _torch.bfloat16
     with _torch.cuda.device(device_index):
-        shapes = (((n, k), False), ((_MAX_M, k), True), ((n,), False))
+        shapes: tuple[tuple[tuple[int, ...], bool], ...] = (
+            ((n, k), False),
+            ((_MAX_M, k), True),
+            ((n,), False),
+        )
         shapes += (((_MAX_M, n), True),)
         args = tuple(
             _view(_torch.empty(s, device="cuda", dtype=dtype), dynamic_m=d)

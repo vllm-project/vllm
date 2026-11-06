@@ -107,7 +107,8 @@ def _stock_verify(layer, heads, projected, caches, table, q, record_indices=None
         query_start_loc=starts, max_query_len=q, validate_data=False,
         out=torch.empty_like(projected[:, : 3 * dim]),
     )  # fmt: skip
-    qkv = [x.reshape(1, n, heads, D) for x in mixed.split(dim, dim=-1)]
+    xq, xk, xv = (x.reshape(1, n, heads, D) for x in mixed.split(dim, dim=-1))
+    qkv = xq, xk, xv
     core = kda_recoverssm_verify(
         *qkv, g1, beta, layer.A_log, layer.dt_bias, LOWER_BOUND, state,
         layer.recoverssm_records, starts, table, q, record_indices=record_indices,
@@ -349,7 +350,7 @@ def test_fused_ws_uneven_ctas(heads, requests, ctas, monkeypatch):
     monkeypatch.setattr(
         prepared,
         "KdaFusedWS",
-        lambda *args: ws(*args[:-1], ctas),
+        lambda *args: ws(*args[:-1], ctas),  # type: ignore[call-arg]
     )
     prepared.executable.cache_clear()
     try:
@@ -405,7 +406,7 @@ def test_padded_rows_and_graph(split, path):
                 recs[1].clone(),
             )
             fn()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 fn()
@@ -416,7 +417,7 @@ def test_padded_rows_and_graph(split, path):
             graph.replay()
         else:
             fn()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         return out, caches, recs, pending_buf
 
     rows = torch.tensor([4, 0, 6, 2, 3], dtype=torch.int32, device=DEVICE)

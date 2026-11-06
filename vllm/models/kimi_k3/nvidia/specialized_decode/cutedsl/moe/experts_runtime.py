@@ -92,7 +92,7 @@ DYNAMIC = "4-8:1"
 def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
     """Only code and geometry are cached; no owner tensors or descriptors. ``knobs``:
     (B<=8 stream, pregrouped, steal, listed, ahead, static, dynamic)."""
-    defaults = (streamed(batch), False, False, False, False, static(batch))
+    defaults: tuple = (streamed(batch), False, False, False, False, static(batch))
     defaults += (dynamic(batch),)
     stream, grouped, steal, listed, ahead, walk, claims = knobs + defaults[len(knobs) :]
     capacity = 1 << (batch - 1).bit_length()

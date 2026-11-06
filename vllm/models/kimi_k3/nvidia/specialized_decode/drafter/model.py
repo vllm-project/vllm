@@ -141,7 +141,7 @@ def install_draft_fold(attn) -> None:
     if not attn.non_causal_multi_token_decode:
         return
     attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
-    attn.impl.__class__ = _folded_impl(type(attn.impl))
+    attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]
 
 
 @cache
@@ -150,7 +150,7 @@ def _folded_impl(base):
     draft decode first. Keeps the class name (logs, backend checks)."""
     from .attention import draft_forward_mqa
 
-    class Folded(base):
+    class Folded(base):  # type: ignore[valid-type, misc]
         def forward_mqa(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
             out = draft_forward_mqa(self, q, kv_c_and_k_pe_cache, attn_metadata, layer)
             if out is None:

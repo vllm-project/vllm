@@ -194,7 +194,7 @@ class PreparedMla:
             sms = torch.cuda.get_device_properties(self.device).multi_processor_count
             pitch = self.pitches[batch]
             cap = self.dcp.cap if self.dcp is not None else 64
-            args = batch, self.heads, pitch, specs, device, dcp, sms, q, cap
+            args: tuple = batch, self.heads, pitch, specs, device, dcp, sms, q, cap
             if self.dcp is not None:
                 args += (self.dcp.mailbox(batch).format,)
             query = to_cute(self.query_scratch[:batch])
@@ -245,7 +245,13 @@ class PreparedMla:
                 cp.update(pack=True)
         query, out = query.view(reqs, q, *query.shape[1:]), out.view(reqs, q, -1, 512)
         if self.cores[batch, q] == "balanced":
-            args = cache, block_table[:reqs], lengths[:reqs], self.stock_scales, out
+            args: tuple = (
+                cache,
+                block_table[:reqs],
+                lengths[:reqs],
+                self.stock_scales,
+                out,
+            )
             if box is not None:
                 cp = dict(cp=(box.size, box.rank, box.interleave), totals=totals[:reqs])
             self.balanced.decode(query, *args, lse=lse, **cp)
@@ -276,6 +282,7 @@ class PreparedMla:
         if self.dcp is not None:  # DcpValue zeroes padded requests (global lengths)
             publish, ((rows, rows_lse), boxes, peers), ids = self.dcp_args[batch]
             if self.dcp.mailbox(batch).format == PROJECTED:
+                assert self.uv_gathered is not None
                 uv = self.uv_gathered[1]
             mq(*q_args, *publish, s)
             self.stock_core(cache, block_table, lengths, batch, q, totals)

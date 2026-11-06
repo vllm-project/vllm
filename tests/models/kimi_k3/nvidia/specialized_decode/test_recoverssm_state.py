@@ -104,7 +104,7 @@ def _make_state(use_recoverssm: bool, model=None) -> KimiK3ModelState:
 
 
 def test_model_state_hands_itself_to_the_specialized_decode() -> None:
-    bound = []
+    bound: list = []
     decode = SimpleNamespace(bind_model_state=bound.append)
     model = SimpleNamespace(specialized_decode_config=object())
     model.build_specialized_decode = lambda: setattr(
@@ -136,6 +136,7 @@ def test_installed_add_request_resets_the_slot_after_the_base() -> None:
     with patch.object(MambaHybridModelState, "add_request", base_add_request):
         state = _make_state(use_recoverssm=True)
         install_model_state(state)
+        assert isinstance(state.recoverssm, DeferredRecoverSSMState)
         state.recoverssm.pending.fill_(3)
         state.add_request(5, SimpleNamespace())
     assert calls == [(5, 3)]

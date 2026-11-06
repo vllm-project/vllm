@@ -1852,6 +1852,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="internlm/Intern-S2-Mobius",
         is_available_online=False,
     ),
+    "KimiK3MTPModel": _HfExamplesInfo(
+        "moonshotai/Kimi-K3",
+        speculative_model="moonshotai/Kimi-K3",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
         speculative_model="meituan-longcat/LongCat-Flash-Chat",
