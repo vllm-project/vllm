@@ -37,8 +37,8 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
+    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
     RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
@@ -515,6 +515,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub sse_keep_alive_interval: u64,
 
+    /// Controls the `system_fingerprint` field on responses: `full`
+    /// (`vllm-<version>[-<parallelism>]-<config hash>`), `hash` (without the
+    /// parallelism), `custom` (`--fingerprint-value`), or `none`.
+    #[arg(long, value_enum, default_value_t)]
+    #[serde(default)]
+    pub fingerprint_mode: FingerprintModeArg,
+
+    /// Literal fingerprint string used when `--fingerprint-mode=custom`.
+    #[arg(long)]
+    #[serde(default)]
+    pub fingerprint_value: Option<String>,
+
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
@@ -825,6 +837,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let fingerprint_mode = self.fingerprint_mode_config();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -877,6 +890,7 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
             api_server_options,
+            fingerprint_mode,
             cors,
             access_log,
             tls,
@@ -912,6 +926,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let fingerprint_mode = self.fingerprint_mode_config();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -963,6 +978,7 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
             api_server_options,
+            fingerprint_mode,
             cors,
             access_log,
             tls,
@@ -1010,6 +1026,17 @@ impl SharedRuntimeArgs {
         }
     }
 
+    fn fingerprint_mode_config(&self) -> FingerprintMode {
+        match self.fingerprint_mode {
+            FingerprintModeArg::Full => FingerprintMode::Full,
+            FingerprintModeArg::Hash => FingerprintMode::Hash,
+            // Like Python, `custom` without a value reports no fingerprint.
+            FingerprintModeArg::Custom => (self.fingerprint_value.clone())
+                .map_or(FingerprintMode::None, FingerprintMode::Custom),
+            FingerprintModeArg::None => FingerprintMode::None,
+        }
+    }
+
     fn access_log_config(&self) -> AccessLogConfig {
         AccessLogConfig {
             enabled: !self.disable_access_log,
@@ -1030,6 +1057,17 @@ impl SharedRuntimeArgs {
             allow_credentials: self.allow_credentials,
         }
     }
+}
+
+/// `--fingerprint-mode` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FingerprintModeArg {
+    #[default]
+    Full,
+    Hash,
+    Custom,
+    None,
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
