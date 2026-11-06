@@ -451,10 +451,6 @@ def test_is_reasoning_end_ignores_earlier_turns_in_prompt():
 
     assert parser.is_reasoning_end(prompt_ids) is False
     assert parser.is_reasoning_end(prompt_ids + _ids(START_REASONING)) is False
-    assert (
-        parser.is_reasoning_end(prompt_ids + _ids(COMPLETE_REASONING["output"])) is True
-    )
-    # A prefill that opens with the response, as the streaming gate sees it.
     assert parser.is_reasoning_end(prompt_ids + _ids(START_RESPONSE)) is True
 
 
@@ -643,13 +639,8 @@ def test_thinking_follows_the_prompt_without_kwargs():
 
     assert parser_cls(tok).is_reasoning_end(prompt) is False
     # The frontend may report the prompt check itself, so the engine's
-    # reasoner can see the prompt first through the streaming gate.
-    engine = parser_cls(tok)
-    gate_steps = [
-        i
-        for i in range(1, len(output) + 1)
-        if engine.is_reasoning_end_streaming(prompt + output[:i], output[i - 1 : i])
-    ]
+    # reasoner gets the prompt only through set_prompt_token_ids.
+    gate_steps = _gate_steps(parser_cls(tok), prompt, output, 1)
     assert len(gate_steps) == 1
     assert tok.decode(output[: gate_steps[0]]).endswith(START_RESPONSE)
 
@@ -676,6 +667,8 @@ def test_whitespace_before_thought_marker(tokens_per_delta: int):
 def _gate_steps(parser, prompt: list[int], output: list[int], k: int) -> list[int]:
     """Feed `output` to the engine's gate in deltas of `k` tokens, as with
     speculative decoding; return the ends of the deltas where it fires."""
+    # As the structured-output manager does before its first gate call.
+    parser.set_prompt_token_ids(prompt)
     return [
         j
         for i in range(0, len(output), k)
@@ -889,6 +882,249 @@ def test_thinking_on_prompt_still_splits(
 ):
     prompt = _granite_prompt([{"role": "user", "content": "hi"}], thinking=True)
     assert _extract_after_prompt(prompt, output) == (reasoning, content)
+
+
+GATE_CASES = [
+    pytest.param(f"{START_REASONING} a {START_RESPONSE} b", START_RESPONSE, id="split"),
+    pytest.param(f"\n{START_RESPONSE} b", START_RESPONSE, id="response_first"),
+    pytest.param(
+        f"{START_REASONING} a {START_RESPONSE} b {START_RESPONSE} c",
+        START_RESPONSE,
+        id="first_response_marker_wins",
+    ),
+    pytest.param('{"text": "Here is my response: hi"}', None, id="inside_json"),
+    pytest.param(f"Sure. {START_RESPONSE} ok", None, id="no_thought_preamble"),
+    pytest.param(
+        f"Sure. {START_REASONING} a {START_RESPONSE} b",
+        None,
+        id="thought_after_preamble",
+    ),
+]
+
+
+@pytest.mark.parametrize("output, marker", GATE_CASES)
+@pytest.mark.parametrize("k", [1, 3])
+def test_engine_gate_ends_reasoning_where_extraction_does(
+    output: str, marker: str | None, k: int
+):
+    """The grammar starts where extraction's content starts after the marker,
+    and never on a marker that extraction keeps in the content."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt([{"role": "user", "content": "hi"}], thinking=True)
+    ids = tok.encode(output, add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    steps = _gate_steps(parser_cls(tok), prompt, ids, k)
+    reasoning, content = _extract_after_prompt(prompt, output)
+    if marker is None:
+        assert steps == [] and (reasoning, content) == (None, output)
+        return
+    marker_end = next(
+        j for j in range(1, len(ids) + 1) if marker in tok.decode(ids[:j])
+    )
+    assert steps == [min(len(ids), -(-marker_end // k) * k)]
+    assert content.lstrip() == output.split(marker, 1)[1].lstrip()
+
+
+def test_raw_prompt_quoting_markers_does_not_end_reasoning():
+    """Without a role header, only a response marker that ends the prompt
+    ends reasoning there."""
+    tok = _granite_tokenizer()
+    prompt = tok.encode(
+        f"Answer in this format.\n{START_REASONING} steps\n{START_RESPONSE} 4"
+        "\n\nQ: 3+3?",
+        add_special_tokens=False,
+    )
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is False
+
+
+def test_raw_prompt_ending_with_response_marker_ends_reasoning():
+    tok = _granite_tokenizer()
+    prompt = tok.encode(
+        f"Q: 3+3?\n{START_REASONING} add\n{START_RESPONSE}", add_special_tokens=False
+    )
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is True
+
+
+def test_engine_gate_after_a_raw_prompt_fires_at_the_response_marker():
+    """Without a role header the output start is unknown, so the gate ends
+    reasoning at the first response marker, where extraction splits an
+    output that opens with a thought."""
+    tok = _granite_tokenizer()
+    prompt = tok.encode(
+        f"Answer in this format.\n{START_REASONING} steps\n{START_RESPONSE} 4\n\n"
+        "Q: 3+3?\n",
+        add_special_tokens=False,
+    )
+    output = tok.encode(THOUGHT_OUTPUT, add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    marker_end = next(
+        j for j in range(1, len(output) + 1) if START_RESPONSE in tok.decode(output[:j])
+    )
+    assert _gate_steps(parser_cls(tok), prompt, output, 1) == [marker_end]
+
+
+@pytest.mark.parametrize(
+    "prefill",
+    [
+        "Sure.",
+        f"{START_RESPONSE} {{",
+        f"{START_REASONING} x {START_RESPONSE}",
+    ],
+    ids=["plain_text", "response_started", "closed_thought"],
+)
+def test_assistant_prefill_ends_reasoning(prefill: str):
+    """A continue_final_message prompt already holds the start of the answer,
+    so the engine constrains the output from its first token and extraction
+    returns it whole."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt(
+        [{"role": "user", "content": "hi"}], thinking=True
+    ) + tok.encode(prefill, add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is True
+    assert _extract_after_prompt(prompt, THOUGHT_OUTPUT) == (None, THOUGHT_OUTPUT)
+
+
+@pytest.mark.parametrize(
+    "prefill",
+    [f"{START_REASONING} Let me", "Here's my thought process: Let me"],
+    ids=["open_thought", "heres_spelling"],
+)
+@pytest.mark.parametrize("k", [1, 3])
+def test_prefill_with_an_open_thought_puts_the_output_inside_it(prefill, k):
+    """The model still has to finish its thought and write the response
+    marker: reasoning runs to that marker, where the grammar starts."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt(
+        [{"role": "user", "content": "hi"}], thinking=True
+    ) + tok.encode(prefill, add_special_tokens=False)
+    output = tok.encode(f" think. {START_RESPONSE} y", add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is False
+    steps = _gate_steps(parser_cls(tok), prompt, output, k)
+    assert len(steps) == 1
+    assert START_RESPONSE in tok.decode(output[: steps[0]])
+    assert START_RESPONSE not in tok.decode(output[: max(0, steps[0] - k)])
+    assert _extract_after_prompt(prompt, tok.decode(output)) == (" think. ", " y")
+
+
+def test_response_marker_begun_in_the_prefill_does_not_end_reasoning():
+    """Extraction reads the output alone and never sees a marker that the
+    prefill began, so the gate must not see one either."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt(
+        [{"role": "user", "content": "hi"}], thinking=True
+    ) + tok.encode(f"{START_REASONING} a. Here is my resp", add_special_tokens=False)
+    output = tok.encode('onse: {"a": 1}', add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert _gate_steps(parser_cls(tok), prompt, output, 1) == []
+    text = tok.decode(output)
+    assert _extract_after_prompt(prompt, text) == (text, None)
+
+
+def test_engine_gate_reads_the_turn_past_an_eos_in_the_output():
+    """With ignore_eos the output can hold EOS; the turn still starts at its
+    role header, so a marker after a preamble stays out of the grammar."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt([{"role": "user", "content": "hi"}], thinking=True)
+    output = (
+        tok.encode("Sure.", add_special_tokens=False)
+        + [tok.eos_token_id]
+        + tok.encode(f" {START_RESPONSE} b", add_special_tokens=False)
+    )
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert _gate_steps(parser_cls(tok), prompt, output, 1) == []
+
+
+def test_closed_last_turn_is_not_a_prefill():
+    """A prompt rendered without a generation prompt ends with a closed
+    turn: the output opens a new one, so reasoning has not ended."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt([{"role": "user", "content": "hi"}], thinking=True)
+    closed = prompt[: len(prompt) - prompt[::-1].index(tok.eos_token_id)]
+    assert tok.decode(closed).endswith(f"hi{tok.eos_token}")
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(closed) is False
+
+
+def _marker_end(tok, output: list[int]) -> int:
+    return next(
+        j for j in range(1, len(output) + 1) if START_RESPONSE in tok.decode(output[:j])
+    )
+
+
+def test_engine_gate_after_a_raw_prompt_follows_extraction():
+    """The output start comes from the prompt, so a raw prompt gets the same
+    rule as a chat prompt: a marker after a preamble stays in the content."""
+    tok = _granite_tokenizer()
+    prompt = tok.encode(f"Use '{START_REASONING}'.\nQ: hi\n", add_special_tokens=False)
+    output = tok.encode(f"Sure. {START_RESPONSE} b", add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is False
+    assert _gate_steps(parser_cls(tok), prompt, output, 1) == []
+
+
+def test_raw_prompt_ending_with_a_thought_marker_puts_the_output_inside_it():
+    tok = _granite_tokenizer()
+    prompt = tok.encode(f"Q: hi\n{START_REASONING}", add_special_tokens=False)
+    output = tok.encode(f" x. {START_RESPONSE} b", add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is False
+    assert _gate_steps(parser_cls(tok), prompt, output, 1) == [_marker_end(tok, output)]
+    assert _extract_after_prompt(prompt, tok.decode(output)) == (" x. ", " b")
+
+
+@pytest.mark.parametrize("lead", ["eos", "own_turn"])
+def test_engine_gate_after_a_closed_turn_follows_extraction(lead: str):
+    """Rendered without a generation prompt, the output opens the next turn.
+    Extraction reads detokenized text, which drops special tokens, so the
+    gate fires where the text opens with a thought section."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt([{"role": "user", "content": "hi"}], thinking=True)
+    closed = prompt[: len(prompt) - prompt[::-1].index(tok.eos_token_id)]
+    output = tok.encode(THOUGHT_OUTPUT, add_special_tokens=False)
+    if lead == "eos":
+        output = [tok.eos_token_id] + output
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(closed) is False
+    assert _gate_steps(parser_cls(tok), closed, output, 1) == [_marker_end(tok, output)]
+
+
+def test_engine_gate_ignores_a_role_header_in_the_output():
+    """With ignore_eos the model can write a new turn; its text after the
+    header is not the start of the output, as extraction sees it."""
+    tok = _granite_tokenizer()
+    prompt = _granite_prompt([{"role": "user", "content": "hi"}], thinking=True)
+    output = (
+        tok.encode("Sure.", add_special_tokens=False)
+        + [tok.eos_token_id]
+        + tok.encode(
+            f"<|start_of_role|>assistant<|end_of_role|>{THOUGHT_OUTPUT}",
+            add_special_tokens=False,
+        )
+    )
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert _gate_steps(parser_cls(tok), prompt, output, 1) == []
+    text = tok.decode(output, skip_special_tokens=True)
+    assert parser_cls(tok).extract_reasoning(text, None) == (None, text)
+
+
+def test_user_turn_continuation_is_not_a_prefill():
+    """continue_final_message on a user turn: the model still writes its own
+    assistant turn, so reasoning has not ended."""
+    tok = _granite_tokenizer()
+    text = tok.apply_chat_template(
+        [{"role": "user", "content": "hi"}],
+        tokenize=False,
+        continue_final_message=True,
+        thinking=True,
+    )
+    assert text.endswith("user<|end_of_role|>hi")
+    prompt = tok.encode(text, add_special_tokens=False)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    assert parser_cls(tok).is_reasoning_end(prompt) is False
 
 
 def test_response_marker_prefill_keeps_the_whole_output():

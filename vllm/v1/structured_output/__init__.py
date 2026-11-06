@@ -130,6 +130,8 @@ class StructuredOutputManager:
                 tokenizer=self.tokenizer,
                 **parser_kwargs,
             )
+            if request.prompt_token_ids is not None:
+                structured_req.reasoner.set_prompt_token_ids(request.prompt_token_ids)
         return structured_req.reasoner
 
     def grammar_init(self, request: "Request") -> None:

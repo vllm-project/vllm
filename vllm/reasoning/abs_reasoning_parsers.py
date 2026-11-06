@@ -95,13 +95,15 @@ class ReasoningParser:
 
         It is used in structured engines like `xgrammar` to check if the
         reasoning content ends in the model output during a decode step.
-        `input_ids` the entire model output and `delta_ids` are the last few
-        computed tokens of the model output (like during a decode step).
+        `input_ids` are the request's token ids so far and `delta_ids` are the
+        last few computed tokens of the model output (like during a decode
+        step). The structured-output manager passes the prompt and output
+        ids; the streaming frontend passes the output ids.
 
         Parameters
         ----------
         input_ids: list[int]
-            The entire model output.
+            The request's token ids so far (see above).
         delta_ids: list[int]
             The last few computed tokens of the model output at the current decode step.
 
@@ -195,8 +197,10 @@ class ReasoningParser:
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         """Provide the rendered prompt before the output is parsed.
 
-        Parsers that can tell whether the prompt already closes reasoning
-        (e.g. continue_final_message) use it to classify the output.
+        The frontend calls it before parsing, and the structured-output
+        manager before its first gate call, whose ids are the prompt followed
+        by the output. Parsers that can tell whether the prompt already closes
+        reasoning (e.g. continue_final_message) use it to classify the output.
         Default is a no-op; override in subclasses as needed.
         """
         return

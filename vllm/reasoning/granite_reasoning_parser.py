@@ -3,7 +3,7 @@
 
 import functools
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -19,11 +19,22 @@ if TYPE_CHECKING:
 
 # How far into a prompt to look for the first turn's end.
 FIRST_TURN_MAX_TOKENS = 1024
+# Tokens read from the start of the output or a prefill: whitespace and a marker.
+TURN_HEAD_TOKENS = 64
+# How a prompt leaves the model's turn (see _prefill_state).
+PromptState = Literal["ended", "thought", "open"]
+ROLE_START = "<|start_of_role|>"
+ROLE_END = "<|end_of_role|>"
 
 
 @functools.cache
-def _colon_token_ids(tokenizer: PreTrainedTokenizerBase) -> frozenset[int]:
-    return frozenset(i for token, i in tokenizer.get_vocab().items() if ":" in token)
+def _vocab_ids(
+    tokenizer: PreTrainedTokenizerBase,
+) -> tuple[frozenset[int], int | None, int | None]:
+    """The ids of tokens holding a ":", and of the role-header tokens."""
+    vocab = tokenizer.get_vocab()
+    colon_ids = frozenset(i for t, i in vocab.items() if ":" in t)
+    return colon_ids, vocab.get(ROLE_START), vocab.get(ROLE_END)
 
 
 class GraniteReasoningParser(ReasoningParser):
@@ -32,30 +43,23 @@ class GraniteReasoningParser(ReasoningParser):
     IBM granite models currently use "Here is my thought process:"
     and "Here is my response:" to separate its thinking / response outputs.
 
-    is_reasoning_end reads the prompt to tell whether a thought section was
-    asked for; a first turn that merely mentions a thought marker counts.
-    When it was not, or the prompt already ends reasoning, extraction given
-    that prompt through set_prompt_token_ids returns the output whole, as
-    streaming does. Otherwise, or given no prompt, extraction reads the
-    output alone, and markers count only at its start, after whitespace: a
+    Markers count only at the start of the output, after whitespace: a
     thought marker there opens reasoning that runs to the first response
-    marker, and a response marker there is dropped. Any other output, a
-    thought section after a preamble included, is content.
+    marker, a response marker there opens the content, and any other output
+    is content. The engine's gate, which reads token ids, ends reasoning by
+    the same rule, so the grammar starts where the content does; the engine
+    passes the prompt through set_prompt_token_ids first, and without it the
+    ids are taken as output only. A prompt that does not ask for thoughts,
+    or already ends reasoning (text after the assistant role header, or a
+    raw prompt ending with a response marker), makes the whole output
+    content. An assistant prefill that leaves a thought section open, or a
+    raw prompt ending with a thought marker, puts the output inside it:
+    reasoning runs to the first response marker.
 
-    The engine's gate reads token ids, so the grammar starts at the right
-    token; a streaming frontend switches to content where the extraction
-    does, through state that extract_reasoning_streaming sets, as K2
-    Horizon's parser does (a general Parser hook would replace it).
-
-    Structured output applies after the thought section the template asks
-    for, or from the first token when thinking is off. With thinking on, a
-    model that skips its thought section is not constrained: ending reasoning
-    where the output leaves the marker prefix would put that token, the "{"
-    of a direct JSON answer, outside the grammar, which then adds another.
-
-    Known limits: a prompt that ends inside an open thought section (an
-    assistant prefill) is not handled, and a stream that ends inside a
-    response-marker prefix drops those held reasoning chars.
+    With thinking on, a model that skips its thought section is not
+    constrained: ending reasoning where the output leaves the marker prefix
+    would put that token, the "{" of a direct JSON answer, outside the
+    grammar.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
@@ -64,11 +68,11 @@ class GraniteReasoningParser(ReasoningParser):
         # NOTE: There have been some observed occurrences of quantized
         # instances of the current models using "Here's" instead of "Here is",
         # so to be safe, we match on both.
-        self.valid_think_starts = [
+        self.valid_think_starts = (
             "Here's my thought process:",
             "Here is my thought process:",
-        ]
-        self.valid_response_starts = ["Here's my response:", "Here is my response:"]
+        )
+        self.valid_response_starts = ("Here's my response:", "Here is my response:")
         self.markers = (*self.valid_think_starts, *self.valid_response_starts)
         self.response_start_regex = re.compile(
             "|".join(map(re.escape, self.valid_response_starts))
@@ -80,11 +84,15 @@ class GraniteReasoningParser(ReasoningParser):
             len(response_start) for response_start in self.valid_response_starts
         )
 
-        self.colon_token_ids = _colon_token_ids(tokenizer)
+        self.colon_token_ids, self.role_start_id, self.role_end_id = _vocab_ids(
+            tokenizer
+        )
         # Set by extract_reasoning_streaming, which only the frontend calls.
         self._streamed_content: bool | None = None
         # Set from the prompt when the caller passes one.
         self._prompt_ends_reasoning = False
+        self._output_in_thought = False
+        self._output_start = 0
 
     def _asks_for_thoughts(self, prompt_token_ids: Sequence[int]) -> bool:
         # The template ignores `thinking` with a system message, tools or
@@ -106,14 +114,75 @@ class GraniteReasoningParser(ReasoningParser):
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         # The same decision the engine and the streaming frontend make, so
         # non-streaming extraction keeps the output whole when they do.
-        self._prompt_ends_reasoning = self.is_reasoning_end(prompt_token_ids)
+        state = self._prompt_state(prompt_token_ids)
+        self._prompt_ends_reasoning = state == "ended"
+        self._output_in_thought = state == "thought"
+        # The engine's gate reads the prompt and output ids together.
+        self._output_start = len(prompt_token_ids)
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        if not self._asks_for_thoughts(input_ids):
+        return self._prompt_state(input_ids) == "ended"
+
+    def _prompt_state(self, prompt_token_ids: Sequence[int]) -> PromptState:
+        if not self._asks_for_thoughts(prompt_token_ids):
+            return "ended"
+        return self._prefill_state(prompt_token_ids)
+
+    def _prefill_state(self, input_ids: Sequence[int]) -> PromptState:
+        """How the prompt leaves the model's turn: "ended" when it holds the
+        start of the answer, "thought" when it leaves a thought section open,
+        else "open"."""
+        decode = self.model_tokenizer.decode
+        start = self._turn_start(input_ids)
+        if start is None:
+            # A raw prompt can quote the markers, so only its last words count.
+            num = len(input_ids)
+            tail = token_slice(input_ids, max(0, num - TURN_HEAD_TOKENS), num)
+            text = decode(list(tail)).rstrip()
+            if text.endswith(self.valid_response_starts):
+                return "ended"
+            return "thought" if text.endswith(self.valid_think_starts) else "open"
+        eos = self.model_tokenizer.eos_token_id
+        if rfind_tokens(input_ids, (eos,), start) >= 0 or not self._is_assistant_turn(
+            input_ids, start
+        ):
+            # A closed turn or another role's text: the model writes its own
+            # assistant turn.
+            return "open"
+        head = decode(list(token_slice(input_ids, start, start + TURN_HEAD_TOKENS)))
+        head = head.lstrip()
+        if not head:
+            return "open"
+        if not head.startswith(self.valid_think_starts):
+            return "ended"
+        prefill = decode(list(token_slice(input_ids, start, len(input_ids))))
+        _, content = self._split(prefill, final=False, in_thought=False)
+        return "thought" if content is None else "ended"
+
+    def _turn_start(self, input_ids: Sequence[int]) -> int | None:
+        """Where the last turn's text starts, after its role header, or None
+        without one (a raw prompt)."""
+        if self.role_end_id is None:
+            return None
+        start = rfind_tokens(input_ids, (self.role_end_id,)) + 1
+        return start or None
+
+    def _is_assistant_turn(self, input_ids: Sequence[int], start: int) -> bool:
+        header = list(token_slice(input_ids, max(0, start - 8), start - 1))
+        if self.role_start_id not in header:
+            return False
+        role = header[len(header) - header[::-1].index(self.role_start_id) :]
+        return self.model_tokenizer.decode(role).strip() == "assistant"
+
+    def _opens(self, input_ids: Sequence[int]) -> bool:
+        # Extraction honors markers only at the start of the output, in text
+        # detokenized without special tokens.
+        if self._output_in_thought:
             return True
-        # A response marker that ends the prompt (a prefill) ends reasoning.
-        text = self.model_tokenizer.decode(self._turn_tail(input_ids, 0))
-        return self.response_start_regex.search(text) is not None
+        start = self._output_start
+        head = token_slice(input_ids, start, start + TURN_HEAD_TOKENS)
+        text = self.model_tokenizer.decode(list(head), skip_special_tokens=True)
+        return text.lstrip().startswith(self.markers)
 
     def _turn_tail(self, input_ids: Sequence[int], num_delta: int) -> list[int]:
         # The markers are text whose token ids depend on the character before
@@ -138,24 +207,30 @@ class GraniteReasoningParser(ReasoningParser):
             return False
         num_delta = len(delta_ids)
         tail = self._turn_tail(input_ids, num_delta)
+        # Extraction reads the output alone, so a marker begun in the prompt's
+        # prefill does not count.
+        tail = tail[max(0, len(tail) - (len(input_ids) - self._output_start)) :]
         decode = self.model_tokenizer.decode
         search = self.response_start_regex.search
-        return search(decode(tail)) is not None and (
-            search(decode(tail[: max(0, len(tail) - num_delta)])) is None
+        return (
+            search(decode(tail)) is not None
+            and search(decode(tail[: max(0, len(tail) - num_delta)])) is None
+            and self._opens(input_ids)
         )
 
-    def _split(self, text: str, final: bool) -> tuple[str | None, str | None]:
+    def _split(
+        self, text: str, final: bool, in_thought: bool
+    ) -> tuple[str | None, str | None]:
         """Split `text` into reasoning and content at the response marker.
 
         With `final` False, `text` is a prefix of the output, and text that
         a later token can still turn into a marker is left out of both parts.
         """
-        stripped = text.lstrip()
-        lead = len(text) - len(stripped)
-        think = next(
-            (t for t in self.valid_think_starts if stripped.startswith(t)), None
-        )
-        if think is None:
+        # A prefill that opened the thought section puts the text inside it.
+        think_end = 0 if in_thought else self._think_end(text)
+        if think_end is None:
+            stripped = text.lstrip()
+            lead = len(text) - len(stripped)
             response = next(
                 (r for r in self.valid_response_starts if stripped.startswith(r)), None
             )
@@ -166,7 +241,6 @@ class GraniteReasoningParser(ReasoningParser):
             if not final and self._is_marker_prefix(stripped):
                 return None, None
             return None, text
-        think_end = lead + len(think)
         response = self.response_start_regex.search(text, think_end)
         if response is None:
             held = 0
@@ -186,6 +260,14 @@ class GraniteReasoningParser(ReasoningParser):
         if final:
             return reasoning or None, content or None
         return reasoning, content
+
+    def _think_end(self, text: str) -> int | None:
+        """The end of the thought marker that opens `text`, or None."""
+        stripped = text.lstrip()
+        think = next(
+            (t for t in self.valid_think_starts if stripped.startswith(t)), None
+        )
+        return None if think is None else len(text) - len(stripped) + len(think)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Called on the delta that ends the response marker; its content text
@@ -212,7 +294,7 @@ class GraniteReasoningParser(ReasoningParser):
         """
         if self._prompt_ends_reasoning:
             return None, model_output
-        return self._split(model_output, final=True)
+        return self._split(model_output, True, self._output_in_thought)
 
     def extract_reasoning_streaming(
         self,
@@ -251,8 +333,9 @@ class GraniteReasoningParser(ReasoningParser):
 
         """
         previous = current_text[: max(0, len(current_text) - len(delta_text))]
-        old_reasoning, old_content = self._split(previous, final=False)
-        new_reasoning, new_content = self._split(current_text, final=False)
+        in_thought = self._output_in_thought
+        old_reasoning, old_content = self._split(previous, False, in_thought)
+        new_reasoning, new_content = self._split(current_text, False, in_thought)
         self._streamed_content = new_content is not None
         reasoning = (new_reasoning or "")[len(old_reasoning or "") :]
         content = (new_content or "")[len(old_content or "") :]
@@ -268,8 +351,8 @@ class GraniteReasoningParser(ReasoningParser):
         """Called on the last delta of a stream that never reached the
         response marker; returns the content text held back so far. Held
         reasoning text cannot be returned here and stays unsent."""
-        _, content = self._split(previous_text, final=True)
-        _, streamed = self._split(previous_text, final=False)
+        _, content = self._split(previous_text, True, self._output_in_thought)
+        _, streamed = self._split(previous_text, False, self._output_in_thought)
         return (content or "")[len(streamed or "") :] or None
 
     def _is_marker_prefix(self, text: str) -> bool:
