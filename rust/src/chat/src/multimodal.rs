@@ -1151,10 +1151,13 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         video_fps: Option<f64>,
     ) -> Result<FetchedMedia> {
-        let (sampling, default_fps) = self.video_sampling_policy_for_request(video_fps);
-        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector))
-            .with_video_frame_sampling(sampling)
-            .with_default_video_sample_fps(default_fps);
+        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
+        if video_fps.is_some() || self.video_sampling_policy().is_some() {
+            let (sampling, default_fps) = self.video_sampling_policy_for_request(video_fps);
+            tracker = tracker
+                .with_video_frame_sampling(sampling)
+                .with_default_video_sample_fps(default_fps);
+        }
         for part in media_parts {
             tracker.push_part(part)?;
         }

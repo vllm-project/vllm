@@ -64,6 +64,54 @@ SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
 `vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
 gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
+### Request-scoped multimodal kwargs (gRPC)
+
+The Rust `vllm.Inference` gRPC service supports request-scoped
+multimodal processing overrides through two optional `GenerateRequest`
+fields of type `google.protobuf.Struct`:
+
+- `mm_processor_kwargs`: image preprocessing options `max_pixels`
+  and `num_crops`.
+- `media_io_kwargs`: video sampling option `video.fps`.
+
+For example, the fields can contain the following JSON-shaped values:
+
+```json
+{
+  "mm_processor_kwargs": {
+    "max_pixels": 3136
+  },
+  "media_io_kwargs": {
+    "video": {
+      "fps": 2.0
+    }
+  }
+}
+```
+
+These values are illustrative; valid image limits depend on the model's
+preprocessor configuration. This is not a complete gRPC request.
+
+Request-scoped overrides are disabled by default. Server operators can
+enable them with `--trust-request-mm-kwargs` when using trusted gRPC
+clients.
+
+The supported overrides have the following constraints:
+
+- `max_pixels` must be a positive integer, no greater than the model's
+  configured maximum and no smaller than its configured minimum, if any.
+- `num_crops` must be a positive integer no greater than the model's
+  configured limit.
+- `video.fps` must be finite and greater than 0, up to 30 FPS.
+
+Image overrides require the corresponding model configuration limits.
+Request overrides require raw media; preprocessed features are not
+supported. Unsupported keys and invalid values are rejected.
+
+Overrides are applied per request without changing shared processor
+configuration. Media cache identities account for the request-specific
+options to avoid reusing incompatible preprocessing results.
+
 ### gRPC health checks
 
 The gRPC listener also serves `grpc.health.v1.Health`. Kubernetes probes should
