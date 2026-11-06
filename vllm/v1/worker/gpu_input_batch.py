@@ -677,11 +677,8 @@ class InputBatch:
         """Slide non-empty requests down into lower, empty indices.
 
         Any consecutive empty indices at the very end of the list are not
-        filled.
-
-        Returns:
-          swaps: list of (from,to) swap tuples for moved requests
-          empty_req_indices: indices not filled by condensation
+        filled. The swaps are recorded by the batch update builder and applied
+        in place, so the method returns nothing.
 
         """
         num_reqs = self.num_reqs
