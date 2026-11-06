@@ -841,9 +841,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
     "AriaForConditionalGeneration": _HfExamplesInfo(
         "rhymes-ai/Aria",
-        min_transformers_version="5.18.0",
+        min_transformers_version="5.23.0",
         transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/48907"
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/49594"
         },
     ),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
