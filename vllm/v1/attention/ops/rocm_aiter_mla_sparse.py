@@ -42,7 +42,6 @@ else:
 
 logger = init_logger(__name__)
 
-
 FP8_DTYPE = current_platform.fp8_dtype()
 _USE_FUSED_PAGED_MQA_LOGITS = _ON_GFX942 or _ON_GFX950 or _ON_RDNA
 
@@ -1553,14 +1552,12 @@ def rocm_aiter_sparse_attn_indexer(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
 
-        paged_mqa_seq_lens = decode_metadata.seq_lens
-        paged_mqa_block_table = decode_metadata.block_table
         logits = rocm_fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
-            paged_mqa_seq_lens,
-            paged_mqa_block_table,
+            decode_metadata.seq_lens,
+            decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
             compress_ratio=compress_ratio,
