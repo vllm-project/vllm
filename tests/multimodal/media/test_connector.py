@@ -4,7 +4,10 @@
 import mimetypes
 import os
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from io import BytesIO
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
@@ -579,3 +582,75 @@ def test_get_cached_bytes_file_deleted_before_read():
         connector._media_cache_path(url).unlink()
 
         assert connector._get_cached_bytes(url) is None
+
+
+@pytest.fixture
+def cached_image_eviction(local_asset_server, tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_MEDIA_CACHE", str(tmp_path))
+    # Each write keeps only its own entry, so a second image evicts the first.
+    monkeypatch.setenv("VLLM_MEDIA_CACHE_MAX_SIZE_MB", "0")
+    monkeypatch.setenv("VLLM_MEDIA_CACHE_TTL_HOURS", "24")
+    reader = MediaConnector()
+    writer = MediaConnector()
+    url = local_asset_server.url_for("RGBA_comp.png")
+    other_url = local_asset_server.url_for("Grayscale_8bits_palette_sample_image.png")
+    writer.fetch_image(other_url)
+
+    cache_path = reader._media_cache_path(url)
+
+    @contextmanager
+    def evict_after_stat():
+        stat_done = threading.Event()
+        eviction_done = threading.Event()
+        original_stat = os.stat
+
+        def stat_then_wait(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if path == cache_path and not stat_done.is_set():
+                stat_done.set()
+                assert eviction_done.wait(timeout=10)
+            return result
+
+        def evict():
+            try:
+                assert stat_done.wait(timeout=10)
+                writer.fetch_image(other_url)
+                assert not cache_path.exists()
+            finally:
+                eviction_done.set()
+
+        with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as pool:
+            patch.setattr(os, "stat", stat_then_wait)
+            eviction = pool.submit(evict)
+            try:
+                yield
+            finally:
+                eviction.result(timeout=10)
+        assert stat_done.is_set()
+
+    return reader, url, evict_after_stat
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_fetch_image_cache_evicted_after_stat(cached_image_eviction, use_async):
+    """Concurrent eviction must fall back to downloading a valid image."""
+    reader, url, evict_after_stat = cached_image_eviction
+    expected = reader.fetch_image(url)
+    cache_path = reader._media_cache_path(url)
+    cached_bytes = cache_path.read_bytes()
+    old_time = time.time() - 60
+    os.utime(cache_path, (old_time, old_time))
+    assert _image_equals(reader.fetch_image(url), expected)
+    assert cache_path.stat().st_mtime > old_time
+
+    with evict_after_stat():
+        image = (
+            await reader.fetch_image_async(url)
+            if use_async
+            else reader.fetch_image(url)
+        )
+
+    assert _image_equals(image, expected)
+    assert cache_path.read_bytes() == cached_bytes
+    assert _image_equals(reader.fetch_image(url), expected)

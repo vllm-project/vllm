@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.utils import hash_config
 from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -32,7 +33,6 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
-from vllm.distributed.utils import sched_yield
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -1525,8 +1525,8 @@ class EngineCoreProc(EngineCore):
             }
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+                ready_msg["parallel_config_hash"] = hash_config(
+                    vllm_config.parallel_config
                 )
             if vllm_config.parallel_config.enable_elastic_ep:
                 ready_msg["coord_store_port"] = (
@@ -1900,7 +1900,10 @@ class EngineCoreProc(EngineCore):
         """Wait for a step's model output, meanwhile handling new requests and
         aborts as they arrive."""
         poll: Callable[[], bool] | None = getattr(future, "poll", None)
-        if poll is not None:
+        wait_briefly: Callable[[Sized, float], None] | None = getattr(
+            future, "wait_briefly", None
+        )
+        if poll is not None and wait_briefly is not None:
             pending_inputs = self.input_queue.queue
             spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
             while not self._deferred_inputs and not poll():
@@ -1912,7 +1915,9 @@ class EngineCoreProc(EngineCore):
                     else:
                         self._deferred_inputs.append(req)
                 elif time.monotonic() < spin_deadline:
-                    sched_yield()
+                    # Spin on something cheaper than poll(), to leave the GIL
+                    # free more of the time for the input and output threads.
+                    wait_briefly(pending_inputs, spin_deadline)
                 else:
                     # Long-running step: stop busy-looping and block until the
                     # output arrives. Later inputs are handled after the step.
@@ -2052,6 +2057,15 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
+    def _config_hash(self) -> str | None:
+        """`hash_config()` of the initialized config, the hash part of a
+        frontend's `system_fingerprint`. Like the frontend, never fail startup
+        over the fingerprint."""
+        try:
+            return hash_config(self.vllm_config)
+        except Exception:
+            return None
+
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
@@ -2110,6 +2124,9 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             prefix_hash_config=self.prefix_hash_config,
+            cache_config_info=self.vllm_config.cache_config.metrics_info(),
+            config_hash=self._config_hash(),
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
         )
 
     def process_input_sockets(
