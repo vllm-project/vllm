@@ -65,13 +65,13 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) [Nightly] EP Weight Filter with EPLB"
-  key: ep-weight-filter-eplb-2xb200
+  key: ep-weight-filter-eplb-4xb200
   # Needs VLLM_BATCH_INVARIANT for MLA, so no ROCm mirror.
   optional: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s
-  num_devices: 2
+  num_devices: 4
   source_file_dependencies:
   - vllm/model_executor/model_loader/default_loader.py
   - vllm/model_executor/model_loader/ep_weight_filter.py
