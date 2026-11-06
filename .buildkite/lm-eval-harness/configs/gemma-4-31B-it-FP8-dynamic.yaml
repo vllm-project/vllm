@@ -1,0 +1,15 @@
+model_name: "RedHatAI/gemma-4-31B-it-FP8-dynamic"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.937
+limit: 1319
+num_fewshot: 5
+kv_cache_dtype: fp8
+enforce_eager: false
+apply_chat_template: true
+fewshot_as_multiturn: true
+hf_overrides:
+  text_config:
+    use_bidirectional_attention: null
