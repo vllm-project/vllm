@@ -39,16 +39,6 @@ from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
 from vllm.platforms import current_platform
 
 
-def _construct_router(selected_cls: type[FusedMoERouter], **kwargs) -> FusedMoERouter:
-    constructor = current_platform.get_fused_moe_router_constructor(selected_cls)
-    if not callable(constructor):
-        raise TypeError("Platform must return a fused MoE router constructor.")
-    router = constructor(**kwargs)
-    if not isinstance(router, FusedMoERouter):
-        raise TypeError("Platform router constructor must return FusedMoERouter.")
-    return router
-
-
 def create_fused_moe_router(
     # common parameters
     top_k: int,
@@ -141,8 +131,7 @@ def create_fused_moe_router(
         assert e_score_correction_bias is not None, (
             "e_score_correction_bias is required when zero_expert_type is set"
         )
-        router = _construct_router(
-            ZeroExpertRouter,
+        router = ZeroExpertRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
@@ -159,8 +148,7 @@ def create_fused_moe_router(
         # (plain softmax, grouped topk, custom routing functions, and
         # DeepSeek V4's sqrtsoftplus/hash routing) in a single class, so it
         # takes priority over the scheme-specific routers below.
-        router = _construct_router(
-            CPURouter,
+        router = CPURouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             use_grouped_topk=use_grouped_topk,
@@ -210,8 +198,7 @@ def create_fused_moe_router(
             and scaling_handled_downstream
             and routing_method_preserved
         ):
-            router = _construct_router(
-                GroupedTopKRouter,
+            router = GroupedTopKRouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -231,8 +218,7 @@ def create_fused_moe_router(
             assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
 
         if custom_routing_function is not None:
-            router = _construct_router(
-                CustomRoutingRouter,
+            router = CustomRoutingRouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -241,8 +227,7 @@ def create_fused_moe_router(
             )
 
         elif e_score_correction_bias is not None or hash_indices_table is not None:
-            router = _construct_router(
-                FusedTopKBiasRouter,
+            router = FusedTopKBiasRouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -262,8 +247,7 @@ def create_fused_moe_router(
             and scoring_func == "softmax"
             and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         ):
-            router = _construct_router(
-                AiterSharedRoutedFusedMoERouter,
+            router = AiterSharedRoutedFusedMoERouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -273,8 +257,7 @@ def create_fused_moe_router(
             )
 
         else:
-            router = _construct_router(
-                FusedTopKRouter,
+            router = FusedTopKRouter(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -283,8 +266,7 @@ def create_fused_moe_router(
             )
 
     if envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY != "":
-        router = _construct_router(
-            RoutingSimulatorRouter,
+        router = RoutingSimulatorRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             kernel_routing_method_type=router.routing_method_type,

@@ -106,13 +106,6 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
-    Platforms can also adapt selected fused MoE components during construction:
-
-    - `get_fused_moe_router_constructor(selected_cls)` returns a callable accepting the selected router branch's constructor arguments and producing a `FusedMoERouter`. A compatible sibling router is allowed. Preserve the selected branch's routing semantics and optional EPLB state.
-    - `get_fused_moe_routed_experts_cls(selected_cls)` and `get_fused_moe_runner_cls(selected_cls)` receive the class selected by the factory or model, including expert substitution. Adapt only classes with a compatible implementation, preserving constructor arguments, model-specific weight loading, and forward semantics. Return `selected_cls` unchanged for unsupported classes; a generic replacement may not preserve a model-specific class's contract.
-
-    All three hooks return `selected_cls` by default. They run after component selection during construction, without adding forward-time platform lookups. A router explicitly supplied to `FusedMoEFactory` is used directly. EPLB statistics, weight transfer, and commit ordering remain owned by EPLB.
-
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 
     - `init_device`: This function is called to set up the device for the worker.
@@ -149,6 +142,12 @@ Every plugin has three parts:
 
     - triton ops
       Custom way doesn't work for triton ops now.
+
+    Fused MoE routers, routed experts, and runners use `PluggableLayer` for whole-class replacement. Register a compatible subclass with, for example, `FusedTopKRouter.register_oot(MyFusedTopKRouter)` before model construction.
+
+    Registration matches the concrete class name. A registration for `MoERunner` or `RoutedExperts` does not replace model-specific subclasses or `SubstitutedRoutedExperts`; register those classes separately when supported. Without a matching registration, the selected class is used unchanged. A router instance explicitly supplied to `FusedMoEFactory` is used directly.
+
+    Replacements must subclass the class they replace and preserve its constructor arguments, routing semantics, model-specific weight loading, and EPLB state. Routers are PyTorch modules, so a shared correction-bias `Parameter` also appears under the router in `state_dict()`. Preserve the shared parameter object and the model's canonical checkpoint names; models that load the bias through the gate should register the gate before constructing the MoE layer.
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 

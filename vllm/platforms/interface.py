@@ -8,7 +8,6 @@ import math
 import os
 import platform
 import sys
-from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -1228,59 +1227,6 @@ class Platform:
     def get_device_communicator_cls(cls) -> str:
         """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
-
-    @classmethod
-    def get_fused_moe_router_constructor(
-        cls, selected_cls: type[Any]
-    ) -> Callable[..., Any]:
-        """Adapt a factory-selected fused MoE router constructor.
-
-        Match selected_cls only when the platform has a compatible implementation;
-        otherwise return it unchanged. The constructor must accept the selected
-        branch's arguments and preserve its routing semantics, kernel routing
-        method, and EPLB state. A generic FusedMoERouter replacement can pass the
-        base-type check while changing routing behavior.
-
-        Explicit router instances bypass this hook. Compatible sibling router
-        implementations are allowed.
-        """
-        return selected_cls
-
-    @classmethod
-    def get_fused_moe_routed_experts_cls(cls, selected_cls: type[Any]) -> type[Any]:
-        """Adapt the routed-experts class selected by the factory or model.
-
-        selected_cls can be model-specific or SubstitutedRoutedExperts. Dispatch
-        on the input class, replacing only classes the platform explicitly
-        supports; return selected_cls unchanged for all other inputs.
-
-        Replacements must preserve constructor arguments, checkpoint layout,
-        weight loading, execution semantics, and compatibility with the selected
-        runner. A generic RoutedExperts subclass can break initialization or load
-        weights incorrectly. The factory checks the common base type, not these
-        model-specific contracts.
-        """
-        return selected_cls
-
-    @classmethod
-    def get_fused_moe_runner_cls(cls, selected_cls: type[Any]) -> type[Any]:
-        """Adapt the runner class selected by the factory or model.
-
-        Model-specific runners may require extra constructor state, a different
-        forward signature, or a matching routed-experts implementation. Replacing
-        one with a generic MoERunner subclass can fail during initialization or
-        change model behavior even if it passes the factory's base-type check.
-
-        Map only explicitly supported input classes to compatible implementations,
-        preserving those contracts and the router/EPLB state. Return selected_cls
-        unchanged when no compatible implementation is available. For example,
-        given a platform-owned mapping of supported runner classes:
-
-        ```python
-        return supported_runners.get(selected_cls, selected_cls)
-        ```
-        """
-        return selected_cls
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:

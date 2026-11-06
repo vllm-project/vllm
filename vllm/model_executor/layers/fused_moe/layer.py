@@ -41,7 +41,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -416,13 +415,6 @@ def FusedMoEFactory(
         }
     elif routed_experts_cls is None:
         routed_experts_cls = RoutedExperts
-    routed_experts_cls = current_platform.get_fused_moe_routed_experts_cls(
-        routed_experts_cls
-    )
-    if not isinstance(routed_experts_cls, type) or not issubclass(
-        routed_experts_cls, RoutedExperts
-    ):
-        raise TypeError("Platform must return a RoutedExperts class.")
 
     assert params_dtype is not None
     routed_experts = routed_experts_cls(
@@ -459,9 +451,6 @@ def FusedMoEFactory(
 
     if runner_cls is None:
         runner_cls = MoERunner
-    runner_cls = current_platform.get_fused_moe_runner_cls(runner_cls)
-    if not isinstance(runner_cls, type) or not issubclass(runner_cls, MoERunner):
-        raise TypeError("Platform must return a MoERunner class.")
 
     runner = runner_cls(
         layer_name=layer_name,
