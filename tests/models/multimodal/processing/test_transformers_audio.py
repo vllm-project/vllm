@@ -247,15 +247,6 @@ def test_transcription_needs_a_transcription_request(model_id, transcribes):
     assert supports_transcription(get_model_cls(model_config)) == transcribes
 
 
-def test_qwen3_asr_config_follows_the_checkpoint_format():
-    """VLLM's own config would drop the `audio_config` of a Transformers checkpoint."""
-    hf_config = ModelConfig(model="Qwen/Qwen3-ASR-1.7B-hf").hf_config
-    native_config = ModelConfig(model="Qwen/Qwen3-ASR-1.7B").hf_config
-
-    assert hf_config.audio_config is not None
-    assert not hasattr(native_config, "audio_config")
-
-
 def test_transcription_output_strips_a_generated_prefix():
     model_config = ModelConfig(
         model="nvidia/audio-flamingo-3-hf", model_impl="transformers"
