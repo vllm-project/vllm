@@ -478,20 +478,8 @@ class CommonAttentionMetadata:
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
 
-    def naive_query_lens(self) -> torch.Tensor:
-        """Naive because it assumes that query ends where the next query starts."""
-        return self.query_start_loc[1:] - self.query_start_loc[:-1]
-
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
-
-    def invalidate_cached_layout(self) -> None:
-        """Drop values cached from query_start_loc and seq_lens.
-
-        Call after updating either in place.
-        """
-        self._num_computed_tokens_cache = None
-        self._token_to_req_indices_cache = None
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
