@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -396,20 +398,20 @@ class ExampleConnector(KVConnectorBase_V1):
     ) -> bool:
         """Check if the cache is hit for the request."""
         return self._found_match_for_prompt(
-            list(request.prompt_token_ids or []),
+            request.prompt_token_ids or [],
             [f.identifier for f in request.mm_features],
         )
 
     def _found_match_for_prompt(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_hashes: list[str],
     ) -> bool:
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
         )
         foldername = self._generate_foldername_debug(
-            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            token_ids_to_tensor(prompt_token_ids)[:num_tokens_to_check],
             mm_hashes,
             create_folder=False,
         )

@@ -606,3 +606,101 @@ def test_rocm_mxfp8_fused_quant_cuda_graph_capture(warm_counters):
         graph.replay()
         torch.accelerator.synchronize()
         assert torch.equal(out, expected), "replay differs from stock"
+
+
+# DeepSeek-V4.1-Flash TP2 linears whose large-M tiles take the gfx950 prefill
+# paths: Gluon kernels for wq_b, wo_b and engram, grouped tiles for gate_up.
+GFX950_PREFILL_SHAPES = [
+    ("wq_b_tp2", 16384, 1280),
+    ("wo_b_tp2", 5120, 4096),
+    ("engram_tp2", 12800, 6144),
+    ("shared_gate_up_tp2", 2304, 5120),
+]
+
+
+def test_rocm_mxfp8_block32_gfx950_gluon_kernels_load():
+    """On gfx950 the Gluon kernels import and fill the launcher table, so the
+    prefill tiles cannot silently fall back to the tiled kernel."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    if not g._ON_GFX950:
+        pytest.skip("the Gluon kernels are gfx950-only")
+    from vllm.model_executor.kernels.linear.mxfp8 import (
+        rocm_block32_gemm_gluon as gluon_gemm,
+    )
+
+    launchers = g._gluon_launchers()
+    assert launchers, "Gluon launcher table is empty on gfx950"
+    assert set(launchers.values()) == {
+        gluon_gemm.launch_mixed,
+        gluon_gemm.launch_output,
+    }
+
+
+@pytest.mark.parametrize("name,n,k", GFX950_PREFILL_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("m", [8193, 9199, 16384])
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_gfx950_prefill_bitwise_eq_tiled(monkeypatch, name, n, k, m):
+    """The gfx950 prefill paths write byte-identical outputs to the tiled
+    kernel, M tails and all-zero scale blocks included, and leave every input
+    unchanged."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    if not g._ON_GFX950:
+        pytest.skip("the prefill paths are gfx950-only")
+    weight, weight_scale = _make_block32_weight(n, k, "cuda", seed=m)
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    x[:32] = 0.0  # all-zero blocks clamp their scale byte to 0
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    inputs = (x_q, x_scale, weight, weight_scale)
+    before = [t.view(torch.uint8).clone() for t in inputs]
+    cfg = g._config(m, n, k)
+    out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
+
+    assert g._gfx950_prefill(m, out)
+    if name != "shared_gate_up_tp2":
+        assert (n, k, cfg) in g._gluon_launchers(), f"{name}: no Gluon kernel"
+    g._launch(*inputs, out, cfg)
+
+    monkeypatch.setattr(g, "_ON_GFX950", False)
+    expected = torch.empty_like(out)
+    g._launch(*inputs, expected, cfg)
+
+    assert (out.dtype, out.shape, out.stride()) == (
+        expected.dtype,
+        expected.shape,
+        expected.stride(),
+    )
+    # Compare bytes: torch.equal would accept -0.0 for +0.0.
+    assert torch.equal(out.view(torch.int16), expected.view(torch.int16)), (
+        f"{name}: output bytes differ from the tiled kernel"
+    )
+    for t, ref in zip(inputs, before):
+        assert torch.equal(t.view(torch.uint8), ref), f"{name}: input modified"
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_gfx950_prefill_fallbacks():
+    """Non-BF16 outputs keep the tiled kernel, since the Gluon kernels store
+    BF16 only, and so does M outside (8192, 16384]."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    n, k, m = 5120, 4096, 9199  # wo_b at TP2
+    weight, weight_scale = _make_block32_weight(n, k, "cuda", seed=m)
+    x_q, x_scale = mxfp8_e4m3_quantize(
+        torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    )
+    out = torch.empty((m, n), dtype=torch.float16, device="cuda")
+    assert not g._gfx950_prefill(m, out)
+    g._launch(x_q, x_scale, weight, weight_scale, out, g._config(m, n, k))
+
+    row_scale = weight_scale.repeat_interleave(32, dim=0)
+    reference = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(weight, row_scale).float().T
+    )
+    assert _rel_err(out, reference) < 5e-3
+
+    bf16 = torch.empty(0, dtype=torch.bfloat16, device="cuda")
+    assert not g._gfx950_prefill(8192, bf16)
+    assert not g._gfx950_prefill(16385, bf16)
