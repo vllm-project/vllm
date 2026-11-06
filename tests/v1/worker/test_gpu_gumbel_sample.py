@@ -26,6 +26,8 @@ if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import (
+    _log1p_neg_stable,
+    _uniform32_from_random64,
     _uniform64_from_random53,
     gumbel_sample,
     murmur3_hash32,
@@ -136,6 +138,47 @@ def test_uniform64_excludes_endpoints():
     assert torch.isfinite(uniform).all()
     assert ((uniform > 0.0) & (uniform < 1.0)).all()
     assert uniform.tolist() == [2.0**-54, 1.0 - 2.0**-53]
+
+
+@triton.jit
+def _fp32_noise_from_random64_kernel(
+    hi_ptr,
+    lo_ptr,
+    uniform_ptr,
+    noise_ptr,
+    numel: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    idx = tl.arange(0, BLOCK_SIZE)
+    mask = idx < numel
+    hi = tl.load(hi_ptr + idx, mask=mask).to(tl.uint32)
+    lo = tl.load(lo_ptr + idx, mask=mask).to(tl.uint32)
+    u = _uniform32_from_random64(hi, lo)
+    tl.store(uniform_ptr + idx, u, mask=mask)
+    tl.store(noise_ptr + idx, -tl.log(-_log1p_neg_stable(u)), mask=mask)
+
+
+def test_fp32_noise_tail_uses_64_random_bits():
+    """The fp32 noise must reach far beyond the ~22.9 cap of a 32-bit uniform.
+
+    A token whose logit trails the top by more than max minus min noise can never
+    be sampled, so the cap directly bounds the silently truncated tail.
+    """
+    hi = torch.tensor([0, 0, 1, 0xFFFFFFFF], dtype=torch.int64, device=DEVICE)
+    lo = torch.tensor([0, 0xFFFFFFFF, 0, 0xFFFFFFFF], dtype=torch.int64, device=DEVICE)
+    uniform = torch.empty(4, dtype=torch.float32, device=DEVICE)
+    noise = torch.empty(4, dtype=torch.float32, device=DEVICE)
+
+    _fp32_noise_from_random64_kernel[(1,)](
+        hi, lo, uniform, noise, numel=hi.numel(), BLOCK_SIZE=4
+    )
+
+    assert uniform[0].item() == 2.0**-65
+    assert uniform[1].item() == pytest.approx(2.0**-32, rel=1e-6)
+    assert uniform[2].item() == pytest.approx(2.0**-32, rel=1e-6)
+    assert torch.isfinite(noise).all()
+    assert noise[0].item() == pytest.approx(65 * math.log(2), rel=1e-5)
+    assert noise.max().item() > 45.0
 
 
 def _make_heavy_tailed_counts(seed: int = 1234) -> torch.Tensor:
