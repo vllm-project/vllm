@@ -571,9 +571,8 @@ def test_sleep_keeps_offloaded_blocks_unless_reset(reset_connector: bool) -> Non
     )
     try:
         llm.generate(prompt, sampling_params, use_tqdm=False)
-        # Let the store to CPU finish before the sleep discards the GPU blocks.
-        _wait_for_prefix_cache_reset(llm)
-
+        # No wait for the stores: the sleep must drain them before it
+        # discards the GPU blocks they read.
         llm.sleep(level=1, reset_connector=reset_connector)
         llm.wake_up()
 
