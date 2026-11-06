@@ -57,12 +57,14 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Compilation / Dynamic Shapes"
   device: h200_35gb
   key: pytorch-compilation-dynamic-shapes
+  automatic_shard: true
   timeout_in_minutes: 30
   source_file_dependencies: *pytorch-compilation-deps
   commands:
   - pytest -s -v compile/dynamic_shapes/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) PyTorch Compilation / Dynamic Shapes"
       dind: false
       device: mi300_1
@@ -75,6 +77,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases"
   key: pytorch-compilation-unit-tests-h100
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -108,6 +111,7 @@ steps:
   - "find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) PyTorch Compilation H100 Cases"
       dind: false
       device: mi355_dpx
@@ -182,6 +186,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb
   key: pytorch-fullgraph-test
+  automatic_shard: true
   timeout_in_minutes: 90
   source_file_dependencies:
   - vllm/__init__.py
@@ -212,13 +217,11 @@ steps:
   - tests/compile
   - csrc/
   commands:
-  # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
-  # as it is a heavy test that is covered in other steps.
-  # Use `find` to launch multiple instances of pytest so that
-  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  # The heavy cudagraph test is covered in other steps.
+  - pytest -v -s compile/fullgraph --ignore=compile/fullgraph/test_full_cudagraph.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) PyTorch Fullgraph"
       dind: false
       device: mi355_dpx
@@ -235,6 +238,7 @@ steps:
 # those SM90 cases skip while the architecture-compatible cases still run.
 - label: ":nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility"
   key: pytorch-fullgraph-cudagraph-l4-compatibility
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 60
@@ -269,6 +273,7 @@ steps:
   - pytest -s -v compile/fullgraph/test_full_cudagraph.py
   mirror:
     amd:
+      automatic_shard: true
       label: ':amd: (MI250) PyTorch Fullgraph CUDAGraph Compatibility'
       dind: false
       device: mi250_1
@@ -289,6 +294,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check"
   key: pytorch-nightly-dependency-override-check
+  automatic_shard: true
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
@@ -300,6 +306,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) PyTorch Nightly Dependency Override Check"
       dind: false
       device: mi300_1

@@ -73,3 +73,68 @@ def test_fused_sigmoid_gate_mul_fallback_noncontiguous():
     expected = x * torch.sigmoid(gate)
 
     torch.testing.assert_close(result, expected, atol=0.0, rtol=0.0)
+
+
+def _fp8_codes(q: torch.Tensor) -> torch.Tensor:
+    """Sign-magnitude e4m3 bytes -> ordered ints (+0 == -0)."""
+    b = q.view(torch.uint8).int()
+    return torch.where(b >= 128, -(b & 0x7F), b)
+
+
+@requires_cuda
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 (e4m3fn) output requires NVIDIA SM89+",
+)
+# o_proj input widths at TP1 (6144) and TP2 (3072) of a 24x256-head model.
+@pytest.mark.parametrize("shape", [(1, 6144), (37, 6144), (5, 3072), (300, 4096)])
+@torch.inference_mode()
+def test_fused_sigmoid_gate_mul_fp8_matches_chain(shape: tuple[int, int]):
+    """The FP8 output (fused o_proj input quant) equals the bf16 kernel
+    followed by static scaled_fp8_quant."""
+    from vllm import _custom_ops as ops
+
+    g = torch.Generator(device="cuda").manual_seed(shape[0])
+    x = torch.randn(shape, generator=g, dtype=torch.bfloat16, device="cuda") * 8
+    gate = torch.randn(shape, generator=g, dtype=torch.bfloat16, device="cuda") * 4
+    scale = torch.tensor([0.02], device="cuda")
+
+    ref_q, _ = ops.scaled_fp8_quant(
+        fused_sigmoid_gate_mul(x, gate), scale, group_shape=(-1, -1)
+    )
+    q = fused_sigmoid_gate_mul(x, gate, scale)
+
+    assert q.dtype == torch.float8_e4m3fn
+    assert ref_q.float().abs().max().item() == 448.0
+    # Arch-dependent compilation flips occasional bf16 rounding boundaries;
+    # codes must be within one FP8 step.
+    dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
+    assert dist.max().item() <= 1
+    assert (dist > 0).float().mean().item() <= 1e-4
+
+
+@requires_cuda
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 (e4m3fn) output requires NVIDIA SM89+",
+)
+@torch.inference_mode()
+def test_fused_sigmoid_gate_mul_fp8_strided_gate_falls_back():
+    """A strided gate view (num_heads == 1 per TP rank keeps the packed qkv
+    row stride through reshape) cannot run the fused kernel; the FP8 path
+    must quantize the eager result instead of asserting."""
+    from vllm import _custom_ops as ops
+
+    x = torch.randn(5, 128, dtype=torch.bfloat16, device="cuda")
+    packed = torch.randn(5, 256, dtype=torch.bfloat16, device="cuda")
+    gate = packed[:, :128].view(5, 1, 128).reshape(5, 128)
+    assert not gate.is_contiguous()
+    scale = torch.tensor([0.02], device="cuda")
+
+    ref_q, _ = ops.scaled_fp8_quant(
+        x * torch.sigmoid(gate), scale, group_shape=(-1, -1)
+    )
+    q = fused_sigmoid_gate_mul(x, gate, scale)
+
+    assert q.dtype == torch.float8_e4m3fn
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))

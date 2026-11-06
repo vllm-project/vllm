@@ -200,7 +200,8 @@ class BaseFrontendArgs:
     priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
     """The ``reasoning_effort`` used for Anthropic Messages, token counting,
-    and render requests with ``thinking: {"type": "disabled"}``.
+    and render requests with ``thinking: {"type": "disabled"}`` or
+    ``thinking: {"type": "between_tools"}``.
     ``none`` turns thinking off for models that support it; ``low`` suits
     models that always think
     (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
@@ -447,6 +448,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Run in headless mode. See multi-node data parallel "
         "documentation for more details.",
+    )
+    # Internal: the Rust frontend's managed `serve` passes its local handshake
+    # endpoint so that headless engines also handshake with it.
+    parser.add_argument(
+        "--headless-client-handshake-address",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--api-server-count",

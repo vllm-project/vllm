@@ -87,7 +87,7 @@ def test_eagle_max_len(
         enforce_eager=True,  # For faster initialization.
         speculative_config={
             "method": "eagle",
-            "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+            "model": "vllm-project/EAGLE-LLaMA3-Instruct-8B",
             "num_speculative_tokens": num_speculative_tokens,
             "max_model_len": 80,
         },
