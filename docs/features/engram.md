@@ -96,20 +96,21 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 CPU offload requires a GPU with UVA support;
 vLLM fails fast when it is unavailable.
 
-## Disk offload (Qwen4Exp)
+## Disk offload
 
-`disk_offload` keeps Qwen4Exp PLE tables in the checkpoint files: no table
-is allocated in GPU or pinned host memory, and nothing is copied to an offload
+`disk_offload` keeps the tables in the checkpoint files: no table is
+allocated in GPU or pinned host memory, and nothing is copied to an offload
 directory. Each step reads that step's rows from the safetensors files on the
 host. Use it where neither `cpu_offload` nor a resident table fits, for example
-on unified-memory GPUs such as DGX Spark, where pinned host memory comes out of
-the same pool as the weights and the KV cache:
+on unified-memory GPUs such as DGX Spark or AMD APUs, where pinned host memory
+comes out of the same pool as the weights and the KV cache. It replaces
+`cpu_offload` and is supported for Qwen4Exp on CUDA and for DeepSeek V4.1.
+
+### Qwen4Exp
 
 ```bash
 vllm serve <qwen4exp-checkpoint> --engram-config '{"disk_offload": true}'
 ```
-
-It applies only to Qwen4Exp on CUDA and takes precedence over `cpu_offload`.
 
 Rows are read with `preadv` and copied to fixed device buffers before the
 forward, so CUDA graphs replay unchanged. They stay in the checkpoint format
@@ -130,6 +131,25 @@ Costs and limits:
   not file-backed safetensors views (`.bin`, runai, `fastsafetensors`,
   `instanttensor`, or `--safetensors-load-strategy eager`);
   `--load-format dummy` serves zeros.
+
+### DeepSeek V4.1
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --engram-config '{"disk_offload": true}' --enforce-eager
+```
+
+Each rank memory-maps only its own rows, and each step copies the rows it
+needs to the GPU through the OS page cache. Frequent rows stay cached; the
+rest come from storage, so a local NVMe drive is recommended.
+
+- Cannot be combined with `dp_shared_memory`, `use_thp`, or
+  `embedding_across_dp`.
+- The checkpoint must stay on local disk (a directory or a complete Hugging
+  Face cache snapshot).
+- The lookup runs on the host, so it cannot be captured in a CUDA graph. Use
+  `--enforce-eager`, or `VLLM_USE_BREAKABLE_CUDAGRAPH=1` with
+  `-cc.cudagraph_mode=PIECEWISE`; other graph modes are rejected at startup.
 
 ## Data-parallel topologies (DeepSeek V4.1)
 
@@ -179,3 +199,6 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
+- `disk_offload` supports DeepSeek V4.1 only, needs `--enforce-eager` or
+  piecewise breakable CUDA graphs, and is unsupported with elastic expert
+  parallelism.

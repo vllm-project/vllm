@@ -107,6 +107,7 @@ from ..common.engram import (
     NgramHashState,
     can_share_engram_tables,
     gather_engram_hashes,
+    map_engram_disk_tables,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .ops.mhc import (
@@ -1784,6 +1785,9 @@ class DeepseekV41LLMForCausalLM(
             ):
                 if layer.engram is not None:
                     layer.engram.embed_tokens.collapse_huge_pages()
+        map_engram_disk_tables(
+            islice(self.model.layers, self.model.start_layer, self.model.end_layer)
+        )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

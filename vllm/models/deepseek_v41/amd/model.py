@@ -87,6 +87,7 @@ from ..common.engram import (
     NgramHashState,
     can_share_engram_tables,
     gather_engram_hashes,
+    map_engram_disk_tables,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
@@ -1493,6 +1494,9 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        map_engram_disk_tables(
+            islice(self.model.layers, self.model.start_layer, self.model.end_layer)
+        )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

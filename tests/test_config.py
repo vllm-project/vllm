@@ -2158,6 +2158,17 @@ def test_engram_cpu_offload_default():
     assert EngramConfig().cpu_offload is True
 
 
+def test_engram_disk_offload_replaces_cpu_offload():
+    config = EngramConfig(disk_offload=True)
+    assert config.disk_offload and not config.cpu_offload
+
+
+@pytest.mark.parametrize("option", ["dp_shared_memory", "use_thp"])
+def test_engram_disk_offload_rejects_host_options(option):
+    with pytest.raises(ValueError, match="disk_offload cannot be combined"):
+        EngramConfig(disk_offload=True, **{option: True})
+
+
 def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None
@@ -2244,21 +2255,60 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
 
 
 @pytest.mark.parametrize(
-    ("architecture", "layer_field", "rocm", "expect_error"),
+    ("architecture", "layer_field", "rocm", "across_dp", "expect_error"),
     [
         pytest.param(
-            "DeepseekV41ForCausalLM", "engram_layer_ids", False, True, id="deepseek"
+            "DeepseekV41ForCausalLM",
+            "engram_layer_ids",
+            False,
+            False,
+            False,
+            id="deepseek_cuda",
         ),
         pytest.param(
-            "Qwen4ExpForCausalLM", "ple_layer_ids", True, True, id="qwen4exp_rocm"
+            "DeepseekV41ForCausalLM",
+            "engram_layer_ids",
+            True,
+            False,
+            False,
+            id="deepseek_rocm",
         ),
         pytest.param(
-            "Qwen4ExpForCausalLM", "ple_layer_ids", False, False, id="qwen4exp_cuda"
+            "DeepseekV41ForCausalLM",
+            "engram_layer_ids",
+            False,
+            True,
+            True,
+            id="deepseek_across_dp",
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            True,
+            False,
+            True,
+            id="qwen4exp_rocm",
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            False,
+            False,
+            False,
+            id="qwen4exp_cuda",
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            False,
+            True,
+            False,
+            id="qwen4exp_across_dp",
         ),
     ],
 )
-def test_engram_disk_offload_requires_cuda_qwen4exp(
-    monkeypatch, architecture, layer_field, rocm, expect_error
+def test_engram_disk_offload_model_support(
+    monkeypatch, architecture, layer_field, rocm, across_dp, expect_error
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: not rocm)
     model = cast(
@@ -2268,7 +2318,7 @@ def test_engram_disk_offload_requires_cuda_qwen4exp(
             hf_text_config=SimpleNamespace(**{layer_field: [1]}),
         ),
     )
-    config = EngramConfig(disk_offload=True)
+    config = EngramConfig(disk_offload=True, embedding_across_dp=across_dp)
     if expect_error:
         with pytest.raises(ValueError, match="disk_offload"):
             config.verify_model_config(model)
