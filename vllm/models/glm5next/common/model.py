@@ -118,12 +118,13 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
 def _specialized_decode_config(vllm_config: VllmConfig):
     """The specialized decode's config, None unless it is requested. Only ROCm has
     one today, so only ROCm imports a vendor runtime; elsewhere a request is refused
-    at startup and a stock deployment never reaches vendor code."""
+    at startup and a stock deployment never reaches vendor code. A ROCm GPU other
+    than gfx950 is refused by the runtime's own checks (``spec.refusal_reasons``)."""
     if not requested(vllm_config):
         return None
     if not current_platform.is_rocm():
         raise ValueError(
-            "GLM-5.3-Flash has a specialized decode only on ROCm (MI355X); drop "
+            "GLM-5.3-Flash has a specialized decode only on ROCm CDNA4 (gfx950); drop "
             "--monokernel / decode_backend=latency_specialized on "
             f"{current_platform.device_name}"
         )

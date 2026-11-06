@@ -166,7 +166,7 @@ def build_flash_ffn_kernel(
     max_pools: int = 0,
     dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
     kv_fp8: bool = False,
-    fault_hook: bool = True,
+    fault: abi.FaultSpec | None = None,
 ):
     """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
     ``kda`` the whole KDA decoder layer (attention-side mHC, projections, short conv,
@@ -184,8 +184,8 @@ def build_flash_ffn_kernel(
     into this rank's flag on rank 0 (``poll_xrank_addr``), then continues, so a
     stalled peer finishes the launch with wrong values instead of hanging. With
     ``poll_early_out`` every later wait of the same step returns at its first retry.
-    ``fault_hook``: whether ``VLLM_MONO_FAULT_INJECT`` (test only) applies to this
-    build; a runtime gives it to one launch kind, so a fault stalls a step once.
+    ``fault`` (tests only): a rank to stall at a kernel step; None builds no fault
+    code.
     The shared expert is read from ``w_sh_*`` (one expert each), not the routed
     tensors, so it may be fused into them or stored apart.
     """
@@ -204,7 +204,7 @@ def build_flash_ffn_kernel(
     QKV8, QB8, O8 = dsa_fp8
     whole = kda or dsa
     POLL_TICKS = 0 if poll_timeout_us is None else poll_timeout_us * REALTIME_PER_US
-    FAULT = abi.fault_spec() if fault_hook else None
+    FAULT = fault
     F_RANK, F_STEP, F_US = (
         (FAULT.rank, FAULT.step, FAULT.us) if FAULT is not None else (0, 0, 0)
     )

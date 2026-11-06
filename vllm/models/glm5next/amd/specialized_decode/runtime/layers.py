@@ -333,9 +333,6 @@ def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
             max_pools=max_pools(ctx) if kind == "dsa" else 0,
             dsa_fp8=ctx.state.get("dsa_fp8", (True, True, True)),
             kv_fp8=kind == "dsa" and ctx.state.get("kv_fp8", False),
-            # the fault test stalls a step once: only in the launch kind built
-            # first at this width (the step's first kernel layer)
-            fault_hook=not any(w == width for w, _ in widths),
         )
         widths[(width, kind)] = _Width(rt, width, ctx.device)
         if first is None and rt.flags is not None:

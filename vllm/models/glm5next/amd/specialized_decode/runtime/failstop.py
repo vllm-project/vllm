@@ -11,7 +11,6 @@ import os
 import torch
 
 from vllm.logger import init_logger
-from vllm.models.glm5next.amd.specialized_decode.mono import abi
 
 logger = init_logger(__name__)
 
@@ -43,8 +42,7 @@ class HealthWatch:
     last copy once it has landed, without blocking the stream, and starts the next
     copy only after that check, so under async scheduling every copy is checked a
     step or two late instead of being overwritten unchecked. Words are sticky (the
-    kernels only ever set them), so a later copy still holds an expiry; only
-    ``VLLM_MONO_UNSAFE_WARN=1`` clears them, after logging."""
+    kernels only ever set them), so a later copy still holds an expiry."""
 
     def __init__(
         self,
@@ -64,7 +62,6 @@ class HealthWatch:
             torch.zeros(t.shape, dtype=t.dtype, pin_memory=pin) for t in self._dev
         ]
         self._event: torch.cuda.Event | None = None
-        self._unsafe_warn = abi.unsafe_warn()
 
     def health(self) -> torch.Tensor:
         return torch.cat([t.to(torch.int32).flatten() for t in self._dev])
@@ -93,9 +90,4 @@ class HealthWatch:
             f"{'; ranks flagging an expiry: ' + str(peers) if peers else ''}"
             "; tokens of the affected steps are wrong"
         )
-        if not self._unsafe_warn:
-            fail_stop(msg, self._rank)
-        counters["incidents"] += 1
-        logger.error("%s [%s=1: continuing]", msg, abi.UNSAFE_WARN_ENV)
-        for d in self._dev:
-            d.zero_()
+        fail_stop(msg, self._rank)

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.models.glm5next.amd.specialized_decode.mono.abi import FaultSpec
 from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.kernel import (
     build_flash_ffn_kernel,
@@ -158,7 +159,7 @@ class FlashFfnRuntime:
         max_pools: int = 0,
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
         kv_fp8: bool = False,
-        fault_hook: bool = True,
+        fault: FaultSpec | None = None,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
         self.kv_fp8 = kv_fp8
@@ -178,7 +179,7 @@ class FlashFfnRuntime:
             max_pools=max_pools,
             dsa_fp8=dsa_fp8,
             kv_fp8=kv_fp8,
-            fault_hook=fault_hook,
+            fault=fault,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)

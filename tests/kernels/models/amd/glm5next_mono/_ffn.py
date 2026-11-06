@@ -206,7 +206,7 @@ def _vllm_seam(lay, x_attn, res, post, comb):
         return r, p, c, _apply_mhc_norm(li, lay.gamma, EPS)
 
 
-def _runtime(width, rank, tp, poll_timeout_us, launches=1, early_out=False):
+def _runtime(width, rank, tp, poll_timeout_us, launches=1, early_out=False, fault=None):
     from vllm.distributed import get_tp_group
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnRuntime
 
@@ -219,6 +219,7 @@ def _runtime(width, rank, tp, poll_timeout_us, launches=1, early_out=False):
         launches,
         poll_timeout_us,
         poll_early_out=early_out,
+        fault=fault,
     )
 
 
@@ -327,16 +328,17 @@ def _check_fault(rank: int, tp: int, device, early_out: bool = False) -> None:
 
     import torch.distributed as dist
 
-    # read at kernel build time; a private cache keeps the stalling build apart
-    os.environ["VLLM_MONO_FAULT_INJECT"] = "rank=1,step=0,us=2000000"
+    # a private cache keeps the stalling build apart
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = tempfile.mkdtemp(prefix="mono_fault_")
 
     from vllm.distributed import get_tp_group
+    from vllm.models.glm5next.amd.specialized_decode.mono.abi import FaultSpec
     from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashFfnOp
 
     lay = _Layer(rank, tp, device)
-    rt = _runtime(2, rank, tp, FAULT_POLL_TIMEOUT_US, early_out=early_out)
+    fault = FaultSpec(rank=1, step=0, us=2_000_000)
+    rt = _runtime(2, rank, tp, FAULT_POLL_TIMEOUT_US, early_out=early_out, fault=fault)
     op = FlashFfnOp(rt, lay.weights(), 0)
     x = torch.randn(2, HIDDEN, device=device).bfloat16()
     res = torch.randn(2, HC_MULT, HIDDEN, device=device).bfloat16()
@@ -365,8 +367,7 @@ def _check_slow_rank(rank: int, tp: int, device) -> None:
 
     import torch.distributed as dist
 
-    # read at kernel build time; a private cache keeps the stalling build apart
-    os.environ["VLLM_MONO_FAULT_INJECT"] = "rank=1,step=0,us=10000000"
+    # a private cache keeps the stalling build apart
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = tempfile.mkdtemp(prefix="mono_slow_")
 
     from vllm.distributed import get_tp_group
@@ -375,7 +376,11 @@ def _check_slow_rank(rank: int, tp: int, device) -> None:
     from vllm.models.glm5next.amd.specialized_decode.runtime.spec import DecodeConfig
 
     lay = _Layer(rank, tp, device)
-    rt = _runtime(2, rank, tp, DecodeConfig(tp_size=tp).poll_timeout_us, early_out=True)
+    from vllm.models.glm5next.amd.specialized_decode.mono.abi import FaultSpec
+
+    timeout = DecodeConfig(tp_size=tp).poll_timeout_us
+    fault = FaultSpec(rank=1, step=0, us=10_000_000)
+    rt = _runtime(2, rank, tp, timeout, early_out=True, fault=fault)
     op = FlashFfnOp(rt, lay.weights(), 0)
     x = torch.randn(2, HIDDEN, device=device).bfloat16()
     res = torch.randn(2, HC_MULT, HIDDEN, device=device).bfloat16()

@@ -192,7 +192,7 @@ def refusal_reasons(vllm_config: VllmConfig) -> list[str]:
         from vllm.platforms.rocm import on_gfx950
 
         if not on_gfx950():
-            reasons.append("needs gfx950")
+            reasons.append("needs a CDNA4 (gfx950) GPU")
     else:
         reasons.append("needs ROCm")
     if not vllm_config.use_v2_model_runner:

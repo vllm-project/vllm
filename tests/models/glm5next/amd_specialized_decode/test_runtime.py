@@ -19,7 +19,7 @@ from vllm.models.glm5next.amd.specialized_decode.runtime.decode import (
 from . import kit
 
 STAGES = ("a", "b")
-PLATFORM = ("needs ROCm", "needs gfx950")
+PLATFORM = ("needs ROCm", "needs a CDNA4 (gfx950) GPU")
 
 
 def _reasons(cfg) -> list[str]:
@@ -247,8 +247,7 @@ def test_health_words_cover_every_stage(monkeypatch):
     assert d.health().tolist() == [0] * len(spec.STAGES)
 
 
-def _watch(monkeypatch, rank, unsafe=False, flags=True):
-    monkeypatch.setenv("VLLM_MONO_UNSAFE_WARN", "1" if unsafe else "0")
+def _watch(monkeypatch, rank, flags=True):
     words = [torch.zeros(2, dtype=torch.int32), torch.zeros(2, dtype=torch.int32)]
     f = torch.zeros(4, dtype=torch.int32) if flags else None
     return failstop.HealthWatch("fake", words, STAGES, rank, f), words, f
@@ -311,24 +310,9 @@ def test_after_step_checks_a_copy_before_starting_the_next(monkeypatch):
     assert checked == [[[0, 0], [1, 0], [0, 0, 0, 0]]]
 
 
-def test_unsafe_warn_logs_and_clears(monkeypatch):
-    watch, words, flags = _watch(monkeypatch, 0, unsafe=True)
-    words[0][1] = 1
-    flags[3] = 1
-    watch.check([[0, 1], [0, 0], [0, 0, 0, 1]])
-    assert not words[0].any() and not flags.any()
-
-
-def test_fault_spec(monkeypatch):
+def test_fault_spec_needs_a_stall():
     from vllm.models.glm5next.amd.specialized_decode.mono import abi
 
-    monkeypatch.delenv(abi.FAULT_INJECT_ENV, raising=False)
-    assert abi.fault_spec() is None
-    monkeypatch.setenv(abi.FAULT_INJECT_ENV, "rank=1,step=5,us=2000")
-    assert abi.fault_spec() == abi.FaultSpec(1, 5, 2000)
-    monkeypatch.setenv(abi.FAULT_INJECT_ENV, "rank=1")
-    with pytest.raises(ValueError, match="rank=R,step=N,us=D"):
-        abi.fault_spec()
-    monkeypatch.setenv(abi.FAULT_INJECT_ENV, "rank=0,step=0,us=0")
+    assert abi.FaultSpec(1, 5, 2000).us == 2000
     with pytest.raises(ValueError, match="us > 0"):
-        abi.fault_spec()
+        abi.FaultSpec(0, 0, 0)

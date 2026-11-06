@@ -570,11 +570,11 @@ def _check_fault(rank: int, tp: int, device) -> None:
 
     import torch.distributed as dist
 
-    # read at kernel build time; a private cache keeps the stalling build apart
-    os.environ["VLLM_MONO_FAULT_INJECT"] = "rank=1,step=0,us=2000000"
+    # a private cache keeps the stalling build apart
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = tempfile.mkdtemp(prefix="mono_fault_")
 
     from vllm.distributed import get_tp_group
+    from vllm.models.glm5next.amd.specialized_decode.mono.abi import FaultSpec
     from vllm.models.glm5next.amd.specialized_decode.mono.config import HC_MULT, HIDDEN
     from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
         FlashFfnOp,
@@ -598,6 +598,7 @@ def _check_fault(rank: int, tp: int, device) -> None:
         dsa=True,
         max_pools=MAX_LEN // 4,
         dsa_fp8=FORMATS["mixed"],
+        fault=FaultSpec(rank=1, step=0, us=2_000_000),
     )
     op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
     g = lay.g

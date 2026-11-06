@@ -1,7 +1,8 @@
 # GLM-5.3-Flash specialized decode
 
 `--monokernel` (or `--additional-config '{"decode_backend": "latency_specialized"}'`)
-on MI355X/gfx950 runs each MoE decoder layer 3-43 of a decode
+on CDNA4 (gfx950: measured on MI355X; MI350X is the same chip and CU count but
+untested) runs each MoE decoder layer 3-43 of a decode
 step as one persistent FlyDSL launch (256 CTAs, one per CU), inside vLLM's
 layer loop. There are two launch kinds (`mono/ffn/kernel.py`):
 
@@ -61,6 +62,6 @@ blocking the stream: the output rank raises with the stage names and exits
 after a grace period, the other ranks exit their workers. The check trails the
 GPU by a step or two, so the step that expired, and the steps until the check,
 can return wrong tokens to their requests; if the engine goes idle after such a
-step, the stop comes with the next step it runs. `VLLM_MONO_UNSAFE_WARN=1` logs
-and clears instead (debug only); `VLLM_MONO_FAULT_INJECT=rank=R,step=N,us=D`
-stalls a rank for the fault test.
+step, the stop comes with the next step it runs. The op tests stall a rank
+through the runtime's `fault` argument (`FaultSpec`); serving builds no fault
+code.
