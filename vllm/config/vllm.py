@@ -3,7 +3,6 @@
 
 import copy
 import getpass
-import json
 import os
 import tempfile
 import threading
@@ -26,12 +25,20 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
-from vllm.utils.hashing import safe_hash
+from vllm.utils.math_utils import cdiv
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
+from .compilation import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    decode_cudagraph_capture_grid,
+    decode_cudagraph_capture_shapes,
+    prefill_cudagraph_capture_grid,
+    varlen_decode_cudagraph_capture_grid,
+)
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
@@ -39,7 +46,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig
+from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -53,7 +60,13 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, get_field, replace
+from .utils import (
+    CompileFactors,
+    SupportsCompileFactors,
+    config,
+    get_field,
+    replace,
+)
 from .watchdog_config import WatchdogConfig
 from .watermarking import WatermarkConfig, warn_watermarking_override
 from .weight_transfer import WeightTransferConfig
@@ -136,7 +149,9 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
-        return frozenset({"DeepseekV41ForCausalLM"})
+        # HYV4 also runs without torch.compile, preserving runtime-shape
+        # kernel selection during graph capture.
+        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
     if current_platform.is_cuda():
         # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
         # platforms keep the torch.compile path.
@@ -441,7 +456,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = Field(default_factory=dict)
+    additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -472,7 +487,7 @@ class VllmConfig:
     remaining requests are aborted once the timeout is reached.
     """
 
-    def compute_hash(self, include_version: bool = True) -> str:
+    def compile_factors(self, include_version: bool = True) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
@@ -487,108 +502,50 @@ class VllmConfig:
             include_version: Include the vLLM version in the hash.
 
         """
-        factors: list[Any] = []
 
-        # summarize vllm config
-        vllm_factors: list[Any] = []
+        def get_factors(config_obj: SupportsCompileFactors | None) -> CompileFactors:
+            return {} if config_obj is None else config_obj.compile_factors()
+
+        factors: CompileFactors = {
+            "model": get_factors(self.model_config),
+            "cache": get_factors(self.cache_config),
+            "parallel": get_factors(self.parallel_config),
+            "scheduler": get_factors(self.scheduler_config),
+            "device": get_factors(self.device_config),
+            "load": get_factors(self.load_config),
+            "offload": get_factors(self.offload_config),
+            "attention": get_factors(self.attention_config),
+            "engram": get_factors(self.engram_config),
+            "lora": get_factors(self.lora_config),
+            "speculative": get_factors(self.speculative_config),
+            "structured_outputs": get_factors(self.structured_outputs_config),
+            "profiler": get_factors(self.profiler_config),
+            "observability": get_factors(self.observability_config),
+            "compilation": get_factors(self.compilation_config),
+            "kernel": get_factors(self.kernel_config),
+            "kv_transfer": get_factors(self.kv_transfer_config),
+            "ec_transfer": get_factors(self.ec_transfer_config),
+            "aux_output": get_factors(self.aux_output_config),
+        }
         if include_version:
             from vllm import __version__
 
-            vllm_factors.append(__version__)
-        if self.model_config:
-            vllm_factors.append(self.model_config.compute_hash())
-            if (
-                self.compilation_config
-                and getattr(self.compilation_config, "compile_mm_encoder", False)
-                and self.model_config.multimodal_config
-            ):
-                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.cache_config:
-            vllm_factors.append(self.cache_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.parallel_config:
-            vllm_factors.append(self.parallel_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.scheduler_config:
-            vllm_factors.append(self.scheduler_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.device_config:
-            vllm_factors.append(self.device_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.load_config:
-            vllm_factors.append(self.load_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.offload_config:
-            vllm_factors.append(self.offload_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.attention_config:
-            vllm_factors.append(self.attention_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        vllm_factors.append(
-            self.engram_config.compute_hash()
-            if self.engram_config is not None
-            else "None"
-        )
-        if self.lora_config:
-            vllm_factors.append(self.lora_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.speculative_config:
-            vllm_factors.append(self.speculative_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.structured_outputs_config:
-            vllm_factors.append(self.structured_outputs_config.compute_hash())
-        if self.profiler_config:
-            vllm_factors.append(self.profiler_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        vllm_factors.append(self.observability_config.compute_hash())
-        if self.quant_config:
-            pass  # should be captured by model_config.quantization
-        if self.compilation_config:
-            vllm_factors.append(self.compilation_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.kernel_config:
-            vllm_factors.append(self.kernel_config.compute_hash())
-        else:
-            vllm_factors.append(None)
-        if self.kv_transfer_config:
-            vllm_factors.append(self.kv_transfer_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.ec_transfer_config:
-            vllm_factors.append(self.ec_transfer_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        vllm_factors.append(self.aux_output_config.compute_hash())
-        if self.additional_config:
-            if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = safe_hash(
-                    json.dumps(additional_config, sort_keys=True).encode(),
-                    usedforsecurity=False,
-                ).hexdigest()
-            else:
-                additional_config_hash = additional_config.compute_hash()
-            vllm_factors.append(additional_config_hash)
-        else:
-            vllm_factors.append("None")
-        factors.append(vllm_factors)
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
-        return hash_str
+            factors["version"] = __version__
+        # MM encoder compilation also depends on the MM encoder factors.
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.compilation_config is not None
+            and self.compilation_config.compile_mm_encoder
+        ):
+            factors["multimodal"] = (
+                self.model_config.multimodal_config.compile_factors()
+            )
+        if isinstance(self.additional_config, SupportsCompileFactors):
+            factors["additional"] = self.additional_config.compile_factors()
+        elif self.additional_config:
+            factors["additional"] = self.additional_config
+        return factors
 
     @property
     def is_mm_encoder_only(self) -> bool:
@@ -621,6 +578,13 @@ class VllmConfig:
         # basis, so in-flight steps transiently keep their blocks.
         return (
             self.max_concurrent_batches * self.scheduler_config.max_num_batched_tokens
+        )
+
+    @property
+    def use_flashinfer_replayssm(self) -> bool:
+        return (
+            self.cache_config.use_replayssm
+            and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
 
     @property
@@ -710,6 +674,80 @@ class VllmConfig:
         """
         return 1 + self.num_speculative_tokens
 
+    def get_decode_cudagraph_query_lens(self, decode_query_len: int) -> dict[int, int]:
+        """Map each uniform decode query length of a target-shaped runner, whose
+        widest is `decode_query_len`, to the most requests its batches have.
+
+        Dynamic speculative decoding drafts as many tokens as its schedule gives
+        the batch size, so a query length only runs up to the largest batch size
+        that drafts its number of tokens.
+        """
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        speculative_config = self.speculative_config
+        num_new_sampled_tokens = decode_query_len - self.num_speculative_tokens
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or num_new_sampled_tokens <= 0
+        ):
+            return {decode_query_len: max_num_seqs}
+        from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+
+        dense_schedule = build_dynamic_sd_schedule_lookup(
+            speculative_config.num_speculative_tokens_per_batch_size,
+            vllm_max_batch_size=max_num_seqs,
+            vllm_num_speculative_tokens=self.num_speculative_tokens,
+        )
+        # By ascending batch size, so each query length keeps its widest batch.
+        return {
+            k + num_new_sampled_tokens: batch_size
+            for batch_size, k in enumerate(dense_schedule)
+            if batch_size > 0
+        }
+
+    def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
+        """Request counts of the FULL graphs of one-token draft decodes, the
+        draft steps after the first of EAGLE, EAGLE3, single-module MTP and
+        draft models: the request-count grid up to `max_num_seqs`. The target's
+        decode cap can be far lower: off SM100 its default is 512 / (1 + K)
+        requests, 64 at K=7. Above it the K - 1 draft steps would run eagerly
+        and pay their host launch time on every step, while their graphs are
+        small. Empty without such steps or decode graphs."""
+        speculative_config = self.speculative_config
+        sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
+        if (
+            not sizes
+            or speculative_config is None
+            or self.num_speculative_tokens < 2
+            or speculative_config.method
+            not in ("eagle", "eagle3", "mtp", "draft_model")
+            or (
+                speculative_config.use_multi_module_mtp()
+                and not speculative_config.use_gemma4_mtp()
+            )
+        ):
+            return []
+        return decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
+
+    def get_varlen_decode_cudagraph_token_sizes(
+        self, decode_query_len: int
+    ) -> list[int]:
+        """Token counts of the FULL decode graphs for adaptive verification,
+        whose decode batches mix query lengths up to `decode_query_len`: the
+        token-count grid up to `max_decode_cudagraph_capture_requests` requests
+        of `decode_query_len` tokens each, within the decode token budget."""
+        max_requests = self.compilation_config.max_decode_cudagraph_capture_requests
+        assert max_requests is not None
+        return varlen_decode_cudagraph_capture_grid(
+            min(
+                max_requests * decode_query_len,
+                self.scheduler_config.max_num_batched_tokens,
+                self.compilation_config.max_decode_cudagraph_capture_tokens
+                or max_requests * decode_query_len,
+            ),
+            self.performance_mode == "interactivity",
+        )
+
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
         """Whether CUDA graphs go to the cuMem pool that sleep offloads."""
@@ -766,6 +804,7 @@ class VllmConfig:
             {
                 "DFlash2DraftModel",
                 "DFlash2BeamDraftModel",
+                "DFlash2RicursiveDraftModel",
                 "LiLiCorrDraftModel",
             }.intersection(draft_config.architectures or [])
         )
@@ -1953,23 +1992,6 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
                 )
-            if self.kv_transfer_config is not None and (
-                self.kv_transfer_config.kv_connector
-                not in (
-                    None,
-                    "NixlConnector",
-                    "MooncakeStoreConnector",
-                    "MultiConnector",
-                )
-            ):
-                logger.warning(
-                    "HiSparse host-resident KV is configured with connector "
-                    "%s. NixlConnector (GPU-staged host imports) and "
-                    "MooncakeStoreConnector (shared-store offload) are the "
-                    "validated paths; other connectors are treated as "
-                    "debug/fallback paths.",
-                    self.kv_transfer_config.kv_connector,
-                )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
@@ -2265,6 +2287,15 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        if (
+            self.attention_config.hisparse_config is not None
+            and hisparse_host_pool_gib(self.kv_transfer_config) is None
+        ):
+            raise ValueError(
+                "HiSparse requires a KV transfer config with HiSparseConnector "
+                "and host_pool_gib; to combine it with another connector, nest "
+                "both in MultiConnector instead of using --kv-offloading-size."
+            )
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
@@ -2502,6 +2533,20 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
+            legacy_sizes = (
+                max_cudagraph_capture_size is not None
+                or self.compilation_config.cudagraph_capture_sizes is not None
+            )
+            try:
+                target_query_lens = self.get_decode_cudagraph_query_lens(
+                    self.uniform_decode_query_len
+                )
+            except ValueError:
+                # Validation lives elsewhere; an invalid dynamic speculative
+                # decoding schedule keeps the single static width.
+                target_query_lens = {
+                    self.uniform_decode_query_len: self.scheduler_config.max_num_seqs
+                }
             # Decode sizes to cover, in tokens. Populated only when the default
             # is computed here, so an explicit capture range is left exactly as
             # configured.
@@ -2544,48 +2589,9 @@ class VllmConfig:
 
                     # Dynamic speculative decoding picks the draft width from
                     # the batch size, so a decode step is only uniform within a
-                    # tier and each tier needs its own sizes. Scaling by the
-                    # widest one alone leaves the narrower tiers short: the
-                    # manager rounds a capture size up to a multiple of the
-                    # tier's query length and drops it once the implied request
-                    # count exceeds max_num_seqs, so at query length 3 sizes
-                    # built from 17 stop covering at 227 of 256 requests.
-                    decode_tiers = [(decode_query_len, max_num_seqs)]
-                    speculative_config = self.speculative_config
-                    if (
-                        speculative_config is not None
-                        and speculative_config.uses_dynamic_speculative_decoding()
-                    ):
-                        from vllm.v1.spec_decode.dynamic.utils import (
-                            build_dynamic_sd_schedule_lookup,
-                        )
-
-                        schedule = (
-                            speculative_config.num_speculative_tokens_per_batch_size
-                        )
-                        assert schedule is not None
-                        # Read the tiers off the dense lookup the scheduler
-                        # runs on, so the clamp against num_speculative_tokens
-                        # and the carry-forward through gaps and the tail
-                        # cannot drift from it. Validation lives elsewhere; an
-                        # invalid schedule keeps the single-tier default.
-                        try:
-                            dense_schedule = build_dynamic_sd_schedule_lookup(
-                                schedule,
-                                vllm_max_batch_size=max_num_seqs,
-                                vllm_num_speculative_tokens=self.num_speculative_tokens,
-                            )
-                        except ValueError:
-                            pass
-                        else:
-                            # Ascending batch size, so the last write per
-                            # query length is the widest batch running at it.
-                            widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
-                            ):
-                                widest_batch[num_spec + 1] = batch_size
-                            decode_tiers = list(widest_batch.items())
+                    # tier, and each tier needs its own sizes up to the widest
+                    # batch running at it.
+                    decode_tiers = list(target_query_lens.items())
 
                     uniform_decode_sizes = sorted(
                         {
@@ -2695,6 +2701,7 @@ class VllmConfig:
                 )
             # always write back the final sizes
             self.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+            self._split_cudagraph_capture_sizes(legacy_sizes, target_query_lens)
 
         else:
             # no cudagraph in use
@@ -2703,6 +2710,198 @@ class VllmConfig:
 
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
+
+    def _split_cudagraph_capture_sizes(
+        self, legacy_sizes: bool, target_query_lens: dict[int, int]
+    ) -> None:
+        """Resolve the prefill (token) and decode (request) CUDA graph capture
+        sizes, each from its own sizes, cap or default and never from the
+        other's, and record every graph's token count in
+        `cudagraph_capture_sizes` and `max_cudagraph_capture_size`.
+
+        Args:
+            legacy_sizes: The deprecated `cudagraph_capture_sizes` or
+                `max_cudagraph_capture_size` was set before resolution.
+            target_query_lens: The target model's decode query lengths, each
+                mapped to the most requests its batches have.
+
+        """
+        compilation_config = self.compilation_config
+        prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        max_prefill_tokens = compilation_config.max_prefill_cudagraph_capture_tokens
+        decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
+        max_decode_requests = compilation_config.max_decode_cudagraph_capture_requests
+        uses_split_sizes = any(
+            x is not None
+            for x in (
+                prefill_sizes,
+                max_prefill_tokens,
+                decode_sizes,
+                max_decode_requests,
+            )
+        )
+        if not self.use_v2_model_runner:
+            if (
+                uses_split_sizes
+                or compilation_config.max_decode_cudagraph_capture_tokens is not None
+            ):
+                raise ValueError(
+                    "prefill_cudagraph_capture_token_sizes, "
+                    "decode_cudagraph_capture_request_sizes, their max_* caps and "
+                    "max_decode_cudagraph_capture_tokens need model runner V2."
+                )
+            return
+        if legacy_sizes and not uses_split_sizes:
+            logger.warning_once(
+                "cudagraph_capture_sizes and max_cudagraph_capture_size are "
+                "deprecated with model runner V2. Set the token counts of prefill "
+                "CUDA graphs with prefill_cudagraph_capture_token_sizes or "
+                "max_prefill_cudagraph_capture_tokens, and the request counts of "
+                "decode CUDA graphs with decode_cudagraph_capture_request_sizes or "
+                "max_decode_cudagraph_capture_requests."
+            )
+        from vllm.platforms import current_platform
+
+        shared_sizes = compilation_config.cudagraph_capture_sizes
+        shared_max = compilation_config.max_cudagraph_capture_size
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        # On SM100, unset kinds default to wider grids; elsewhere, and with the
+        # deprecated fields, they default to the shared sizes resolved above.
+        wide_defaults = (
+            not legacy_sizes and current_platform.is_device_capability_family(100)
+        )
+        if (
+            wide_defaults
+            and compilation_config.max_decode_cudagraph_capture_tokens is None
+        ):
+            compilation_config.max_decode_cudagraph_capture_tokens = 8192
+
+        def explicit(
+            sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
+        ):
+            kept = sorted({s for s in sizes if 1 <= s <= limit})
+            if len(kept) < len(set(sizes)):
+                logger.warning(
+                    "Dropping %s from %s: outside [1, %d].",
+                    sorted(set(sizes) - set(kept)),
+                    name,
+                    limit,
+                )
+            if cap is not None and kept and kept[-1] > cap:
+                raise ValueError(f"{name} holds {kept[-1]}, above {cap_name}={cap}.")
+            return kept
+
+        if prefill_sizes is not None:
+            prefill_sizes = explicit(
+                prefill_sizes,
+                max_num_tokens,
+                max_prefill_tokens,
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+            )
+        elif max_prefill_tokens is not None or wide_defaults:
+            prefill_sizes = prefill_cudagraph_capture_grid(
+                min(
+                    8192 if max_prefill_tokens is None else max_prefill_tokens,
+                    max_num_tokens,
+                ),
+                self.performance_mode == "interactivity",
+            )
+        else:
+            prefill_sizes = list(shared_sizes)
+
+        if decode_sizes is not None:
+            decode_sizes = explicit(
+                decode_sizes,
+                max_num_seqs,
+                max_decode_requests,
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            )
+        elif max_decode_requests is not None or wide_defaults:
+            decode_sizes = decode_cudagraph_capture_grid(
+                max_num_seqs
+                if max_decode_requests is None
+                else min(max_decode_requests, max_num_seqs)
+            )
+        else:
+            # The request counts each target query length rounds the shared sizes
+            # up to within the shared bound.
+            decode_sizes = sorted(
+                {
+                    min(cdiv(s, q), max_num_seqs)
+                    for s in shared_sizes
+                    for q in target_query_lens
+                    if cdiv(s, q) * q <= shared_max
+                }
+            )
+        compilation_config.prefill_cudagraph_capture_token_sizes = prefill_sizes
+        compilation_config.max_prefill_cudagraph_capture_tokens = max(
+            prefill_sizes, default=0
+        )
+        compilation_config.decode_cudagraph_capture_request_sizes = decode_sizes
+        compilation_config.max_decode_cudagraph_capture_requests = max(
+            decode_sizes, default=0
+        )
+
+        decode_max_tokens = min(
+            max_num_tokens,
+            compilation_config.max_decode_cudagraph_capture_tokens or max_num_tokens,
+        )
+        token_sizes: set[int] = set()
+        token_sizes.update(
+            n * q
+            for n, q in decode_cudagraph_capture_shapes(
+                decode_sizes, target_query_lens, decode_max_tokens
+            )
+        )
+        token_sizes.update(
+            n
+            for n, _ in decode_cudagraph_capture_shapes(
+                self.get_draft_decode_cudagraph_request_sizes(),
+                {1: max_num_seqs},
+                decode_max_tokens,
+            )
+        )
+        speculative_config = self.speculative_config
+        if speculative_config is not None and (
+            speculative_config.enable_adaptive_verification
+        ):
+            token_sizes.update(
+                self.get_varlen_decode_cudagraph_token_sizes(
+                    self.uniform_decode_query_len
+                )
+            )
+        decode_token_sizes = set(token_sizes)
+        token_sizes.update(prefill_sizes)
+        # FULL_DECODE_ONLY captures no prefill graph, so prefill sizes would only
+        # inflate the recorded max; the deprecated sizes alone keep main's.
+        if not (legacy_sizes and not uses_split_sizes) and (
+            compilation_config.cudagraph_mode.mixed_mode() == CUDAGraphMode.NONE
+        ):
+            token_sizes = set(decode_token_sizes)
+        if legacy_sizes and uses_split_sizes:
+            # Resolving a resolved config again keeps the sizes it recorded, also
+            # when a worker has since dropped the mode to FULL_DECODE_ONLY.
+            if shared_sizes not in (
+                sorted(decode_token_sizes | set(prefill_sizes)),
+                sorted(decode_token_sizes),
+            ):
+                raise ValueError(
+                    "The deprecated cudagraph_capture_sizes and "
+                    "max_cudagraph_capture_size cannot be combined with the "
+                    "prefill and decode CUDA graph capture sizes; set only the "
+                    "latter."
+                )
+            token_sizes = set(shared_sizes)
+        compilation_config.cudagraph_capture_sizes = sorted(token_sizes)
+        compilation_config.max_cudagraph_capture_size = max(token_sizes, default=0)
+        if not token_sizes:
+            logger.info_once(
+                "No CUDA graph capture sizes are left; setting cudagraph_mode to NONE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     def _set_compile_ranges(self):
         """Set the compile ranges for the compilation config."""
@@ -3202,8 +3401,6 @@ class VllmConfig:
             )
         elif not self.use_v2_model_runner:
             unsupported = "it requires the V2 model runner"
-        elif self.attention_config.hisparse_config is not None:
-            unsupported = "HiSparse allocates its KV cache itself"
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
@@ -3339,6 +3536,22 @@ class VllmConfig:
                 "Adaptive verification requires full CUDA graphs. Use cudagraph "
                 "mode FULL, FULL_DECODE_ONLY, or FULL_AND_PIECEWISE, or disable "
                 "adaptive verification."
+            )
+
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        decode_sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
+        if (
+            decode_sizes is not None
+            and not decode_sizes
+            and cudagraph_mode.separate_routine()
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        ):
+            # Its step costs are profiled by replaying the decode graphs.
+            raise ValueError(
+                "Adaptive verification needs decode CUDA graphs, but "
+                "decode_cudagraph_capture_request_sizes is empty. Capture decode "
+                "graphs, or disable adaptive verification (e.g. on a prefill-only "
+                "kv_producer instance, which never verifies drafts)."
             )
 
         if self.parallel_config.pipeline_parallel_size > 1:
@@ -3711,31 +3924,36 @@ class VllmConfig:
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif use_mamba_replayssm_spec:
-            if self.cache_config.mamba_cache_mode != "none":
-                raise ValueError(
-                    "FlashInfer ReplaySSM speculative decoding does not support "
-                    "prefix caching; use --disable-prefix-caching"
-                )
-            query_len = 1 + self.num_speculative_tokens
-            if self.cache_config.replayssm_buffer_len < query_len:
-                raise ValueError(
-                    "FlashInfer ReplaySSM speculative decoding requires "
-                    "--replayssm-buffer-len >= 1 + num_speculative_tokens "
-                    f"({query_len}); got "
-                    f"{self.cache_config.replayssm_buffer_len}"
-                )
-            if self.mamba_config.backend != MambaBackendEnum.FLASHINFER:
-                raise ValueError(
-                    "Mamba2 ReplaySSM speculative decoding requires "
-                    "--mamba-backend flashinfer"
-                )
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-            if self.cache_config.mamba_cache_mode == "align":
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and self.model_config is not None
+                and self.model_config.dtype != torch.bfloat16
+            ):
                 raise ValueError(
-                    "FlashInfer ReplaySSM does not support prefix caching yet; "
-                    "use --disable-prefix-caching"
+                    "FlashInfer ReplaySSM align requires bfloat16 model inputs "
+                    "for its replay rings; SSM state cache dtype is independent"
                 )
+            if self.parallel_config.use_ubatching:
+                raise ValueError("FlashInfer ReplaySSM does not support microbatching")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "FlashInfer ReplaySSM currently requires pipeline_parallel_size=1"
+                )
+            if use_mamba_replayssm_spec:
+                query_len = 1 + self.num_speculative_tokens
+                if self.cache_config.replayssm_buffer_len < query_len:
+                    raise ValueError(
+                        "FlashInfer ReplaySSM speculative decoding requires "
+                        "--replayssm-buffer-len >= 1 + num_speculative_tokens "
+                        f"({query_len}); got "
+                        f"{self.cache_config.replayssm_buffer_len}"
+                    )
+        elif use_mamba_replayssm_spec:
+            raise ValueError(
+                "Mamba2 ReplaySSM speculative decoding requires "
+                "--mamba-backend flashinfer"
+            )
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"

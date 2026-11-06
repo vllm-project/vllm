@@ -18,6 +18,12 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -70,9 +76,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
@@ -258,12 +261,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             return build_linear_method(self, self.quant_method, prefix)
         elif isinstance(layer, RoutedExperts):
-            quant_method = self.FusedMoEMethodCls(
+            return self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
 
         return None
 
@@ -2078,7 +2078,6 @@ class RuntimeDtypes:
 
     input_dtype: torch.dtype
     out_dtype: torch.dtype
-    marlin_input_dtype: torch.dtype | None = None
 
 
 @dataclass(frozen=True)
@@ -2707,18 +2706,23 @@ class ModelOptLinearMethod(LinearMethodBase):
         )
         self.out_dtype = dtype
         self.input_dtype = dtype
-        self.marlin_input_dtype = None
-        # Kernel/backend are chosen in create_weights (after get_quant_method),
-        # so the front-end marlin poke stays dormant here — same as the old
-        # NVFP4 methods.
         self.kernel: Any = None
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
         return isinstance(w, QuantKey) and (
             w.dtype == FP4_DTYPE
+            or (
+                w in (kFp8StaticTensorSym, kFp8StaticTokenSym)
+                and isinstance(self.kernel, CutlassFP8ScaledMMLinearKernel)
+                and type(self.fmt) is FormatScheme
+            )
+            or (
+                w == kFp8Static128BlockSym
+                and isinstance(self.kernel, CutlassFp8BlockScaledMMKernel)
+                and type(self.fmt) is _Fp8PbWoPartialBlock
+            )
             or (
                 w == kMxfp8Static
                 and self.kernel is not None
@@ -2748,7 +2752,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.akey.create_weights(layer, ACT, self.ctx, shapes, weight_loader)
         self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
 
-        rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
+        rt = RuntimeDtypes(self.input_dtype, self.out_dtype)
         self.kernel = select_linear_kernel(
             self.spec,
             layer,
@@ -2768,6 +2772,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 raise RuntimeError(
                     f"{type(self.kernel).__name__} cannot use pre-processed weights"
                 )
+            if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
+                layer.processed_weight_dims = (0, 1)
+            elif self.spec.weight == kFp8Static128BlockSym:
+                logical_out = layer.output_size_per_partition
+                if logical_out % 128:
+                    layer._pbwo_logical_out = logical_out
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)

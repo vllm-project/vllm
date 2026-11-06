@@ -3,6 +3,8 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import gc
+import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -438,6 +440,37 @@ def test_hisparse_residency_update_sends_only_changed_pages():
     assert update[request.request_id].block_ids == ([0],)
 
 
+def test_hisparse_teardown_with_live_request_frees_pools():
+    """Untracked request block lists must not keep the pools alive through
+    block -> pool -> reuse watcher -> coordinator -> manager -> list."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    _publish_hisparse_pages(manager)
+    pool = manager.block_pool
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    # The request is never freed, so its lists are alive at teardown.
+    assert pool._reuse_watchers
+    assert not gc.is_tracked(
+        coordinator.resident_managers[0].req_to_blocks[request.request_id]
+    )
+    host_manager = coordinator.host_manager
+    assert host_manager is not None
+    assert not gc.is_tracked(host_manager.req_to_blocks[request.request_id])
+
+    refs = [weakref.ref(obj) for obj in (coordinator, pool, host_pool)]
+    del coordinator, host_manager, hot_manager, host_pool, manager, pool
+    gc.collect()
+    assert [ref() for ref in refs] == [None, None, None]
+
+
 def test_hisparse_readmitted_request_resends_its_full_residency():
     """A preempted request may resume in a worker state row holding another
     request's residency, so its first update must cover every page again."""
@@ -664,7 +697,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     transfers = coordinator.build_offload_command().page_transfers
     assert len(transfers) == 1
     restore = transfers[0]
-    assert restore.restore and not restore.after_forward
+    assert restore.restore
     assert restore.host_block_id == source[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
     request.num_computed_tokens = count
@@ -793,7 +826,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks(
 
     spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     assert len(spills) == 2
-    assert all(spill.after_forward for spill in spills)
+    assert not any(spill.restore for spill in spills)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
     assert [block.ref_cnt for block in resident_blocks] == [2, 2]
     spill_counts = {spill.transfer_id: 1 for spill in spills}
@@ -3685,8 +3718,11 @@ def test_reset_prefix_cache():
     manager.free(req0)
     manager.free(req1)
 
+    cache = manager.block_pool.cached_block_hash_to_block
     assert manager.reset_prefix_cache()
-    assert not manager.block_pool.cached_block_hash_to_block
+    # Cleared in place, so the map stays out of the cyclic GC.
+    assert manager.block_pool.cached_block_hash_to_block is cache
+    assert not cache and not gc.is_tracked(cache._cache)
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
 
 
@@ -3735,33 +3771,27 @@ def test_maybe_evict_cached_block():
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {
-            block0.block_id: block0,
-            block3.block_id: block3,
-        },
-        block_hash1: block1,
-        block_hash2: block2,
-    }
+    cache = pool.cached_block_hash_to_block
+    # Only bytes and block ids, and explicitly untracked: never traversed by GC.
+    assert not gc.is_tracked(cache._cache)
+    assert cache._cache == {block_hash0: 0, block_hash1: 1, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block1
     pool._maybe_evict_cached_block(block1)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block0.block_id: block0, block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 0, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block0: block_hash0 entry should NOT be removed, as block3
     # also use the same hash
     pool._maybe_evict_cached_block(block0)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 3, block_hash2: 2}
+    assert cache.get_one_block(block_hash0) is block3
+    assert cache._dup_ids == {}
     # Evict block2
     pool._maybe_evict_cached_block(block2)
-    assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
+    assert cache._cache == {block_hash0: 3}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
-    assert pool.cached_block_hash_to_block._cache == {}
+    assert cache._cache == {}
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -5648,12 +5678,11 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
 
 
 def test_block_lookup_cache_single_block_per_key():
-    cache = BlockHashToBlockMap()
+    block0, block1 = blocks = [KVCacheBlock(0), KVCacheBlock(1)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
     key2 = BlockHashWithGroupId(b"hash2")
-    block0 = KVCacheBlock(0)
-    block1 = KVCacheBlock(1)
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -5691,13 +5720,11 @@ def test_block_lookup_cache_single_block_per_key():
 
 
 def test_block_lookup_cache_multi_blocks_per_key():
-    cache = BlockHashToBlockMap()
+    blocks = [KVCacheBlock(i) for i in range(12)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
-    block00 = KVCacheBlock(0)
-    block01 = KVCacheBlock(1)
-    block10 = KVCacheBlock(10)
-    block11 = KVCacheBlock(11)
+    block00, block01, block10, block11 = blocks[0], blocks[1], blocks[10], blocks[11]
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -6792,3 +6819,34 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(
+            block_size, num_blocks=50, sliding_window_blocks=2
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = list(range(4 * block_size + 1))
+    request = make_request("0", token_ids, block_size, sha256)
+    assert (
+        manager.allocate_slots(request, len(token_ids), delay_cache_blocks=True)
+        is not None
+    )
+    assert manager.estimate_cached_tokens(request) == 0
+
+    # The block table has an unhashed tail.
+    manager.cache_blocks(request, 2 * block_size)
+    assert manager.estimate_cached_tokens(request) == 2 * block_size
+
+    manager.cache_blocks(request, 4 * block_size)
+    assert manager.estimate_cached_tokens(request) == 4 * block_size
+
+    # Evicting one group's last hashed block lowers the estimate to that group's.
+    full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
+    manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
+    assert manager.estimate_cached_tokens(request) == 3 * block_size
