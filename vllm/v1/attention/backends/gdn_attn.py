@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.checkpoint import (
@@ -72,6 +73,12 @@ class GDNFlashInferCheckpointPlan:
     rows: torch.Tensor
 
 
+def _as_int_list(x: "torch.Tensor | list[int]") -> list[int]:
+    """Host-side cu_seqlens as a plain list. Input is always a CPU tensor or a
+    list, so this never forces a device synchronization."""
+    return x.tolist() if isinstance(x, torch.Tensor) else list(x)
+
+
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -87,6 +94,14 @@ class GDNAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # The batch-invariant GDN path is implemented per-layer. Backend
+        # selection only sees the enum, so this gate is opened here and the
+        # concrete layer asserts its own support (see
+        # GatedDeltaNetAttention.supports_batch_invariant).
         return True
 
 
@@ -108,6 +123,9 @@ class GDNAttentionMetadata:
     non_spec_query_start_loc: torch.Tensor | None = (
         None  # shape: [batch - num_spec_decodes + 1,]
     )
+    # Host-side copy of non_spec_query_start_loc, populated only under
+    # VLLM_BATCH_INVARIANT so the per-request loops never sync on a CUDA tensor.
+    non_spec_query_start_loc_cpu: list[int] | None = None
 
     spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
     non_spec_state_indices_tensor: torch.Tensor | None = (
@@ -126,6 +144,7 @@ class GDNAttentionMetadata:
     chunk_offsets: torch.Tensor | None = None
     # Chunk-kernel inputs for prefill
     prefill_query_start_loc: torch.Tensor | None = None
+    prefill_query_start_loc_cpu: list[int] | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
     aiter_prefill_metadata: object | None = None
@@ -193,6 +212,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+
+        # Batch invariance is incompatible with speculative decoding
+        if envs.VLLM_BATCH_INVARIANT and self.use_spec_decode:
+            raise ValueError(
+                "Batch invariance (VLLM_BATCH_INVARIANT=1) is not supported "
+                "with speculative decoding on GDN_ATTN backend. "
+                "Please disable one of: VLLM_BATCH_INVARIANT or "
+                "speculative_config.num_speculative_tokens."
+            )
 
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -529,6 +557,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
         prefill_query_start_loc: torch.Tensor | None = None
+        prefill_query_start_loc_cpu: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
         aiter_prefill_metadata: object | None = None
@@ -604,6 +633,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if checkpoint is not None and self.plan_flashinfer_checkpoints:
             assert checkpoint.offsets is not None
             assert checkpoint.query_lens is not None
+            assert prefill_query_start_loc_cpu is not None
             # The prefill kernel runs the trailing checkpoint rows.
             num_prefill_rows = prefill_query_start_loc_cpu.shape[0] - 1
             every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
@@ -688,6 +718,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        # Host-side cu_seqlens for the batch-invariant per-request loops. Both
+        # are derived from CPU tensors, so no GPU->CPU sync is introduced, and
+        # neither is computed when batch invariance is off.
+        prefill_query_start_loc_cpu_list: list[int] | None = None
+        non_spec_query_start_loc_cpu_list: list[int] | None = None
+        if envs.VLLM_BATCH_INVARIANT:
+            if prefill_query_start_loc_cpu is not None:
+                prefill_query_start_loc_cpu_list = _as_int_list(
+                    prefill_query_start_loc_cpu
+                )
+            if non_spec_query_start_loc_cpu is not None:
+                non_spec_query_start_loc_cpu_list = _as_int_list(
+                    non_spec_query_start_loc_cpu
+                )
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -702,11 +747,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             prefill_query_start_loc=prefill_query_start_loc,
+            prefill_query_start_loc_cpu=prefill_query_start_loc_cpu_list,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
             aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_query_start_loc_cpu=non_spec_query_start_loc_cpu_list,
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
             spec_sequence_masks=spec_sequence_masks,
