@@ -9,6 +9,8 @@ import textwrap
 import pytest
 import torch
 
+from vllm.multimodal.video import EmbeddingGemma2VideoBackend
+
 MODEL = os.environ.get("EG2_MODEL_PATH")
 needs_model = pytest.mark.skipif(not MODEL, reason="EG2_MODEL_PATH not set")
 TEXT_COS, MM_COS = 0.999, 0.999
@@ -87,6 +89,25 @@ def test_text_parity(vllm_runner, st_model, prompt):
     assert sim >= TEXT_COS, (
         f"Text cosine {sim} < {TEXT_COS} for prompt len {len(prompt)}"
     )
+
+
+@needs_model
+def test_matryoshka_parity(vllm_runner, st_model):
+    from vllm import PoolingParams
+
+    prompt = "task: search result | query: what is vllm"
+    # 768 also needs embedding_size to report the 768-d output (#60978).
+    dims = [128, 256, 512]
+    with vllm_runner(MODEL, runner="pooling", max_model_len=8192) as vm:
+        outs = vm.embed(
+            [prompt] * len(dims),
+            pooling_params=[PoolingParams(dimensions=d) for d in dims],
+        )
+    for d, out in zip(dims, outs):
+        ref = st_model.encode([prompt], truncate_dim=d, normalize_embeddings=True)
+        assert len(out) == d
+        sim = _cos([out], ref).min().item()
+        assert sim >= TEXT_COS, f"Matryoshka {d}d cosine {sim} < {TEXT_COS}"
 
 
 @needs_model
@@ -256,10 +277,16 @@ def test_encoder_contract():
         "embed_multimodal",
         "_encoder_chunk",
     ]
+    # EmbeddingGemma2 borrows these without Gemma4's data-parallel dispatch.
+    gemma4_source = {
+        "_process_image_input": "_process_image_input_local",
+        "_process_video_input": "_process_video_input_local",
+    }
 
     for name in borrowed_methods:
         # Check method identity (L-F6 + T-F4)
-        assert getattr(EmbeddingGemma2Model, name) is getattr(G, name)
+        source = gemma4_source.get(name, name)
+        assert getattr(EmbeddingGemma2Model, name) is getattr(G, source)
 
         # AST checks: verify no zero-arg super() calls in borrowed methods
         func = getattr(EmbeddingGemma2Model, name)
@@ -348,6 +375,7 @@ def test_video_loader_real_video(vllm_runner, st_model):
 
     video_path = "/projects/gemma4-vllm/videos/test_intel.mp4"
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     with open(video_path, "rb") as f:
         data = f.read()
 
@@ -396,6 +424,7 @@ def test_video_loader_duplicate_expansion_e2e(vllm_runner, st_model):
     from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
 
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     # 4s clip at 0.5 fps = 2 unique frames
     lowfps_path = "/tmp/test_lowfps_05.mp4"
     _ensure_synthetic_video(lowfps_path, duration=4.0, fps=0.5, width=64, height=48)
@@ -436,6 +465,7 @@ def test_video_loader_indices():
     )
 
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     hf_proc = EmbeddingGemma2VideoProcessor()
 
     # Case 1: clip shorter than 32s (e.g. 5s @ 24fps = 120 frames)
@@ -521,6 +551,7 @@ def test_video_loader_duplicate_expansion():
     )
 
     backend_cls = VIDEO_LOADER_REGISTRY.name2class["embedding_gemma2"]
+    assert issubclass(backend_cls, EmbeddingGemma2VideoBackend)
     hf_proc = EmbeddingGemma2VideoProcessor()
 
     # 4s clip @ 0.5fps = 2 frames total. Requested target fps = 1.0 -> 4 frames.
@@ -573,9 +604,10 @@ def test_video_media_io_embedding_gemma2():
     assert meta_conn.get("do_sample_frames") is False
 
 
-def test_config_capping_and_explicit_limits(caplog):
-    """Verify EmbeddingGemma2ModelConfig capping and explicit user overrides."""
-    import logging
+def test_config_capping_and_explicit_limits():
+    """Verify EmbeddingGemma2ModelConfig backend selection, default capping,
+    and preservation of explicit limits.
+    """
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -585,19 +617,13 @@ def test_config_capping_and_explicit_limits(caplog):
     )
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    # (a) Defaults: uncapped max_model_len=262144 -> capped to 8192,
-    # and derived scheduler limits (>= 262144) lowered to 8192.
+    # (a) When attention backend is None, default to TRITON_ATTN,
+    # and default capping: max_model_len > 8192 without explicit limit capped to 8192
     cfg_default = SimpleNamespace(
         attention_config=SimpleNamespace(backend=None),
         model_config=SimpleNamespace(
-            model="dummy", max_model_len=262144, original_max_model_len=None
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=262144,
-            max_num_encoder_input_tokens=262144,
-            encoder_cache_size=262144,
-            max_num_seqs=256,
-            verify_max_model_len=lambda x: None,
+            max_model_len=262144,
+            original_max_model_len=None,
         ),
     )
     with patch.object(Gemma4Config, "verify_and_update_config"):
@@ -605,83 +631,93 @@ def test_config_capping_and_explicit_limits(caplog):
 
     assert cfg_default.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
     assert cfg_default.model_config.max_model_len == 8192
-    assert cfg_default.scheduler_config.max_num_batched_tokens == 8192
-    assert cfg_default.scheduler_config.max_num_encoder_input_tokens == 8192
-    assert cfg_default.scheduler_config.encoder_cache_size == 8192
 
-    # (b) Reachable explicit limits: explicit max_model_len=8192 and explicit
-    # max_num_batched_tokens=32768 stays 32768.
-    # Note: omitting max_model_len while passing max_num_batched_tokens < 262144
-    # is rejected earlier by SchedulerConfig validation (32768 < 262144) before
-    # this hook runs.
-    cfg_explicit_batched = SimpleNamespace(
+    # (b) Default capping with original_max_model_len == -1
+    cfg_default_minus1 = SimpleNamespace(
         attention_config=SimpleNamespace(backend=None),
         model_config=SimpleNamespace(
-            model="dummy", max_model_len=8192, original_max_model_len=8192
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=32768,
-            max_num_encoder_input_tokens=32768,
-            encoder_cache_size=32768,
-            max_num_seqs=256,
-            verify_max_model_len=lambda x: None,
+            max_model_len=131072,
+            original_max_model_len=-1,
         ),
     )
     with patch.object(Gemma4Config, "verify_and_update_config"):
-        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_batched)
+        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_default_minus1)
 
-    assert cfg_explicit_batched.model_config.max_model_len == 8192
-    assert cfg_explicit_batched.scheduler_config.max_num_batched_tokens == 32768
-    assert cfg_explicit_batched.scheduler_config.max_num_encoder_input_tokens == 32768
-    assert cfg_explicit_batched.scheduler_config.encoder_cache_size == 32768
+    assert cfg_default_minus1.model_config.max_model_len == 8192
 
-    # (c) Explicit value > uncapped_len (e.g. 300000) with uncapped model len is lowered
-    # to 8192 and logs a warning because it exceeds uncapped_len.
-    cfg_explicit_large = SimpleNamespace(
+    # (c) Explicit limit 4096 preserved
+    cfg_explicit_4k = SimpleNamespace(
         attention_config=SimpleNamespace(backend=None),
         model_config=SimpleNamespace(
-            model="dummy", max_model_len=262144, original_max_model_len=None
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=300000,
-            max_num_encoder_input_tokens=300000,
-            encoder_cache_size=300000,
-            max_num_seqs=256,
-            verify_max_model_len=lambda x: None,
-        ),
-    )
-    with (
-        caplog.at_level(logging.WARNING),
-        patch.object(Gemma4Config, "verify_and_update_config"),
-    ):
-        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_large)
-
-    assert cfg_explicit_large.model_config.max_model_len == 8192
-    assert cfg_explicit_large.scheduler_config.max_num_batched_tokens == 8192
-    assert cfg_explicit_large.scheduler_config.max_num_encoder_input_tokens == 8192
-    assert cfg_explicit_large.scheduler_config.encoder_cache_size == 8192
-    assert any(
-        "lowering explicitly set scheduler_config.max_num_batched_tokens"
-        " from 300000 to 8192" in rec.message
-        for rec in caplog.records
-    )
-
-    # (d) Explicit max_model_len=16384 is respected and not capped to 8192
-    cfg_explicit_model_len = SimpleNamespace(
-        attention_config=SimpleNamespace(backend=None),
-        model_config=SimpleNamespace(
-            model="dummy", max_model_len=16384, original_max_model_len=16384
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=16384,
-            max_num_encoder_input_tokens=16384,
-            encoder_cache_size=16384,
-            max_num_seqs=256,
-            verify_max_model_len=lambda x: None,
+            max_model_len=4096,
+            original_max_model_len=4096,
         ),
     )
     with patch.object(Gemma4Config, "verify_and_update_config"):
-        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_model_len)
+        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_4k)
 
-    assert cfg_explicit_model_len.model_config.max_model_len == 16384
-    assert cfg_explicit_model_len.scheduler_config.max_num_batched_tokens == 16384
+    assert cfg_explicit_4k.model_config.max_model_len == 4096
+
+    # (d) Explicit limit 16384 preserved and explicit backend preserved
+    cfg_explicit_16k = SimpleNamespace(
+        attention_config=SimpleNamespace(backend=AttentionBackendEnum.FLASH_ATTN),
+        model_config=SimpleNamespace(
+            max_model_len=16384,
+            original_max_model_len=16384,
+        ),
+    )
+    with patch.object(Gemma4Config, "verify_and_update_config"):
+        EmbeddingGemma2ModelConfig.verify_and_update_config(cfg_explicit_16k)
+
+    assert cfg_explicit_16k.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+    assert cfg_explicit_16k.model_config.max_model_len == 16384
+
+
+def _update_matryoshka_config(**hf_config_fields):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.config import EmbeddingGemma2ModelConfig
+
+    hf_config = SimpleNamespace(**hf_config_fields)
+    EmbeddingGemma2ModelConfig.verify_and_update_model_config(
+        SimpleNamespace(hf_config=hf_config)
+    )
+    return hf_config
+
+
+def test_sets_matryoshka_dimensions_from_model_card():
+    assert _update_matryoshka_config().matryoshka_dimensions == [128, 256, 512, 768]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"matryoshka_dimensions": [768, 256]},
+        {"matryoshka_dimensions": None},
+        {"is_matryoshka": True},
+        {"is_matryoshka": False},
+    ],
+)
+def test_keeps_declared_matryoshka_config(fields):
+    hf_config = _update_matryoshka_config(**fields)
+    assert getattr(hf_config, "matryoshka_dimensions", None) == fields.get(
+        "matryoshka_dimensions"
+    )
+
+
+def test_sentence_transformer_tokenizer_config_max_seq_length(tmp_path):
+    """Verify get_sentence_transformer_tokenizer_config accepts config
+    with only max_seq_length.
+    """
+    import json
+
+    from vllm.transformers_utils.config import (
+        get_sentence_transformer_tokenizer_config,
+    )
+
+    # 1. Synthetic model directory with only max_seq_length in sentence_bert_config.json
+    cfg_file = tmp_path / "sentence_bert_config.json"
+    cfg_file.write_text(json.dumps({"max_seq_length": 8192}))
+    loaded = get_sentence_transformer_tokenizer_config(str(tmp_path))
+    assert loaded is not None
+    assert loaded["max_seq_length"] == 8192

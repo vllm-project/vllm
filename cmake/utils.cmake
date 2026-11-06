@@ -113,11 +113,14 @@ function (vllm_finalize_hipify_target)
   list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
 
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  set(HIPIFY_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/hipify-source-map.json)
   add_custom_target(
     hipify_all
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} --manifest ${HIPIFY_MANIFEST} ${ALL_SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
-    BYPRODUCTS ${ALL_BYPRODUCTS}
+    BYPRODUCTS ${ALL_BYPRODUCTS} ${HIPIFY_MANIFEST}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    VERBATIM
     COMMENT "Running hipify on all extension source files.")
 endfunction()
 
@@ -425,6 +428,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a" "${_base}f")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
     endif()
@@ -464,8 +468,10 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
-        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
+        if (NOT "${_base}" IN_LIST _TGT_CUDA_ARCHS)
+          list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
+        endif()
       endif()
     endif()
   endforeach()

@@ -1,0 +1,245 @@
+meta:
+  title: "Kimi-K2-Instruct"
+  slug: "kimi-k2-instruct"
+  provider: "Moonshot AI"
+  description: "Moonshot AI's Kimi-K2 is a trillion-parameter MoE instruction model (~32B active) with native FP8 weights and strong tool-calling capabilities."
+  date_added: 2025-09-25
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "Open-weights 1T-parameter MoE with native FP8 and Kimi K2 tool calling"
+  related_recipes:
+    - "moonshotai/Kimi-K2-Thinking"
+    - "moonshotai/Kimi-K2.5"
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "moonshotai/Kimi-K2-Instruct"
+  min_vllm_version: "0.12.0"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "32B"
+  context_length: 131072
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+    - "--tokenizer-mode"
+    - "auto"
+  base_env: {}
+
+dependencies:
+  - note: "Optional: DeepEP + DeepGEMM for the DP+EP deployment path on H800/H200"
+    command: "uv pip install git+https://github.com/deepseek-ai/DeepGEMM.git@v2.1.1.post3 --no-build-isolation"
+    optional: true
+
+features:
+  tool_calling:
+    description: "Enable Kimi K2 tool calling with the kimi_k2 tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "kimi_k2"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 1200
+    description: "Native FP8 weights on 16xH800 / 16xH200 (smallest deployment for 128k seqlen)"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_env:
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides:
+  # Kimi-K2 16xH800 reference command from the original recipe: TP8 inside each
+  # node, PP2 across nodes, plus DCP=8 for decode-context parallel and the
+  # full FP8 / chunked-prefill tuning.
+  multi_node_tp_pp:
+    vllm_args:
+      - "--dtype"
+      - "bfloat16"
+      - "--quantization"
+      - "fp8"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--enable-chunked-prefill"
+      - "--max-model-len"
+      - "65536"
+      - "--max-num-batched-tokens"
+      - "1024"
+      - "--max-num-seqs"
+      - "1"
+
+guide: |
+  ## Overview
+
+  Kimi-K2-Instruct is Moonshot AI's trillion-parameter Mixture-of-Experts instruction
+  model (approximately 32B activated per token) shipped with native FP8 weights. The
+  smallest deployment unit for Kimi-K2 FP8 weights with 128k seqlen on mainstream H800
+  platforms is a 16-GPU cluster using either Tensor Parallel (TP) or Data Parallel +
+  Expert Parallel (DP+EP). This guide is partially adapted from the official
+  [Kimi-K2-Instruct Deployment Guidance](https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/deploy_guidance.md).
+
+  ## Prerequisites
+
+  - **Hardware (FP8)**: 16x H800 or 16x H200 GPUs (verified)
+  - **vLLM**: Current stable release
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### AMD ROCm
+
+  The ROCm wheel requires Python 3.12, ROCm 7.0+, and glibc >= 2.35. Use the
+  ROCm Docker image when your host environment does not meet those requirements.
+
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Running Kimi-K2 with FP8 on 16xH800
+
+  ### Tensor Parallelism + Pipeline Parallelism (TP8+PP2)
+
+  ```bash
+  # node 0 (start Ray on both nodes first)
+  vllm serve moonshotai/Kimi-K2-Instruct \
+    --trust-remote-code \
+    --tokenizer-mode auto \
+    --tensor-parallel-size 8 \
+    --pipeline-parallel-size 2 \
+    --dtype bfloat16 \
+    --quantization fp8 \
+    --max-model-len 2048 \
+    --max-num-seqs 1 \
+    --max-num-batched-tokens 1024 \
+    --enable-chunked-prefill \
+    --kv-cache-dtype fp8 \
+    -dcp 8
+  ```
+
+  Key parameter notes:
+  - `--enable-auto-tool-choice`: required when enabling tool usage.
+  - `--tool-call-parser kimi_k2`: required when enabling tool usage.
+
+  ### Data Parallelism + Expert Parallelism (DP16+EP)
+
+  You can install libraries like DeepEP and DeepGEMM as needed. Then run the command
+  (example on H800):
+
+  ```bash
+  # node 0
+  vllm serve moonshotai/Kimi-K2-Instruct \
+    --port 8000 --served-model-name kimi-k2 \
+    --trust-remote-code \
+    --data-parallel-size 16 \
+    --data-parallel-size-local 8 \
+    --data-parallel-address $MASTER_IP \
+    --data-parallel-rpc-port $PORT \
+    --enable-expert-parallel \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 256 \
+    --gpu-memory-utilization 0.85 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2
+
+  # node 1
+  vllm serve moonshotai/Kimi-K2-Instruct \
+    --headless \
+    --data-parallel-start-rank 8 \
+    --port 8000 --served-model-name kimi-k2 \
+    --trust-remote-code \
+    --data-parallel-size 16 \
+    --data-parallel-size-local 8 \
+    --data-parallel-address $MASTER_IP \
+    --data-parallel-rpc-port $PORT \
+    --enable-expert-parallel \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 256 \
+    --gpu-memory-utilization 0.85 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2
+  ```
+
+  ### ROCm on 8x MI300X / MI325X / MI355X
+
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  vllm serve moonshotai/Kimi-K2-Instruct \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2
+  ```
+
+  Additional flags:
+  - `--max-model-len` preserves memory; `--max-model-len=65536` is usually good for most scenarios.
+  - `--max-num-batched-tokens` balances throughput vs latency. `32768` is good for prompt-heavy
+    workloads; reduce to 16k or 8k to cut activation memory and decrease latency.
+  - vLLM conservatively uses 90% of GPU memory. Set `--gpu-memory-utilization=0.95` to
+    maximize KV cache.
+
+  ## Benchmarking
+
+  ### FP8 Benchmark on 16xH800
+
+  ```bash
+  vllm bench serve \
+    --model moonshotai/Kimi-K2-Instruct \
+    --dataset-name random \
+    --random-input-len 1000 \
+    --random-output-len 512 \
+    --request-rate 1.0 \
+    --num-prompts 8 \
+    --ignore-eos \
+    --trust-remote-code
+  ```
+
+  ### FP8 Benchmark on 16xH200
+
+  ```bash
+  vllm bench serve \
+    --model moonshotai/Kimi-K2-Instruct \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos \
+    --trust-remote-code
+  ```
+
+  Adding `-dcp 8` at launch can further improve throughput on H200 (observed ~33% lower
+  mean TTFT and higher tok/s in internal benchmarks).
+
+  Test different batch sizes by changing `--num-prompts`, e.g. 1, 16, 32, 64, 128, 256, 512.
+
+  ## References
+
+  - [Kimi-K2-Instruct on Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Instruct)
+  - [Official Kimi-K2 Deployment Guidance](https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/deploy_guidance.md)
+  - [vLLM Expert Parallelism docs](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment.html)
