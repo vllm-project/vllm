@@ -76,7 +76,7 @@ def _is_integrated_gpu(device: torch.device) -> bool:
     return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
 
 
-_E8M0_AND_UINT8 = {torch.float8_e8m0fnu, torch.uint8}
+_E8M0_AND_UINT8 = (torch.float8_e8m0fnu, torch.uint8)
 
 
 def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
@@ -95,7 +95,11 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     a CPU temporary. Sources with at most one element are skipped: they count
     as contiguous with any stride, which `view(torch.uint8)` rejects.
     """
-    if {src.dtype, dst.dtype} == _E8M0_AND_UINT8:
+    if (
+        src.dtype != dst.dtype
+        and src.dtype in _E8M0_AND_UINT8
+        and dst.dtype in _E8M0_AND_UINT8
+    ):
         src = src.view(dst.dtype)
     if (
         src.device.type == "cpu"
