@@ -36,6 +36,7 @@ from run_ci_command import (
     is_active_build,
     is_build_for_pr,
     is_ci_command_attempt,
+    iter_builds,
     notify_authorized,
     parse_command,
     parse_trusted_users,
@@ -50,6 +51,7 @@ from run_ci_command import (
 def make_pr(**overrides: Any) -> dict[str, Any]:
     pr = {
         "base": {"ref": "main"},
+        "created_at": "2026-01-01T00:00:00Z",
         "draft": False,
         "head": {
             "label": "contributor:feature",
@@ -196,13 +198,17 @@ class FakeBuildkite:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: tuple[str, ...] = (),
+        page: int = 1,
+        created_from: str | None = None,
     ) -> list[dict[str, Any]]:
         self.list_calls.append((commit, metadata))
         self.list_requests.append(
             {
                 "branch": branch,
                 "commit": commit,
+                "created_from": created_from,
                 "metadata": metadata,
+                "page": page,
                 "states": states,
             }
         )
@@ -1590,8 +1596,14 @@ class RunCiCommandTest(unittest.TestCase):
             metadata=("github-pr-number", "42"),
             states=CANCELABLE_BUILD_STATES,
         )
+        client.list_builds(None, page=2, created_from="2026-01-01T00:00:00Z")
 
         self.assertEqual(builds, [])
+        self.assertNotIn("&page=", transport.calls[0]["url"])
+        self.assertIn("&page=2", transport.calls[1]["url"])
+        self.assertIn(
+            "created_from=2026-01-01T00%3A00%3A00Z", transport.calls[1]["url"]
+        )
         url = transport.calls[0]["url"]
         self.assertIn("?exclude_jobs=true", url)
         self.assertIn("commit=current-commit", url)
@@ -1655,9 +1667,11 @@ class RocmCacheTest(unittest.TestCase):
         command: str = COMMAND_ROCM_CACHE,
         ci_builds: list[dict[str, Any]] | None = None,
         actor: str = "reviewer",
+        ci_pages: list[list[dict[str, Any]]] | None = None,
     ) -> FakeBuildkite:
-        amd = FakeBuildkite([[]])
-        self.ci = FakeBuildkite([ci_builds or []])
+        # One page per query: the head label, then the bare ref.
+        amd = FakeBuildkite([[], []])
+        self.ci = FakeBuildkite(ci_pages or [ci_builds or [], []])
         run(make_event(command, actor), github, amd, ci_buildkite=self.ci)
         return amd
 
@@ -1701,6 +1715,47 @@ class RocmCacheTest(unittest.TestCase):
         self.assertIn("`fedcba987654`", github.comments[0])
         self.assertEqual(self.ci.list_requests[0]["branch"], "contributor:feature")
 
+    def test_cache_finds_the_source_on_a_later_page(self) -> None:
+        reused = ci_build(meta_data={"rocm-rocm-stack": "s@d3"})
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        amd = self.comment(github, ci_pages=[[reused] * 100, [ci_build()], []])
+
+        self.assertEqual(len(amd.created_builds), 1)
+        self.assertEqual(
+            [(r["branch"], r["page"]) for r in self.ci.list_requests],
+            [("contributor:feature", 1), ("contributor:feature", 2), ("feature", 1)],
+        )
+
+    def test_cache_lists_builds_since_the_pr_opened_off_the_base_branch(
+        self,
+    ) -> None:
+        pr = make_pr(head={**make_pr()["head"], "label": "contributor:main"})
+        pr["head"]["ref"] = "main"
+        github = FakeGitHub(files=STACK_PR_FILES, pr=pr)
+
+        amd = self.comment(github, ci_pages=[[ci_build()]])
+
+        self.assertEqual(len(amd.created_builds), 1)
+        self.assertEqual(
+            [(r["branch"], r["created_from"]) for r in self.ci.list_requests],
+            [("contributor:main", "2026-01-01T00:00:00Z")],
+        )
+
+    def test_build_pagination_is_bounded(self) -> None:
+        full = FakeBuildkite([[ci_build()] * 100] * 101)
+
+        with self.assertRaises(ApiError):
+            list(iter_builds(full, branch="feature"))
+
+    def test_cache_finds_a_source_created_under_the_bare_ref(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        amd = self.comment(github, ci_pages=[[], [ci_build()]])
+
+        (build,) = amd.created_builds
+        self.assertEqual(build["env"]["ROCM_PROMOTE_SHA"], "fedcba9876543210")
+
     def test_nocache_records_the_decision_without_a_build(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
 
@@ -1713,6 +1768,16 @@ class RocmCacheTest(unittest.TestCase):
     def test_refusals_leave_the_gate_failing(self) -> None:
         other_recipe = FakeGitHub(files=STACK_PR_FILES)
         other_recipe.file_shas = {("docker/docker-bake-rocm.hcl", "main"): "newer"}
+        # Built with main's recipe, but the PR changed it afterwards.
+        head_recipe = FakeGitHub(files=STACK_PR_FILES)
+        head_recipe.file_shas = {
+            (".buildkite/scripts/rocm/build.sh", "0123456789abcdef"): "changed"
+        }
+        # The PR changed the image after its CI last pushed one.
+        head_stack = FakeGitHub(files=STACK_PR_FILES)
+        head_stack.file_shas = {
+            ("docker/Dockerfile.rocm_base", "0123456789abcdef"): "changed"
+        }
         reused = [ci_build(meta_data={"rocm-rocm-stack": "s@d1"})]
         # The author, with CI delegated to them by an approval.
         author = FakeGitHub(
@@ -1722,7 +1787,9 @@ class RocmCacheTest(unittest.TestCase):
             reviews=[{"user": {"login": "reviewer"}, "state": "APPROVED"}],
         )
         cases = [
-            (other_recipe, [ci_build()], "reviewer", "differs from main's"),
+            (other_recipe, [ci_build()], "reviewer", "before main changed them"),
+            (head_recipe, [ci_build()], "reviewer", "before main changed them"),
+            (head_stack, [ci_build()], "reviewer", "latest changes"),
             (FakeGitHub(files=STACK_PR_FILES), [], "reviewer", "built the ROCm"),
             (FakeGitHub(files=STACK_PR_FILES), reused, "reviewer", "built the ROCm"),
             (author, [ci_build()], "author", "Only maintainers with write access"),
