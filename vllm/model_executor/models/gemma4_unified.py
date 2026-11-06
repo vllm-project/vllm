@@ -35,7 +35,6 @@ from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
     _VIDEO_MAX_FRAMES,
-    _VIDEO_MAX_SOFT_TOKENS,
     Gemma4AudioInputs,
     Gemma4DummyInputsBuilder,
     Gemma4ForConditionalGeneration,
@@ -46,6 +45,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ProcessingInfo,
     Gemma4VideoInputs,
     _get_max_soft_tokens,
+    _get_video_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -185,7 +185,8 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         video_opts = mm_config.limit_per_prompt.get("video")
         if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
-        tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
+        video_max_soft_tokens = _get_video_max_soft_tokens(merged_kwargs)
+        tokens["video"] = num_frames * (video_max_soft_tokens + 2 + 6)
         return tokens
 
     def _compute_num_soft_tokens(

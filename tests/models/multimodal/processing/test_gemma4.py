@@ -321,6 +321,95 @@ def test_video_cache_is_independent_of_image_kwargs(
     )
 
 
+def _process_video(
+    mm_processor_kwargs: dict[str, object],
+    kwargs_on_init: bool,
+    model_config_kwargs: dict[str, object] | None = None,
+):
+    ctx = build_model_context(
+        GEMMA4_MODEL_ID,
+        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        model_config_kwargs=model_config_kwargs,
+        limit_mm_per_prompt={"video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    frames = np.random.default_rng(0).integers(0, 256, (2, 720, 1280, 3), np.uint8)
+    mm_items = processor.info.parse_mm_data(
+        {"video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
+    )
+    processed = processor(
+        hf_processor.video_token,
+        mm_items,
+        hf_processor_mm_kwargs={} if kwargs_on_init else mm_processor_kwargs,
+    )
+    return processor, frames, processed
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_video_soft_tokens"),
+    [
+        ({}, 70),
+        ({"max_soft_tokens": 560}, 70),
+        ({"images_kwargs": {"max_soft_tokens": 560}}, 70),
+        ({"videos_kwargs": {"max_soft_tokens": 70}}, 70),
+        ({"videos_kwargs": {"max_soft_tokens": 140}}, 140),
+        (
+            {
+                "images_kwargs": {"max_soft_tokens": 560},
+                "videos_kwargs": {"max_soft_tokens": 280},
+            },
+            280,
+        ),
+    ],
+)
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
+def test_video_max_soft_tokens_matches_hf_video_processor(
+    mm_processor_kwargs: dict[str, object],
+    expected_video_soft_tokens: int,
+    kwargs_on_init: bool,
+):
+    """Only videos_kwargs.max_soft_tokens sets the per-frame budget, and both
+    the frames and their placeholders must follow it, as in HF.
+    """
+    processor, frames, processed = _process_video(
+        mm_processor_kwargs,
+        kwargs_on_init,
+        model_config_kwargs={"mm_device_do_normalize": False},
+    )
+    hf_processor = processor.info.get_hf_processor()
+    expected = hf_processor.video_processor(
+        videos=[frames],
+        max_soft_tokens=expected_video_soft_tokens,
+        do_sample_frames=False,
+        return_tensors="pt",
+    )
+    (soft_tokens_per_frame,) = expected["num_soft_tokens_per_video"].tolist()
+
+    data = processed["mm_kwargs"].get_data()
+    torch.testing.assert_close(
+        data["pixel_values_videos"],
+        expected["pixel_values_videos"].to(data["pixel_values_videos"].dtype),
+        rtol=0,
+        atol=0,
+    )
+    assert data["video_num_soft_tokens"] == [[soft_tokens_per_frame] * 2]
+    num_video_tokens = processed["prompt_token_ids"].count(hf_processor.video_token_id)
+    assert num_video_tokens == 2 * soft_tokens_per_frame
+    if kwargs_on_init:
+        tokens = processor.info.get_mm_max_tokens_per_item(
+            seq_len=processor.info.ctx.model_config.max_model_len,
+            mm_counts={"video": 1},
+        )
+        assert tokens["video"] == 32 * (expected_video_soft_tokens + 2 + 6)
+
+
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
+def test_video_max_soft_tokens_rejects_unsupported_value(kwargs_on_init: bool):
+    with pytest.raises(ValueError, match="videos_kwargs.max_soft_tokens"):
+        _process_video({"videos_kwargs": {"max_soft_tokens": 100}}, kwargs_on_init)
+
+
 @pytest.mark.usefixtures("default_vllm_config")
 def test_mm_device_do_normalize():
     device = current_platform.device_type
@@ -529,7 +618,14 @@ def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
 
 @pytest.mark.parametrize(
     "mm_processor_kwargs",
-    [{"max_soft_tokens": 560}, {"images_kwargs": {"max_soft_tokens": 560}}],
+    [
+        {"max_soft_tokens": 560},
+        {"images_kwargs": {"max_soft_tokens": 560}},
+        {
+            "images_kwargs": {"max_soft_tokens": 140},
+            "videos_kwargs": {"max_soft_tokens": 560},
+        },
+    ],
 )
 def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
     model = _gemma4_for_encoder_cudagraph()
