@@ -216,10 +216,10 @@ def test_only_long_form_audio_fills_the_context(model_id, long_form):
 
 @pytest.mark.parametrize(
     ("limit", "expected_tokens"),
-    [({"count": 1}, 27000), ({"count": 1, "length": 24000 * 60}, 450)],
+    [({"count": 1}, 4500), ({"count": 1, "length": 24000 * 60}, 450)],
 )
 def test_long_form_audio_limit(limit, expected_tokens):
-    """Long-form audio stops at an hour unless the audio limit says otherwise."""
+    """Long-form audio stops at the decode limit unless told otherwise."""
     info = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(
             model="microsoft/VibeVoice-ASR-HF",

@@ -20,9 +20,9 @@ Set the maximum audio file size (in MB) that VLLM will accept, via the
 Models that transcribe long-form audio in a single pass, such as
 `microsoft/VibeVoice-ASR-HF`, also need `VLLM_MAX_AUDIO_DECODE_DURATION_S` and
 `VLLM_MAX_AUDIO_DECODE_BYTES` raised, and a large enough `--max-model-len` for the
-audio and its transcript. vLLM sizes these models for one hour of audio, which
-`--limit-mm-per-prompt '{"audio": {"length": <samples>}}'` changes. Transcribing with
-VibeVoice-ASR requires Transformers 5.23 or later.
+audio and its transcript. vLLM sizes these models for `VLLM_MAX_AUDIO_DECODE_DURATION_S`
+of audio, which `--limit-mm-per-prompt '{"audio": {"length": <samples>}}'` changes.
+Transcribing with VibeVoice-ASR requires Transformers 5.23 or later.
 
 ### Uploading Audio Files
 
