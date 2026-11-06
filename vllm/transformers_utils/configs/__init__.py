@@ -48,9 +48,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Moondream3Config": "vllm.transformers_utils.configs.moondream3",
     "Moondream3TextConfig": "vllm.transformers_utils.configs.moondream3",
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
-    "MossTranscribeDiarizeConfig": (
-        "vllm.transformers_utils.configs.moss_transcribe_diarize"
-    ),
     "Nemotron3_5TranscribeConfig": (
         "vllm.transformers_utils.configs.nemotron3_5_transcribe"
     ),
@@ -128,7 +125,6 @@ __all__ = [
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
-    "MossTranscribeDiarizeConfig",
     "Nemotron3_5TranscribeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
