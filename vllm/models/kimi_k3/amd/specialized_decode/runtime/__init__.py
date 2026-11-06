@@ -170,15 +170,16 @@ def unsupported(vllm_config) -> list[str]:
             not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE),
             "AITER off (set VLLM_ROCM_USE_AITER=1, VLLM_ROCM_USE_AITER_MOE=1)",
         ),
-        # MoRIIO consumers finish loads before execution, without per-layer hooks.
+        # MoRIIO and Mooncake consumers finish loads before execution, without
+        # per-layer hooks.
         (
             kv is not None
             and (
-                kv.kv_connector != "MoRIIOConnector"
+                kv.kv_connector not in ("MoRIIOConnector", "MooncakeConnector")
                 or kv.kv_connector_module_path is not None
                 or kv.kv_role != "kv_consumer"
             ),
-            "KV transfer connectors other than a MoRIIO consumer",
+            "KV transfer connectors other than a MoRIIO or Mooncake consumer",
         ),
         (
             vllm_config.aux_output_config.enable_return_routed_experts,
