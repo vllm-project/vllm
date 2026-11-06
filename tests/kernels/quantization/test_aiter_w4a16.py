@@ -41,26 +41,6 @@ if not (
 device = "cuda"
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _dist_init():
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed import (
-        ensure_model_parallel_initialized,
-        init_distributed_environment,
-    )
-    from vllm.distributed.parallel_state import model_parallel_is_initialized
-
-    if not model_parallel_is_initialized():
-        with set_current_vllm_config(VllmConfig()):
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                distributed_init_method="tcp://127.0.0.1:0",
-                local_rank=0,
-            )
-            ensure_model_parallel_initialized(1, 1)
-
-
 def _pack8(v: torch.Tensor, dim: int) -> torch.Tensor:
     """Pack int values 0..15 along `dim` (8 per int32, value i at bit 4*i)."""
     v = v.movedim(dim, -1).to(torch.int64)
@@ -109,8 +89,9 @@ def _make_layer(fmt, q_kn, s_gn, z_gn):
         )
         layer.register_parameter(
             "w_s",
+            # A copy: processing may write the result into this storage.
             GroupQuantScaleParameter(
-                data=s_gn.contiguous(), weight_loader=loader, input_dim=0, output_dim=1
+                data=s_gn.clone(), weight_loader=loader, input_dim=0, output_dim=1
             ),
         )
     else:
@@ -168,7 +149,9 @@ def test_gemm_a16w4_fake_impl():
 @pytest.mark.parametrize("weight_type", [scalar_types.uint4b8, scalar_types.uint4])
 @pytest.mark.parametrize("group_size", [-1, 32, 128])
 @pytest.mark.parametrize("M", [1, 16, 33, 256])
-def test_aiter_w4a16_matches_reference(fmt, act_type, weight_type, group_size, M):
+def test_aiter_w4a16_matches_reference(
+    fmt, act_type, weight_type, group_size, M, dist_init
+):
     set_random_seed(0)
     K, N = 512, 384
     G = K if group_size == -1 else group_size
@@ -201,7 +184,7 @@ def test_aiter_w4a16_matches_reference(fmt, act_type, weight_type, group_size, M
     torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
 
 
-def test_aiter_w4a16_symmetric_ignores_qzeros():
+def test_aiter_w4a16_symmetric_ignores_qzeros(dist_init):
     """GPTQ registers qzeros even for uint4b8 (zero_points=False)."""
     set_random_seed(0)
     K, N, G, M = 256, 256, 128, 8
@@ -249,7 +232,7 @@ def test_aiter_w4a16_warmup_m_values():
     assert all(1 <= v <= 300 for v in m)
 
 
-def test_aiter_w4a16_warmup_runs_each_shape_once():
+def test_aiter_w4a16_warmup_runs_each_shape_once(dist_init):
     """Layers sharing weight shapes compile one set of M values; the kernel
     is found on quant_method (GPTQ/AWQ) and on scheme (compressed-tensors)."""
     from vllm.model_executor.warmup.aiter_w4a16_warmup import (
