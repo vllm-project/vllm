@@ -463,7 +463,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             and mm_config is not None
             and mm_config.mm_encoder_attn_backend is None
         ):
-            mm_config.mm_encoder_attn_backend = AttentionBackendEnum.TORCH_SDPA
+            mm_config.mm_encoder_attn_backend = AttentionBackendEnum.ROCM_AITER_FA
         UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
         logger.info(
             "Unlimited-OCR-2: output KV window=%s; input KV is retained for DASH.",

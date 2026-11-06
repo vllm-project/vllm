@@ -296,7 +296,7 @@ def test_v2_preprocessed_features_validate_page_layout_at_admission():
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
-def test_v2_rocm_defaults_select_ck_and_sdpa():
+def test_v2_rocm_defaults_select_aiter_for_dash_and_vision():
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -310,4 +310,4 @@ def test_v2_rocm_defaults_select_ck_and_sdpa():
     assert config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
     mm_config = config.model_config.multimodal_config
     assert mm_config is not None
-    assert mm_config.mm_encoder_attn_backend == AttentionBackendEnum.TORCH_SDPA
+    assert mm_config.mm_encoder_attn_backend == AttentionBackendEnum.ROCM_AITER_FA

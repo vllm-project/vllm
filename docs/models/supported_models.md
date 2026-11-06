@@ -654,7 +654,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 
 Unlimited-OCR-2 requires Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
 On ROCm, DASH defaults to `ROCM_AITER_FA` and uses AITER CK varlen attention;
-the vision encoder defaults to `TORCH_SDPA`. Select the DASH path explicitly
+the vision encoder also defaults to `ROCM_AITER_FA`. Select the DASH path explicitly
 with `attention_config={"backend": "ROCM_AITER_FA"}` when needed. NVIDIA defaults
 remain unchanged.
 Its optional page-count guard respects sampling constraints, preserving EOS

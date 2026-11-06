@@ -91,8 +91,8 @@ def test_unlimited_ocr2_batched_pages(
         },
         enable_chunked_prefill=chunked_prefill,
         enable_prefix_caching=False,
-        mm_encoder_attn_backend="FLASHINFER"
-        if backend == "FLASHINFER"
+        mm_encoder_attn_backend=backend
+        if backend in ("FLASHINFER", "ROCM_AITER_FA")
         else "TORCH_SDPA",
         limit_mm_per_prompt={"image": 2},
         mm_processor_kwargs={"crop_mode": crop_mode},
