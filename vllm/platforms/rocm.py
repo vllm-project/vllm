@@ -230,6 +230,20 @@ def _query_apu_pool_sizes(device_id: int) -> tuple[int, int] | None:
     return vram_total, gtt_total
 
 
+_TTM_PAGES_LIMIT_PATH = Path("/sys/module/ttm/parameters/pages_limit")
+
+
+@cache
+def _query_ttm_limit() -> int | None:
+    """The TTM page limit in bytes, which KFD reports as the GTT pool size,
+    or None if it is unset or unreadable."""
+    try:
+        pages = int(_TTM_PAGES_LIMIT_PATH.read_text())
+    except Exception:
+        return None
+    return pages * os.sysconf("SC_PAGE_SIZE") if pages > 0 else None
+
+
 # HIP reports the backing pool's size exactly; allow a little slack.
 _APU_POOL_MATCH_TOLERANCE = 0.01
 
@@ -238,15 +252,15 @@ def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
     """Whether an APU serves device allocations from GTT rather than VRAM.
 
     Which pool amdgpu uses depends on the kernel version (always VRAM before
-    6.10, always GTT before 6.15, the smaller of the two after), so compare
-    the pool size HIP reports against both instead of predicting it. Native
-    MI300A has no carve-out.
+    6.10, always GTT from 6.10, and from 6.15 GTT only when it is larger than
+    the carve-out), so compare the pool size HIP reports against both instead
+    of predicting it. Native MI300A has no carve-out.
 
     Only a match with the carve-out counts as carve-out-backed; anything
-    else, including unreadable sysfs, equal pool sizes, or a GTT pool that
-    sysfs does not report exactly (KFD reports ``ttm.pages_limit`` while
-    sysfs reports the deprecated ``amdgpu.gttsize`` when it is set), is
-    treated as GTT-backed. That errs towards bounding the device by host
+    else, including unreadable sysfs or equal pool sizes, is treated as
+    GTT-backed. HIP reports the GTT pool as ``ttm.pages_limit``, while sysfs
+    reports the deprecated ``amdgpu.gttsize`` when it is set, so the TTM
+    limit is checked as well. Erring towards GTT bounds the device by host
     memory, which can only make startup stricter, never cause an OOM.
     """
     pool_sizes = _query_apu_pool_sizes(device_id)
@@ -255,9 +269,13 @@ def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
     vram_total, gtt_total = pool_sizes
     if vram_total == 0:
         return True
+    gtt_sizes = [gtt_total]
+    if (ttm_limit := _query_ttm_limit()) is not None:
+        gtt_sizes.append(ttm_limit)
     vram_distance = abs(device_total - vram_total)
+    gtt_distance = min(abs(device_total - size) for size in gtt_sizes)
     matches_vram = vram_distance <= _APU_POOL_MATCH_TOLERANCE * vram_total
-    return not (matches_vram and vram_distance < abs(device_total - gtt_total))
+    return not (matches_vram and vram_distance < gtt_distance)
 
 
 def _get_gcn_arch() -> str:

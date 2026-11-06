@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -176,28 +177,32 @@ def test_rocm_integrated_gpu_memory_info(
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 @pytest.mark.parametrize(
-    ("pools", "device_total", "expected"),
+    ("pools", "ttm_limit", "device_total", "expected"),
     [
         # 0.5 GiB carve-out, 100 GiB GTT: HIP reports the GTT pool.
-        ((0.5, 100), 100, True),
+        ((0.5, 100), None, 100, True),
         # 64 GiB carve-out, 37.7 GiB GTT: HIP reports the carve-out.
-        ((64, 37.7), 64, False),
+        ((64, 37.7), 37.7, 64, False),
         # 64 GiB carve-out, 100 GiB GTT: HIP reports the GTT pool.
-        ((64, 100), 100, True),
+        ((64, 100), None, 100, True),
         # Native MI300A has no carve-out.
-        ((0, 128), 120, True),
+        ((0, 128), None, 120, True),
         # GTT-backed, but sysfs reports amdgpu.gttsize (100 GiB) while HIP
         # reports ttm.pages_limit (32 GiB), which is closer to the carve-out.
-        ((8, 100), 32, True),
+        ((8, 100), 32, 32, True),
+        # Same, with ttm.pages_limit equal to the carve-out: HIP's 32 GiB
+        # matches the carve-out exactly but is the TTM limit.
+        ((32, 100), 32, 32, True),
         # Equal pool sizes are ambiguous: assume GTT.
-        ((64, 64), 64, True),
+        ((64, 64), None, 64, True),
         # sysfs unreadable: assume GTT.
-        (None, 64, True),
+        (None, None, 64, True),
     ],
 )
 def test_rocm_apu_allocates_from_gtt(
     tmp_path,
     pools: tuple[float, float] | None,
+    ttm_limit: float | None,
     device_total: float,
     expected: bool,
 ):
@@ -211,15 +216,23 @@ def test_rocm_apu_allocates_from_gtt(
         (device_path / "mem_info_gtt_total").write_text(f"{int(pools[1] * GiB)}\n")
     props = MagicMock(pci_domain_id=0, pci_bus_id=0xC3, pci_device_id=0)
 
+    ttm_path = tmp_path / "pages_limit"
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    pages = 0 if ttm_limit is None else int(ttm_limit * GiB) // page_size
+    ttm_path.write_text(f"{pages}\n")
+
     rocm._query_apu_pool_sizes.cache_clear()
+    rocm._query_ttm_limit.cache_clear()
     try:
         with (
             patch.object(rocm, "_PCI_DEVICES_PATH", tmp_path),
+            patch.object(rocm, "_TTM_PAGES_LIMIT_PATH", ttm_path),
             patch.object(rocm.torch.cuda, "get_device_properties", return_value=props),
         ):
             assert rocm._apu_allocates_from_gtt(0, int(device_total * GiB)) == expected
     finally:
         rocm._query_apu_pool_sizes.cache_clear()
+        rocm._query_ttm_limit.cache_clear()
 
 
 def test_memory_snapshot_uses_cuda_on_discrete_gpu():
