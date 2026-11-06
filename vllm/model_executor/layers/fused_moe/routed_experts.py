@@ -229,16 +229,7 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
-        registered = set(self._parameters)
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        # Per-element quant params; per-expert scalars ((E,), (E, <=2)) aren't padded.
-        self._padding_fill_names = [
-            name
-            for name, p in self._parameters.items()
-            if name not in registered
-            and p is not None
-            and (p.ndim >= 3 or (p.ndim == 2 and p.shape[1] > 2))
-        ]
 
         loader = self.shared_expert_online_loader
         if loader is not None and loader.stages_shared_experts:
@@ -250,16 +241,18 @@ class RoutedExperts(PluggableLayer):
         """Params a direct reload zero-fills; read at cold start, before PWAL."""
         c = self.moe_config
         inter = c.intermediate_size_per_partition
-        padded = (
+        if not (
             c.hidden_dim > (c.hidden_dim_unpadded or c.hidden_dim)
             or inter > (c.intermediate_size_per_partition_unpadded or inter)
             # The loader refills this padding too, but a load plan skips loader fills.
             or c.tp_shard_with_padding
-        )
-        if not padded:
+        ):
             return []
+        # Per-expert scalars ((E,), (E, <=2)) aren't padded.
         return [
-            n for n in self._padding_fill_names if self._parameters.get(n) is not None
+            n
+            for n, p in self._parameters.items()
+            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]
         ]
 
     # TODO(bnell): Temporary hack. Get rid of this.
