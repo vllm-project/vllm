@@ -18,6 +18,7 @@ for small steps). Copied from the Kimi-K3 specialized decode.
 """
 
 from collections.abc import Callable
+from functools import partial
 
 import cutlass
 import cutlass.cute as cute
@@ -60,12 +61,13 @@ def _kernel(heads, requests, tokens, conv_state, qkv):
     if not dim_first:
         aligned = aligned and (stride[-1] * size) % 16 == 0
     if items >= WS_MIN_ITEMS and aligned and window >= tokens + 2 and tokens >= 3:
-        smem = fused_ws.shared_bytes(tokens, tokens, dim_first, window, size)
-        if smem <= fused_ws.SMEM_LIMIT:
+        smem = partial(fused_ws.shared_bytes, tokens, tokens, dim_first, window, size)
+        stage_fb = smem(True) <= fused_ws.SMEM_LIMIT
+        if stage_fb or smem() <= fused_ws.SMEM_LIMIT:
             sms = torch.cuda.get_device_properties(qkv.device).multi_processor_count
             per = max(2, -(-items // sms))
             return KdaFusedWS(
-                heads, tokens, 0, False, dim_first, window, -(-items // per)
+                heads, tokens, 0, False, dim_first, window, -(-items // per), stage_fb
             )
     split = next(s for limit, s in FUSED_SPLIT if items < limit)
     return KdaFused(heads, tokens, 0, False, split)

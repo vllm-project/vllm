@@ -229,9 +229,11 @@ def check(layer, verify, inputs, slots, starts, ones, accepted, window):
     )
     state_error = (state - expected_state).abs().max() / expected_state.abs().max()
     assert state_error < 1e-5, state_error
-    rms = expected.float().pow(2).mean(-1, keepdim=True).sqrt()
-    out_error = ((actual.float() - expected.float()).abs() / rms).max()
-    assert out_error < 6e-2, out_error
+    # BF16 roundings of FP32 results summed in another order: rare one-ulp steps.
+    same = (actual.view(torch.int16) == expected.view(torch.int16)).float().mean()
+    assert same > 0.99, same
+    out_error = (actual.float() - expected.float()).abs().max()
+    assert out_error < 1e-2 * expected.float().abs().max(), out_error
 
 
 def capture_graph(op: Callable[[], object]) -> torch.cuda.CUDAGraph:

@@ -8,8 +8,9 @@ One CTA per SM walks every ``ctas``-th (request, head) item (strided, see kernel
 
 - two **prep warpgroups** (thread c = channel c; warpgroup w takes items w, w + 2,
   ...) stream each item in (projection rows and conv window by cp.async, the
-  item's old records into their staging), run the convolution, SiLU, norms, F_B
-  gate projection and decays, and fill one of four operand blocks: the chunk
+  item's old records into their staging, with ``stage_fb`` also the F_B rows of
+  the second gate pass), run the convolution, SiLU, norms, F_B gate projection and
+  decays, and fill one of four operand blocks: the chunk
   vectors Gamma_t k_t and Gamma_t q_t, the replay keys kn_t P_t and D_n, the old
   corrections, v, beta, the output gate and the q x q pair sums;
 - the **scan group** (8 warps) takes the item's state page (bulk copy) into
@@ -64,6 +65,8 @@ LANES = 8  # scan threads per row
 CHUNKS = 4  # 4-key chunks per thread and row
 SCAN_REGISTERS, PREP_REGISTERS = 168, 88
 PAGE_BYTES = K * K * 4
+FB_ROWS = K // 2  # F_B rows of the second gate pass, staged with stage_fb
+FB_PITCH = K + 8  # their row pitch (BF16): conflict-free fragment loads
 COPY_BYTES = 16384
 SMEM_LIMIT = 227 * 1024
 META = 8  # live, request, head, token, n, record slot, state slot
@@ -89,15 +92,16 @@ def operand_bytes(tokens, rq):
     return floats * 4 + tokens * K * 2 + META * 4
 
 
-def staging_bytes(tokens, rq, conv_dim_first, window, conv_size):
+def staging_bytes(tokens, rq, conv_dim_first, window, conv_size, stage_fb=False):
     rows = 5 * tokens * K * 2  # x (3 parts), gate, F_A
     conv = 3 * K * window * conv_size if conv_dim_first else 9 * K * conv_size
     records = rq * 2 * K * 2 + rq * K * 4  # old key / gate, old corrections
-    return rows + conv + records
+    f_b = FB_ROWS * FB_PITCH * 2 if stage_fb else 0
+    return rows + conv + records + f_b
 
 
-def shared_bytes(tokens, rq, conv_dim_first, window, conv_size):
-    staging = staging_bytes(tokens, rq, conv_dim_first, window, conv_size)
+def shared_bytes(tokens, rq, conv_dim_first, window, conv_size, stage_fb=False):
+    staging = staging_bytes(tokens, rq, conv_dim_first, window, conv_size, stage_fb)
     sums = 2 * 64 * 4 * 4 + 2 * 8 * 4 * 4
     dots = K * (2 * tokens + 1) * 4
     blocks = 4 * operand_bytes(tokens, rq)
@@ -111,12 +115,21 @@ class KdaFusedWS:
     registers = (SCAN_REGISTERS, PREP_REGISTERS)
 
     def __init__(
-        self, heads, tokens, gate_mode, has_bias, conv_dim_first, window, ctas
+        self,
+        heads,
+        tokens,
+        gate_mode,
+        has_bias,
+        conv_dim_first,
+        window,
+        ctas,
+        stage_fb=False,
     ):
         assert 2 <= tokens <= 8 and gate_mode in (0, 1)
         self.heads, self.tokens, self.gate_mode = heads, tokens, gate_mode
         self.has_bias = has_bias
         self.conv_dim_first, self.window, self.ctas = conv_dim_first, window, ctas
+        self.stage_fb = stage_fb
 
     @cute.jit
     def __call__(self, *args):
@@ -197,14 +210,28 @@ class KdaFusedWS:
                 copy_g2s(at(us, t, 4 * k), at(corrections, rec, head, t, 4 * k))
 
     @cute.jit
+    def stage_f_b(self, args, fbm, p, head):
+        """cp.async the F_B rows of ``head``'s second gate pass: rows 32 w + 16 + i
+        of prep warp w (i < 16) into row 16 w + i of ``fbm``."""
+        f_b = args[16]
+        granules: cutlass.Constexpr = K // 8  # per row
+        for i in cutlass.range_constexpr(FB_ROWS * granules // PREP_THREADS):
+            g = p + PREP_THREADS * i
+            row, col = g // granules, 8 * (g % granules)
+            feature = head * K + 32 * (row // 16) + 16 + row % 16
+            copy_g2s(at(fbm, row, col), at(f_b, feature, col))
+
+    @cute.jit
     def stage(self, args, staging, p, item):
-        convs, xs, gs, fas, _, _, kgs, us = staging
+        convs, xs, gs, fas, _, _, kgs, us, fbm = staging
         head, request, slot, rec, n, offset = self.item_info(args, item)
         if slot > 0:
             self.stage_conv(args, convs, p, head, slot, offset)
             self.stage_rows(args, xs, gs, fas, p, head, request)
             if rec >= 0:
                 self.stage_records(args, kgs, us, p, head, rec)
+            if cutlass.const_expr(self.stage_fb):
+                self.stage_f_b(args, fbm, p, head)
 
     @cute.jit
     def block_sums(self, values, sums, p, count: cutlass.Constexpr):
@@ -277,6 +304,9 @@ class KdaFusedWS:
         fas = alloc(smem, BFloat16, (2, T, K), align=16)
         kgs = alloc(smem, BFloat16, (2, RQ, 2 * K), align=16)
         us = alloc(smem, Float32, (2, RQ, K), align=16)
+        fbm = kgs  # unused without stage_fb
+        if cutlass.const_expr(self.stage_fb):
+            fbm = alloc(smem, BFloat16, (2, FB_ROWS, FB_PITCH), align=16)
         sums = alloc(smem, Float32, (2, 32, 4))
         psums = alloc(smem, Float32, (2, 64, 4))
         out_sums = alloc(smem, Float32, (2, 8, 4))
@@ -303,7 +333,7 @@ class KdaFusedWS:
             staging = (
                 convs[w, None, None], xs[w, None, None, None], gs[w, None, None],
                 fas[w, None, None], sums[w, None, None], psums[w, None, None],
-                kgs[w, None, None], us[w, None, None],
+                kgs[w, None, None], us[w, None, None], fbm[w, None, None],
             )  # fmt: skip
             self.prep(args, w, p, first, stride, count, staging, ops, ops_full, done)
         else:
@@ -464,7 +494,7 @@ class KdaFusedWS:
         state, output, gate, norm_weight, lower_bound, scale, eps, f_b = args[9:17]
         key_gates = args[19]
         xv_s, kp_s, dn_s, u_s, v_s, g_s, beta_s, pr_s, meta = ops
-        convs, xs, gs, fas, sums, psums, kgs, us = staging
+        convs, xs, gs, fas, sums, psums, kgs, us, fbm = staging
         T: cutlass.Constexpr = self.tokens
         H: cutlass.Constexpr = self.heads
         RQ: cutlass.Constexpr = args[18].shape[2]
@@ -577,10 +607,15 @@ class KdaFusedWS:
                 for m in cutlass.range_constexpr(2):
                     if cutlass.const_expr(m == 1):
                         for chunk in cutlass.range_constexpr(8):
-                            feature = head * K + 32 * warp + 16 + group_id
                             col = 16 * chunk + 4 * quarter
-                            low = load_weight_bf16x4(at(f_b, feature, col))
-                            high = load_weight_bf16x4(at(f_b, feature + 8, col))
+                            if cutlass.const_expr(self.stage_fb):
+                                row = 16 * warp + group_id
+                                low = load_shared_u32x2(at(fbm, row, col))
+                                high = load_shared_u32x2(at(fbm, row + 8, col))
+                            else:
+                                feature = head * K + 32 * warp + 16 + group_id
+                                low = load_weight_bf16x4(at(f_b, feature, col))
+                                high = load_weight_bf16x4(at(f_b, feature + 8, col))
                             wr[chunk, 0], wr[chunk, 2] = low
                             wr[chunk, 1], wr[chunk, 3] = high
                     chains: cutlass.Constexpr = 4 if self.gate_mode == 1 else 1
