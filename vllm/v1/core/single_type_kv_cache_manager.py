@@ -270,6 +270,34 @@ class SingleTypeKVCacheManager(ABC):
             num_new_blocks += 1
         return num_new_blocks + num_evictable_blocks
 
+    def spec_batch_tier_need(
+        self, requests: list[Request], tier: int, end_tokens: list[int]
+    ) -> int:
+        """End-state block need summed over the formed batch (the
+        formed-batch fit projection). Rows not yet allocated reserve
+        their full end state; allocated rows reserve the remaining
+        growth to it. Tier-independent for groups without speculative
+        state; the mamba align manager overrides with the tier-dependent
+        window term. Prefix-hit-blind: it reserves the full row for every
+        request, which can only over-price an admission."""
+        del tier
+        need = 0
+        for request, end in zip(requests, end_tokens):
+            end_blocks = cdiv(end, self.block_size)
+            if self.max_admission_blocks_per_request is not None:
+                end_blocks = min(end_blocks, self.max_admission_blocks_per_request)
+            blocks = self.req_to_blocks.get(request.request_id)
+            if blocks is None:
+                need += end_blocks
+                continue
+            held = len(blocks)
+            if self.max_admission_blocks_per_request is not None:
+                # Capped specs (SWA, chunked-local) pad skipped positions
+                # with nulls; only their rows are short enough to scan.
+                held -= sum(1 for block in blocks if block.is_null)
+            need += max(end_blocks - held, 0)
+        return need
+
     def add_local_computed_blocks(
         self,
         request_id: str,
@@ -1218,6 +1246,18 @@ class CircularBufferManager(FullAttentionManager):
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 
+    def spec_batch_tier_need(
+        self, requests: list[Request], tier: int, end_tokens: list[int]
+    ) -> int:
+        """The ring holds ONE block per request for its whole lifetime
+        (CircularBufferSpec.max_memory_usage_bytes) — length-independent,
+        so the formed-batch projection is the not-yet-allocated rows
+        alone."""
+        del tier, end_tokens
+        return sum(
+            1 for request in requests if request.request_id not in self.req_to_blocks
+        )
+
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
@@ -1448,6 +1488,9 @@ class MambaManager(SingleTypeKVCacheManager):
             "Mamba prefix caching requires mamba_cache_mode='align'"
         )
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+        self.num_prefill_checkpoint_blocks: int = (
+            kv_cache_spec.num_prefill_checkpoint_blocks
+        )
         self.has_prefill_checkpoint_blocks = (
             self.mamba_cache_mode == "align"
             and kv_cache_spec.num_prefill_checkpoint_blocks > 0
@@ -1465,6 +1508,14 @@ class MambaManager(SingleTypeKVCacheManager):
             # checkpoint position and reserved block index for the current
             # allocation.
             self._checkpoints: dict[str, tuple[int, int]] = {}
+            # Requests admitted at the K=0 spec tier (pool-priced admission):
+            # their speculative window is null row slots, not pool blocks —
+            # the tier is an admission-time per-request decision, and the
+            # pin gates the priced promotion back up.
+            self._spec_released: set[str] = set()
+            # Requests whose runner rows must be rebuilt this step (the
+            # spec positions changed under an append-only runner row).
+            self._spec_row_rebuilds: set[str] = set()
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
@@ -1742,6 +1793,10 @@ class MambaManager(SingleTypeKVCacheManager):
 
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
+            # The speculative window positions always count toward the row
+            # (released rows hold them as null blocks); only the physical
+            # reservation is suppressed, by the cap and the admission
+            # window substitution in allocate_new_blocks.
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -1790,9 +1845,32 @@ class MambaManager(SingleTypeKVCacheManager):
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
                 physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
-                if not blocks_allocated:
+                if not blocks_allocated and request_id not in self._spec_released:
                     physical_block_cap += self.num_speculative_blocks
                 num_new_blocks = min(num_new_blocks, physical_block_cap)
+            if request_id in self._spec_released:
+                # The pinned window's null positions refill with fresh
+                # physical blocks as the state boundary advances into
+                # them — on top of the row-length need the cap above
+                # bounds. Promotion refills the whole window beforehand
+                # (promote_spec_blocks), so a pinned row's allocation
+                # only ever counts the live-region nulls.
+                row = self.req_to_blocks[request_id]
+                if len(row) >= self.num_speculative_blocks and (
+                    num_required_blocks > len(row)
+                    or has_partial_hit
+                    or checkpoint_block
+                ):
+                    live_start = max(
+                        num_required_blocks
+                        - self.num_speculative_blocks
+                        - 1
+                        - checkpoint_block,
+                        0,
+                    )
+                    num_new_blocks += sum(
+                        1 for block in row[live_start:] if block.is_null
+                    )
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
@@ -1819,11 +1897,14 @@ class MambaManager(SingleTypeKVCacheManager):
             # mamba layers.
             num_tokens = num_tokens_main_model
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            released = request_id in self._spec_released
+            # The window positions always count toward the row: a pinned
+            # row holds them as null blocks (padding like physical hedge
+            # blocks); only the physical reservation is suppressed below.
+            spec_blocks = self.num_speculative_blocks
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
-            num_required_blocks = (
-                cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
-            )
+            num_required_blocks = cdiv(num_tokens, self.block_size) + spec_blocks
             checkpoint_block = int(request_id in self._checkpoints)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
@@ -1851,9 +1932,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     # saves the hit state.
                     self.last_state_block_idx[request_id] = prev_block_len - 1
 
-                num_skipped_blocks = (
-                    num_required_blocks - self.num_speculative_blocks - 1
-                )
+                num_skipped_blocks = num_required_blocks - spec_blocks - 1
                 # null blocks
                 if prev_block_len < num_skipped_blocks:
                     # minus the internal checkpoint block
@@ -1863,7 +1942,7 @@ class MambaManager(SingleTypeKVCacheManager):
                         [self._null_block for _ in range(prev_block_len, null_end)]
                     )
 
-                if blocks_allocated:
+                if blocks_allocated and request_id not in self._spec_released:
                     # Relocate exclusively owned scratch blocks this step leaves
                     # behind. In a checkpoint step, one at the checkpoint index
                     # stays: the worker exports the checkpoint into that column.
@@ -1880,8 +1959,69 @@ class MambaManager(SingleTypeKVCacheManager):
                 max_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
                 if not blocks_allocated:
                     max_new_blocks += self.num_speculative_blocks
-                assert num_new_blocks <= max_new_blocks
-                new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                elif released:
+                    # A pinned row has no window scratch to relocate: the
+                    # boundary advance the normal row absorbs free via
+                    # relocation is explicit row-length growth here. Budget
+                    # the same window's worth in the per-step bound — the
+                    # advance this bound already allows a normal row.
+                    max_new_blocks += self.num_speculative_blocks
+                # A request admitted at the K=0 tier holds its speculative
+                # window as null positions: they are row slots, not pool
+                # blocks, so the physical take is smaller by the window.
+                free_window = (
+                    self.num_speculative_blocks
+                    if released and not blocks_allocated
+                    else 0
+                )
+                # The pinned window's null positions refill in place as
+                # the boundary advances into them: physical blocks beyond
+                # the row-length need, bounded by the window. Without the
+                # refill the state chain would walk into null blocks.
+                fill_pool = 0
+                if released:
+                    live_start = max(num_skipped_blocks - checkpoint_block, 0)
+                    fill_pool = sum(
+                        1 for block in req_blocks[live_start:] if block.is_null
+                    )
+                if num_new_blocks > max_new_blocks:
+                    row_kinds = "".join(
+                        "N" if block.is_null else "R" for block in req_blocks
+                    )
+                    row_view = (
+                        row_kinds[:40] + ".." + row_kinds[-40:]
+                        if len(row_kinds) > 84
+                        else row_kinds
+                    )
+                    raise AssertionError(
+                        "mamba row accounting exceeded the per-step bound: "
+                        f"released={released} "
+                        f"blocks_allocated={blocks_allocated} "
+                        f"num_required={num_required_blocks} "
+                        f"row_len={len(req_blocks)} row={row_view} "
+                        f"num_skipped={num_skipped_blocks} "
+                        f"checkpoint={checkpoint_block} "
+                        f"partial_hit={has_partial_hit} fill_pool={fill_pool} "
+                        f"free_window={free_window} "
+                        f"num_new={num_new_blocks} max_new={max_new_blocks} "
+                        f"spec_blocks={spec_blocks}"
+                    )
+                new_blocks = self.block_pool.get_new_blocks(
+                    num_new_blocks + fill_pool - free_window
+                )
+                if fill_pool:
+                    fill_limit = len(new_blocks) - int(has_partial_hit)
+                    fill_idx: list[int] = []
+                    for idx in range(live_start, len(req_blocks)):
+                        if len(fill_idx) >= fill_limit:
+                            break
+                        if req_blocks[idx].is_null:
+                            fill_idx.append(idx)
+                    for idx, block in zip(fill_idx, new_blocks):
+                        req_blocks[idx] = block
+                    if fill_idx:
+                        self._spec_row_rebuilds.add(request_id)
+                        new_blocks = new_blocks[len(fill_idx) :]
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
@@ -1922,10 +2062,189 @@ class MambaManager(SingleTypeKVCacheManager):
                         self._apply_cow(request_id, block_idx, source_block, cow_block)
                         returned_blocks = [cow_block] + returned_blocks
                 req_blocks.extend(new_blocks)
+                if free_window:
+                    req_blocks.extend([self._null_block] * free_window)
                 self._allocated_block_reqs.add(request_id)
                 self._partial_hit_reqs.pop(request_id, None)
                 returned_blocks.extend(new_blocks)
+                if free_window:
+                    returned_blocks.extend([self._null_block] * free_window)
                 return returned_blocks
+
+    def take_spec_row_rebuilds(self) -> set[str]:
+        rebuilds = self._spec_row_rebuilds
+        self._spec_row_rebuilds = set()
+        return rebuilds
+
+    def _spec_admission_priceable(self, request_id: str) -> bool:
+        return (
+            self.num_speculative_blocks > 0
+            and self.mamba_cache_mode == "align"
+            and request_id not in self._allocated_block_reqs
+        )
+
+    def spec_admission_priceable(self, request_id: str) -> bool:
+        """Whether the request's admission can be priced down to the K=0
+        tier: a fresh waiting request under a spec-decode align pool."""
+        return self._spec_admission_priceable(request_id)
+
+    def spec_batch_tier_need(
+        self, requests: list[Request], tier: int, end_tokens: list[int]
+    ) -> int:
+        """End-state mamba row need summed over the formed batch (the
+        formed-batch fit projection).
+
+        The align row's pool footprint is its RESIDENT state set —
+        2 + window + checkpoint pages, length-independent
+        (MambaSpec.max_memory_usage_bytes): the row table's per-token
+        slots are nulls outside the resident set, and the boundary
+        advance nulls old states as it allocates fresh ones. Two
+        growth terms sit on top of the resident set:
+
+        - A pinned (K=0) row's window nulls REFILL with fresh physical
+          blocks as the state boundary advances through the row's
+          remaining token span (prefill and decode alike), to an
+          observed equilibrium of resident + window + 2 (the 2 = the
+          boundary-advance in-flight pair), and the aging returns them
+          once the row runs out of crossings. The projection prices the
+          climb (the ceiling minus the held real blocks, bounded by the
+          crossings ahead), and the full crossing-bounded ceiling for a
+          not-yet-allocated row that admission will pin.
+        - A tier>0 row's remaining growth is its window alone (the
+          promotion refill).
+
+        Prefix-hit-blind: it can only over-price an admission — the
+        per-row priced retry stays the net for the opposite error.
+        """
+        if self.num_speculative_blocks <= 0 or self.mamba_cache_mode != "align":
+            return 0
+        resident = 2 + self.num_prefill_checkpoint_blocks
+        window = self.num_speculative_blocks
+        ceiling = resident + window + 2
+        need = 0
+        for request, end in zip(requests, end_tokens):
+            blocks = self.req_to_blocks.get(request.request_id)
+            # The boundary crossings the row still has ahead of it: the
+            # climb adds about one held block per crossing until the
+            # ceiling, so the crossing count bounds the climb.
+            end_span = cdiv(end, self.block_size)
+            if blocks is None:
+                if tier > 0:
+                    need += resident + window
+                else:
+                    # The admission will pin the row: its real count
+                    # starts at 1 state and climbs one per boundary
+                    # crossing, bounded by the row's end-state span.
+                    need += min(ceiling, end_span)
+            elif request.request_id in self._spec_released:
+                if tier > 0:
+                    need += window
+                else:
+                    crossings_ahead = end_span - (len(blocks) - window)
+                    real = sum(1 for block in blocks if not block.is_null)
+                    need += max(min(ceiling - real, crossings_ahead), 0)
+        return need
+
+    def mark_spec_admission_tier0(self, request_id: str) -> bool:
+        """Mark a waiting request for a K=0-tier admission: its speculative
+        window is born as null row slots (no pool blocks). Returns False
+        when the admission cannot be priced (no window, non-align mode,
+        or the request already holds blocks)."""
+        if not self._spec_admission_priceable(request_id):
+            return False
+        self._spec_released.add(request_id)
+        return True
+
+    def unmark_spec_admission(self, request_id: str) -> None:
+        self._spec_released.discard(request_id)
+
+    def is_spec_released(self, request_id: str) -> bool:
+        """Whether the request is pinned at the K=0 tier (null window)."""
+        return request_id in self._spec_released
+
+    def promote_spec_blocks(self, request_id: str, reserve: int = 0) -> bool:
+        """Price and run the pinned row's promotion to the full spec tier.
+
+        Refills the window's null positions with fresh hedge blocks only when
+        the pool fits them (plus `reserve`); otherwise the row stays pinned.
+        """
+        if request_id not in self._spec_released:
+            return False
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks or len(req_blocks) < self.num_speculative_blocks:
+            return False
+        tail_start = len(req_blocks) - self.num_speculative_blocks
+        nulls = sum(1 for block in req_blocks[tail_start:] if block.is_null)
+        if nulls == 0:
+            # The boundary already consumed the window; the pin is stale.
+            self._spec_released.discard(request_id)
+            return False
+        if nulls + reserve > self.block_pool.get_num_free_blocks():
+            return False
+        return self.resume_spec_blocks(request_id)
+
+    def resume_spec_blocks(self, request_id: str) -> bool:
+        """Refill the pinned window's null positions with fresh hedge
+        blocks (the promotion to the full spec tier).
+
+        The hedge slots are empty allocations, not computed data: the
+        committed state lives in the base blocks, so fresh blocks are
+        correct without any replay. Only null positions are refilled —
+        a request admitted at the K=0 tier has committed blocks (or no
+        row) where the hedge would be, and those must not be touched.
+        """
+        if request_id not in self._spec_released:
+            return False
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks or len(req_blocks) < self.num_speculative_blocks:
+            # Nothing to restore yet; stay marked and retry on a later
+            # step (the mark must not clear before blocks are placed,
+            # or the relocation loop would run over the naked row).
+            return False
+        tail_start = len(req_blocks) - self.num_speculative_blocks
+        null_slots = [
+            i for i, block in enumerate(req_blocks[tail_start:]) if block.is_null
+        ]
+        if not null_slots:
+            # Window already real (e.g. re-admitted with a physical
+            # hedge): nothing to restore, just clear the mark.
+            self._spec_released.discard(request_id)
+            return False
+        fresh = self.block_pool.get_new_blocks(len(null_slots))
+        for i, block in zip(null_slots, fresh):
+            req_blocks[tail_start + i] = block
+        self._spec_released.discard(request_id)
+        self._spec_row_rebuilds.add(request_id)
+        return True
+
+    def release_spec_blocks(self, request_id: str) -> bool:
+        """Swap the running row's real window blocks for null slots at the
+        K=0 crossing: the hedge blocks return to the pool, the positions
+        stay (the born-null row shape), and the row joins the pin set.
+
+        The hedge slots are empty allocations, not computed data: the
+        committed state lives in the base blocks, so freeing them is
+        lossless and the promotion's fresh-block refill needs no replay.
+        Only real positions are freed — nulls (boundary-advance states or
+        a born-null window) stay. Returns True when blocks were freed
+        (the runner row must be rebuilt)."""
+        if self.num_speculative_blocks <= 0 or request_id in self._spec_released:
+            return False
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks or len(req_blocks) < self.num_speculative_blocks:
+            return False
+        tail_start = len(req_blocks) - self.num_speculative_blocks
+        freed: list[KVCacheBlock] = []
+        for i in range(tail_start, len(req_blocks)):
+            if req_blocks[i] == self._null_block:
+                continue
+            freed.append(req_blocks[i])
+            req_blocks[i] = self._null_block
+        self._spec_released.add(request_id)
+        if freed:
+            self.block_pool.free_blocks(freed)
+            self._spec_row_rebuilds.add(request_id)
+        return bool(freed)
 
     def _relocate_speculative_block(
         self, req_blocks: list[KVCacheBlock], block_idx: int
@@ -1960,6 +2279,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx.pop(request_id, None)
             self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
+            self._spec_released.discard(request_id)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to

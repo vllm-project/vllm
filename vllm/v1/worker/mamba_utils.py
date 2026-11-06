@@ -7,6 +7,7 @@ from typing import Any, NamedTuple
 
 import torch
 
+from vllm import envs
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -523,10 +524,12 @@ def preprocess_mamba_align_fused_kernel(
     num_accepted_tokens_ptr,
     src_col_ptr,
     src_off_ptr,
+    num_decode_draft_tokens_ptr,
     num_reqs,
     BLOCK_SIZE: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr = True,
+    K0_FOLD_RESET: tl.constexpr = False,
 ):
     """Fused align preprocess: emit the pre-copy src column/offset AND advance
     state_idx in a single launch (V2 align).
@@ -539,7 +542,10 @@ def preprocess_mamba_align_fused_kernel(
       3. Advance state_idx to the new running block. Reset num_accepted to 1
          when the block changes: the migrated convolution state
          now sits at the start of the new block and must be read with the neutral
-         accepted-token bias. ReplaySSM ring cursors are migrated separately.
+         accepted-token bias. Also reset when K0_FOLD_RESET is armed and the
+         row is a draft-less decode row whose accepted
+         offset the pre-copy folds into the running block (the regular decode
+         kernels read offset 0 and would otherwise see a stale state).
     """
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < num_reqs
@@ -562,7 +568,17 @@ def preprocess_mamba_align_fused_kernel(
     computed_after = num_computed + query_end - query_start
     new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
     tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
-    should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
+    # 0 = decode row scheduled without drafts (the K=0 ladder tier): the
+    # pre-copy folds its pending accepted offset, so the neutral bias applies
+    # from this step on. Armed only alongside the fold copy (same env knobs) —
+    # the reset without the copy would make the next read see stale state.
+    if K0_FOLD_RESET:
+        k0_fold = (
+            tl.load(num_decode_draft_tokens_ptr + offsets, mask=mask, other=-1) == 0
+        ) & (num_accepted > 1)
+        should_reset = ((state_idx >= 0) & (state_idx != new_state_idx)) | k0_fold
+    else:
+        should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
     tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
 
 
@@ -585,6 +601,11 @@ def precopy_mamba_align_fused_kernel(
     state_dim_row_count_ptr,
     state_dim_row_stride_ptr,
     idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    # [num_reqs] batch-order per-request draft counts (-1/0/K); only read when
+    # HAS_K0_FOLD. 0 marks a decode row scheduled without drafts (the K=0
+    # ladder tier) whose pending accepted offset must be folded into the
+    # running block before the regular decode kernels read it at offset 0.
+    num_decode_draft_tokens_ptr,
     num_reqs,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
@@ -593,6 +614,9 @@ def precopy_mamba_align_fused_kernel(
     # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
+    # HAS_K0_FOLD: when True, same-block rows with draft count 0 and a
+    # non-neutral token bias get the fold copy instead of the early exit.
+    HAS_K0_FOLD: tl.constexpr = False,
 ):
     """Pre-copy mamba "align" state across block boundaries.
 
@@ -622,13 +646,21 @@ def precopy_mamba_align_fused_kernel(
 
     src_col = tl.load(src_col_ptr + req_idx)
     dst_col = tl.load(mamba_state_idx_ptr + req_idx)
+    token_bias = tl.load(token_bias_ptr + req_idx)
     # Fresh state, or still writing the same block: kernels locate the initial
     # state in-block via num_accepted (preserved when no boundary is crossed),
-    # so there is nothing to copy.
-    if src_col < 0 or src_col == dst_col:
+    # so there is nothing to copy -- except a draft-less decode row with a
+    # pending accepted offset: the regular decode kernels read the running
+    # block at offset 0, so the accepted state must be folded in first.
+    skip_same_block = src_col == dst_col
+    if HAS_K0_FOLD:
+        k0_fold = (tl.load(num_decode_draft_tokens_ptr + batch_idx) == 0) & (
+            token_bias > 0
+        )
+        skip_same_block = skip_same_block & ~k0_fold
+    if src_col < 0 or skip_same_block:
         return
 
-    token_bias = tl.load(token_bias_ptr + req_idx)
     if ZERO_TEMPORAL_TOKEN_BIAS:
         conv_width = tl.load(state_conv_widths_ptr + state_idx)
         token_bias = tl.where(conv_width > 0, token_bias, 0)
@@ -1297,6 +1329,7 @@ class MambaSpecDecodeGPUContext:
         src_col_gpu: torch.Tensor,
         token_bias_gpu: torch.Tensor,
         idx_mapping: torch.Tensor | None,
+        num_decode_draft_tokens: torch.Tensor | None = None,
     ) -> None:
         """Pre-copy each request's previous running block into its new window
         block before the forward pass (align boundary migration).
@@ -1308,6 +1341,11 @@ class MambaSpecDecodeGPUContext:
             token_bias_gpu: [max_reqs] accepted-token bias (num_accepted - 1).
             idx_mapping: optional [num_reqs] batch_idx -> req_state_idx.
                 None means V1 batch order already equals request state order.
+            num_decode_draft_tokens: optional [num_reqs] batch-order draft
+                counts (-1/0/K). When given, draft-less decode rows (0) with a
+                non-neutral bias get their accepted-offset state folded into
+                the running block, so the regular decode kernels (which read
+                offset 0) start from the accepted state.
 
         """
         if num_reqs == 0 or not self.is_initialized:
@@ -1329,12 +1367,19 @@ class MambaSpecDecodeGPUContext:
             self.state_dim_row_count,
             self.state_dim_row_stride,
             idx_mapping,
+            num_decode_draft_tokens,
             num_reqs,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
             ZERO_TEMPORAL_TOKEN_BIAS=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
+            HAS_K0_FOLD=(
+                num_decode_draft_tokens is not None
+                and (
+                    envs.VLLM_MAMBA_K0_SLOT_RELEASE or envs.VLLM_MAMBA_PRICED_ADMISSION
+                )
+            ),
         )
 
     def run_fused_postprocess_align(
@@ -1656,10 +1701,12 @@ def preprocess_mamba(
                 num_accepted_tokens_gpu,
                 fused.src_col.gpu,
                 fused.token_bias.gpu,
+                None,
                 num_reqs,
                 BLOCK_SIZE=256,
                 MAMBA_BLOCK_SIZE=block_size,
                 HAS_IDX_MAPPING=False,
+                K0_FOLD_RESET=False,
             )
             fused.ctx.replayssm.reset_new_slots(
                 idx_mapping=None,

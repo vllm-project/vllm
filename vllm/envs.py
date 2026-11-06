@@ -61,6 +61,8 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_USE_FUSED_MQA_TOPK: bool = True
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_MAMBA_PRICED_ADMISSION: bool = False
+    VLLM_MAMBA_K0_SLOT_RELEASE: bool = False
     VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB: int = 2048
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
@@ -1149,6 +1151,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Pool-priced spec-tier admission for hybrid-state models: when a waiting
+    # request cannot admit at its scheduled spec tier's state footprint, retry
+    # the admission at the K=0 tier (the speculative window as null row slots)
+    # before stalling. The admitted tier is pinned per request and promoted
+    # (priced) when the count-based tier rises above it. Default: off
+    "VLLM_MAMBA_PRICED_ADMISSION": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_PRICED_ADMISSION", "0"))
+    ),
+    # Release the running rows' idle speculative windows at the K=0
+    # crossing (the born-null row shape); the admission check prices the
+    # freed blocks automatically. Requires a mamba spec-tier table
+    # (num_speculative_tokens_per_batch_size). Default: off
+    "VLLM_MAMBA_K0_SLOT_RELEASE": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_K0_SLOT_RELEASE", "0"))
     ),
     # Per-chunk decode logits budget (MiB) for the SM100 sparse indexer;
     # 0 disables decode chunking.

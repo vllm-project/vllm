@@ -14,9 +14,12 @@ with byte-identical semantics to the scalar V1 copy specs
   ``state[bt[dst_col]]``.
 
 The kernel must also no-op when ``src_col < 0`` (fresh request) or
-``src_col == dst_col`` (no boundary crossed). V2 callers pass an explicit
-``idx_mapping``; V1 align preprocessing launches in batch order with
-``idx_mapping=None``.
+``src_col == dst_col`` (no boundary crossed) -- unless the row is a
+draft-less decode row (K=0 ladder tier) with a non-neutral staged bias:
+the K=0 fold then copies the accepted state into the running block so the
+regular decode kernels (which read offset 0) start from the accepted
+state. V2 callers pass an explicit ``idx_mapping``; V1 align preprocessing
+launches in batch order with ``idx_mapping=None``.
 """
 
 from __future__ import annotations
@@ -217,11 +220,95 @@ def test_precopy_matches_v1_copy_specs(
         drc,
         drs,
         idx_mapping if has_idx_mapping else None,
+        None,
         num_reqs,
         COPY_BLOCK_SIZE=1024,
         CONV_STATE_DIM_FIRST=conv_state_dim_first,
         HAS_IDX_MAPPING=has_idx_mapping,
         TEMPORAL_TILES=temporal_tiles,
+        HAS_K0_FOLD=False,
+    )
+    torch.accelerator.synchronize()
+
+    for layer in range(NUM_LAYERS):
+        torch.testing.assert_close(convs[layer], conv_ref[layer], rtol=0, atol=0)
+        torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
+
+
+@_parametrize("conv_state_dim_first", [False, True])
+@_cuda_required
+def test_k0_fold_copies_same_block_draft_less_rows(conv_state_dim_first):
+    """The K=0 fold: same-block rows take the copy only when the row is a
+    draft-less decode row with a non-neutral staged bias.
+
+    The fold reads the accepted checkpoint column (temporal:
+    ``bt[src_col + token_bias]``; conv: left shift by ``token_bias``) and
+    writes the running block, so the regular decode kernels -- which read
+    offset 0 -- start from the accepted state. Rows with drafts, a neutral
+    bias, or ``HAS_K0_FOLD`` off keep the historical same-block no-op.
+    """
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_reqs = 3
+    num_blocks = num_reqs * MAX_COLS + 1
+    bt = torch.empty(num_reqs, MAX_COLS, dtype=torch.int32, device=device)
+    for r in range(num_reqs):
+        bt[r] = torch.arange(
+            1 + r * MAX_COLS, 1 + (r + 1) * MAX_COLS, dtype=torch.int32, device=device
+        )
+    # Every row sits on the same block (src == dst == 0): the historical
+    # early-exit case. bias 2 everywhere.
+    src_col = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+    dst_col = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+    bias = torch.full((num_reqs,), 2, dtype=torch.int32, device=device)
+    # Batch order: req 0 = K=0 row (fold fires), req 1 = drafted row (skip),
+    # req 2 = K=0 row with a neutral bias (skip).
+    drafts = torch.tensor([0, 2, 0], dtype=torch.int32, device=device)
+    bias[2] = 0
+
+    convs, ssms = _build_state(num_blocks, device, conv_state_dim_first)
+    conv_pre = [c.clone() for c in convs]
+    ssm_pre = [s.clone() for s in ssms]
+    conv_ref = [c.clone() for c in convs]
+    ssm_ref = [s.clone() for s in ssms]
+    # Only the fold row copies: temporal from the accepted column bt[0, 2],
+    # conv left-shifted by the bias, into the running block bt[0, 0].
+    dblk = int(bt[0, 0])
+    tblk = int(bt[0, 2])
+    for layer in range(NUM_LAYERS):
+        if conv_state_dim_first:
+            conv_ref[layer][dblk, :, : CONV_WIDTH - 2] = conv_pre[layer][dblk, :, 2:]
+        else:
+            conv_ref[layer][dblk, : CONV_WIDTH - 2] = conv_pre[layer][dblk, 2:]
+        ssm_ref[layer][dblk] = ssm_pre[layer][tblk]
+
+    base, blk_stride, elem, inner, width, group, drc, drs = _build_meta(
+        convs, ssms, device, conv_state_dim_first
+    )
+    bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
+    grid = (num_reqs, NUM_LAYERS * 2, 1)
+    precopy_mamba_align_fused_kernel[grid](
+        dst_col,
+        src_col,
+        bias,
+        bt_ptrs,
+        bt.stride(0),
+        base,
+        blk_stride,
+        elem,
+        inner,
+        width,
+        group,
+        drc,
+        drs,
+        None,  # batch order == slot order
+        drafts,
+        num_reqs,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=conv_state_dim_first,
+        HAS_IDX_MAPPING=False,
+        TEMPORAL_TILES=1,
+        HAS_K0_FOLD=True,
     )
     torch.accelerator.synchronize()
 
