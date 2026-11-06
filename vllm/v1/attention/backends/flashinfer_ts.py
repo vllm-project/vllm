@@ -30,7 +30,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from packaging.version import Version
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -64,30 +63,29 @@ _TS_PAGE_SIZES = (16, 32, 64, 128)
 _TS_HEAD_DIMS = (64, 128, 256)
 _TS_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 _TS_MAX_HEAD_RATIO = 128
-# First build with the plan/run argument names used below.
-_TS_MIN_FLASHINFER = "0.7.3.dev20261031"
 
 
 def _require_prims_ts():
     """Import the prims_ts wrapper, or explain which flashinfer is needed.
 
-    Builds before 0.7.3.dev20261031 name the plan/run arguments differently
-    (``max_seq_len_q``, ``q_data_type``, ``seq_lens``, ``bmm1_scale``, ...).
+    0.7.0.post1 ships prims_ts but calls ``Task._run_task_body_impl`` with a
+    ``context`` kwarg that cutlass-dsl 4.8.0 removed, so it raises TypeError
+    deep inside kernel codegen.
     """
     try:
         from flashinfer.attention.prims_ts import BatchDecodePagedTSWrapper
     except ImportError as exc:
         raise RuntimeError(
-            f"FLASHINFER_TS needs flashinfer-python>={_TS_MIN_FLASHINFER} "
+            "FLASHINFER_TS needs flashinfer-python>=0.7.1 "
             "(flashinfer.attention.prims_ts is missing)."
         ) from exc
     import flashinfer
 
-    if Version(flashinfer.__version__) < Version(_TS_MIN_FLASHINFER):
+    if tuple(int(p) for p in flashinfer.__version__.split(".")[:3]) < (0, 7, 1):
         raise RuntimeError(
-            f"FLASHINFER_TS needs flashinfer-python>={_TS_MIN_FLASHINFER}, "
-            f"found {flashinfer.__version__}: earlier builds of prims_ts take "
-            "other plan/run argument names."
+            f"FLASHINFER_TS needs flashinfer-python>=0.7.1, found "
+            f"{flashinfer.__version__}: earlier builds of prims_ts are "
+            "incompatible with cutlass-dsl>=4.8."
         )
     return BatchDecodePagedTSWrapper
 
@@ -211,11 +209,11 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
             head_dim=self.head_size,
             page_size=self.page_size,
             max_kv_len=self._max_kv_len(),
-            max_q_len=query_len,
+            max_seq_len_q=query_len,
             packed_query=False,
-            q_dtype=self.q_dtype,
-            kv_dtype=self.kv_dtype,
-            out_dtype=_ts_output_dtype(self.q_dtype, self.out_dtype),
+            q_data_type=self.q_dtype,
+            kv_data_type=self.kv_dtype,
+            o_data_type=_ts_output_dtype(self.q_dtype, self.out_dtype),
             # A dense plan is what makes a non-causal draft block expressible;
             # it cannot carry a window, which _restrict_to_window applies to
             # the page table instead.
@@ -431,10 +429,10 @@ class FlashInferTSImpl(AttentionImpl[FlashInferTSMetadata]):
         attn_metadata.wrapper.run(
             q=q,
             paged_kv_cache=(k_cache, v_cache),
-            seq_lens_kv=attn_metadata.seq_lens,
+            seq_lens=attn_metadata.seq_lens,
             block_tables=attn_metadata.block_table,
-            softmax_scale=self.scale * layer._q_scale_float * layer._k_scale_float,
-            output_scale=layer._v_scale_float,
+            bmm1_scale=self.scale * layer._q_scale_float * layer._k_scale_float,
+            bmm2_scale=layer._v_scale_float,
             out=kernel_out,
             validate=False,
         )

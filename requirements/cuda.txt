@@ -10,12 +10,7 @@ torchaudio==2.11.0
 torchvision==0.29.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 torchcodec >= 0.14
 PyNvVideoCodec==2.0.4
-# FlashInfer nightly: prims_ts sparse MLA decode (the default for nvfp4_ds_mla
-# and for a per-tensor fp8 cache under DCP) is not in a release yet. The
-# nightly index also serves the matching flashinfer-cubin and
-# flashinfer-jit-cache wheels (`vllm download-kernels`).
---extra-index-url https://flashinfer.ai/whl/nightly/
-flashinfer-python==0.7.3.dev20261102
+flashinfer-python==0.7.3
 apache-tvm-ffi==0.1.11
 tilelang==0.1.12
 # >=1.31.0 keeps execution plans alive for the CUDA graphs recorded from them

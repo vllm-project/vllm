@@ -177,11 +177,11 @@ def test_dense_plan_matches_flash_attention_non_causal():
         head_dim=HEAD_DIM,
         page_size=PAGE,
         max_kv_len=kv,
-        max_q_len=sq,
+        max_seq_len_q=sq,
         packed_query=False,
-        q_dtype=torch.bfloat16,
-        kv_dtype=torch.bfloat16,
-        out_dtype=torch.bfloat16,
+        q_data_type=torch.bfloat16,
+        kv_data_type=torch.bfloat16,
+        o_data_type=torch.bfloat16,
         mask_type="dense",
         window_left=-1,
     )
@@ -189,10 +189,10 @@ def test_dense_plan_matches_flash_attention_non_causal():
     wrapper.run(
         q=q.view(b, sq, hq, HEAD_DIM),
         paged_kv_cache=(k_plane, v_plane),
-        seq_lens_kv=lens,
+        seq_lens=lens,
         block_tables=bt,
-        softmax_scale=scale,
-        output_scale=1.0,
+        bmm1_scale=scale,
+        bmm2_scale=1.0,
         out=out,
     )
 
