@@ -76,7 +76,7 @@ def reload_weights(
         model_loader = get_model_loader(load_config)
         # before start_reload changes the model: the base method only raises
         get_all_weights = getattr(type(model_loader), "get_all_weights", None)
-        if get_all_weights in (None, BaseModelLoader.get_all_weights):
+        if get_all_weights is BaseModelLoader.get_all_weights:
             raise NotImplementedError(
                 f"Model reloading with `{load_config.load_format}` format"
             )
