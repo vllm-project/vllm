@@ -68,6 +68,16 @@ def test_dynamic_config_accepts_the_complete_prefill_runtime(config_factory):
     assert size == 2 and dynamic.enabled
 
 
+def test_dynamic_config_rejects_cache_rebinding_that_replaces_movable_pages(
+    config_factory,
+):
+    config = config_factory()
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.enable_extensible_kv_cache = True
+    with pytest.raises(ValueError, match="no-enable-extensible-kv-cache"):
+        get_pp_config(config)
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [

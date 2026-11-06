@@ -17,6 +17,7 @@ without boundary movement can be enabled independently for MRv2 PP models.
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve deepseek-ai/DeepSeek-V4-Flash \
     --pipeline-parallel-size 2 --tensor-parallel-size 4 \
     --enforce-eager --no-enable-prefix-caching --no-enable-chunked-prefill \
+    --no-enable-extensible-kv-cache \
     --max-model-len 20992 --max-num-batched-tokens 20480 \
     --additional-config '{
       "pp_send_buffer_size": 2,
@@ -95,6 +96,11 @@ cut that is no faster, identifies a candidate steady-state split for that
 workload. It is not a universal partition for other prompt or batch sizes.
 
 ## Current limits
+
+For prefix reuse or MTP3 decode, disable extensible KV cache with
+`--no-enable-extensible-kv-cache`. Its final
+cache-view rebinding would replace dedicated movable-layer pages; dynamic PP
+rejects this combination until ownership and registration can track that resize.
 
 The default boundary path supports eager PP=2, TP, complete fresh prefills, and one
 output token per request. Prefix caching, chunked prefill, decode, KV

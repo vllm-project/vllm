@@ -122,6 +122,13 @@ class DynamicPPConfig:
             raise ValueError("pp_send_buffer_size requires Model Runner V2")
         if not self.enabled:
             return
+        if (
+            self.allow_mtp_decode or vllm_config.cache_config.enable_prefix_caching
+        ) and getattr(vllm_config.cache_config, "enable_extensible_kv_cache", False):
+            raise ValueError(
+                "Dynamic PP historical state does not support extensible KV cache; "
+                "use --no-enable-extensible-kv-cache"
+            )
         if self.kv_transfer_backend == "mooncake" and not (
             self.allow_mtp_decode
             or (

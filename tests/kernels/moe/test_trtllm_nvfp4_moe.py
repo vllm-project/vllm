@@ -384,6 +384,205 @@ def test_trtllm_fp4_moe_no_graph(
         torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
 
 
+def _run_fp4_padded(
+    kernel: mk.FusedMoEKernel,
+    hidden_states: torch.Tensor,
+    a1q_scale: torch.Tensor | None,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Drive ``TrtLlmNvFp4ExpertsModular.apply`` on a padded layout.
+
+    ``topk_ids`` already carries the padding tail (rows whose ids are -1).
+    FlashInfer manages the workspaces, so pass the (0,)-shaped stand-ins that
+    ``workspace_shapes`` advertises.
+    """
+    experts = kernel.fused_experts
+    assert isinstance(experts, TrtLlmNvFp4ExpertsModular)
+    output = torch.empty(
+        (hidden_states.shape[0], experts.hidden_dim_unpadded),
+        device=hidden_states.device,
+        dtype=torch.bfloat16,
+    )
+    empty_ws = torch.empty((0,), device=hidden_states.device, dtype=torch.bfloat16)
+    experts.apply(
+        output=output,
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=experts.moe_config.num_experts,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        a2_scale=None,
+        workspace13=empty_ws,
+        workspace2=empty_ws,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    return output
+
+
+@pytest.mark.parametrize("per_token_activation", [False, True])
+@pytest.mark.parametrize("m,n,k", [(64, 1024, 1024)])
+@pytest.mark.parametrize("e", [128])
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
+def test_trtllm_fp4_moe_padding_robust(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    per_token_activation: bool,
+    workspace_init,
+):
+    """Padding rows (topk_ids == -1) must be skipped, never fed into results.
+
+    DeepEP v2 hands these experts a PaddedStandard buffer whose tail rows are
+    inactive. Construct that layout directly, poison the padding rows with
+    NaN, and check the valid outputs are finite, bit-identical to a
+    zero-padding run, and bit-identical to the unpadded kernel run.
+    """
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        pad = 64
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_q, w2_q, quant_config = make_test_quant_config(
+            e,
+            n,
+            k,
+            in_dtype=dtype,
+            quant_dtype="nvfp4",
+            block_shape=None,
+            per_act_token_quant=False,
+            make_gate=True,
+            is_scale_swizzled=False,
+        )
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
+        w1_scale_linear = torch.stack(
+            [
+                convert_swizzled_to_linear(scale, w1_q.size(1), k, 16)
+                for scale in quant_config.w1_scale
+            ]
+        )
+        w2_scale_linear = torch.stack(
+            [
+                convert_swizzled_to_linear(scale, w2_q.size(1), n, 16)
+                for scale in quant_config.w2_scale
+            ]
+        )
+        w1_q_kernel, w1_scale_linear = reorder_w1w3_to_w3w1(
+            w1_q.clone(), w1_scale_linear
+        )
+        w1_q, w1_scale, w2_q, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
+            w1_q_kernel,
+            w2_q,
+            w1_scale_linear,
+            w2_scale_linear,
+            hidden_size=k,
+            intermediate_size=n,
+            num_experts=e,
+            is_gated_activation=True,
+        )
+        quant_config._w1.scale = w1_scale
+        quant_config._w2.scale = w2_scale
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        scores = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(scores, topk)
+        topk_ids = topk_ids.to(torch.int32)
+
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m + pad),
+        )
+        kernel = _make_trtllm_fp4_moe_kernel(
+            moe_config,
+            quant_config,
+            per_token_activation=per_token_activation,
+        )
+
+        topk_ids_padded = torch.full(
+            (m + pad, topk), -1, device="cuda", dtype=torch.int32
+        )
+        topk_ids_padded[:m] = topk_ids
+        topk_weights_padded = torch.zeros(
+            (m + pad, topk), device="cuda", dtype=topk_weights.dtype
+        )
+        topk_weights_padded[:m] = topk_weights
+
+        a_clean = torch.zeros((m + pad, k), device="cuda", dtype=dtype)
+        a_clean[:m] = a
+        a_poison = a_clean.clone()
+        a_poison[m:] = float("nan")
+
+        def quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+            if per_token_activation:
+                return x, None
+            assert quant_config.a1_gscale is not None
+            return ops.scaled_fp4_quant(
+                x, quant_config.a1_gscale[0], is_sf_swizzled_layout=False
+            )
+
+        hs_clean, scale_clean = quantize(a_clean)
+        hs_poison, scale_poison = quantize(a_poison)
+        hs_unpadded, scale_unpadded = quantize(a)
+
+        out_clean = _run_fp4_padded(
+            kernel,
+            hs_clean,
+            scale_clean,
+            w1_q,
+            w2_q,
+            topk_weights_padded,
+            topk_ids_padded,
+        )
+        out_poison = _run_fp4_padded(
+            kernel,
+            hs_poison,
+            scale_poison,
+            w1_q,
+            w2_q,
+            topk_weights_padded,
+            topk_ids_padded,
+        )
+        out_unpadded = _run_fp4_padded(
+            kernel,
+            hs_unpadded,
+            scale_unpadded,
+            w1_q,
+            w2_q,
+            topk_weights,
+            topk_ids,
+        )
+
+        assert torch.isfinite(out_poison[:m]).all(), (
+            "padding garbage leaked into valid outputs"
+        )
+        torch.testing.assert_close(out_poison[:m], out_clean[:m], rtol=0, atol=0)
+        torch.testing.assert_close(out_clean[:m], out_unpadded, rtol=0, atol=0)
+
+
 @torch.inference_mode()
 def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
     """Weight reloads rerun post-processing on the same experts object; the
