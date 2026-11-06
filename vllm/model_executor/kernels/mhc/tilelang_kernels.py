@@ -821,18 +821,23 @@ def mhc_post_tilelang(
     hidden: int,
     n_thr: int = 128,
     h_blk: int = 1024,
+    h_tiles: int = 1,
 ) -> tilelang.JITKernel:
     # rename for shorter code
     n = T.dynamic("num_tokens")
     h = hidden
 
     h_blk = math.gcd(hidden, h_blk)
+    assert h_tiles > 0 and (h // h_blk) % h_tiles == 0
+    blocks_per_tile = h // h_blk // h_tiles
     a: T.Tensor((n, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
     b: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
     c: T.Tensor((n, hc), T.float32)  # type: ignore[no-redef, valid-type]
     d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
     x: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    with T.Kernel(n, threads=n_thr) as i_n:
+    with T.Kernel(n * h_tiles, threads=n_thr) as i_block:
+        i_n = i_block // h_tiles
+        i_tile = i_block % h_tiles
         b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         d_shared = T.alloc_shared(h_blk, T.bfloat16)
 
@@ -847,7 +852,9 @@ def mhc_post_tilelang(
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
 
-        for i0_h in T.Serial(T.ceildiv(h, h_blk)):
+        # Hidden positions are independent; preserve each output's HC sum.
+        for i_h_local in T.Serial(blocks_per_tile):
+            i0_h = i_tile * blocks_per_tile + i_h_local
             T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
             T.copy(d[i_n, i0_h * h_blk], d_shared)
 
@@ -1611,16 +1618,30 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
     class CompileKey:
         hidden_size: int
         hc_mult: int
+        h_tiles: int = 1
 
     @staticmethod
-    def kernel() -> Any:
+    def kernel(compile_key: CompileKey) -> Any:
         return mhc_post_tilelang
 
     def dispatch(  # type: ignore[override]
         self,
-        **compile_key_fields: int,
+        *,
+        num_tokens: int = 1,
+        hidden_size: int,
+        hc_mult: int,
     ) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
+        return self.CompileKey(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            h_tiles=5
+            if current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and 0 < num_tokens <= 64
+            and hidden_size == 5120
+            and hc_mult == 4
+            else 1,
+        )
 
     def get_warmup_keys(
         self,
@@ -1629,12 +1650,13 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
         hc_mult: int,
     ) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
+            num_tokens=(1, 65),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        num_tokens = 1
+        num_tokens = 1 if compile_key.h_tiles == 5 else 65
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
         comb_mix = make_tilelang_warmup_tensor(
@@ -1671,14 +1693,23 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
         hc_mult: int,
         hidden_size: int,
     ) -> TileLangLaunchSpec:
-        return (), (
-            comb_mix,
-            residual,
-            post_mix,
-            layer_input,
-            out,
-            hc_mult,
-            hidden_size,
+        compile_key = self.dispatch(
+            num_tokens=residual.shape[0],
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+        )
+        return (
+            (compile_key,),
+            (
+                comb_mix,
+                residual,
+                post_mix,
+                layer_input,
+                out,
+                hc_mult,
+                hidden_size,
+            ),
+            {"h_tiles": compile_key.h_tiles},
         )
 
 

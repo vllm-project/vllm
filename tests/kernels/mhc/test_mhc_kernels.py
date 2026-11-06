@@ -19,6 +19,9 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     _HC_PRENORM_GEMM_TILELANG_KERNEL,
     mhc_fused_post_pre_split_config,
 )
+from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+    mhc_post_tilelang as mhc_post_kernel,
+)
 from vllm.model_executor.kernels.mhc.torch import (
     mhc_post_torch,
     mhc_pre_delayed_torch,
@@ -1091,6 +1094,48 @@ def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
     )
 
     torch.testing.assert_close(out, ref, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 8, 17, 40, 64, 65])
+def test_mhc_post_spatial_tiling_preserves_bytes_on_graph_replay(num_tokens):
+    """Changing inputs must refresh every hidden tile, including nonfinite bytes."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA graph replay required")
+    rng = torch.Generator(device=DEVICE).manual_seed(18)
+    residual = torch.randn(
+        num_tokens, 4, 5120, device=DEVICE, dtype=torch.bfloat16, generator=rng
+    )
+    x = torch.randn(
+        num_tokens, 5120, device=DEVICE, dtype=torch.bfloat16, generator=rng
+    )
+    post = torch.randn(num_tokens, 4, 1, device=DEVICE, generator=rng)
+    comb = torch.randn(num_tokens, 4, 4, device=DEVICE, generator=rng)
+    serial = torch.empty_like(residual)
+    tiled = torch.empty_like(residual)
+
+    def check(actual):
+        mhc_post_kernel(comb, residual, post.squeeze(-1), x, serial, 4, 5120)
+        assert torch.equal(actual.view(torch.uint8), serial.view(torch.uint8))
+
+    mhc_post_kernel(comb, residual, post.squeeze(-1), x, tiled, 4, 5120, h_tiles=5)
+    check(tiled)
+    check(mhc_post_tilelang(x, residual, post, comb))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        consumed = mhc_post_tilelang(x, residual, post, comb).clone()
+    for scale in (0.0, 1.0, 128.0):
+        residual.normal_(generator=rng).mul_(scale)
+        x.normal_(generator=rng)
+        post.normal_(generator=rng)
+        comb.normal_(generator=rng)
+        graph.replay()
+        check(consumed)
+    residual[0, 0, 0] = float("nan")
+    residual[0, 1, 1] = float("inf")
+    x[0, 2] = -0.0
+    graph.replay()
+    check(consumed)
 
 
 @pytest.mark.skipif(
