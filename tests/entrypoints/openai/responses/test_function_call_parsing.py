@@ -484,7 +484,8 @@ def test_explicit_null_fields_are_backfilled_like_absent_ones():
 
     request = ResponsesRequest(**request_data)
 
-    reasoning, message = request.input
+    reasoning = request.input[0]
+    message = request.input[1]
     assert isinstance(reasoning, ResponseReasoningItem), type(reasoning)
     assert reasoning.id.startswith("rs_")
     assert isinstance(message, ResponseOutputMessage), type(message)
@@ -525,7 +526,10 @@ def test_supplied_fields_are_never_overwritten():
 
     request = ResponsesRequest(**request_data)
 
-    reasoning, message = request.input
+    reasoning = request.input[0]
+    message = request.input[1]
+    assert isinstance(reasoning, ResponseReasoningItem), type(reasoning)
+    assert isinstance(message, ResponseOutputMessage), type(message)
     assert reasoning.id == "rs_mine"
     assert message.id == "msg_mine"
     assert message.status == "incomplete"
