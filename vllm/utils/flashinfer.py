@@ -63,22 +63,19 @@ def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None,
-    pdl: bool | None,
+    pdl: bool,
     backend: str,
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
-
-    # pdl=None keeps FlashInfer's default.
-    kwargs = {} if pdl is None else {"pdl": pdl}
 
     def _mm() -> torch.Tensor:
         return mm_bf16(
             a,
             b,
             bias=bias,
+            pdl=pdl,
             out_dtype=torch.bfloat16,
             backend=backend,
-            **kwargs,
         )
 
     if _bf16_gemm_tuning_buckets is None:

@@ -101,8 +101,6 @@ class _FlashInferBf16Backend:
     flashinfer_backend: str
     is_supported: Callable[[], bool]
     can_implement: _FlashInferBf16RuntimeCheck
-    # False leaves mm_bf16's pdl argument at its FlashInfer default.
-    pass_pdl: bool = True
 
 
 def _can_use_flashinfer_bf16(
@@ -174,7 +172,6 @@ _FLASHINFER_BF16_BACKENDS = {
         flashinfer_backend="auto",
         is_supported=is_flashinfer_auto_bf16_gemm_supported,
         can_implement=_can_use_flashinfer_auto_bf16,
-        pass_pdl=False,
     ),
     "flashinfer_cutedsl": _FlashInferBf16Backend(
         flashinfer_backend="cute-dsl",
@@ -199,7 +196,7 @@ def cuda_flashinfer_bf16_gemm_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
-    pdl: bool | None,
+    pdl: bool,
     vllm_backend: str,
 ) -> torch.Tensor:
     backend_spec = _get_flashinfer_bf16_backend(vllm_backend)
@@ -223,7 +220,7 @@ def cuda_flashinfer_bf16_gemm_fake(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
-    pdl: bool | None,
+    pdl: bool,
     vllm_backend: str,
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
@@ -236,7 +233,7 @@ def cuda_flashinfer_bf16_gemm(
     bias: torch.Tensor | None = None,
     *,
     vllm_backend: str,
-    pdl: bool | None,
+    pdl: bool,
 ) -> torch.Tensor:
     return _cuda_flashinfer_bf16_gemm_op(
         x,
@@ -917,5 +914,5 @@ def dispatch_unquantized_gemm(
     return functools.partial(
         cuda_flashinfer_bf16_gemm,
         vllm_backend=linear_backend,
-        pdl=(current_platform.is_arch_support_pdl() if backend_spec.pass_pdl else None),
+        pdl=current_platform.is_arch_support_pdl(),
     )

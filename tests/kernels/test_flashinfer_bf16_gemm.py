@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.model_executor.layers import utils as layer_utils
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import is_flashinfer_cutedsl_bf16_gemm_supported
 
 
@@ -67,14 +68,17 @@ def test_flashinfer_bf16_cutedsl_correctness(
 )
 @pytest.mark.parametrize("tune", [False, True])
 def test_flashinfer_bf16_auto_correctness(m: int, n: int, k: int, tune: bool) -> None:
-    """--linear-backend=flashinfer dispatches to mm_bf16(backend="auto") without
-    pdl, with and without autotuning across FlashInfer's BF16 backends."""
+    """--linear-backend=flashinfer dispatches to mm_bf16(backend="auto") with
+    an explicit pdl, with and without autotuning across FlashInfer's BF16 backends."""
     from flashinfer import autotune
 
     gemm = layer_utils.dispatch_unquantized_gemm("flashinfer")
     # A plain function here means the F.linear fallback.
     assert isinstance(gemm, functools.partial)
-    assert gemm.keywords == {"vllm_backend": "flashinfer", "pdl": None}
+    assert gemm.keywords == {
+        "vllm_backend": "flashinfer",
+        "pdl": current_platform.is_arch_support_pdl(),
+    }
 
     torch.manual_seed(0)
     x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.1
