@@ -10,10 +10,11 @@ quantization and GEMM:
 
 1. ``indexer_cute.IndexScores``: every history page's index score, from the
    step's list of pages (``indexer_cute.IndexWork``, once a step in
-   ``prepare_step``);
+   ``prepare_step``, which also writes each row's record);
 2. ``sparse_cute.SparseAttention``: each row's top-15 pages and local page,
    the attention over them, o_proj's MXFP8 input;
-3. ``o_proj``: the MXFP8 GEMM, whose weight loads overlap the attention.
+3. ``o_proj``: FlashInfer's low-latency MXFP8 GEMM (only its activation
+   loads wait for the attention; its weight loads do not).
 
 Every launch is sized from the step's request and query counts; the context
 lengths and pages come from the device seq_lens and block table only, so a
@@ -48,11 +49,12 @@ PARTIAL_BYTES = MAX_ROWS * 8 * (2 * HEADS + HEADS * HEAD_DIM) * 4
 class AttentionStep(NamedTuple):
     """One decode step's attention metadata, shared by every layer."""
 
-    block_table: torch.Tensor
-    seq_lens: torch.Tensor
+    num_reqs: int
     query_len: int
-    # The pages the indexer scores (``indexer_cute.IndexWork``).
+    # The pages the indexer scores and the rows' records
+    # (``indexer_cute.IndexWork``).
     work: torch.Tensor
+    records: torch.Tensor
 
 
 def prepare_step(
@@ -61,23 +63,26 @@ def prepare_step(
     """The step of ``seq_lens.shape[0]`` requests of ``query_len`` queries:
     ``block_table`` int32 [requests, pages] and ``seq_lens`` int32
     [requests] (0 for padding requests), both read in place. Lists the pages
-    to score on the current stream."""
+    to score and each row's record on the current stream."""
     from cutlass import Int32, Int64
 
+    num_reqs = seq_lens.shape[0]
     assert block_table.dtype == torch.int32 and seq_lens.dtype == torch.int32
-    assert block_table.shape[0] == seq_lens.shape[0] and block_table.stride(1) == 1
+    assert block_table.shape[0] == num_reqs and block_table.stride(1) == 1
     assert block_table.shape[1] <= MAX_PAGES and seq_lens.is_contiguous()
-    kernels = _kernels(seq_lens.device.index)
-    work = _scratch(seq_lens.device)[3]
-    kernels.work(
+    assert 0 < num_reqs <= MAX_REQS and 0 < query_len <= MAX_QUERY_LEN
+    scratch = _scratch(seq_lens.device)
+    _kernels(seq_lens.device.index).work(
         Int64(block_table.data_ptr()),
         Int32(block_table.stride(0)),
         Int64(seq_lens.data_ptr()),
-        Int64(work.data_ptr()),
-        Int32(seq_lens.shape[0]),
+        Int64(scratch.work.data_ptr()),
+        Int64(scratch.records.data_ptr()),
+        Int32(num_reqs),
+        Int32(query_len),
         current_cu_stream(),
     )
-    return AttentionStep(block_table, seq_lens, query_len, work)
+    return AttentionStep(num_reqs, query_len, scratch.work, scratch.records)
 
 
 class _Kernels(NamedTuple):
@@ -102,8 +107,8 @@ def _kernels(device_index: int) -> _Kernels:
             IndexWork(),
             Int64(0),
             Int32(0),
-            Int64(0),
-            Int64(0),
+            *(Int64(0),) * 3,
+            Int32(1),
             Int32(1),
             make_fake_stream(),
         )
@@ -115,11 +120,8 @@ def _kernels(device_index: int) -> _Kernels:
         )
         attention = cute.compile(
             SparseAttention(ATTENTION_CTAS),
-            *(Int64(0),) * 4,
-            Int32(0),
-            *(Int64(0),) * 8,
+            *(Int64(0),) * 11,
             Float32(0.0),
-            Int32(1),
             Int32(1),
             make_fake_stream(),
         )
@@ -127,24 +129,39 @@ def _kernels(device_index: int) -> _Kernels:
     return _Kernels(sms, work, indexer, attention)
 
 
+class _Scratch(NamedTuple):
+    """Buffers the layers reuse in turn, and the step's metadata."""
+
+    # (FP32 index score, int32 physical page) [rows, pages].
+    scores: torch.Tensor
+    # o_proj's MXFP8 input and its scales (128x4 layout).
+    act: torch.Tensor
+    act_scale: torch.Tensor
+    # The attention CTAs' partials of a row, and per row the CTAs done.
+    partial: torch.Tensor
+    counters: torch.Tensor
+    work: torch.Tensor
+    records: torch.Tensor
+
+
 @cache
-def _scratch(device: torch.device):
-    """Buffers the layers reuse in turn (index scores with their physical
-    pages, o_proj's MXFP8 input and its scales) and the step's work list."""
-    from .indexer_cute import work_entries
+def _scratch(device: torch.device) -> _Scratch:
+    from .indexer_cute import RECORD_BYTES, work_entries
 
     ctas = (
         INDEX_CTAS_PER_SM
         * torch.cuda.get_device_properties(device).multi_processor_count
     )
-    return (
-        torch.empty(MAX_ROWS, MAX_PAGES, 2, dtype=torch.int32, device=device),
-        torch.zeros(MAX_ROWS, HEADS * HEAD_DIM, dtype=torch.uint8, device=device),
-        torch.zeros(128 * HEADS * HEAD_DIM // 32, dtype=torch.uint8, device=device),
-        torch.zeros(work_entries(ctas) + 1, 2, dtype=torch.int32, device=device),
-        # The attention CTAs' partials of a row, and per row the CTAs done.
-        torch.empty(PARTIAL_BYTES, dtype=torch.uint8, device=device),
-        torch.zeros(MAX_ROWS, dtype=torch.int32, device=device),
+    return _Scratch(
+        scores=torch.empty(MAX_ROWS, MAX_PAGES, 2, dtype=torch.int32, device=device),
+        act=torch.zeros(MAX_ROWS, HEADS * HEAD_DIM, dtype=torch.uint8, device=device),
+        act_scale=torch.zeros(
+            128 * HEADS * HEAD_DIM // 32, dtype=torch.uint8, device=device
+        ),
+        partial=torch.empty(PARTIAL_BYTES, dtype=torch.uint8, device=device),
+        counters=torch.zeros(MAX_ROWS, dtype=torch.int32, device=device),
+        work=torch.zeros(work_entries(ctas) + 1, 2, dtype=torch.int32, device=device),
+        records=torch.zeros(MAX_ROWS, RECORD_BYTES, dtype=torch.uint8, device=device),
     )
 
 
@@ -160,6 +177,9 @@ class LowBatchAttention:
         self.weight = weight
         self.weight_scale = weight_scale
         self.kernels = _kernels(weight.device.index)
+        # Outside any capture: a buffer first made inside one would not be
+        # zeroed for the graphs captured later.
+        _scratch(weight.device)
 
     def accepts(self, num_reqs: int, query_len: int) -> bool:
         return (
@@ -182,15 +202,24 @@ class LowBatchAttention:
         128, 72], on the current stream."""
         from cutlass import Float32, Int32, Int64
 
-        rows = step.seq_lens.shape[0] * step.query_len
-        scores, act, act_scale, _, partial, counters = _scratch(q.device)
+        rows = step.num_reqs * step.query_len
+        assert q.dtype == torch.float8_e4m3fn and q.shape == (rows, HEADS * HEAD_DIM)
+        assert index_q.dtype == torch.float8_e4m3fn
+        assert index_q.shape == (rows, HEAD_DIM)
+        assert q.is_contiguous() and index_q.is_contiguous()
+        assert kv_cache.shape[1:] == (2, PAGE, 72) and index_cache.shape[1:] == (
+            PAGE,
+            72,
+        )
+        assert kv_cache[0].is_contiguous() and index_cache[0].is_contiguous()
+        scratch = _scratch(q.device)
         stream = current_cu_stream()
         self.kernels.indexer(
             Int64(index_q.data_ptr()),
             Int64(index_cache.data_ptr()),
             Int64(index_cache.stride(0)),
             Int64(step.work.data_ptr()),
-            Int64(scores.data_ptr()),
+            Int64(scratch.scores.data_ptr()),
             Int32(step.query_len),
             stream,
         )
@@ -198,23 +227,28 @@ class LowBatchAttention:
             Int64(q.data_ptr()),
             Int64(kv_cache.data_ptr()),
             Int64(kv_cache.stride(0)),
-            Int64(step.block_table.data_ptr()),
-            Int32(step.block_table.stride(0)),
-            Int64(step.seq_lens.data_ptr()),
-            Int64(scores.data_ptr()),
+            Int64(step.records.data_ptr()),
+            Int64(scratch.scores.data_ptr()),
             Int64(self.k_scale.data_ptr()),
             Int64(self.v_scale.data_ptr()),
-            Int64(act.data_ptr()),
-            Int64(act_scale.data_ptr()),
-            Int64(partial.data_ptr()),
-            Int64(counters.data_ptr()),
+            Int64(scratch.act.data_ptr()),
+            Int64(scratch.act_scale.data_ptr()),
+            Int64(scratch.partial.data_ptr()),
+            Int64(scratch.counters.data_ptr()),
             Float32(self.logit_scale),
             Int32(rows),
-            Int32(step.query_len),
             stream,
         )
         out = torch.empty(rows, HIDDEN, dtype=torch.bfloat16, device=q.device)
-        o_proj_gemm(self.weight, self.weight_scale, act, act_scale, out, rows, stream)
+        o_proj_gemm(
+            self.weight,
+            self.weight_scale,
+            scratch.act,
+            scratch.act_scale,
+            out,
+            rows,
+            stream,
+        )
         return out
 
 

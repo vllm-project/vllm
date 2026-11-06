@@ -59,10 +59,10 @@ modules. The configuration decides this, so every rank agrees.
 | `__init__.py` | The setting, the startup checks, the capture gate |
 | `runtime/decode.py` | `SpecializedDecode` (`plan`, the step's attention metadata, the layer loop) and `DecodeStep` |
 | `attention/__init__.py` | `build_low_batch_attention`, `LowBatchAttention` (`accepts`, `run`), `prepare_step`, `MAX_ROWS` |
-| `attention/indexer_cute.py` | The step's list of pages to score (`prepare_step`), and their index scores, one persistent launch a layer (TMA page copies) |
-| `attention/sparse_cute.py` | Eight CTAs a row: top-15 + local page, attention over them; the row's last CTA merges and writes o_proj's MXFP8 input |
+| `attention/indexer_cute.py` | The step's list of pages to score and each query row's record (`prepare_step`), and the index scores, one persistent launch a layer (TMA page copies) |
+| `attention/sparse_cute.py` | Eight CTAs a row: top-15 (ranked by the CTA's 256 threads) + local page, attention over them; the row's CTAs meet on a counter and each merges two heads into o_proj's MXFP8 input |
 | `attention/o_proj.py` | o_proj on FlashInfer's low-latency MXFP8 GEMM, one tactic per 8-, 16- or 32-row tile |
-| `attention/ptx.py` | NVFP4 decode, warp MMAs, loads and stores in PTX |
+| `attention/ptx.py` | NVFP4 decode (QMUL4), warp MMAs, loads and stores in PTX |
 | `moe/__init__.py` | `build_low_batch_ffn`, `LowBatchFfn` (`accepts`, `run`), `unsupported_reason`, `MAX_ROWS` |
 | `moe/front_cute.py` | Routing + per-token NVFP4 input + routing record in one launch, one build per width (8, 16, 32 rows) |
 | `moe/gemm_cute.py` | Routed FC1 (SwiGLU-OAI epilogue, FC2's input quantized per token tile) and FC2 on persistent `tcgen05` NVFP4 GEMMs |
@@ -78,8 +78,13 @@ kernel against them, so a change there that breaks these fails it.
 layer once the weights are processed; it compiles the kernels then, outside any
 CUDA graph capture, and binds the routed and shared expert weights in place (no
 copies). `MiniMaxM3SparseAttention.process_weights_after_loading` builds its
-`LowBatchAttention` the same way (the kernels compile once per process) and
-reads o_proj's weights in place.
+`LowBatchAttention` the same way when its impl takes the CUTLASS decode (whose
+query is E4M3): the kernels compile once per process, the scratch buffers are
+allocated then, and o_proj's weights are read in place. The captured graphs
+keep those weight addresses, so a weight reload needs new captures (as for the
+FFN; sleep mode is excluded above). `attention/o_proj.py` builds FlashInfer's
+`LowLatencyBlockscaledGemmKernel` from its module path with fixed tactics, so
+a FlashInfer upgrade that moves or changes that class must update it.
 
 ## Paths
 
@@ -88,7 +93,7 @@ reads o_proj's weights in place.
 | qkv projection, QK norm, RoPE and KV insert: stock | all |
 | Index scores of every history page (E4M3 query, NVFP4 keys, max over the page) of the requests whose last query has more than 15 history pages, contexts up to 8192 pages (1M tokens) | 1-32, up to 32 requests of up to 8 queries |
 | Per row the top-15 history pages (all of them when at most 15) and the local page, the causal attention over them (NVFP4 K/V, E4M3 query), the output quantized to MXFP8 as o_proj's input; padding requests (seq_len 0) write zeros | 1-32 |
-| o_proj: low-latency MXFP8 GEMM, weight loads ahead of its PDL wait | 1-32 |
+| o_proj: FlashInfer's low-latency MXFP8 GEMM; its weight loads do not wait for the attention, its activation loads do | 1-32 |
 | Gate: stock `GateLinear` (FP32 logits) | all |
 | Front: top-4 of `sigmoid(logit) + bias`, BF16 weights from the recovered scores, per-token NVFP4 of the input, routing record | 1-32 |
 | Routed FC1 and FC2 on the record's work items; the last FC1 item of each token tile quantizes its BF16 output per token for FC2 | 1-32 |

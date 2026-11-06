@@ -9,7 +9,9 @@ index keys (E4M3-rounded, see ``ptx``), accumulated in FP32. Requests with at
 most 15 history pages select all of them and are not scored.
 
 ``IndexWork`` runs once per decode step: it lists those pages, flattened in
-request order, as (request * 8192 + page, physical page) after their count.
+request order, as (request * 8192 + page, physical page) after their count,
+and writes each query row's record (its pages when it does not rank them,
+its local page and position) for the attention.
 ``IndexScores`` runs per layer on a persistent grid of ``ctas`` CTAs of
 eight warps: CTA ``c`` takes list entries ``c``, ``c + ctas``, ..., a page a
 step, each warp 16 of its tokens against the request's (up to eight) query
@@ -36,8 +38,9 @@ from .ptx import (
     ld_shared_u32x4,
     mma_f16,
     nvfp4_f16x8,
-    scale_pairs,
+    scales_x4,
     st_f32_s32,
+    st_s32,
     st_s32x2,
 )
 
@@ -51,6 +54,9 @@ MAX_REQS = 32
 STAGES = 4
 PAGE_BYTES = PAGE * 72  # codes, then scales
 STAGE_BYTES = PAGE_BYTES + 8 * HEAD_DIM  # a page and its request's query rows
+SPLIT = 8  # IndexWork CTAs a request
+ENTRIES = SCORE_STRIDE // SPLIT  # work list entries an IndexWork CTA writes
+RECORD_BYTES = 128  # a query row's record (IndexWork)
 
 
 def work_entries(ctas: int) -> int:
@@ -72,7 +78,13 @@ def ranked_pages(length: Int32) -> Int32:
 
 
 class IndexWork:
-    """The step's work list (module docstring), one CTA a request."""
+    """The step's work list (module docstring) and each query row's record:
+    words 0-15 the physical pages of its 16 slots (-1 when unused; slots
+    0-14 hold the history pages of a row with at most 15, the attention
+    ranks the others), 16 its history pages when it ranks them (else 0), 17
+    its position in its local page. A grid of (requests, ``SPLIT``) CTAs:
+    CTA (b, y) lists request b's pages ``ENTRIES y`` .. and CTA (b, 0)
+    writes b's records."""
 
     @cute.jit
     def __call__(
@@ -81,11 +93,18 @@ class IndexWork:
         table_stride: Int32,
         seq_lens: Int64,
         work: Int64,
+        records: Int64,
         num_reqs: Int32,
+        query_len: Int32,
         stream: cuda.CUstream,
     ):
-        self.kernel(block_table, table_stride, seq_lens, work, num_reqs).launch(
-            grid=(num_reqs, 1, 1), block=(256, 1, 1), stream=stream, use_pdl=True
+        self.kernel(
+            block_table, table_stride, seq_lens, work, records, num_reqs, query_len
+        ).launch(
+            grid=(num_reqs, SPLIT, 1),
+            block=(256, 1, 1),
+            stream=stream,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -95,16 +114,19 @@ class IndexWork:
         table_stride: Int32,
         seq_lens: Int64,
         work: Int64,
+        records: Int64,
         num_reqs: Int32,
+        query_len: Int32,
     ):
         tid, _, _ = cute.arch.thread_idx()
-        b, _, _ = cute.arch.block_idx()
+        b, y, _ = cute.arch.block_idx()
         lane = tid % 32
         cute.arch.griddepcontrol_launch_dependents()
         cute.arch.griddepcontrol_wait()
-        pages = Int32(0)
+        length = Int32(0)
         if lane < num_reqs:
-            pages = ranked_pages(ld_s32(seq_lens + Int64(lane) * 4))
+            length = ld_s32(seq_lens + Int64(lane) * 4)
+        pages = ranked_pages(length)
         incl = pages
         for d in cutlass.range_constexpr(5):
             other = cute.arch.shuffle_sync_up(incl, 1 << d)
@@ -113,12 +135,60 @@ class IndexWork:
         total = cute.arch.shuffle_sync(incl, 31)
         first = cute.arch.shuffle_sync(incl - pages, b)
         count = cute.arch.shuffle_sync(pages, b)
-        if (b == 0) & (tid == 0):
+        length = cute.arch.shuffle_sync(length, b)
+        if (b == 0) & (y == 0) & (tid == 0):
             st_s32x2(work, total, total)
         row = block_table + Int64(b) * Int64(table_stride) * 4
-        for j in cutlass.range(tid, count, 256, unroll=1):
-            entry = work + Int64(first + j + 1) * 8
-            st_s32x2(entry, b * SCORE_STRIDE + j, ld_s32(row + Int64(j) * 4))
+        if y * ENTRIES < count:
+            self.list_pages(row, work, b, y * ENTRIES + tid, first, count)
+        if y == 0:
+            self.write_records(row, records, b, length, query_len, tid)
+
+    @cute.jit
+    def list_pages(
+        self, row: Int64, work: Int64, b: Int32, j0: Int32, first: Int32, count: Int32
+    ):
+        """Entries ``j0 + 256 u`` (below ``count``), their table loads in
+        flight together."""
+        phys = cute.make_rmem_tensor((ENTRIES // 256,), Int32)
+        for u in cutlass.range_constexpr(ENTRIES // 256):
+            phys[u] = ld_s32(row + Int64(cute.min(j0 + 256 * u, count - 1)) * 4)
+        for u in cutlass.range_constexpr(ENTRIES // 256):
+            j = j0 + 256 * u
+            if j < count:
+                entry = work + Int64(first + j + 1) * 8
+                st_s32x2(entry, b * SCORE_STRIDE + j, phys[u])
+
+    @cute.jit
+    def write_records(
+        self,
+        row: Int64,
+        records: Int64,
+        b: Int32,
+        length: Int32,
+        query_len: Int32,
+        tid: Int32,
+    ):
+        """Word ``tid % 16`` of request ``b``'s row ``tid // 16`` (class
+        docstring) and, from slot 0's thread, words 16 and 17."""
+        i = tid // 16
+        k = tid % 16
+        if i < query_len:
+            pos = length - query_len + i
+            local = pos // PAGE
+            phys = Int32(-1)
+            if (length > 0) & (pos >= 0):
+                if k == TOPK - 1:
+                    phys = ld_s32(row + Int64(local) * 4)
+                elif (local < TOPK) & (k < local):
+                    phys = ld_s32(row + Int64(k) * 4)
+            at = records + Int64(b * query_len + i) * RECORD_BYTES
+            st_s32(at + 4 * k, phys)
+            if k == 0:
+                ranked = Int32(0)
+                if (length > 0) & (pos >= 0) & (local >= TOPK):
+                    ranked = local
+                st_s32x2(at + 4 * TOPK, ranked, pos % PAGE)
 
 
 class IndexScores:
@@ -192,6 +262,10 @@ class IndexScores:
         steps = Int32(0)
         if cta < total:
             steps = (total - cta + self.ctas - 1) // self.ctas
+        # The query's B fragments, converted again only when the request
+        # changes from one page to the next.
+        query = cute.make_rmem_tensor((8, 2), Uint32)
+        query_of = Int32(-1)
         for first in cutlass.range(0, steps, 32, unroll=1):
             key, phys = ld_s32x2(
                 work + (Int64(cta) + Int64(first + lane) * self.ctas + 1) * 8
@@ -219,34 +293,13 @@ class IndexScores:
                 cute.arch.mbarrier_wait(full + k % STAGES, (first + k) // STAGES % 2)
                 a0 = ld_shared_u32x4(at + key_at)
                 a1 = ld_shared_u32x4(at + key_at + 8 * 64)
-                q0 = ld_shared_u32x4(at + query_at)
-                q1 = ld_shared_u32x4(at + query_at + 16)
                 s0 = ld_shared_u32(at + scale_at) >> (16 * (t % 2))
                 s1 = ld_shared_u32(at + scale_at + 8 * 8) >> (16 * (t % 2))
-                # Dims 32t + 4j .. + 3 are MMA step j's columns 2t, 2t + 1,
-                # 8 + 2t, 9 + 2t (the same order for keys and query).
-                query = [e4m3x4_f16(w & keep) for w in (*q0, *q1)]
-                pairs = (scale_pairs(s0), scale_pairs(s1))
-                keys = [
-                    [nvfp4_f16x8(words[i], pairs[tok][i // 2]) for i in range(4)]
-                    for tok, words in enumerate((a0, a1))
-                ]
-                acc = [Float32(0.0)] * 4
-                for j in cutlass.range_constexpr(8):
-                    lo = keys[0][j // 2]
-                    hi = keys[1][j // 2]
-                    m = 2 * (j % 2)
-                    acc = mma_f16((lo[m], hi[m], lo[m + 1], hi[m + 1]), query[j], acc)
-                # Rows 2t and 2t + 1: the maximum over the warp's 16 tokens.
-                m0 = cute.arch.fmax(acc[0], acc[2])
-                m1 = cute.arch.fmax(acc[1], acc[3])
-                for d in cutlass.range_constexpr(3):
-                    m0 = cute.arch.fmax(m0, cute.arch.shuffle_sync_bfly(m0, 4 << d))
-                    m1 = cute.arch.fmax(m1, cute.arch.shuffle_sync_bfly(m1, 4 << d))
-                if g == 0:
-                    red[k, warp, 2 * t] = m0
-                    red[k, warp, 2 * t + 1] = m1
-                # Every warp is done with the stage: refill it.
+                request = unit[0, k] // SCORE_STRIDE
+                if request != query_of:
+                    self.convert_query(at + query_at, keep, query)
+                    query_of = request
+                # Every warp has read the stage: refill it.
                 cute.arch.sync_threads()
                 if (tid == 0) & (k + STAGES < count):
                     self.issue(
@@ -259,6 +312,33 @@ class IndexScores:
                         page_stride,
                         query_len,
                     )
+                # Dims 32t + 4j .. + 3 are MMA step j's columns 2t, 2t + 1,
+                # 8 + 2t, 9 + 2t (the same order for keys and query).
+                pairs = (scales_x4(s0, 2), scales_x4(s1, 2))
+                keys = [
+                    [nvfp4_f16x8(words[i], pairs[tok][i // 2]) for i in range(4)]
+                    for tok, words in enumerate((a0, a1))
+                ]
+                acc = [Float32(0.0)] * 4
+                for j in cutlass.range_constexpr(8):
+                    lo = keys[0][j // 2]
+                    hi = keys[1][j // 2]
+                    m = 2 * (j % 2)
+                    acc = mma_f16(
+                        (lo[m], hi[m], lo[m + 1], hi[m + 1]),
+                        (query[j, 0], query[j, 1]),
+                        acc,
+                    )
+                # Rows 2t and 2t + 1: the maximum over the warp's 16 tokens.
+                m0 = cute.arch.fmax(acc[0], acc[2])
+                m1 = cute.arch.fmax(acc[1], acc[3])
+                for d in cutlass.range_constexpr(3):
+                    m0 = cute.arch.fmax(m0, cute.arch.shuffle_sync_bfly(m0, 4 << d))
+                    m1 = cute.arch.fmax(m1, cute.arch.shuffle_sync_bfly(m1, 4 << d))
+                if g == 0:
+                    red[k, warp, 2 * t] = m0
+                    red[k, warp, 2 * t + 1] = m1
+            cute.arch.sync_threads()
             k = tid // 8
             row = tid % 8
             if (k < count) & (row < query_len):
@@ -271,6 +351,16 @@ class IndexScores:
                     scores + Int64(index + key_k % SCORE_STRIDE) * 8, best, unit[1, k]
                 )
             cute.arch.sync_threads()
+
+    @cute.jit
+    def convert_query(self, at: Int32, keep: Uint32, query: cute.Tensor):
+        """This lane's query words (dims 32t .. 32t + 31 of its row, zero past
+        the request's rows) at shared address ``at`` as F16 pairs."""
+        words = (*ld_shared_u32x4(at), *ld_shared_u32x4(at + 16))
+        for j in cutlass.range_constexpr(8):
+            pair = e4m3x4_f16(words[j] & keep)
+            query[j, 0] = pair[0]
+            query[j, 1] = pair[1]
 
     @cute.jit
     def issue(

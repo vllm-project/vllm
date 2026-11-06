@@ -3,9 +3,9 @@
 """PTX building blocks of the low-batch attention kernels.
 
 NVFP4 pages decode as the stock kernels read them: an E2M1 code times its
-E4M3 block scale, rounded to E4M3 (saturating). The product is exact in F16
-(at most 6 significant bits, 2^-10 to 2688), so ``cvt`` to F16, ``mul`` and
-``cvt`` to E4M3 give that rounding exactly.
+E4M3 block scale, rounded to E4M3 (saturating), four codes an instruction
+(QMUL4, ``mul.rn.satfinite.e4m3x4.e2m1x4.e4m3x4``; PTX ISA 9.4, SM100 and
+SM103).
 
 The warp MMA is ``mma.sync`` m16n8k16 on F16 operands (E4M3 values are exact
 in F16; SM100 runs E4M3 ``mma.sync`` through F16 anyway) with FP32
@@ -134,6 +134,12 @@ def st_f32_s32(address: Int64, value: Float32, other: Int32, *, loc=None, ip=Non
 
 
 @dsl_user_op
+def st_s32(address: Int64, value: Int32, *, loc=None, ip=None) -> None:
+    operands = [_v(Int64(address), loc, ip), _v(Int32(value), loc, ip)]
+    _asm(None, operands, "st.global.b32 [$0], $1;", "l,r", loc, ip, True)
+
+
+@dsl_user_op
 def st_s32x2(address: Int64, a: Int32, b: Int32, *, loc=None, ip=None) -> None:
     operands = [_v(Int64(address), loc, ip), _v(Int32(a), loc, ip)]
     operands.append(_v(Int32(b), loc, ip))
@@ -251,6 +257,31 @@ def arrive_count(address: Int64, *, loc=None, ip=None) -> Int32:
 
 
 @dsl_user_op
+def ranks_before(
+    v: Float32, j: Int32, other_v: Float32, other_j: Int32, *, loc=None, ip=None
+) -> Int32:
+    """1 when (``other_v``, ``other_j``) ranks before (``v``, ``j``) (by
+    value, ties to the lower index), else 0; no branch."""
+    text = (
+        "{\n.reg .pred p, e, q;\nsetp.gt.f32 p, $3, $1;\nsetp.eq.f32 e, $3, $1;\n"
+        "setp.lt.s32 q, $4, $2;\nand.pred q, q, e;\nor.pred p, p, q;\n"
+        "selp.u32 $0, 1, 0, p;\n}"
+    )
+    operands = [_v(Float32(v), loc, ip), _v(Int32(j), loc, ip)]
+    operands += [_v(Float32(other_v), loc, ip), _v(Int32(other_j), loc, ip)]
+    return Int32(_asm(T.i32(), operands, text, "=r,f,r,f,r", loc, ip))
+
+
+@dsl_user_op
+def atom_add_shared(smem: Int32, value: Int32, *, loc=None, ip=None) -> Int32:
+    """Add ``value`` to the int32 at shared address ``smem``; returns the old
+    value."""
+    operands = [_v(Int32(smem), loc, ip), _v(Int32(value), loc, ip)]
+    text = "atom.shared.add.u32 $0, [$1], $2;"
+    return Int32(_asm(T.i32(), operands, text, "=r,r,r", loc, ip, True))
+
+
+@dsl_user_op
 def ld_cg_f32(address: Int64, *, loc=None, ip=None) -> Float32:
     """A float other CTAs of this grid wrote (from L2)."""
     text = "ld.global.cg.f32 $0, [$1];"
@@ -274,60 +305,25 @@ def ld_cg_f32x4(address: Int64, *, loc=None, ip=None):
     return [Float32(w) for w in _words(res, 4, loc, ip, T.f32())]
 
 
-@dsl_user_op
-def scale_pairs(scales: Uint32, *, loc=None, ip=None):
-    """The two E4M3 scales in the low 16 bits of ``scales`` as the F16 pairs
-    (s0, s0) and (s1, s1)."""
-    text = (
-        "{\n.reg .b16 b, lo, hi;\n.reg .b32 h;\ncvt.u16.u32 b, $2;\n"
-        "cvt.rn.f16x2.e4m3x2 h, b;\nmov.b32 {lo, hi}, h;\n"
-        "mov.b32 $0, {lo, lo};\nmov.b32 $1, {hi, hi};\n}"
-    )
-    res = _asm(_struct(2), [_v(Uint32(scales), loc, ip)], text, "=r,=r,r", loc, ip)
-    return [Uint32(w) for w in _words(res, 2, loc, ip)]
-
-
-@dsl_user_op
-def scale_quad(scales: Uint32, *, loc=None, ip=None):
-    """The four E4M3 scales of ``scales`` as F16 pairs (s_i, s_i)."""
-    text = (
-        "{\n.reg .b16 b0, b1, l0, h0, l1, h1;\n.reg .b32 x, y;\n"
-        "mov.b32 {b0, b1}, $4;\ncvt.rn.f16x2.e4m3x2 x, b0;\n"
-        "cvt.rn.f16x2.e4m3x2 y, b1;\nmov.b32 {l0, h0}, x;\nmov.b32 {l1, h1}, y;\n"
-        "mov.b32 $0, {l0, l0};\nmov.b32 $1, {h0, h0};\n"
-        "mov.b32 $2, {l1, l1};\nmov.b32 $3, {h1, h1};\n}"
-    )
-    res = _asm(
-        _struct(4), [_v(Uint32(scales), loc, ip)], text, "=r,=r,=r,=r,r", loc, ip
-    )
-    return [Uint32(w) for w in _words(res, 4, loc, ip)]
-
-
-def _decode(code: str, scale: str) -> str:
-    """PTX of eight E2M1 codes (``code``) times the F16 pair ``scale`` as the
-    E4M3 pairs e0 .. e3."""
-    return (
-        ".reg .b8 c0, c1, c2, c3;\n.reg .b32 h0, h1, h2, h3;\n"
-        ".reg .b16 e0, e1, e2, e3;\n"
-        f"mov.b32 {{c0, c1, c2, c3}}, {code};\n"
-        "cvt.rn.f16x2.e2m1x2 h0, c0;\ncvt.rn.f16x2.e2m1x2 h1, c1;\n"
-        "cvt.rn.f16x2.e2m1x2 h2, c2;\ncvt.rn.f16x2.e2m1x2 h3, c3;\n"
-        f"mul.rn.f16x2 h0, h0, {scale};\nmul.rn.f16x2 h1, h1, {scale};\n"
-        f"mul.rn.f16x2 h2, h2, {scale};\nmul.rn.f16x2 h3, h3, {scale};\n"
-        "cvt.rn.satfinite.e4m3x2.f16x2 e0, h0;\ncvt.rn.satfinite.e4m3x2.f16x2 e1, h1;\n"
-        "cvt.rn.satfinite.e4m3x2.f16x2 e2, h2;\ncvt.rn.satfinite.e4m3x2.f16x2 e3, h3;\n"
-    )
+def scales_x4(scales: Uint32, count: int):
+    """The first ``count`` E4M3 bytes of ``scales``, each repeated four
+    times (QMUL4's scale operand)."""
+    return [prmt(scales, Uint32(0), 0x1111 * i) for i in range(count)]
 
 
 @dsl_user_op
 def nvfp4_f16x8(code: Uint32, scale: Uint32, *, loc=None, ip=None):
-    """Eight E2M1 codes times the F16 pair ``scale``, rounded to E4M3, as four
-    F16 pairs (codes 2i and 2i + 1 in word i)."""
+    """Eight E2M1 codes times the E4M3 ``scale`` (repeated four times), each
+    rounded to E4M3 (QMUL4), as four F16 pairs (codes 2i and 2i + 1 in word
+    i)."""
     text = (
-        "{\n"
-        + _decode("$4", "$5")
-        + "cvt.rn.f16x2.e4m3x2 $0, e0;\ncvt.rn.f16x2.e4m3x2 $1, e1;\n"
-        "cvt.rn.f16x2.e4m3x2 $2, e2;\ncvt.rn.f16x2.e4m3x2 $3, e3;\n}"
+        "{\n.reg .b16 lo, hi, a0, a1, b0, b1;\n.reg .b32 a, b;\n"
+        "mov.b32 {lo, hi}, $4;\n"
+        "mul.rn.satfinite.e4m3x4.e2m1x4.e4m3x4 a, lo, $5;\n"
+        "mul.rn.satfinite.e4m3x4.e2m1x4.e4m3x4 b, hi, $5;\n"
+        "mov.b32 {a0, a1}, a;\nmov.b32 {b0, b1}, b;\n"
+        "cvt.rn.f16x2.e4m3x2 $0, a0;\ncvt.rn.f16x2.e4m3x2 $1, a1;\n"
+        "cvt.rn.f16x2.e4m3x2 $2, b0;\ncvt.rn.f16x2.e4m3x2 $3, b1;\n}"
     )
     operands = [_v(Uint32(code), loc, ip), _v(Uint32(scale), loc, ip)]
     res = _asm(_struct(4), operands, text, "=r,=r,=r,=r,r,r", loc, ip)

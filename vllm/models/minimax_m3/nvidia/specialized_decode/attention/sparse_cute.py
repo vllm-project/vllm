@@ -9,10 +9,11 @@ rounded to BF16 as the stock attention stores it, is quantized to MXFP8 as
 o_proj's input (E4M3 values, E8M0 scales in the 128x4 layout).
 
 ``ctas`` CTAs of eight warps take one row; CTA ``c`` takes ``16 / ctas`` of
-its pages, a warp 32 tokens of a page at a time. Each CTA first ranks the
-row's pages from the (score, physical page) pairs the indexer wrote (warp 0:
-the 15th best of the lanes' best pages bounds the survivors, which are ranked
-against each other). A warp's step::
+its pages, a warp 32 tokens of a page at a time. The row's record (from
+``prepare_step``) holds its local page and, for a row of at most 15 history
+pages, all of them; each CTA of a longer row first ranks its pages from the
+(score, physical page) pairs the indexer wrote (``Ranking``). A warp's
+step::
 
     K (NVFP4 -> E4M3 -> F16) as the B operand of S = Q K^T (m16n8k16 F16,
     FP32; E4M3 values are exact in F16)
@@ -39,8 +40,10 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_front_
     inverse_scale,
 )
 
+from .indexer_cute import RECORD_BYTES
 from .ptx import (
     arrive_count,
+    atom_add_shared,
     e4m3_byte,
     e4m3x4_f16,
     f16x2,
@@ -49,6 +52,7 @@ from .ptx import (
     ld_f32,
     ld_f32_s32,
     ld_s32,
+    ld_s32x2,
     ld_shared_f32x4,
     ld_u16,
     ld_u32,
@@ -57,8 +61,8 @@ from .ptx import (
     mma_f16,
     nvfp4_f16x8,
     prmt,
-    scale_pairs,
-    scale_quad,
+    ranks_before,
+    scales_x4,
     st_f32,
     st_f32x4,
     st_shared_f32,
@@ -76,8 +80,9 @@ SLOT_BYTES = CODE_BYTES + PAGE * HEAD_DIM // 16  # K slot, then the V slot
 HISTORY = 15  # ranked history pages; the local page is the 16th
 SCORE_STRIDE = 8192
 WARPS = 8
-CAPACITY = 128  # survivors of the ranking's first pass
-LOADS = 8  # scores a lane loads at once while ranking
+RANKERS = WARPS * 32
+CAPACITY = 256  # survivors the ranking places
+PAIRS = SCORE_STRIDE // RANKERS  # pairs a thread holds while ranking a long row
 BIG = 1 << 24
 LOG2E = 1.4426950408889634
 MAX_ROWS = 32
@@ -90,6 +95,261 @@ def swizzled_scale_offset(row, block):
     """Byte of MXFP8 scale ``block`` (32 columns) of ``row`` < 128 in the
     128x4 layout."""
     return (block // 4) * 512 + (row % 32) * 16 + (row // 32) * 4 + block % 4
+
+
+@cute.jit
+def better(v: Float32, j: Int32, other_v: Float32, other_j: Int32):
+    """Whether (``other_v``, ``other_j``) ranks before (``v``, ``j``): by
+    score, ties to the lower page."""
+    return (other_v > v) | ((other_v == v) & (other_j < j))
+
+
+class Ranking:
+    """A row's top-15 history pages by index score, ranked by the CTA's 256
+    threads in shared memory it allocates (ties to the lower page).
+
+    A row of at most 256 pages takes one pair a thread (loaded ahead): each
+    warp ranks its 32 pairs by shuffles and stores them in rank order, and a
+    pair among its warp's best 15 adds, by binary search, how many pairs of
+    each other warp's list rank before it. A longer row (at most 8191 pages)
+    takes 32 pairs a thread, all loads at once: the 15th best of 32 maxima,
+    each over the pages of one residue mod 32, bounds the selection (15
+    pages score at least that); the pages at least the bound survive and
+    each is placed by counting the survivors that rank before it, or past
+    ``CAPACITY`` survivors 15 rounds of extraction pick them. (Shared memory
+    written under a runtime condition is written through local names: the
+    DSL carries those, not this object.)"""
+
+    def __init__(self, smem) -> None:
+        # [rank, warp]: a warp's pairs in rank order (short rows), or each
+        # thread's best pair at [tid % 32, tid // 32] (long rows).
+        lists = cute.make_layout((32, WARPS), stride=(1, 32))
+        self.list_v = smem.allocate_tensor(Float32, lists, 16)
+        self.list_j = smem.allocate_tensor(Int32, lists, 16)
+        self.surv_v = smem.allocate_tensor(Float32, cute.make_layout(CAPACITY), 16)
+        self.surv_j = smem.allocate_tensor(Int32, cute.make_layout(CAPACITY), 16)
+        self.surv_p = smem.allocate_tensor(Int32, cute.make_layout(CAPACITY), 16)
+        self.warp_v = smem.allocate_tensor(Float32, cute.make_layout(WARPS + 1), 16)
+        # The survivor count, then the bound's (or the extraction's) page.
+        self.words = smem.allocate_tensor(Int32, cute.make_layout(WARPS + 2), 16)
+
+    @cute.jit
+    def rank(
+        self,
+        row: Int64,
+        count: Int32,
+        first_v: Float32,
+        first_p: Int32,
+        tid: Int32,
+        sel: cute.Tensor,
+    ):
+        """For a row of ``count`` > 15 history pages, ``sel[k]``: the
+        physical page of rank ``k`` < 15 among the (score, physical page)
+        pairs at ``row``; ``first_v``, ``first_p``: pair ``tid``. Every
+        thread calls it."""
+        if count > HISTORY:
+            if count <= RANKERS:
+                self.rank_short(count, first_v, first_p, tid, sel)
+            else:
+                self.rank_long(row, count, tid, sel)
+
+    @cute.jit
+    def rank_short(
+        self, count: Int32, first_v: Float32, first_p: Int32, tid: Int32, sel
+    ):
+        list_v = self.list_v
+        list_j = self.list_j
+        lane = tid % 32
+        warp = tid // 32
+        v = first_v
+        if tid >= count:
+            v = Float32(-math.inf)
+        before = Int32(0)
+        for k in cutlass.range_constexpr(32):
+            other = cute.arch.shuffle_sync(v, k)
+            before = before + ranks_before(v, tid, other, tid - lane + k)
+        list_v[before, warp] = v
+        list_j[before, warp] = tid
+        cute.arch.sync_threads()
+        if before < HISTORY:
+            self.place_short(v, tid, first_p, sel)
+
+    @cute.jit
+    def place_short(self, v: Float32, j: Int32, phys: Int32, sel: cute.Tensor):
+        """The pairs of every warp's list (its own included) that rank before
+        (``v``, ``j``), up to 15 a list: a prefix, found in four steps."""
+        place = Int32(0)
+        for w in cutlass.range_constexpr(WARPS):
+            at = Int32(0)
+            for step in (8, 4, 2, 1):
+                other_v = self.list_v[at + step - 1, w]
+                other_j = self.list_j[at + step - 1, w]
+                at = at + step * ranks_before(v, j, other_v, other_j)
+            place = place + at
+        if place < HISTORY:
+            sel[place] = phys
+
+    @cute.jit
+    def rank_long(self, row: Int64, count: Int32, tid: Int32, sel: cute.Tensor):
+        list_v = self.list_v
+        list_j = self.list_j
+        words = self.words
+        if tid == 0:
+            words[0] = 0
+        vals = cute.make_rmem_tensor((PAIRS,), Float32)
+        pages = cute.make_rmem_tensor((PAIRS,), Int32)
+        for i in cutlass.range_constexpr(PAIRS):
+            j = tid + RANKERS * i
+            v, phys = ld_f32_s32(row + Int64(cute.min(j, count - 1)) * 8)
+            if j >= count:
+                v = Float32(-math.inf)
+            vals[i] = v
+            pages[i] = phys
+        best_v = Float32(-math.inf)
+        best_j = Int32(BIG)
+        for i in cutlass.range_constexpr(PAIRS):
+            if vals[i] > best_v:
+                best_v = vals[i]
+                best_j = tid + RANKERS * i
+        list_v[tid % 32, tid // 32] = best_v
+        list_j[tid % 32, tid // 32] = best_j
+        cute.arch.sync_threads()
+        if tid < 32:
+            self.bound(tid)
+        cute.arch.sync_threads()
+        self.append(vals, pages, self.warp_v[WARPS], words[1], tid)
+        cute.arch.sync_threads()
+        survivors = words[0]
+        if survivors <= CAPACITY:
+            if tid < survivors:
+                self.place(survivors, tid, sel)
+        else:
+            self.extract(vals, pages, tid, sel)
+
+    @cute.jit
+    def bound(self, lane: Int32):
+        """Warp 0: the 15th best of the 32 residues' best pairs, into
+        ``warp_v[WARPS]`` and ``words[1]``."""
+        warp_v = self.warp_v
+        words = self.words
+        best_v = Float32(-math.inf)
+        best_j = Int32(BIG) + lane
+        for i in cutlass.range_constexpr(WARPS):
+            v = self.list_v[lane, i]
+            j = self.list_j[lane, i]
+            if better(best_v, best_j, v, j):
+                best_v = v
+                best_j = j
+        place = Int32(0)
+        for k in cutlass.range_constexpr(32):
+            other_v = cute.arch.shuffle_sync(best_v, k)
+            other_j = cute.arch.shuffle_sync(best_j, k)
+            place = place + ranks_before(best_v, best_j, other_v, other_j)
+        if place == HISTORY - 1:
+            warp_v[WARPS] = best_v
+            words[1] = best_j
+
+    @cute.jit
+    def append(
+        self,
+        vals: cute.Tensor,
+        pages: cute.Tensor,
+        bound_v: Float32,
+        bound_j: Int32,
+        tid: Int32,
+    ):
+        """Append this thread's pairs at least the bound (pairs past the row
+        score -inf, below it) to the survivors, up to ``CAPACITY`` (the count
+        goes on): one shared atomic a warp, slots from a warp scan."""
+        surv_v = self.surv_v
+        surv_j = self.surv_j
+        surv_p = self.surv_p
+        lane = tid % 32
+        kept = Int32(0)
+        for i in cutlass.range_constexpr(PAIRS):
+            kept = kept + 1 - ranks_before(vals[i], tid + RANKERS * i, bound_v, bound_j)
+        ahead = kept
+        for d in cutlass.range_constexpr(5):
+            other = cute.arch.shuffle_sync_up(ahead, 1 << d)
+            if lane >= (1 << d):
+                ahead = ahead + other
+        base = Int32(0)
+        if lane == 31:
+            base = atom_add_shared(self.words.iterator.toint(), ahead)
+        slot = cute.arch.shuffle_sync(base, 31) + ahead - kept
+        for i in cutlass.range_constexpr(PAIRS):
+            j = tid + RANKERS * i
+            keep = 1 - ranks_before(vals[i], j, bound_v, bound_j)
+            if (keep == 1) & (slot < CAPACITY):
+                surv_v[slot] = vals[i]
+                surv_j[slot] = j
+                surv_p[slot] = pages[i]
+            slot = slot + keep
+
+    @cute.jit
+    def place(self, survivors: Int32, s: Int32, sel: cute.Tensor):
+        """Survivor ``s``'s rank among the survivors; ``sel`` gets its page
+        when it is below 15."""
+        surv_v = self.surv_v
+        surv_j = self.surv_j
+        v = surv_v[s]
+        j = surv_j[s]
+        phys = self.surv_p[s]
+        place = Int32(0)
+        for s2 in cutlass.range(survivors, unroll=4):
+            place = place + ranks_before(v, j, surv_v[s2], surv_j[s2])
+        if place < HISTORY:
+            sel[place] = phys
+
+    @cute.jit
+    def extract(
+        self, vals: cute.Tensor, pages: cute.Tensor, tid: Int32, sel: cute.Tensor
+    ):
+        """Rare (more than ``CAPACITY`` survivors): 15 rounds, each the best
+        pair after the previous round's."""
+        warp_v = self.warp_v
+        words = self.words
+        warp_p = self.surv_p
+        warp = tid // 32
+        last_v = Float32(math.inf)
+        last_j = Int32(-1)
+        for k in cutlass.range(HISTORY, unroll=1):
+            best_v = Float32(-math.inf)
+            best_j = Int32(BIG)
+            best_p = Int32(0)
+            for i in cutlass.range_constexpr(PAIRS):
+                j = tid + RANKERS * i
+                after = better(vals[i], j, last_v, last_j)
+                if after & better(best_v, best_j, vals[i], j):
+                    best_v = vals[i]
+                    best_j = j
+                    best_p = pages[i]
+            for d in cutlass.range_constexpr(5):
+                other_v = cute.arch.shuffle_sync_bfly(best_v, 1 << d)
+                other_j = cute.arch.shuffle_sync_bfly(best_j, 1 << d)
+                other_p = cute.arch.shuffle_sync_bfly(best_p, 1 << d)
+                if better(best_v, best_j, other_v, other_j):
+                    best_v = other_v
+                    best_j = other_j
+                    best_p = other_p
+            if tid % 32 == 0:
+                warp_v[warp] = best_v
+                words[2 + warp] = best_j
+                warp_p[warp] = best_p
+            cute.arch.sync_threads()
+            best_v = warp_v[0]
+            best_j = words[2]
+            best_p = warp_p[0]
+            for w in cutlass.range_constexpr(1, WARPS):
+                if better(best_v, best_j, warp_v[w], words[2 + w]):
+                    best_v = warp_v[w]
+                    best_j = words[2 + w]
+                    best_p = warp_p[w]
+            if tid == 0:
+                sel[k] = best_p
+            last_v = best_v
+            last_j = best_j
+            cute.arch.sync_threads()
 
 
 class SparseAttention:
@@ -107,9 +367,7 @@ class SparseAttention:
         q: Int64,
         kv: Int64,
         page_stride: Int64,
-        block_table: Int64,
-        table_stride: Int32,
-        seq_lens: Int64,
+        records: Int64,
         scores: Int64,
         k_scale: Int64,
         v_scale: Int64,
@@ -119,11 +377,11 @@ class SparseAttention:
         counters: Int64,
         logit_scale: Float32,
         rows: Int32,
-        query_len: Int32,
         stream: cuda.CUstream,
     ):
         """Addresses: ``q`` E4M3 [rows, 2048]; ``kv`` NVFP4 pages (K slot,
-        V slot) ``page_stride`` bytes apart; ``scores`` the indexer's;
+        V slot) ``page_stride`` bytes apart; ``records`` the step's row
+        records (``indexer_cute.IndexWork``); ``scores`` the indexer's;
         ``k_scale``, ``v_scale`` FP32 global scales; ``act`` E4M3 [rows,
         2048] and ``act_scale`` its 128x4 scales. ``logit_scale`` is the
         softmax scale times the query scale and log2(e)."""
@@ -131,9 +389,7 @@ class SparseAttention:
             q,
             kv,
             page_stride,
-            block_table,
-            table_stride,
-            seq_lens,
+            records,
             scores,
             k_scale,
             v_scale,
@@ -142,7 +398,6 @@ class SparseAttention:
             partial,
             counters,
             logit_scale,
-            query_len,
         ).launch(
             grid=(self.ctas, rows, 1),
             block=(WARPS * 32, 1, 1),
@@ -156,9 +411,7 @@ class SparseAttention:
         q: Int64,
         kv: Int64,
         page_stride: Int64,
-        block_table: Int64,
-        table_stride: Int32,
-        seq_lens: Int64,
+        records: Int64,
         scores: Int64,
         k_scale: Int64,
         v_scale: Int64,
@@ -167,7 +420,6 @@ class SparseAttention:
         partial: Int64,
         counters: Int64,
         logit_scale: Float32,
-        query_len: Int32,
     ):
         tid, _, _ = cute.arch.thread_idx()
         c, r, _ = cute.arch.block_idx()
@@ -179,31 +431,29 @@ class SparseAttention:
 
         smem = cutlass.utils.SmemAllocator()
         sel = smem.allocate_tensor(Int32, cute.make_layout(16), 16)
-        ranked = smem.allocate_tensor(Int32, cute.make_layout(16), 16)
-        surv_v = smem.allocate_tensor(Float32, cute.make_layout(CAPACITY), 16)
-        surv_j = smem.allocate_tensor(Int32, cute.make_layout((2, CAPACITY)), 16)
+        ranking = Ranking(smem)
         part_ml = smem.allocate_tensor(Float32, cute.make_layout((2, WARPS, HEADS)), 16)
         part_o = smem.allocate_tensor(
             Float32, cute.make_layout((WARPS, 16, 32, 4), stride=(2048, 128, 4, 1)), 16
         )
         arrived = smem.allocate_tensor(Int32, cute.make_layout(1), 4)
 
-        cute.arch.griddepcontrol_launch_dependents()
+        _, rows, _ = cute.arch.grid_dim()
+        if rows > 8:
+            cute.arch.griddepcontrol_launch_dependents()
         cute.arch.griddepcontrol_wait()
 
-        b = r // query_len
-        length = ld_s32(seq_lens + Int64(b) * 4)
-        pos = length - query_len + r % query_len
-        valid = (length > 0) & (pos >= 0)
-        local = Int32(0)
-        if valid:
-            local = pos // PAGE
+        # The row's record, its query and (ahead of knowing whether the row
+        # ranks) the pair of its page ``tid``, all in flight together.
+        record = records + Int64(r) * RECORD_BYTES
+        count, local_pos = ld_s32x2(record + 4 * HEADS)
+        slot_phys = ld_s32(record + Int64(lane % 16) * 4)
+        row_scores = scores + Int64(r) * SCORE_STRIDE * 8
+        first_v, first_p = ld_f32_s32(row_scores + Int64(tid) * 8)
         scale = logit_scale * ld_f32(k_scale)
         v_global = ld_f32(v_scale)
-
-        # The query's A fragments: heads g and g + 8, dims 32t .. 32t + 31 as
-        # F16 pairs (pair p: dims 32t + 2p, + 1).
-        qw = cute.make_rmem_tensor((2, 16), Uint32)
+        # Heads g and g + 8, dims 32t .. 32t + 31.
+        q_words = cute.make_rmem_tensor((2, 2, 4), Uint32)
         for hh in cutlass.range_constexpr(2):
             for half in cutlass.range_constexpr(2):
                 words = ld_u32x4(
@@ -212,37 +462,31 @@ class SparseAttention:
                     + Int64((g + 8 * hh) * HEAD_DIM + 32 * t + 16 * half)
                 )
                 for i in cutlass.range_constexpr(4):
-                    pair = e4m3x4_f16(words[i])
+                    q_words[hh, half, i] = words[i]
+        # o_proj streams its weights once launched: up to eight rows launch it
+        # once their pages are known when they rank at most 256 (its stream
+        # does not delay their loads then), others before their wait.
+        after_pages = Int32(0)
+        if (rows <= 8) & (count <= RANKERS):
+            after_pages = Int32(1)
+        if (rows <= 8) & (after_pages == 0):
+            cute.arch.griddepcontrol_launch_dependents()
+
+        if tid < 16:
+            sel[tid] = slot_phys
+        ranking.rank(row_scores, count, first_v, first_p, tid, sel)
+        cute.arch.sync_threads()
+        if after_pages == 1:
+            cute.arch.griddepcontrol_launch_dependents()
+
+        # The query's A fragments as F16 pairs (pair p: dims 32t + 2p, + 1).
+        qw = cute.make_rmem_tensor((2, 16), Uint32)
+        for hh in cutlass.range_constexpr(2):
+            for half in cutlass.range_constexpr(2):
+                for i in cutlass.range_constexpr(4):
+                    pair = e4m3x4_f16(q_words[hh, half, i])
                     qw[hh, 8 * half + 2 * i] = pair[0]
                     qw[hh, 8 * half + 2 * i + 1] = pair[1]
-
-        if warp == 0:
-            # The first 15 pages (the whole history of a short row) and the
-            # local page, read alongside the ranking.
-            row_table = block_table + Int64(b) * Int64(table_stride) * 4
-            early = ld_s32(row_table + Int64(cute.min(lane, HISTORY - 1)) * 4)
-            last = ld_s32(row_table + Int64(local) * 4)
-            if valid & (local > HISTORY):
-                self.rank(
-                    scores + Int64(r) * SCORE_STRIDE * 8,
-                    local,
-                    ranked,
-                    surv_v,
-                    surv_j,
-                    lane,
-                )
-            cute.arch.sync_warp()
-            phys = Int32(-1)
-            if valid & (lane < 16):
-                if lane == 15:
-                    phys = last
-                elif local > HISTORY:
-                    phys = ranked[lane]
-                elif lane < local:
-                    phys = early
-            if lane < 16:
-                sel[lane] = phys
-        cute.arch.sync_threads()
 
         # Running max and sum (heads g, g + 8) and O (dims 32t .. 32t + 31).
         stat = cute.make_rmem_tensor((4,), Float32)
@@ -258,7 +502,7 @@ class SparseAttention:
             phys = sel[slot]
             limit = Int32(PAGE - 1)
             if slot == HISTORY:
-                limit = pos % PAGE
+                limit = local_pos
             if phys >= 0:
                 self.attend(
                     kv + Int64(phys) * page_stride,
@@ -425,164 +669,6 @@ class SparseAttention:
             st_u8(act_scale + Int64(swizzled_scale_offset(r, tid // 4)), code)
 
     @cute.jit
-    def rank(
-        self,
-        row: Int64,
-        count: Int32,
-        ranked: cute.Tensor,
-        surv_v: cute.Tensor,
-        surv_j: cute.Tensor,
-        lane: Int32,
-    ):
-        """``ranked[k]``: the physical page of rank ``k`` < 15 among the
-        ``count`` > 15 (score, physical page) pairs at ``row`` (by score, ties
-        to the lower page). One warp; eight loads a lane in flight."""
-        neg_inf = Float32(-math.inf)
-        best_v = neg_inf
-        best_j = Int32(BIG) + lane
-        vals = cute.make_rmem_tensor((LOADS,), Float32)
-        pages = cute.make_rmem_tensor((LOADS,), Int32)
-        for first in cutlass.range(0, count, 32 * LOADS, unroll=1):
-            self.load_scores(row, first, count, vals, pages, lane)
-            for i in cutlass.range_constexpr(LOADS):
-                if vals[i] > best_v:
-                    best_v = vals[i]
-                    best_j = first + 32 * i + lane
-        # The 15th of the lanes' best pages bounds every selected page.
-        place = Int32(0)
-        for k in cutlass.range_constexpr(32):
-            other_v = cute.arch.shuffle_sync(best_v, k)
-            other_j = cute.arch.shuffle_sync(best_j, k)
-            if (other_v > best_v) | ((other_v == best_v) & (other_j < best_j)):
-                place = place + 1
-        hit = cute.arch.vote_ballot_sync(place == HISTORY - 1)
-        src = cute.arch.popc(hit - Uint32(1))
-        bound_v = cute.arch.shuffle_sync(best_v, src)
-        bound_j = cute.arch.shuffle_sync(best_j, src)
-        # Survivors: every pair at least the bound, in page order (a row of at
-        # most 256 pages still holds its pairs in registers).
-        survivors = Int32(0)
-        if count <= 32 * LOADS:
-            survivors = self.survive(
-                vals, pages, 0, count, bound_v, bound_j, survivors, surv_v, surv_j, lane
-            )
-        else:
-            for first in cutlass.range(0, count, 32 * LOADS, unroll=1):
-                self.load_scores(row, first, count, vals, pages, lane)
-                survivors = self.survive(
-                    vals,
-                    pages,
-                    first,
-                    count,
-                    bound_v,
-                    bound_j,
-                    survivors,
-                    surv_v,
-                    surv_j,
-                    lane,
-                )
-        cute.arch.sync_warp()
-        if survivors <= 32:
-            # One survivor a lane, ranked against the others by shuffles.
-            v = neg_inf
-            j = Int32(BIG) + lane
-            if lane < survivors:
-                v = surv_v[lane]
-                j = surv_j[0, lane]
-            place = Int32(0)
-            for k in cutlass.range_constexpr(32):
-                other_v = cute.arch.shuffle_sync(v, k)
-                other_j = cute.arch.shuffle_sync(j, k)
-                if (other_v > v) | ((other_v == v) & (other_j < j)):
-                    place = place + 1
-            if (lane < survivors) & (place < HISTORY):
-                ranked[place] = surv_j[1, lane]
-        elif survivors <= CAPACITY:
-            for s in cutlass.range(lane, survivors, 32, unroll=1):
-                v = surv_v[s]
-                j = surv_j[0, s]
-                place = Int32(0)
-                for s2 in cutlass.range(survivors, unroll=1):
-                    v2 = surv_v[s2]
-                    if (v2 > v) | ((v2 == v) & (surv_j[0, s2] < j)):
-                        place = place + 1
-                if place < HISTORY:
-                    ranked[place] = surv_j[1, s]
-        else:
-            # Rare: rank by repeated extraction over every score.
-            last_v = Float32(math.inf)
-            last_j = Int32(-1)
-            for k in cutlass.range(HISTORY, unroll=1):
-                best_v = neg_inf
-                best_j = Int32(BIG) + lane
-                for j in cutlass.range(lane, count, 32, unroll=1):
-                    v = ld_f32_s32(row + Int64(j) * 8)[0]
-                    after = (v < last_v) | ((v == last_v) & (j > last_j))
-                    if after & (v > best_v):
-                        best_v = v
-                        best_j = j
-                for d in cutlass.range_constexpr(5):
-                    other_v = cute.arch.shuffle_sync_bfly(best_v, 1 << d)
-                    other_j = cute.arch.shuffle_sync_bfly(best_j, 1 << d)
-                    if (other_v > best_v) | ((other_v == best_v) & (other_j < best_j)):
-                        best_v = other_v
-                        best_j = other_j
-                if lane == 0:
-                    ranked[k] = ld_f32_s32(row + Int64(best_j) * 8)[1]
-                last_v = best_v
-                last_j = best_j
-        cute.arch.sync_warp()
-
-    @cute.jit
-    def load_scores(
-        self,
-        row: Int64,
-        first: Int32,
-        count: Int32,
-        vals: cute.Tensor,
-        pages: cute.Tensor,
-        lane: Int32,
-    ):
-        """Pairs ``first + 32 i + lane`` (score -inf past ``count``), all
-        loads in flight at once."""
-        for i in cutlass.range_constexpr(LOADS):
-            j = first + 32 * i + lane
-            v = Float32(-math.inf)
-            phys = Int32(0)
-            if j < count:
-                v, phys = ld_f32_s32(row + Int64(j) * 8)
-            vals[i] = v
-            pages[i] = phys
-
-    @cute.jit
-    def survive(
-        self,
-        vals: cute.Tensor,
-        pages: cute.Tensor,
-        first: Int32,
-        count: Int32,
-        bound_v: Float32,
-        bound_j: Int32,
-        survivors: Int32,
-        surv_v: cute.Tensor,
-        surv_j: cute.Tensor,
-        lane: Int32,
-    ) -> Int32:
-        """Append the loaded pairs at least the bound to the survivors."""
-        for i in cutlass.range_constexpr(LOADS):
-            j = first + 32 * i + lane
-            v = vals[i]
-            keep = (j < count) & ((v > bound_v) | ((v == bound_v) & (j <= bound_j)))
-            mask = cute.arch.vote_ballot_sync(keep)
-            slot = survivors + cute.arch.popc(mask & cute.arch.lanemask_lt())
-            if keep & (slot < CAPACITY):
-                surv_v[slot] = v
-                surv_j[0, slot] = j
-                surv_j[1, slot] = pages[i]
-            survivors = survivors + cute.arch.popc(mask)
-        return survivors
-
-    @cute.jit
     def attend(
         self,
         page: Int64,
@@ -625,7 +711,7 @@ class SparseAttention:
         # first + 16 (n // 2) + 4t + 2 (n % 2) + {0, 1}.
         s = cute.make_rmem_tensor((16,), Float32)
         for n in cutlass.range_constexpr(4):
-            pair = scale_pairs(ks[n])
+            pair = scales_x4(ks[n], 2)
             keys = [nvfp4_f16x8(kw[n, i], pair[i // 2]) for i in range(4)]
             acc = [Float32(0.0)] * 4
             # Step j's columns 2t, 2t + 1, 8 + 2t, 9 + 2t: dims 32t + 4j .. + 3.
@@ -680,7 +766,7 @@ class SparseAttention:
                 f16x2(s[8 * kk + 4], s[8 * kk + 5]),
                 f16x2(s[8 * kk + 6], s[8 * kk + 7]),
             )
-            pairs = scale_quad(vs[kk])
+            pairs = scales_x4(vs[kk], 4)
             h = cute.make_rmem_tensor((4, 8), Uint32)
             for i in cutlass.range_constexpr(4):
                 for half in cutlass.range_constexpr(2):

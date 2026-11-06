@@ -4,9 +4,10 @@
 
 The kernel class behind ``mm_mxfp8``'s ``cutedsl_low_latency`` backend,
 compiled here with an 8-, 16- or 32-row activation tile and a fixed tactic
-per tile. Its weight loads run ahead of its programmatic grid wait, so in the
-PDL chain they overlap the attention kernel; it reads the weights and the
-weight scales of the layer's FlashInfer ``cute-dsl`` MXFP8 kernel in place.
+per tile. Only its activation (B) load warp waits for the previous grid; the
+weight (A) load warp fills its stages without waiting, both feeding each
+stage's barrier. It reads the weights and the weight scales of the layer's
+FlashInfer ``cute-dsl`` MXFP8 kernel in place.
 """
 
 from functools import cache

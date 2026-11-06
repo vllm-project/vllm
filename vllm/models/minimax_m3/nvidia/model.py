@@ -1110,7 +1110,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def process_weights_after_loading(self) -> None:
-        if self.use_low_batch_attention:
+        # The low-batch kernels read the E4M3 query of the CUTLASS decode.
+        if self.use_low_batch_attention and getattr(
+            self.impl, "use_cutlass_decode", False
+        ):
             from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
                 build_low_batch_attention,
             )

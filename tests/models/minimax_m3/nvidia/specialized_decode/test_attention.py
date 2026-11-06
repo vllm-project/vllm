@@ -155,13 +155,15 @@ def _randint(low, high, shape, generator):
     )
 
 
-def _inputs(context, num_reqs, query_len, seed):
+def _inputs(context, num_reqs, query_len, seed, warm=0):
     """Queries, caches, block table and seq_lens of one step. Fifteen pages of
     each request score far above its others (their index keys scaled up), so
     the stock top-k's 16-bit key resolution cannot change the selection;
     every page holds random values of the same scales, so each selected page
     carries about 1/16 of a row's output and a wrong one moves the row by
-    about a third."""
+    about a third. With ``warm``, that many more pages score between the hot
+    ones and the rest, and hot and warm pages all lie on 14 of the 32
+    residues of the page index mod 32."""
     lengths = _lengths(
         context, num_reqs, query_len, torch.Generator().manual_seed(seed)
     )
@@ -187,10 +189,20 @@ def _inputs(context, num_reqs, query_len, seed):
         block_table[b, : pages[b]] = phys
         history = (max(n, 1) - query_len) // PAGE  # of the request's first row
         if history > TOPK - 1:
-            hot = torch.randperm(history, generator=generator, device=DEVICE)
+            pages_of = torch.arange(history, device=DEVICE)
+            if warm:
+                pages_of = pages_of[pages_of % 32 < 14]
+            order = torch.randperm(len(pages_of), generator=generator, device=DEVICE)
+            hot = pages_of[order]
             index[phys[hot[: TOPK - 1]].long(), codes:] = _randint(
                 0x58, 0x68, (TOPK - 1, PAGE * 8), generator
             )
+            if warm:
+                # Scales 2 to 4: above every cold page, far below the hot ones.
+                warm_pages = phys[hot[TOPK - 1 : TOPK - 1 + warm]].long()
+                index[warm_pages, codes:] = _randint(
+                    0x40, 0x48, (warm, PAGE * 8), generator
+                )
     q = torch.randn(rows, Q_SIZE, generator=generator, device=DEVICE) * 2
     iq = torch.randn(rows, HEAD_DIM, generator=generator, device=DEVICE).abs() + 0.1
     return {
@@ -299,6 +311,59 @@ def test_low_batch_attention_matches_stock(layer, num_reqs, query_len, context):
     ):
         out = _run(low_batch, inputs)
         expected = _stock(attrs, inputs)
+        torch.accelerator.synchronize()
+    _check(out, expected, inputs["live"])
+
+
+@pytest.mark.parametrize("warm", [100, 400])
+@pytest.mark.parametrize("num_reqs,query_len", [(1, 1), (1, 8)])
+def test_low_batch_attention_crowded_ranking(layer, num_reqs, query_len, warm):
+    """Long rows whose best pages crowd 14 residues mod 32 (``_inputs``): the
+    ranking's bound, the 15th best of the 32 residues' best pages, lets
+    about ``warm`` pages through; 100 are placed among each other, 400 are
+    more than it holds and the top 15 are extracted one by one."""
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+
+    attrs, config, low_batch = layer
+    inputs = _inputs("long", num_reqs, query_len, seed=warm + query_len, warm=warm)
+    with (
+        set_current_vllm_config(config),
+        set_forward_context(None, config),
+        torch.inference_mode(),
+    ):
+        out = _run(low_batch, inputs)
+        expected = _stock(attrs, inputs)
+        torch.accelerator.synchronize()
+    _check(out, expected, inputs["live"])
+
+
+def test_low_batch_attention_kv_global_scales(layer):
+    """The device K and V global scales, which the stock decode reads, scale
+    the logits and the output (0.75 and 1.25 here)."""
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
+        build_low_batch_attention,
+    )
+
+    attrs, config, _ = layer
+    scaled = SimpleNamespace(
+        **{
+            **vars(attrs),
+            "_k_scale": torch.full((), 0.75, device=DEVICE),
+            "_v_scale": torch.full((), 1.25, device=DEVICE),
+        }
+    )
+    low_batch = build_low_batch_attention(scaled)
+    inputs = _inputs("long", 4, 1, seed=5)
+    with (
+        set_current_vllm_config(config),
+        set_forward_context(None, config),
+        torch.inference_mode(),
+    ):
+        out = _run(low_batch, inputs)
+        expected = _stock(scaled, inputs)
         torch.accelerator.synchronize()
     _check(out, expected, inputs["live"])
 
