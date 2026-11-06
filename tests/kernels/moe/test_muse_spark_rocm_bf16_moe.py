@@ -62,6 +62,7 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     validate_mxfp4_deployment,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 def _parallel_config(
@@ -1054,7 +1055,7 @@ def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
 def test_token_sharded_stream_keeps_only_the_current_ranks_finalized_rows(
     monkeypatch,
 ) -> None:
-    torch.manual_seed(0)
+    set_random_seed(0)
     num_tokens, top_k, hidden = 8, 8, 256
     norm = _post_expert_norm_module(hidden).cuda()
     routed = torch.randn(num_tokens, top_k, hidden, device="cuda", dtype=torch.bfloat16)
