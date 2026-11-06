@@ -264,6 +264,13 @@ impl OutputItemStreamer {
                 vec![self.function_call_delta(delta.clone())]
             }
             ChatEvent::ToolCallEnd { call, .. } => self.close_current(Some(call)),
+            ChatEvent::ToolCallAbort { call, .. } => {
+                let events = self.close_current(Some(call));
+                if let Some(item) = self.completed_items.last_mut() {
+                    item.mark_incomplete();
+                }
+                events
+            }
         };
         if let Some(position) = events
             .iter()
@@ -584,6 +591,58 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+
+    #[test]
+    fn aborted_call_closes_as_incomplete_before_the_next_item() {
+        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
+        streamer.on_event(&ChatEvent::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "weather".into(),
+        });
+        streamer.on_event(&ChatEvent::ToolCallArgumentsDelta {
+            index: 0,
+            delta: r#"{"city":"Par"#.into(),
+        });
+        let events = streamer.on_event(&ChatEvent::ToolCallAbort {
+            index: 0,
+            call: AssistantToolCall {
+                id: "call_1".into(),
+                name: "weather".into(),
+                arguments: r#"{"city":"Par"#.into(),
+            },
+        });
+        assert!(matches!(
+            &events[..],
+            [ResponseStreamEvent::FunctionCallArgumentsDone {
+                output_index: 0,
+                ..
+            }]
+        ));
+        let events = streamer.on_event(&ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+            delta: "tail".into(),
+            token_count: None,
+        });
+        assert!(matches!(
+            &events[0],
+            ResponseStreamEvent::OutputItemDone {
+                output_index: 0,
+                item: ResponseOutputItem::FunctionCall {
+                    status: Some(ResponseItemStatus::Incomplete),
+                    ..
+                },
+            }
+        ));
+        assert!(matches!(
+            &events[1],
+            ResponseStreamEvent::OutputItemAdded {
+                output_index: 1,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn empty_function_call_emits_arguments_done() {

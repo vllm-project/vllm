@@ -69,6 +69,7 @@ pub fn feed_unified_parser(
             UnifiedParserEvent::ToolCall(call) => {
                 tool_indices.insert(call.tool_index);
             }
+            UnifiedParserEvent::ToolCallEnd { .. } => {}
         }
     }
     summary.calls_len = tool_indices.len();
