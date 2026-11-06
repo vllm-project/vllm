@@ -138,7 +138,6 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
-    method.input_dtype = None
     method.experts_cls = None
     method.moe = SimpleNamespace(w13_num_shards=2)
     layer = torch.nn.Module()

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tracing::info;
 use vllm_tokenizer::{
     DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer, TiktokenTokenizer, Tokenizer,
+    UnavailableTokenizer,
 };
 
 use self::config::{GenerationConfig, load_generation_config};
@@ -35,6 +36,8 @@ fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
 pub struct HfTextBackend {
     model_id: String,
     files: ResolvedModelFiles,
+    /// [`UnavailableTokenizer`] when the files resolve no tokenizer
+    /// (`--skip-tokenizer-init`).
     tokenizer: DynTokenizer,
     /// Primary EOS handled by engine-core's dedicated EOS path.
     primary_eos_token_id: Option<u32>,
@@ -58,9 +61,12 @@ impl HfTextBackend {
         generation_config_mode: GenerationConfigMode,
     ) -> Result<Self> {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
-        let tokenizer = load_tokenizer(&files.tokenizer)?;
         let model_config = load_model_config(files.config_path.as_deref())?;
         let model_vocab_size = model_config.vocab_size()? as usize;
+        let tokenizer = match &files.tokenizer {
+            Some(tokenizer) => load_tokenizer(tokenizer)?,
+            None => Arc::new(UnavailableTokenizer::new(model_vocab_size)),
+        };
         let generation_config = load_generation_config(files.generation_config_path.as_deref())?;
         let (primary_eos_token_id, extra_eos_token_ids) = resolve_eos_token_ids(
             &tokenizer_config,
@@ -135,6 +141,10 @@ impl TextBackend for HfTextBackend {
         self.tokenizer.clone()
     }
 
+    fn has_tokenizer(&self) -> bool {
+        self.files.tokenizer.is_some()
+    }
+
     fn is_moe(&self) -> bool {
         self.model_config.is_moe()
     }
@@ -189,11 +199,14 @@ fn build_sampling_hints(
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{
-        GenerationConfig, GenerationConfigMode, HfTokenizerConfig, ModelConfig,
-        build_sampling_hints, resolve_eos_token_ids,
-    };
     use vllm_tokenizer::Tokenizer;
+
+    use super::{
+        GenerationConfig, GenerationConfigMode, HfTextBackend, HfTokenizerConfig, ModelConfig,
+        ModelFileSources, ModelSource, ResolvedModelFiles, build_sampling_hints,
+        resolve_eos_token_ids,
+    };
+    use crate::backend::TextBackend as _;
 
     struct FakeTokenizer;
 
@@ -225,6 +238,55 @@ mod tests {
         fn id_to_token(&self, id: u32) -> Option<String> {
             (id == 2).then(|| "</s>".to_string())
         }
+    }
+
+    #[tokio::test]
+    async fn skip_tokenizer_init_loads_a_model_without_tokenizer_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"vocab_size": 128, "eos_token_id": [7, 9]}"#,
+        )
+        .unwrap();
+        // Unreadable tokenizer-side metadata must not matter when skipping.
+        std::fs::write(dir.path().join("tokenizer_config.json"), "not json").unwrap();
+        let sources = |skip_tokenizer_init| ModelFileSources {
+            model: ModelSource {
+                id: dir.path().to_str().unwrap().to_string(),
+                revision: None,
+            },
+            tokenizer: None,
+            hf_config: None,
+            skip_tokenizer_init,
+        };
+
+        assert!(ResolvedModelFiles::from_sources(&sources(false)).await.is_err());
+
+        let files = ResolvedModelFiles::from_sources(&ModelFileSources {
+            // Ignored when skipping, even if it does not exist.
+            tokenizer: Some(ModelSource {
+                id: dir.path().join("missing").to_str().unwrap().to_string(),
+                revision: None,
+            }),
+            ..sources(true)
+        })
+        .await
+        .unwrap();
+        assert!(files.tokenizer.is_none());
+        assert!(files.tokenizer_config_path.is_none());
+        let backend = HfTextBackend::from_resolved_model_files(
+            files,
+            "test-model".to_string(),
+            GenerationConfigMode::Auto,
+        )
+        .unwrap();
+        assert!(!backend.has_tokenizer());
+        assert!(backend.tokenizer().encode("hi", false).is_err());
+        assert_eq!(backend.tokenizer_vocab_size(), 128);
+        // Without a tokenizer, the primary EOS comes from the model config.
+        let hints = backend.sampling_hints().unwrap();
+        assert_eq!(hints.primary_eos_token_id, Some(7));
+        assert_eq!(hints.extra_eos_token_ids, BTreeSet::from([9]));
     }
 
     #[test]
