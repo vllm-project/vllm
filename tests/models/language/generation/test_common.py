@@ -53,9 +53,8 @@ def _input_embeds(hf_model, model: str, prompts: list[str]) -> list[torch.Tensor
 def hf_reference_key(request):
     """Cache key: every parametrized value except the one the reference ignores.
 
-    Read off the parametrization rather than listed by hand, so a parameter
-    added later joins the key on its own. If the reference turns out not to
-    depend on it the cost is a lost cache hit, never a shared wrong reference.
+    Read off the parametrization so a parameter added later joins the key on
+    its own; if the reference does not depend on it, the cost is a missed hit.
     """
     params = dict(request.node.callspec.params)
     params.pop("use_prompt_embeds")
@@ -257,12 +256,19 @@ def test_models(
                 prompt_embeds, max_tokens, num_logprobs
             )
 
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+    try:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
+    except AssertionError:
+        # A rerun has to redraw the reference: HF decoding is nondeterministic
+        # on XPU, which is why gpt2 carries flaky(reruns=2) there (#57862).
+        hf_reference_cache.pop(hf_reference_key, None)
+        raise
+
     if prompt_embeds is not None:
         check_logprobs_close(
             outputs_0_lst=vllm_outputs,
