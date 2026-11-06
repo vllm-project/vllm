@@ -1500,9 +1500,7 @@ def _step_output(
     output = SchedulerOutput.make_empty()
     output.scheduled_cached_reqs = CachedRequestData(
         req_ids=request_ids,
-        resumed_req_ids=set(),
         new_token_ids=[[] for _ in request_ids],
-        all_token_ids={},
         new_block_ids=[None for _ in request_ids],
         num_computed_tokens=token_starts,
         num_output_tokens=[0 for _ in request_ids],

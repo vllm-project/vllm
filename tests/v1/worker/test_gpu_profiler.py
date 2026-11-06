@@ -687,9 +687,7 @@ class TestAnnotateProfile:
         ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
         cached = CachedRequestData(
             req_ids=["gen1"],
-            resumed_req_ids=set(),
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[10],
             num_output_tokens=[1],

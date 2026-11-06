@@ -119,7 +119,6 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
             req_ids=["req-0"],
             new_block_ids=[([2],)],
             num_computed_tokens=[44],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 4},
         scheduled_spec_decode_tokens=(
@@ -141,7 +140,6 @@ def _make_decode_scheduler_output(
             # The block that becomes full was allocated on an earlier step.
             new_block_ids=[()],
             num_computed_tokens=[num_computed_tokens],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
@@ -168,7 +166,6 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 32},
         scheduled_spec_decode_tokens={},
@@ -228,7 +225,6 @@ def _make_preemption_scheduler_output():
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -596,7 +592,6 @@ def _make_pending_load_scheduler_output() -> SimpleNamespace:
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -654,16 +649,24 @@ def _make_resumed_unfinished_request(
 
 def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamespace:
     # A resumed-from-preemption step: the scheduler lists the request in
-    # resumed_req_ids and sends the FULL block table (replace semantics).
+    # scheduled_new_reqs with the FULL block table and its prompt + previously
+    # generated tokens as prefill_token_ids.
     return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
-        scheduled_new_reqs=[],
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="req-0",
+                num_computed_tokens=0,
+                prompt_token_ids=list(range(32)),
+                prefill_token_ids=list(range(48)),
+                block_ids=([0, 1, 2],),
+            )
+        ],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_block_ids=[([0, 1, 2],)],
-            num_computed_tokens=[0],
-            resumed_req_ids={"req-0"},
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
@@ -673,8 +676,8 @@ def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamesp
 
 def test_resumed_from_preemption_with_load_skips_save():
     # On resume-from-preemption with a cache hit, the same co-queueing race
-    # applies: the resumed-from-preemption branch in build_connector_meta also
-    # passes load_spec.can_load=True. Skip save in this step; subsequent
+    # applies: the new-request path in build_connector_meta also passes
+    # load_spec.can_load=True. Skip save in this step; subsequent
     # cached_reqs steps will save new tokens normally.
     scheduler = _make_bare_scheduler()
     _make_resumed_unfinished_request(
@@ -726,12 +729,9 @@ def test_resumed_from_preemption_without_load_still_saves():
     assert tracker.num_saved_tokens == 48
 
 
-def test_running_request_not_in_resumed_req_ids_appends_blocks():
-    """Regression: the replace-vs-append choice must follow the scheduler's
-    cached_reqs.resumed_req_ids, NOT connector-local preemption history.
-
-    A running request that is not resumed this step carries a *delta*
-    new_block_ids and must be APPENDED to the tracker's existing blocks.
+def test_running_request_appends_blocks():
+    """Regression: a running request carries a *delta* new_block_ids and must be
+    APPENDED to the tracker's existing blocks.
     Treating it as resumed would replace allocated_block_ids with just the
     delta while token_len stays at the full computed length, so the store
     path's block_ids[start // block_size] runs off the end (the
@@ -745,10 +745,9 @@ def test_running_request_not_in_resumed_req_ids_appends_blocks():
         prefill_end_tokens=48,
     )
 
-    out = _make_scheduler_output(scheduled_spec_tokens=None)
-    assert "req-0" not in out.scheduled_cached_reqs.resumed_req_ids
-
-    meta = scheduler.build_connector_meta(out)
+    meta = scheduler.build_connector_meta(
+        _make_scheduler_output(scheduled_spec_tokens=None)
+    )
 
     tracker = scheduler._request_trackers["req-0"]
     # Delta [2] appended to existing [0, 1] (decode path), not replaced by [2].
@@ -760,10 +759,10 @@ def test_running_request_not_in_resumed_req_ids_appends_blocks():
     assert meta.requests[0].token_len_chunk == 48
 
 
-def test_resumed_request_in_resumed_req_ids_replaces_blocks():
-    """A request the scheduler marks resumed gets the FULL block table in
-    new_block_ids and must REPLACE the tracker's blocks (not append), even if
-    a stale tracker from before preemption is still present."""
+def test_resumed_request_replaces_blocks():
+    """A resumed request gets the FULL block table in scheduled_new_reqs and must
+    REPLACE the tracker's blocks (not append), even if a stale tracker from
+    before preemption is still present."""
     scheduler = _make_bare_scheduler()
     _make_resumed_unfinished_request(
         scheduler,
@@ -784,7 +783,7 @@ def test_resumed_request_in_resumed_req_ids_replaces_blocks():
     )
 
     tracker = scheduler._request_trackers["req-0"]
-    # Replaced with the full table from new_block_ids, not appended to [7,8,9].
+    # Replaced with the full table from block_ids, not appended to [7,8,9].
     assert tracker.allocated_block_ids == ([0, 1, 2],)
     assert tracker.token_len == 48
     blocks_held = sum(len(g) for g in tracker.allocated_block_ids)
@@ -922,7 +921,6 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
                     req_ids=["req-0"],
                     new_block_ids=[()],
                     num_computed_tokens=[num_computed_tokens],
-                    resumed_req_ids=set(),
                 ),
                 num_scheduled_tokens={"req-0": num_scheduled_tokens},
                 scheduled_spec_decode_tokens={},
@@ -1267,7 +1265,6 @@ def _add_pending_partial_tail_request(
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1385,7 +1382,6 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1599,7 +1595,6 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1642,7 +1637,6 @@ def _make_offload_only_output(entries, block_ids=([0],)):
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1745,7 +1739,6 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
             req_ids=["req-0"],
             new_block_ids=[([5], [23])],
             num_computed_tokens=[44],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 4},
         scheduled_spec_decode_tokens={},

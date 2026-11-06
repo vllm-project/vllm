@@ -948,30 +948,6 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     assert req_c.status == RequestStatus.WAITING
 
 
-def test_cached_request_data_resumed_skips_all_token_ids():
-    """all_token_ids is not populated for a resumed request."""
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-
-    scheduler = create_scheduler()
-    (req,) = create_requests(num_requests=1, num_tokens=8)
-    req.append_output_token_ids([101, 102, 103])
-
-    empty_blocks = KVCacheBlocks(blocks=((),))
-
-    def make_cached():
-        return scheduler._make_cached_request_data(
-            running_reqs=[],
-            resumed_reqs=[req],
-            num_scheduled_tokens={req.request_id: 1},
-            spec_decode_tokens={},
-            req_to_new_blocks={req.request_id: empty_blocks},
-        )
-
-    cached = make_cached()
-    assert req.request_id in cached.resumed_req_ids
-    assert cached.all_token_ids == {}
-
-
 @pytest.mark.parametrize("long_prefill_token_threshold", [0, 128])
 @pytest.mark.parametrize("cached_first_image", [False, True])
 def test_encoder_cache_pressure_respects_disabled_chunked_prefill(

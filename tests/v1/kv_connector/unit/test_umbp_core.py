@@ -1013,16 +1013,17 @@ def test_scheduler_resumed_request_replaces_stale_block_table():
         SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2],)),
         0,
     )
+    # Preemption frees the blocks; re-admission passes the whole new table.
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([7, 8],)),
+        0,
+    )
+    scheduled = SimpleNamespace(
+        req_id="resumed", num_computed_tokens=0, block_ids=([7, 8],)
+    )
     metadata = scheduler.build_connector_meta(
-        make_scheduler_output(
-            cached_reqs=SimpleNamespace(
-                req_ids=["resumed"],
-                new_block_ids=[([7, 8],)],
-                num_computed_tokens=[31],
-                resumed_req_ids={"resumed"},
-            ),
-            scheduled_tokens={"resumed": 1},
-        )
+        make_scheduler_output(new_reqs=[scheduled], scheduled_tokens={"resumed": 32})
     )
 
     tracker = scheduler._request_trackers["resumed"]
@@ -1054,7 +1055,6 @@ def test_scheduler_stores_from_cores_current_block_table():
                 req_ids=["r"],
                 new_block_ids=[None],
                 num_computed_tokens=[0],
-                resumed_req_ids=set(),
             ),
             scheduled_tokens={"r": 32},
             block_state=SimpleNamespace(
@@ -1115,7 +1115,6 @@ def test_scheduler_readmission_after_failed_load_uses_new_blocks():
                 req_ids=["readmitted"],
                 new_block_ids=[None],
                 num_computed_tokens=[0],
-                resumed_req_ids=set(),
             ),
             scheduled_tokens={"readmitted": 32},
         )
