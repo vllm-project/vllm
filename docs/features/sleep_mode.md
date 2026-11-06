@@ -88,9 +88,9 @@ training. It covers two use cases:
 Target patterns match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
-Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
-wake-up restores them in place and releases the backups. CPU parameters need no
-copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
+Level-2 sleep backs up selected GPU parameters to CPU memory; weights wake-up
+restores them in place. CPU parameters need no copy. Allow enough host memory
+for backups. Level-1 behavior is unchanged.
 
 The trainer must omit these parameters from updates, and reload/post-processing
 must preserve their values and storage (including avoiding replacement with meta

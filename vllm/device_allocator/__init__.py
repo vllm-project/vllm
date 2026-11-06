@@ -30,6 +30,8 @@ def only_holding(
     pools: Iterable[tuple[Any, Any]], tensors: Collection[int]
 ) -> set[int]:
     """Allocations of these pools whose live tensors all start at these addresses."""
+    if not tensors:
+        return set()
     return {
         allocation["address"]
         for pool, _ in pools

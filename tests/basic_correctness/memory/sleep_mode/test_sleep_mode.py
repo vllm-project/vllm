@@ -129,6 +129,27 @@ def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
+def _embed_tokens(worker) -> torch.Tensor:
+    weights = dict(worker.model_runner.get_model().named_parameters())
+    return weights["model.embed_tokens.weight"].detach().cpu().clone()
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_keeps_preserved_parameters(monkeypatch, gpu_memory_cleared):
+    """A preserved parameter comes back on wake, with no reload."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        sleep_preserve_parameter_names=["model.embed_tokens.weight"],
+    )
+    before = llm.collective_rpc(_embed_tokens)[0]
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    assert torch.equal(llm.collective_rpc(_embed_tokens)[0], before)
+
+
 @create_new_process_for_each_test()
 def test_deep_sleep_lora(gpu_memory_cleared):
     """Level-2 sleep/wake/reload with enable_lora=True.

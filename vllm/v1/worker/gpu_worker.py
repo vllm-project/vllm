@@ -253,7 +253,6 @@ class Worker(WorkerBase):
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
-        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -304,44 +303,28 @@ class Worker(WorkerBase):
             )
         return parameters
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        patterns = self.model_config.sleep_preserve_parameter_names
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
+    def _discardable_parameters(self, model: nn.Module) -> set[int]:
+        """Storage of the parameters the weight update rewrites."""
         parameters = self._get_sleep_parameters(model)
-        names: set[str] = set()
-        for pattern in patterns:
+        preserved: set[str] = set()
+        for pattern in self.model_config.sleep_preserve_parameter_names:
             matches = fnmatch_filter(parameters, pattern)
             if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu")
-            for name, param in parameters.items()
-            if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        parameters = self._get_sleep_parameters(model)
-        for name, value in self._sleep_saved_parameters.items():
-            parameters[name].copy_(value)
-        self._sleep_saved_parameters.clear()
+            preserved.update(matches)
+        return {
+            parameter.untyped_storage().data_ptr() for parameter in parameters.values()
+        } - {parameters[name].untyped_storage().data_ptr() for name in preserved}
 
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
-        discardable: set[int] = set()
-
-        if level == 2:
-            model = self.model_runner.model
-            self._save_sleep_parameters(model)
-            # The weight update rewrites parameters; level 2 keeps everything else.
-            discardable = {
-                parameter.untyped_storage().data_ptr()
-                for parameter in self._get_sleep_parameters(model).values()
-            }
+        # Level 2 keeps everything the weight update doesn't rewrite.
+        discardable = (
+            self._discardable_parameters(self.model_runner.model)
+            if level == 2
+            else set()
+        )
 
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()
@@ -383,9 +366,6 @@ class Worker(WorkerBase):
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
         self.synchronize_device()
 
     def discard(self, tags: tuple[str, ...]) -> None:

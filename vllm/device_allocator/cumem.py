@@ -286,10 +286,8 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
-        discarded = (
-            only_holding(self.allocator_and_pools.get("weights", []), discardable)
-            if discardable
-            else set()
+        discarded = only_holding(
+            self.allocator_and_pools.get("weights", []), discardable
         )
 
         for ptr, data in self.pointer_to_data.items():
