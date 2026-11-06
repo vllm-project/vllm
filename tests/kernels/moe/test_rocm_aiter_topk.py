@@ -502,11 +502,9 @@ def test_rocm_aiter_topk_gating_torch_compile_compatibility():
 # production uses.
 # ---------------------------------------------------------------------------
 
-from vllm._aiter_ops import rocm_aiter_ops  # noqa: E402
 from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E402, E501
     sigmoid_bias_flat_topk,
 )
-from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
 
 def _routing_inputs(token, expert, topk, gating_dtype, bias_dtype, seed=0):
