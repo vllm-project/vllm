@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import transformers
@@ -274,6 +277,41 @@ def test_transcription_output_strips_a_generated_prefix():
     text = "The spoken content of the audio is 'Hello there.'."
 
     assert model_cls.post_process_output(text, model_config) == "Hello there."
+
+
+@pytest.mark.parametrize(
+    ("trust_remote_code", "body", "expected"),
+    [
+        (True, "def apply_transcription_request(self): ...", True),
+        (True, "pass", False),
+        (True, "1 / 0", False),
+        (False, "def apply_transcription_request(self): ...", False),
+    ],
+)
+def test_remote_code_processor_transcription_request(
+    tmp_path, trust_remote_code, body, expected
+):
+    """Remote processors aren't in Transformers, so have to be loaded to check them."""
+    (tmp_path / "processing_custom.py").write_text(
+        "from transformers import ProcessorMixin\n"
+        f"class CustomProcessor(ProcessorMixin):\n    {body}\n"
+    )
+    (tmp_path / "processor_config.json").write_text(
+        json.dumps(
+            {
+                "processor_class": "CustomProcessor",
+                "auto_map": {"AutoProcessor": "processing_custom.CustomProcessor"},
+            }
+        )
+    )
+    model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="custom"),
+        model=str(tmp_path),
+        revision=None,
+        trust_remote_code=trust_remote_code,
+    )
+
+    assert ModelConfig._has_transcription_request(model_config) == expected
 
 
 VIBEVOICE_OUTPUT = (

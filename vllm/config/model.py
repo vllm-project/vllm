@@ -55,6 +55,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -1144,10 +1145,22 @@ class ModelConfig:
         return mm_device_do_normalize
 
     def _has_transcription_request(self) -> bool:
-        """Check the processor class, as creating the processor here is too early."""
-        name = PROCESSOR_MAPPING_NAMES.get(self.hf_config.model_type, "")
-        processor_cls = getattr(transformers, name, None)
-        return hasattr(processor_cls, "apply_transcription_request")
+        """Remote code processors can only be checked by loading them."""
+        method = "apply_transcription_request"
+        if name := PROCESSOR_MAPPING_NAMES.get(self.hf_config.model_type):
+            return hasattr(getattr(transformers, name, None), method)
+        if not self.trust_remote_code:
+            return False
+        try:
+            processor = cached_get_processor(
+                self.model,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code,
+            )
+        # Remote code can raise anything, and this runs for native models too
+        except Exception:
+            return False
+        return hasattr(processor, method)
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
