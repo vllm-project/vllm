@@ -173,9 +173,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
-    uv pip install grpcio-tools protobuf nanobind && \
-    uv pip install -r /workspace/vllm/requirements/xpu.txt
+    uv pip install grpcio-tools protobuf nanobind
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.
