@@ -1431,61 +1431,69 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
     [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
 )
 def test_post_process_zeroes_untransferred_tail(
-    kv_cache_layout, enable_permute_local_kv
+    registered_nixl_worker, kv_cache_layout, enable_permute_local_kv
 ):
     """Received remote sub-blocks are regrouped per head and the untransferred
-    sub-blocks of the last local block are zeroed on receive, once per block
-    although two attention groups alias the tensor."""
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
+    sub-blocks of the last local block are zeroed on receive."""
     ratio = 4
-    block_tokens = 8  # 2 tokens per remote sub-block
-    num_kv_heads = 2  # fewer than ratio
-
-    worker = MagicMock(spec=NixlConnectorWorker)
-    worker.transfer_topo = MagicMock()
-    worker.device_type = "cpu"
-    worker.enable_permute_local_kv = enable_permute_local_kv
-    worker.kv_cache_layout = kv_cache_layout
+    block_tokens = 64  # 16 tokens per remote sub-block
+    num_kv_heads = 1  # The K/V slot count is smaller than the block-size ratio.
+    num_slots = 2 * num_kv_heads
+    head_size = 128
     # Attention caches are [B, H, N, C]; distinct values per head and token.
-    expected = torch.arange(6 * num_kv_heads * block_tokens * 4).view(
-        6, num_kv_heads, block_tokens, 4
+    expected = (
+        torch.arange(6 * num_slots * block_tokens * head_size)
+        .remainder(251)
+        .to(torch.float16)
+        .view(6, num_slots, block_tokens, head_size)
     )
     # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
     received = (
         expected[2:4]
         .unflatten(2, (ratio, -1))
         .transpose(1, 2)
-        .reshape(2, num_kv_heads, block_tokens, 4)
+        .reshape(2, num_slots, block_tokens, head_size)
     )
     if kv_cache_layout == "LBNHC":
         attn_cache = expected.transpose(1, 2).contiguous().transpose(1, 2)
         if enable_permute_local_kv:
             # The remote is LBHNC: its bytes land in token-major memory.
-            attn_cache.transpose(1, 2)[2:4] = received.view(2, block_tokens, -1, 4)
+            attn_cache.transpose(1, 2)[2:4] = received.view(
+                2, block_tokens, -1, head_size
+            )
         # Otherwise token-major blocks receive the sub-blocks in token order.
     else:
         attn_cache = expected.clone()
         attn_cache[2:4] = received
-    worker.device_kv_caches = {"attn.0": attn_cache, "swa.0": attn_cache}
-    fa_group = MagicMock(layer_names=["attn.0"])
-    swa_group = MagicMock(layer_names=["swa.0"])
-    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, swa_group])
-    _bind_worker_method(worker, "post_process_device_kv_on_receive")
+    spec = FullAttentionSpec(
+        block_size=block_tokens,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.float16,
+    )
+    worker = registered_nixl_worker(
+        spec, {"attn.0": attn_cache}, kv_cache_layout, enable_permute_local_kv
+    )
+    # Complete the real layout handshake when the producer uses LBHNC.
+    if enable_permute_local_kv:
+        source = registered_nixl_worker(
+            spec, {"attn.0": expected.clone()}, enable_permute_local_kv=True
+        )
+        worker.add_remote_agent(
+            msgspec.msgpack.decode(
+                source.xfer_handshake_metadata.agent_metadata_bytes,
+                type=NixlAgentMetadata,
+            )
+        )
 
-    # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
+    # Block 5 received nothing; block 4 belongs to another request.
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3, 5], 6)])
 
-    # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
-    assert torch.equal(attn_cache[2], expected[2])
-    assert torch.equal(attn_cache[3, :, :4], expected[3, :, :4])
-    assert torch.all(attn_cache[3, :, 4:] == 0)
-    # Untouched blocks keep their content.
-    assert torch.equal(attn_cache[4], expected[4])
+    # Block 2 fully covered; block 3 covered for 2 sub-blocks (32 tokens).
+    tail_start = block_tokens // 2
+    expected[3, :, tail_start:] = 0
+    expected[5] = 0
+    torch.testing.assert_close(attn_cache, expected, rtol=0, atol=0)
 
 
 @pytest.mark.cpu_test

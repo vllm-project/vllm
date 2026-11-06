@@ -359,7 +359,6 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
@@ -390,6 +389,26 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
+
+- label: ":nvidia: (H200 MIG 18GB) NIXL NVFP4 Block Conversion"
+  key: nixl-nvfp4-block-conversion
+  device: h200_18gb
+  timeout_in_minutes: 20
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/utils.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/utils/torch_utils.py
+    - vllm/v1/attention/backends/flashinfer.py
+    - tests/kernels/attention/test_flashinfer.py
+    - tests/v1/kv_connector/nixl_integration/test_nvfp4.py
+    - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+    - requirements/cuda.txt
+    - requirements/kv_connectors.txt
+  commands:
+    # The CUDA 13 image supplies torch/numpy. Avoid pulling both NIXL backends.
+    - uv pip install --system --no-deps nixl==1.5.2 nixl-cu13==1.5.2
+    - pytest -v -s kernels/attention/test_flashinfer.py -k nvfp4_receive_reblocking
+    - pytest -v -s v1/kv_connector/nixl_integration/test_nvfp4.py
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration

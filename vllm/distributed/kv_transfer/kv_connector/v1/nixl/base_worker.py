@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
+    kv_postprocess_nvfp4_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -2901,6 +2902,20 @@ class NixlBaseConnectorWorker:
                 f"remote={nixl_agent_meta.kv_cache_layout}."
             )
 
+        if (
+            self.enable_permute_local_kv
+            or (block_size_ratio > 1 and kv_cache_layout != "LBHNC")
+        ) and any(
+            isinstance(spec, AttentionSpec)
+            and spec.kv_quant_mode.is_nvfp4
+            and not spec.kv_head_major_slots
+            for spec in self._layer_specs.values()
+        ):
+            raise RuntimeError(
+                "NVFP4 KV receive conversion requires matching LBHNC layouts "
+                "on prefill and decode."
+            )
+
         # NVFP4 pages store all heads' data before all heads' scales, so a
         # head's bytes are not a contiguous slice of the page, unless the
         # backend lays out the page by KV head.
@@ -3124,10 +3139,8 @@ class NixlBaseConnectorWorker:
             )
 
         for group, block_ids, covered_sub_blocks in block_ids_list:
-            attn_caches = [
-                self.device_kv_caches[name]
-                for name in self.kv_cache_config.transfer_groups[group].layer_names
-            ]
+            layer_names = self.kv_cache_config.transfer_groups[group].layer_names
+            attn_caches = [self.device_kv_caches[name] for name in layer_names]
             # Blocks the transfer didn't write: the token tail of the last
             # partially covered block, then everything beyond it.
             covered_blocks, sub_blocks_in_last = divmod(
@@ -3139,8 +3152,20 @@ class NixlBaseConnectorWorker:
             if convert or has_stale:
                 indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
 
-            if convert:
-                for cache in attn_caches:
+            for name, cache in zip(layer_names, attn_caches):
+                spec = self._layer_specs.get(name)
+                if (
+                    convert
+                    and isinstance(spec, AttentionSpec)
+                    and spec.kv_quant_mode.is_nvfp4
+                    and not spec.kv_head_major_slots
+                ):
+                    assert indices is not None
+                    kv_postprocess_nvfp4_on_receive(
+                        cache, indices, block_size_ratio, covered_sub_blocks
+                    )
+                    continue
+                if convert:
                     if self.enable_permute_local_kv:
                         kv_postprocess_blksize_and_layout_on_receive(
                             cache, indices, block_size_ratio
@@ -3151,17 +3176,15 @@ class NixlBaseConnectorWorker:
                             cache, indices, block_size_ratio
                         )
 
-            if sub_blocks_in_last:
-                last_block_id = block_ids[covered_blocks]
-                for cache in attn_caches:
+                if sub_blocks_in_last:
+                    last_block_id = block_ids[covered_blocks]
                     # Attention caches are [B, H, N, C]: tokens on dim 2.
                     sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
                     cache[last_block_id, :, zero_from:].zero_()
-            if has_stale:
-                assert indices is not None
-                stale_ids = indices[first_stale:]
-                for cache in attn_caches:
+                if has_stale:
+                    assert indices is not None
+                    stale_ids = indices[first_stale:]
                     cache.index_fill_(0, stale_ids, 0)
 
     def post_process_device_kv_on_receive_heterogeneous_attn(

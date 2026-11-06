@@ -218,6 +218,117 @@ class FakeNixlWrapper:
         return get_default_xfer_telemetry()
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_heads", [1, 2, 8])
+@pytest.mark.parametrize(
+    "ratio,received_blocks", [(1, 2), (2, 1), (2, 3), (4, 0), (4, 4), (4, 7), (4, 12)]
+)
+def test_nvfp4_receive_regroups_data_and_scales(
+    registered_nixl_worker, num_heads, ratio, received_blocks
+):
+    """Small NVFP4 pages must retain data/scales and clear only uncovered tokens."""
+    block_size, num_blocks = 64, 7
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_heads,
+        head_size=128,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+        num_head_slots=2 * num_heads,
+        state_content_bytes=72,
+    )
+    cache = torch.full(
+        (num_blocks, 2 * num_heads, block_size, 72), 231, dtype=torch.uint8
+    )
+    expected = cache.clone()
+    local_ids = [4, 1, 5]
+    remote_size = block_size // ratio
+    generator = torch.Generator().manual_seed(0)
+    parts = [
+        torch.randint(
+            1,
+            231,
+            (num_heads, len(local_ids) * block_size, width),
+            dtype=torch.uint8,
+            generator=generator,
+        )
+        for width in (64, 8, 64, 8)
+    ]
+    for remote_id in range(received_blocks):
+        start = remote_id * remote_size
+        page = torch.cat(
+            [part[:, start : start + remote_size].flatten() for part in parts]
+        )
+        local_id, sub_block = divmod(remote_id, ratio)
+        offset = sub_block * page.numel()
+        cache[local_ids[local_id]].view(-1)[offset : offset + page.numel()] = page
+    for part in parts:
+        part[:, received_blocks * remote_size :] = 0
+    for i, block_id in enumerate(local_ids):
+        start = i * block_size
+        expected[block_id] = torch.cat(
+            [part[:, start : start + block_size].flatten() for part in parts]
+        ).view_as(cache[block_id])
+
+    worker = registered_nixl_worker(spec, {"layer0": cache})
+    worker.post_process_device_kv_on_receive(
+        ratio, [(0, local_ids, received_blocks)], convert=ratio > 1
+    )
+    torch.testing.assert_close(cache, expected, rtol=0, atol=0)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "remote_layout,local_layout,remote_size,rejected",
+    [
+        ("LBHNC", "LBHNC", 16, False),
+        ("LBHNC", "LBHNC", 64, False),
+        ("LBNHC", "LBNHC", 16, True),
+        ("BLHNC", "BLHNC", 16, True),
+        ("LBHNC", "LBNHC", 64, True),
+        ("LBNHC", "LBNHC", 64, False),
+        ("BLHNC", "BLHNC", 64, False),
+    ],
+)
+def test_nvfp4_receive_layout_handshake(
+    registered_nixl_worker, remote_layout, local_layout, remote_size, rejected
+):
+    workers = []
+    for size, layout in ((remote_size, remote_layout), (64, local_layout)):
+        spec = FullAttentionSpec(
+            block_size=size,
+            num_kv_heads=2,
+            head_size=128,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.NVFP4,
+            num_head_slots=4,
+            state_content_bytes=72,
+        )
+        cache = dense_kv_cache_views(
+            torch.zeros(spec.page_size_bytes * 8, dtype=torch.uint8),
+            spec,
+            8,
+            1,
+            KVCacheLayout[layout],
+        )[0]
+        workers.append(
+            registered_nixl_worker(
+                spec, {"layer0": cache}, layout, enable_permute_local_kv=True
+            )
+        )
+    prefill, decode = workers
+    metadata = msgspec.msgpack.decode(
+        prefill.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    if rejected:
+        with pytest.raises(RuntimeError, match="NVFP4 KV receive conversion"):
+            decode.add_remote_agent(metadata)
+    else:
+        assert decode.add_remote_agent(metadata) == FakeNixlWrapper.REMOTE_AGENT_NAME
+        assert remote_size in decode.src_xfer_handles_by_block_size
+        assert decode.dst_num_blocks[prefill.engine_id] == 8
+
+
 @contextlib.contextmanager
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
