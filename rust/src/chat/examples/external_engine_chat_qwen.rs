@@ -154,7 +154,9 @@ async fn main() -> Result<()> {
                     AssistantBlockKind::ToolCall => {}
                 },
                 ChatEvent::ToolCallArgumentsDelta { delta, .. } => print!("{delta}"),
-                ChatEvent::BlockEnd { .. } | ChatEvent::ToolCallEnd { .. } => {}
+                ChatEvent::BlockEnd { .. }
+                | ChatEvent::ToolCallEnd { .. }
+                | ChatEvent::ToolCallAbort { .. } => {}
             }
         }
 

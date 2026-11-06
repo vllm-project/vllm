@@ -473,6 +473,9 @@ fn fake_chat_tokenizer() -> TestTokenizer {
         .with_regular_token("<|END_THINKING|>", 0xF004)
         .with_regular_token("◁think▷", 0xF005)
         .with_regular_token("◁/think▷", 0xF006)
+        .with_special_token("<|channel>", 0xF007)
+        .with_special_token("<channel|>", 0xF008)
+        .with_special_token("<eos>", 0xF009)
 }
 
 impl FakeChatBackend {
@@ -7870,6 +7873,382 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
         "{text}"
     );
     assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn gemma4_streams_arguments_before_closing_markers() {
+    use futures::StreamExt as _;
+
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (release_close_tx, release_close_rx) = tokio::sync::oneshot::channel();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-gemma4-streaming".to_vec(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request = decode_add_request(&add);
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(
+                        &request.request_id,
+                        vec![(
+                            token_ids("<|tool_call>call:get_weather{location:<|\"|>Par"),
+                            None,
+                        )],
+                    ),
+                )
+                .await;
+                release_close_rx.await.expect("release closing tags");
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(
+                        &request.request_id,
+                        vec![(
+                            token_ids("is<|\"|>}<tool_call|><eos>"),
+                            Some(EngineCoreFinishReason::Stop),
+                        )],
+                    ),
+                )
+                .await;
+            })
+        },
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("google/gemma-4-E2B-it")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(
+        test_llm(client),
+        Arc::new(FakeChatBackend::with_model_id("google/gemma-4-E2B-it")),
+    )
+    .with_tool_call_parser(ParserSelection::Explicit("gemma4".to_string()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["google/gemma-4-E2B-it".to_string()],
+        chat,
+    )));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "google/gemma-4-E2B-it",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"location": {"type": "string"}}
+                                }
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body().into_data_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = body.next().await {
+            text.push_str(std::str::from_utf8(&chunk.expect("read SSE chunk")).expect("utf8 SSE"));
+            let complete_len = text.rfind("\n\n").map_or(0, |end| end + 2);
+            let payloads = sse_json_payloads(&text[..complete_len]);
+            let arguments: String = payloads
+                .iter()
+                .flat_map(|payload| payload["choices"][0]["delta"]["tool_calls"].as_array())
+                .flatten()
+                .filter_map(|call| call["function"]["arguments"].as_str())
+                .collect();
+            if arguments.contains("Par") {
+                return;
+            }
+        }
+        panic!("stream ended before argument content arrived");
+    })
+    .await
+    .expect("argument content must reach the client before the engine emits closing tags");
+
+    release_close_tx.send(()).expect("release closing tags");
+    while let Some(chunk) = body.next().await {
+        text.push_str(std::str::from_utf8(&chunk.expect("read SSE chunk")).expect("utf8 SSE"));
+    }
+    engine_task.await.expect("mock engine task");
+
+    let payloads = sse_json_payloads(&text);
+    let calls: Vec<_> = payloads
+        .iter()
+        .flat_map(|payload| payload["choices"][0]["delta"]["tool_calls"].as_array())
+        .flatten()
+        .collect();
+    assert!(calls[0]["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(calls[0]["function"]["name"], "get_weather");
+    assert!(calls.iter().all(|call| call["index"] == 0));
+    assert!(
+        calls
+            .iter()
+            .skip(1)
+            .all(|call| { call.get("id").is_none() && call["function"].get("name").is_none() })
+    );
+    let arguments: String =
+        calls.iter().filter_map(|call| call["function"]["arguments"].as_str()).collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&arguments).expect("complete tool arguments"),
+        json!({"location": "Paris"}),
+    );
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload["choices"][0]["finish_reason"] == "tool_calls")
+    );
+    assert_eq!(sse_data_payloads(&text).last(), Some(&"[DONE]"));
+}
+
+async fn gemma4_chat_response(
+    chunks: &[&str],
+    finish: EngineCoreFinishReason,
+    stream: bool,
+    stop: Option<&str>,
+) -> String {
+    let output_specs = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let terminal = index + 1 == chunks.len();
+            let mut tokens = token_ids(chunk);
+            if terminal && matches!(finish, EngineCoreFinishReason::Stop) {
+                tokens.extend(token_ids("<eos>"));
+            }
+            (tokens, terminal.then_some(finish))
+        })
+        .collect();
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-gemma4-final-call",
+        output_specs,
+        Arc::new(FakeChatBackend::with_model_id("google/gemma-4-E2B-it")),
+    )
+    .await;
+    let chat = chat.with_tool_call_parser(ParserSelection::Explicit("gemma4".to_string()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["google/gemma-4-E2B-it".to_string()],
+        chat,
+    )));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "google/gemma-4-E2B-it",
+                        "stream": stream,
+                        "stop": stop,
+                        "messages": [{"role": "user", "content": "Check the weather."}],
+                        "tools": [{"type": "function", "function": {
+                            "name": "get_weather",
+                            "parameters": {"type": "object", "properties": {
+                                "location": {"type": "string"},
+                                "note": {"type": "string"}
+                            }}
+                        }}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    String::from_utf8(body.to_vec()).expect("utf8 body")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn gemma4_nonstream_returns_only_complete_tool_calls() {
+    for (chunks, finish, content, arguments, reason) in [
+        (
+            vec!["<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>,note:<|\"|>Par"],
+            EngineCoreFinishReason::Length,
+            None,
+            None,
+            "length",
+        ),
+        (
+            vec![
+                "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>",
+                ",days:[1,2}<tool_call|>",
+            ],
+            EngineCoreFinishReason::Stop,
+            Some(",days:[1,2}<tool_call|>"),
+            None,
+            "stop",
+        ),
+        (
+            vec![
+                "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>",
+                "<|tool_call>call:",
+            ],
+            EngineCoreFinishReason::Length,
+            None,
+            Some(r#"{"location":"Paris"}"#),
+            "length",
+        ),
+        (
+            vec![
+                "<|tool_call>call:get_weather{location:<|\"|>SF<|\"|>",
+                ",location:<|\"|>NYC<|\"|>}<tool_call|>",
+            ],
+            EngineCoreFinishReason::Stop,
+            None,
+            Some(r#"{"location":"NYC"}"#),
+            "tool_calls",
+        ),
+    ] {
+        let body = gemma4_chat_response(&chunks, finish, false, None).await;
+        let response: serde_json::Value = serde_json::from_str(&body).expect("JSON response");
+        let choice = &response["choices"][0];
+        assert_eq!(choice["finish_reason"], reason, "{body}");
+        assert_eq!(choice["message"]["content"], json!(content), "{body}");
+        let actual: Vec<_> = choice["message"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|call| {
+                assert_eq!(call["function"]["name"], "get_weather");
+                call["function"]["arguments"].as_str().expect("arguments")
+            })
+            .collect();
+        assert_eq!(actual, arguments.into_iter().collect::<Vec<_>>(), "{body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn gemma4_stream_keeps_emitted_arguments_after_length_stop() {
+    let body = gemma4_chat_response(
+        &["<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>,note:<|\"|>Par"],
+        EngineCoreFinishReason::Length,
+        true,
+        None,
+    )
+    .await;
+    let payloads = sse_json_payloads(&body);
+    let arguments: String = payloads
+        .iter()
+        .flat_map(|payload| payload["choices"][0]["delta"]["tool_calls"].as_array())
+        .flatten()
+        .filter_map(|call| call["function"]["arguments"].as_str())
+        .collect();
+    assert_eq!(arguments, r#"{"location":"Paris","note":"Par"#);
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| { payload["choices"][0]["finish_reason"] == "length" })
+    );
+    assert_eq!(sse_data_payloads(&body).last(), Some(&"[DONE]"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn gemma4_finish_reason_depends_on_final_calls() {
+    for (prefix, reason) in [
+        ("", "stop"),
+        (
+            "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>",
+            "tool_calls",
+        ),
+    ] {
+        for stream in [false, true] {
+            let body = gemma4_chat_response(
+                &[
+                    prefix,
+                    "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>",
+                    ",days:[1,2}<tool_call|>",
+                ],
+                EngineCoreFinishReason::Stop,
+                stream,
+                None,
+            )
+            .await;
+            let response: serde_json::Value = if stream {
+                assert_eq!(sse_data_payloads(&body).last(), Some(&"[DONE]"));
+                sse_json_payloads(&body).pop().expect("final chunk")
+            } else {
+                serde_json::from_str(&body).expect("JSON response")
+            };
+            assert_eq!(response["choices"][0]["finish_reason"], reason, "{body}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn gemma4_preserves_complete_call_when_stop_removes_wrapper() {
+    for output in [
+        "<|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>",
+        "<|tool_call>call:get_weather(location:<|\"|>Paris<|\"|>)<tool_call|>",
+    ] {
+        for stream in [false, true] {
+            let body = gemma4_chat_response(
+                &[output],
+                EngineCoreFinishReason::Stop,
+                stream,
+                Some("<tool_call|>"),
+            )
+            .await;
+            let (arguments, reason) = if stream {
+                let payloads = sse_json_payloads(&body);
+                let arguments: String = payloads
+                    .iter()
+                    .flat_map(|payload| payload["choices"][0]["delta"]["tool_calls"].as_array())
+                    .flatten()
+                    .filter_map(|call| call["function"]["arguments"].as_str())
+                    .collect();
+                assert_eq!(sse_data_payloads(&body).last(), Some(&"[DONE]"));
+                (
+                    arguments,
+                    payloads.last().unwrap()["choices"][0]["finish_reason"].clone(),
+                )
+            } else {
+                let response: serde_json::Value =
+                    serde_json::from_str(&body).expect("JSON response");
+                let choice = &response["choices"][0];
+                let calls = choice["message"]["tool_calls"].as_array().expect("complete call");
+                assert_eq!(calls.len(), 1, "{body}");
+                assert_eq!(calls[0]["function"]["name"], "get_weather");
+                (
+                    calls[0]["function"]["arguments"].as_str().unwrap().to_owned(),
+                    choice["finish_reason"].clone(),
+                )
+            };
+            assert_eq!(reason, "tool_calls", "{body}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&arguments).expect("complete arguments"),
+                json!({"location": "Paris"}),
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

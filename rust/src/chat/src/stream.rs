@@ -158,6 +158,7 @@ impl ChatEventStream {
                 ChatEvent::BlockStart { .. }
                 | ChatEvent::BlockDelta { .. }
                 | ChatEvent::ToolCallStart { .. }
+                | ChatEvent::ToolCallAbort { .. }
                 | ChatEvent::ToolCallArgumentsDelta { .. } => {}
             }
         }

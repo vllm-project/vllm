@@ -74,7 +74,7 @@ impl UnifiedParserState {
 
                 let mut events = Vec::new();
                 self.process_parser_output(output, &mut events)?;
-                self.open_call_index = None;
+                self.abort_open_call(&mut events);
 
                 let recovered = self.parser.reset();
                 if recovered.is_empty() && events.is_empty() {
@@ -97,11 +97,10 @@ impl UnifiedParserState {
 
         match self.parser.finish() {
             Ok(output) => self.process_parser_output(output, &mut events)?,
-            // The output stopped inside a tool call (`max_tokens`, a stop
-            // string): drop the unfinished markup like Python's parser engine
-            // instead of returning it as text. Earlier events stand.
+            // Drop unfinished markup. Earlier deltas remain in the stream,
+            // but an explicitly unfinished call is absent from the final message.
             Err(error) if error.is_incomplete_tool_call() => {
-                self.open_call_index = None;
+                self.abort_open_call(&mut events);
                 let _ = self.parser.reset();
             }
             Err(error) => {
@@ -110,13 +109,19 @@ impl UnifiedParserState {
                     "unified parser finish failed; closing open parser state"
                 );
                 self.parser_failed = true;
-                self.open_call_index = None;
+                self.abort_open_call(&mut events);
                 let recovered = self.parser.reset();
                 push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
             }
         }
 
         Ok(events)
+    }
+
+    fn abort_open_call(&mut self, events: &mut Vec<AssistantEvent>) {
+        if self.open_call_index.take().is_some() && self.parser.reports_tool_call_end() {
+            events.push(AssistantEvent::ToolCallAbort);
+        }
     }
 
     /// Apply one parsed unified output to the current stream state.
@@ -141,6 +146,20 @@ impl UnifiedParserState {
                 }
                 UnifiedParserEvent::ToolCall(item) => {
                     self.process_tool_item(item, events)?;
+                }
+                UnifiedParserEvent::ToolCallEnd {
+                    tool_index,
+                    arguments,
+                } => {
+                    if self.open_call_index != Some(tool_index) {
+                        return Err(Error::ToolCallStreamInvariant {
+                            message: format!(
+                                "received end for tool index {tool_index} without its start"
+                            ),
+                        });
+                    }
+                    self.open_call_index = None;
+                    events.push(AssistantEvent::ToolCallEnd { arguments });
                 }
             }
         }
@@ -899,10 +918,9 @@ mod tests {
         );
     }
 
-    /// The output stopped inside a tool call (`max_tokens`, a stop string): the
-    /// unfinished markup is dropped and earlier text, if any, is kept.
+    /// Truncation keeps emitted arguments without fabricating the missing close.
     #[tokio::test]
-    async fn unified_stream_drops_incomplete_gemma4_tool_call_at_eos() {
+    async fn unified_stream_keeps_partial_gemma4_arguments_at_eos() {
         let tools = vec![Tool {
             name: "write_file".to_string(),
             description: None,
@@ -930,11 +948,33 @@ mod tests {
                 .collect::<crate::Result<Vec<_>>>()
                 .unwrap();
 
-            let text = (!prefix.is_empty()).then(|| AssistantEvent::TextDelta {
-                kind: AssistantBlockKind::Text,
-                delta: prefix.to_string(),
-                token_count: None,
-            });
+            let mut text = String::new();
+            let mut names = Vec::new();
+            let mut arguments = String::new();
+            for event in &events[..events.len() - 1] {
+                match event {
+                    AssistantEvent::TextDelta {
+                        kind: AssistantBlockKind::Text,
+                        delta,
+                        ..
+                    } => text.push_str(delta),
+                    AssistantEvent::ToolCallStart { id, name } => {
+                        assert!(!id.is_empty());
+                        names.push(name.as_str());
+                    }
+                    AssistantEvent::ToolCallArgumentsDelta { delta } => arguments.push_str(delta),
+                    AssistantEvent::ToolCallAbort => {}
+                    event => panic!("unexpected event: {event:?}"),
+                }
+            }
+            assert_eq!(
+                (text.as_str(), names, arguments.as_str()),
+                (prefix, vec!["write_file"], r#"{"content":"hello world""#),
+            );
+            assert!(matches!(
+                events[events.len() - 2],
+                AssistantEvent::ToolCallAbort
+            ));
             let done = AssistantEvent::Done {
                 usage: done_usage(0),
                 timestamps: Default::default(),
@@ -944,11 +984,7 @@ mod tests {
                 ec_transfer_params: None,
                 weight_versions: None,
             };
-            assert_eq!(
-                events,
-                text.into_iter().chain([done]).collect::<Vec<_>>(),
-                "{prefix:?}"
-            );
+            assert_eq!(events.last(), Some(&done));
         }
     }
 
