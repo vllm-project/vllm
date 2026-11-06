@@ -7164,7 +7164,7 @@ def test_put_capacity_change_retries_without_periodic_delay():
     assert job.src_spec.block_ids.tolist() == [1, 2, 101]
 
 
-def test_put_finish_excludes_reallocated_source_and_resolves_tail():
+def test_put_finish_flushes_reallocated_source_and_resolves_tail():
     scheduler = _make_put_scheduler(batch=2)
     request, state = _put_request(scheduler)
     output = _put_output(put=128)
@@ -7172,9 +7172,12 @@ def test_put_finish_excludes_reallocated_source_and_resolves_tail():
     request.num_computed_tokens = 128
     request.status = RequestStatus.FINISHED_STOPPED
     output.finished_req_ids = {"put"}
+    # A freed block reallocated this step is stored, and its job flushed
+    # before the new owner writes it, exactly as without PUT batching.
     scheduler._current_batch_allocated_block_ids.add(4)
-    [job] = scheduler._build_store_jobs(output).values()
-    assert job.src_spec.block_ids.tolist() == [3, 5, 6, 7, 8]
+    [(job_id, job)] = scheduler._build_store_jobs(output).items()
+    assert job.src_spec.block_ids.tolist() == [3, 4, 5, 6, 7, 8]
+    assert job_id in scheduler._current_batch_jobs_to_flush
     assert state.group_states[0].next_stored_chunk_idx == 8
 
 
@@ -7219,3 +7222,31 @@ def test_put_finished_request_stores_tail_beyond_exhausted_credit():
     [tail] = scheduler._build_store_jobs(output).values()
     assert tail.src_spec.block_ids.tolist() == [3, 4, 5, 6, 7, 8]
     assert state.group_states[0].next_stored_chunk_idx == 8
+
+
+def test_put_deferred_swa_prompt_tail_survives_decode():
+    scheduler = _make_put_scheduler(
+        batch=1, capacity=3, block_sizes=(64, 16), window=16
+    )
+    scheduler.config = scheduler.config._replace(offload_prompt_only=False)
+    request, state = _put_request(scheduler, tokens=112)
+    # The 112-token prompt ends mid-segment: SWA chunk 6 is reachable only as
+    # the prompt's final tail, and the batch defers it past this step.
+    [(first_id, first)] = scheduler._build_store_jobs(_put_output(put=112)).items()
+    assert first.src_spec.block_ids.tolist() == [1, 104]
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={first_id: 1}
+            )
+        )
+    )
+    request.append_output_token_ids(list(range(16)))
+    request.num_computed_tokens = 112
+    state.update_offload_keys()
+    state.group_states[0].block_ids.append(2)
+    state.group_states[1].block_ids.append(108)
+    # Decoding past the prompt must not mask the deferred prompt tail.
+    [second] = scheduler._build_store_jobs(_put_output(put=16)).values()
+    assert second.src_spec.block_ids.tolist() == [2, 107, 108]
+    assert [g.next_stored_chunk_idx for g in state.group_states] == [2, 8]

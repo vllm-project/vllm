@@ -2148,7 +2148,11 @@ class OffloadingConnectorScheduler:
                     store_horizon_chunks = None
                 elif req.is_finished():
                     store_horizon_chunks = num_chunks
-                elif num_chunks <= prompt_horizon_chunks:
+                elif num_chunks <= prompt_horizon_chunks or (
+                    # A PUT batch may have deferred the prompt's final tail
+                    # into decode; it stays reachable as that prompt's end.
+                    self._put_batch_chunks and start_chunk_idx < prompt_horizon_chunks
+                ):
                     store_horizon_chunks = prompt_horizon_chunks
                 else:
                     # An active decode frontier is not a final request
@@ -2242,17 +2246,6 @@ class OffloadingConnectorScheduler:
                             or block_mask[key_idx * blocks_per_chunk + b]
                         )
                         for b in range(blocks_per_chunk)
-                    ):
-                        continue
-                    if (
-                        self._put_batch_chunks
-                        and req.is_finished()
-                        and any(
-                            bid in self._current_batch_allocated_block_ids
-                            for bid in group_state.block_ids[
-                                chunk_start : chunk_start + blocks_per_chunk
-                            ]
-                        )
                     ):
                         continue
                     new_offload_keys.append(offload_key)
