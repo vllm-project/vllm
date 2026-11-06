@@ -12,6 +12,7 @@ from torch.nn import LayerNorm
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
 
 from .vision_attention import (
@@ -228,9 +229,28 @@ def _per_block_cast_to_fp8_padded(
 class MoESwiGLUFFNFP8(MoESwiGLUFFN):
     """NOTE vision MoE using the checkpoint's local block-FP8 semantics."""
 
+    _FUSED_BUFFERS = (
+        "_fused_w13_fp8",
+        "_fused_w13_scale",
+        "_fused_w2_fp8",
+        "_fused_w2_scale",
+    )
+
+    def __init__(self, config: DotsMoEVitConfig, layer_number: int):
+        super().__init__(config, layer_number)
+        for name in self._FUSED_BUFFERS:
+            register_derived_buffer(self, name)
+        # Keep the checkpoint topology while releasing source storage below.
+        for expert in self.experts:
+            for linear in (expert.fc1, expert.fc2, expert.fc3):
+                linear._vllm_defer_weights_reload = True
+
+    def process_weights_for_reload(self) -> None:
+        self.process_weights_after_loading()
+
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if hasattr(self, "_fused_w13_fp8"):
+        if self.experts[0].fc1.weight.numel() == 0:
             return
 
         w13_weights = []
@@ -246,30 +266,25 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             w2_weights.append(w2)
             w2_scales.append(s2)
 
-        self.register_buffer(
-            "_fused_w13_fp8",
-            torch.stack(w13_weights).contiguous(),
-            persistent=False,
+        set_derived_buffer(
+            self, "_fused_w13_fp8", torch.stack(w13_weights).contiguous()
         )
-        self.register_buffer(
-            "_fused_w13_scale",
-            torch.stack(w13_scales).contiguous(),
-            persistent=False,
+        set_derived_buffer(
+            self, "_fused_w13_scale", torch.stack(w13_scales).contiguous()
         )
-        self.register_buffer(
-            "_fused_w2_fp8",
-            torch.stack(w2_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_scale",
-            torch.stack(w2_scales).contiguous(),
-            persistent=False,
-        )
-        del self.experts
+        set_derived_buffer(self, "_fused_w2_fp8", torch.stack(w2_weights).contiguous())
+        set_derived_buffer(self, "_fused_w2_scale", torch.stack(w2_scales).contiguous())
+        for expert in self.experts:
+            for linear in (expert.fc1, expert.fc2, expert.fc3):
+                for name, param in list(linear.named_parameters(recurse=False)):
+                    setattr(
+                        linear,
+                        name,
+                        nn.Parameter(param.new_empty(0), requires_grad=False),
+                    )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not hasattr(self, "_fused_w13_fp8"):
+        if self._fused_w13_fp8 is None:
             raise RuntimeError("NOTE vision FP8 weights were not initialized")
 
         gate_logits = F.linear(x.float(), self.gate_weight.float())
