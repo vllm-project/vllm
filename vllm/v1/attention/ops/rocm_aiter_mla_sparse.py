@@ -32,55 +32,6 @@ else:
 logger = init_logger(__name__)
 
 
-def _get_persistent_paged_mqa_inputs(
-    *,
-    context_lens: torch.Tensor,
-    block_tables: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return graph-replay-stable copies of paged-MQA input metadata.
-
-    During CUDAGraph capture the kernel records the data_ptr of every input
-    tensor.  If context_lens / block_tables are re-allocated between capture
-    and replay the graph replays with stale pointers.  This helper returns
-    persistent staging tensors (one pair per ubatch/lane via the workspace
-    manager) and copies the live values into them on every call.
-    """
-    wm = current_workspace_manager()
-
-    stable_context_lens = wm.get_persistent_resource(
-        (
-            "rocm_paged_mqa_context_lens",
-            tuple(context_lens.shape),
-            tuple(context_lens.stride()),
-            context_lens.dtype,
-        ),
-        lambda: torch.empty_strided(
-            context_lens.shape,
-            context_lens.stride(),
-            dtype=context_lens.dtype,
-            device=context_lens.device,
-        ),
-    )
-    stable_block_tables = wm.get_persistent_resource(
-        (
-            "rocm_paged_mqa_block_tables",
-            tuple(block_tables.shape),
-            tuple(block_tables.stride()),
-            block_tables.dtype,
-        ),
-        lambda: torch.empty_strided(
-            block_tables.shape,
-            block_tables.stride(),
-            dtype=block_tables.dtype,
-            device=block_tables.device,
-        ),
-    )
-
-    stable_context_lens.copy_(context_lens)
-    stable_block_tables.copy_(block_tables)
-    return stable_context_lens, stable_block_tables
-
-
 FP8_DTYPE = current_platform.fp8_dtype()
 _USE_FUSED_PAGED_MQA_LOGITS = _ON_GFX942 or _ON_GFX950 or _ON_RDNA
 
@@ -873,11 +824,8 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            out_logits = current_workspace_manager().get_persistent(
-                key=("rocm_paged_mqa_out_logits",
-                     batch_size * next_n, max_model_len),
-                shape=(batch_size * next_n, max_model_len),
-                dtype=torch.float32,
+            (out_logits,) = current_workspace_manager().get_simultaneous(
+                ((batch_size * next_n, max_model_len), torch.float32),
             )
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
@@ -1576,12 +1524,8 @@ def rocm_aiter_sparse_attn_indexer(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
 
-        paged_mqa_seq_lens, paged_mqa_block_table = (
-            _get_persistent_paged_mqa_inputs(
-                context_lens=decode_metadata.seq_lens,
-                block_tables=decode_metadata.block_table,
-            )
-        )
+        paged_mqa_seq_lens = decode_metadata.seq_lens
+        paged_mqa_block_table = decode_metadata.block_table
         logits = rocm_fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,

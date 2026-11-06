@@ -81,32 +81,6 @@ def _full_dummy_descriptor_valid(
     return cdiv(num_tokens, num_reqs) <= max_query_len
 
 
-def _apply_full_capture_capacity_hint(
-    input_batch: InputBatch,
-    block_tables: BlockTables,
-    kv_cache_config: "KVCacheConfig",
-    max_model_len: int,
-) -> None:
-    """Give FULL-graph dummy requests enough block-table context.
-
-    Paged-MQA backends (e.g. the gfx1151 sparse indexer) index into a
-    context-length worth of KV blocks during both capture and replay.
-    Without this hint the dummy block tables carry zero context and the
-    captured graph records incorrect addresses.
-    """
-    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
-    capture_context_len = max(max_model_len - query_len, 0)
-    if not capture_context_len:
-        return
-    set_dummy_context(
-        input_batch,
-        block_tables,
-        capture_context_len,
-        kv_cache_config.num_blocks,
-        max_model_len,
-    )
-
-
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -626,8 +600,6 @@ class CudaGraphManager:
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
         self.graphs[desc].replay()
-        if current_platform.is_rocm():
-            current_stream().synchronize()
 
     def init_breakable_cg_runner(
         self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
@@ -911,14 +883,6 @@ def prepare_inputs_to_capture(
 
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
-
-    if full_cudagraph:
-        _apply_full_capture_capacity_hint(
-            input_batch,
-            block_tables,
-            kv_cache_config,
-            model_state.max_model_len,
-        )
 
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
