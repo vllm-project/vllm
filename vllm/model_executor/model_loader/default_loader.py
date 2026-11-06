@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_mm_encoder_only_safetensors_files,
     filter_safetensors_files_by_weight_name,
     get_quant_config,
+    get_safetensors_files_in_index,
     instanttensor_weights_iterator,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
@@ -228,16 +229,25 @@ class DefaultModelLoader(BaseModelLoader):
             hf_folder = os.path.join(hf_folder, subfolder)
 
         hf_weights_files: list[str] = []
-        nested: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
-            if allow_patterns_overrides is None and pattern.endswith(".safetensors"):
+            if (
+                not hf_weights_files
+                and allow_patterns_overrides is None
+                and pattern.endswith(".safetensors")
+            ):
                 # The index may list shards in a subdirectory, like tensors/.
-                # Nested files it doesn't list are filtered out below.
-                nested = glob.glob(
-                    os.path.join(hf_folder, "*", "**", pattern), recursive=True
-                )
-                if nested and not is_local:
+                # A Hub snapshot has them without the index if the repo
+                # listing failed or the model is in a subfolder.
+                if (
+                    not is_local
+                    and not os.path.isfile(os.path.join(hf_folder, index_file))
+                    and any(
+                        glob.iglob(
+                            os.path.join(hf_folder, "**", pattern), recursive=True
+                        )
+                    )
+                ):
                     download_safetensors_index_file_from_hf(
                         model_name_or_path,
                         index_file,
@@ -245,8 +255,8 @@ class DefaultModelLoader(BaseModelLoader):
                         subfolder=subfolder,
                         revision=revision,
                     )
-                if nested and os.path.isfile(os.path.join(hf_folder, index_file)):
-                    hf_weights_files += nested
+                index_files = get_safetensors_files_in_index(hf_folder, index_file)
+                hf_weights_files = [f for f in index_files or () if os.path.isfile(f)]
             if len(hf_weights_files) > 0:
                 if pattern.endswith(".safetensors"):
                     use_safetensors = True
@@ -258,8 +268,11 @@ class DefaultModelLoader(BaseModelLoader):
             # safetensors file. Using both breaks.
             # Here, we download the `model.safetensors.index.json` and filter
             # any files not found in the index.
-            # A snapshot with nested files fetched the index above.
-            if not is_local and not nested and len(hf_weights_files) > 1:
+            if (
+                not is_local
+                and len(hf_weights_files) > 1
+                and not os.path.isfile(os.path.join(hf_folder, index_file))
+            ):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,

@@ -170,22 +170,32 @@ def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "shard_names",
+    ("shard_names", "is_local"),
     [
-        ["tensors/model-00001-of-00001.safetensors"],
-        [
-            "model-00001-of-00002.safetensors",
-            "tensors/model-00002-of-00002.safetensors",
-        ],
-        ["pytorch_model.bin"],
+        (
+            [
+                "tensors/model-00001-of-00002.safetensors",
+                "tensors/model-00002-of-00002.safetensors",
+            ],
+            False,
+        ),
+        (
+            [
+                "model-00001-of-00003.safetensors",
+                "model-00002-of-00003.safetensors",
+                "tensors/model-00003-of-00003.safetensors",
+            ],
+            False,
+        ),
+        (["pytorch_model.bin"], False),
+        (["tensors/model-00001-of-00001.safetensors"], True),
     ],
 )
-def test_hub_snapshot_finds_shards_listed_by_the_index(
-    tmp_path, monkeypatch, shard_names
-):
+def test_finds_shards_listed_by_the_index(tmp_path, monkeypatch, shard_names, is_local):
     """Shards under tensors/, alone or next to root shards, are found through
-    the index, also by the IPC weight cache key. The index is fetched once,
-    and never for a .bin-only snapshot."""
+    the index, also by the IPC weight cache key. A Hub snapshot without the
+    index fetches it once, and never for a .bin-only snapshot; a local
+    directory already has it."""
     shards = [tmp_path / name for name in shard_names]
     for i, shard in enumerate(shards):
         shard.parent.mkdir(exist_ok=True)
@@ -204,14 +214,19 @@ def test_hub_snapshot_finds_shards_listed_by_the_index(
     monkeypatch.setattr(
         f"{loader_module}.download_safetensors_index_file_from_hf", fetch_index
     )
+    model = "org/model"
+    if is_local:
+        fetch_index(model, "model.safetensors.index.json")
+        fetched.clear()
+        model = str(tmp_path)
 
     _, files, use_safetensors, _ = DefaultModelLoader(
         LoadConfig(load_format="hf")
     )._prepare_weights(
-        "org/model", None, None, fall_back_to_pt=False, allow_patterns_overrides=None
+        model, None, None, fall_back_to_pt=False, allow_patterns_overrides=None
     )
 
     assert sorted(files) == sorted(map(str, shards))
     assert use_safetensors == shard_names[0].endswith(".safetensors")
-    assert len(fetched) == use_safetensors
+    assert len(fetched) == (use_safetensors and not is_local)
     assert (hash_checkpoint(str(tmp_path)) is not None) == use_safetensors

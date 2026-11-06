@@ -601,6 +601,21 @@ def download_safetensors_index_file_from_hf(
             logger.info("No %s found in remote.", index_file)
 
 
+def get_safetensors_files_in_index(hf_folder: str, index_file: str) -> list[str] | None:
+    """Return the files the safetensors index lists, or None without an index.
+
+    The files may sit in a subdirectory, like tensors/, and may be missing.
+    """
+    index_file_name = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_file_name):
+        return None
+    # model.safetensors.index.json is a mapping from keys in the
+    # torch state_dict to safetensors file holding that weight.
+    with open(index_file_name) as f:
+        weight_map = json.load(f)["weight_map"]
+    return sorted({os.path.join(hf_folder, name) for name in weight_map.values()})
+
+
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
@@ -609,30 +624,18 @@ def download_safetensors_index_file_from_hf(
 def filter_duplicate_safetensors_files(
     hf_weights_files: list[str], hf_folder: str, index_file: str
 ) -> list[str]:
-    # model.safetensors.index.json is a mapping from keys in the
-    # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, index_file)
-    if not os.path.isfile(index_file_name):
+    weight_files_in_index = get_safetensors_files_in_index(hf_folder, index_file)
+    if weight_files_in_index is None:
         return hf_weights_files
-
-    # Iterate through the weight_map (weight_name: safetensors files)
-    # to identify weights that we should use.
-    with open(index_file_name) as f:
-        weight_map = json.load(f)["weight_map"]
-    weight_files_in_index = set()
-    for weight_name in weight_map:
-        weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
     # Check if files referenced in model.safetensors.index.json actually exist.
     # Raise error if any file is missing.
-    hf_weights_files_set = set(hf_weights_files)
-    missing_files = weight_files_in_index - hf_weights_files_set
+    missing_files = {f for f in weight_files_in_index if not os.path.isfile(f)}
     if missing_files:
         raise FileNotFoundError(
             f"Weight files referenced in index but missing: {missing_files}"
         )
-    # Filter out any fields that are not found in the index file.
-    hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
-    return hf_weights_files
+    # Take the files from the index, which may list some in a subdirectory.
+    return weight_files_in_index
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[str]:
@@ -961,7 +964,19 @@ def drop_checkpoint_cache(
         return
     for checkpoint_dir in checkpoint_dirs:
         dropped_bytes = 0
-        for path in checkpoint_dir.glob("*.safetensors"):
+        paths = set(checkpoint_dir.glob("*.safetensors"))
+        # The index may list shards in a subdirectory, like tensors/.
+        try:
+            index_files = get_safetensors_files_in_index(
+                str(checkpoint_dir), SAFE_WEIGHTS_INDEX_NAME
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not read the safetensors index in %s: %s", checkpoint_dir, exc
+            )
+            index_files = None
+        paths.update(Path(f) for f in index_files or () if os.path.isfile(f))
+        for path in paths:
             try:
                 with path.open("rb") as file:
                     os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)

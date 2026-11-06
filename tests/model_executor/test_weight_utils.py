@@ -389,17 +389,31 @@ class TestKvCacheScaleMapper:
         )
 
 
+@pytest.mark.parametrize(
+    ("index", "calls"),
+    [
+        (
+            '{"weight_map": {"a": "tensors/nested.safetensors", '
+            '"b": "tensors/missing.safetensors"}}',
+            2,
+        ),
+        ("{", 1),
+    ],
+)
 @pytest.mark.parametrize("fails", [False, True])
 def test_drop_checkpoint_cache_releases_local_weight_files(
-    tmp_path, monkeypatch, fails
+    tmp_path, monkeypatch, fails, index, calls
 ):
-    """Evict only weights; cache eviction errors must not prevent loading."""
-    for name in ("weights.safetensors", "config.json"):
+    """Evict only weights, also the ones the index lists under tensors/; cache
+    eviction errors and a broken index must not prevent loading."""
+    (tmp_path / "tensors").mkdir()
+    for name in ("weights.safetensors", "tensors/nested.safetensors", "config.json"):
         (tmp_path / name).touch()
+    (tmp_path / "model.safetensors.index.json").write_text(index)
     fadvise = Mock(side_effect=OSError("cache eviction failed") if fails else None)
     monkeypatch.setattr("os.posix_fadvise", fadvise)
     drop_checkpoint_cache(str(tmp_path))
-    fadvise.assert_called_once()
+    assert fadvise.call_count == calls
 
 
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
