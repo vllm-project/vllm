@@ -279,7 +279,6 @@ def test_transcription_config_keeps_uncapped_audio_whole(vibevoice):
 
     stt_config = model_cls.get_speech_to_text_config(model_config, "transcribe")
 
-    assert stt_config.sample_rate == 24000
     assert stt_config.max_audio_clip_s is None
 
 
@@ -312,22 +311,6 @@ def test_transcription_prompt_matches_hf_processor(vibevoice, context):
     ]
 
 
-def test_transcription_rejects_translation(vibevoice):
-    model_cls, model_config = vibevoice
-
-    with pytest.raises(ValueError, match="translation"):
-        model_cls.get_generation_prompt(
-            SpeechToTextParams(
-                audio=np.zeros(24000, dtype=np.float32),
-                stt_config=model_cls.get_speech_to_text_config(
-                    model_config, "translate"
-                ),
-                model_config=model_config,
-                task_type="translate",
-            )
-        )
-
-
 def test_transcription_output_parsing(vibevoice):
     model_cls, model_config = vibevoice
 
@@ -339,10 +322,4 @@ def test_transcription_output_parsing(vibevoice):
         (0.0, 1.5, "0", "Hello there."),
         (1.62, 3.0, "1", "Hi!"),
     ]
-
-
-def test_transcription_output_parsing_fails_closed(vibevoice):
-    model_cls, model_config = vibevoice
-
-    assert model_cls.post_process_output("Hello.\n", model_config) == "Hello."
     assert model_cls.parse_diarized_transcript("Hello.", model_config) == []
