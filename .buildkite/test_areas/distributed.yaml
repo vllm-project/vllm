@@ -133,6 +133,35 @@ steps:
       - tests/v1/distributed
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
       - vllm/platforms/rocm.py
+      - "!tests/v1/e2e/spec_decode/test_sharded_sampling.py"
+      - "!tests/v1/e2e/spec_decode/utils.py"
+      commands:
+      - export NCCL_CUMEM_HOST_ENABLE=0
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+      - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
+      - pytest -v -s v1/e2e/general/test_sharded_sampling.py
+
+- label: ":amd: (MI355) [Nightly] Batch-Sharded Sampling (Spec Decode)"
+  key: batch-sharded-sampling-spec-decode-amd
+  optional: true
+  dind: false
+  device: mi355_2
+  num_devices: 2
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/sample/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/utils.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
 
 - label: ":nvidia: (L4) Distributed Compile + RPC"
   key: distributed-compile-rpc-tests-2-gpus
