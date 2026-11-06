@@ -33,9 +33,10 @@ from .cute_dsl.fused_ws import KdaFusedWS
 from .cute_dsl.host import fake, layout, stream
 
 K = 128
-# (request, head) items from which KdaFusedWS takes the step (B200, GLM-5.3 shapes:
-# 64 heads, q 6, 4 replayed: KdaFused wins at 512 items, KdaFusedWS from 1728).
-WS_MIN_ITEMS = 1024
+# (request, head) items from which KdaFusedWS takes the step (B200, 64 heads, q 6,
+# 4 replayed, ms per step KdaFused / KdaFusedWS: 512 items 1.43 / 1.53, 768 items
+# 2.19 / 1.98, 1024 items 2.92 / 2.28).
+WS_MIN_ITEMS = 768
 # CTAs per item of KdaFused by item count: clusters fill the GPU at small steps.
 FUSED_SPLIT = ((48, 8), (96, 4), (192, 2), (1 << 30, 1))
 
