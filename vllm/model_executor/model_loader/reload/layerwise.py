@@ -485,6 +485,9 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     parameters, buffers = info.kernel_tensors
     non_persistent = info.kernel_non_persistent_buffers
     for name, param in parameters.items():
+        # tensors kept live while staged (bias) had their loaders wrapped
+        if _get_weight_loader(param).__name__ == "online_process_loader":
+            param.weight_loader = _get_original_loader(param)
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
         layer.register_buffer(name, buffer, persistent=name not in non_persistent)

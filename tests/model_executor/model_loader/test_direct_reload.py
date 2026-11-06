@@ -128,6 +128,7 @@ _SHAPES = {
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
     "deq.online.weight": ((4, 4), torch.bfloat16),
+    "deq.online.bias": ((4,), torch.bfloat16),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -173,13 +174,15 @@ class _ToyModel(torch.nn.Module):
                 if not hasattr(parent, part):
                     parent.add_module(part, _Layer(_PWAL[".".join(path[: i + 1])]))
                 parent = getattr(parent, part)
-            online = path[-1] == "online"
+            # as the online methods' create_weights: the weight on meta; the
+            # bias is registered later by the layer, on the device
+            online = path[-1] == "online" and local == "weight"
             param = torch.nn.Parameter(
                 torch.empty(shape, dtype=dtype, device="meta" if online else None),
                 False,
             )
             parent.register_parameter(local, param)
-            if online:  # as the online methods' create_weights
+            if online:
                 parent.quant_method = _OnlineMethod(_PWAL["deq.online"])
                 initialize_online_processing(parent)
 
@@ -325,8 +328,11 @@ class TestUnsent:
     @pytest.mark.parametrize(
         "unsent,kept",
         [
-            ("attn.kv_b.weight", ["attn.kv_b.weight"]),
-            ("deq.online.weight", ["deq.online.weight", "deq.online.weight_scale"]),
+            (["attn.kv_b.weight"], ["attn.kv_b.weight"]),
+            (
+                ["deq.online.weight", "deq.online.bias"],
+                ["deq.online.weight", "deq.online.weight_scale", "deq.online.bias"],
+            ),
         ],
         ids=["no-post-processing", "online-quant"],
     )
@@ -339,13 +345,32 @@ class TestUnsent:
         model = _cold_start(_checkpoint())
         old = _checkpoint()
         new = _checkpoint(1.01)
-        sent = {n: t for n, t in new.items() if n != unsent}
+        sent = {n: t for n, t in new.items() if n not in unsent}
         before = _state(model)
         _reload(model, sent)
         after = _state(model)
         _assert_same(after, before, names=kept, addresses=True)
-        expected = dict(new, **{unsent: old[unsent]})
+        expected = dict(new, **{n: old[n] for n in unsent})
         _assert_same(after, _state(_cold_start(expected)))
+        # the bias stayed live while staged: its loader is unwrapped again
+        bias = model.deq.online.bias
+        assert getattr(bias, "weight_loader", default_weight_loader).__name__ != (
+            "online_process_loader"
+        )
+
+    def test_unsent_after_aborted_processing_is_not_requantized(self):
+        # an update that failed inside the staged quantization cleared the
+        # one-shot guard; the next update leaves the module out: its kernel
+        # tensors go back and must not be quantized again
+        model = _cold_start(_checkpoint())
+        before = _state(model)
+        begin_direct_reload(model)
+        del model.deq.online._already_called_process_weights_after_loading
+        new = _checkpoint(1.01)
+        unsent = ["deq.online.weight", "deq.online.bias"]
+        _reload(model, {n: t for n, t in new.items() if n not in unsent})
+        _assert_same(_state(model), before, names=unsent, addresses=True)
+        assert model.deq.online.quant_method.runs == 1
 
 
 class TestRefusals:
@@ -385,6 +410,13 @@ class TestRefusals:
         monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
         with pytest.raises(RuntimeError, match="fused shared experts"):
             _cold_start(_checkpoint())
+
+    def test_load_plan_refuses_online_quantization(self):
+        # `begin` stages online modules: their loaders would buffer the traces
+        from vllm.model_executor.model_loader.reload import check_plannable
+
+        with pytest.raises(RuntimeError, match="online quantization"):
+            check_plannable(_cold_start(_checkpoint()))
 
     def test_online_quantization_with_eplb_refused(self, monkeypatch):
         # the kernel's quant config keeps the staged scales, which EPLB does

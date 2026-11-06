@@ -241,8 +241,11 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     ]
     # Unstage what an aborted update left staged: this only restores the
     # cold-start state, so the checks below still see the committed model.
+    # Its kernel tensors are processed: restore the guard the abort may have
+    # cleared, or finish would quantize them again if the module is unsent.
     for module in online:
         unstage_layer(module)
+        module._already_called_process_weights_after_loading = True
     _check_params_kept(model)
     views = _checkpoint_views(model)
 
