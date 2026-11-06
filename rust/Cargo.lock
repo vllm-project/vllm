@@ -5683,6 +5683,7 @@ dependencies = [
  "native-tls",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "thiserror-ext",
  "tokio",
@@ -5967,6 +5968,7 @@ dependencies = [
 name = "vllm-tracing"
 version = "0.1.0"
 dependencies = [
+ "serde_with",
  "time",
  "tracing",
  "tracing-subscriber",
