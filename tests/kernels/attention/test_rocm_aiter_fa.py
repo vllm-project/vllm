@@ -42,9 +42,10 @@ DIRECT_NUM_HEADS = (8, 2)
 DIRECT_HEAD_SIZE = 128
 DIRECT_DTYPE = torch.bfloat16
 HEAD_SIZE_TEST_NUM_HEADS_PAIRS = [(16, 16), (16, 4)]
-# Prefill seq lens: (query_len, kv_len).
-# Single-token decode is covered separately in test_aiter_mha_decode_single_token.
-SEQ_LENS = [(8, 512), (32, 1024)]
+# Prefill seq lens: (query_len, kv_len). q=1 is a single-token prompt landing in
+# the prefill path; it only matches the reference while min_seqlen_q is 0, since
+# the CK kernel returns early for seqlen_q <= min_seqlen_q.
+SEQ_LENS = [(1, 512), (8, 512), (32, 1024)]
 DIRECT_SEQ_LENS = [(10, 1328), (5, 18), (129, 463)]
 
 
@@ -259,7 +260,7 @@ def _run_direct_flash_attn_case(
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -447,7 +448,7 @@ def _run_single_seq_flash_attn_case(
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -611,7 +612,7 @@ def test_aiter_mha_multi_batch(num_heads, head_size, dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=max(query_lens),
         max_seqlen_k=max_kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -1114,7 +1115,7 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
