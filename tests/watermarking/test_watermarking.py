@@ -21,6 +21,7 @@ from vllm.v1.watermarking import (
 )
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
+from vllm.v1.watermarking.sbw import SBWWatermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     _resolve_watermark_key,
@@ -29,6 +30,8 @@ from vllm.v1.watermarking.spec_decode import (
     speculative_target_watermark_key,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
+from vllm.v1.worker.cpu.sampler import CPUWatermarkSampler
+from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.watermark import (
@@ -469,6 +472,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
 def test_watermark_context_ignores_prefix_cache_bookkeeping():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=3)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1, -1, -1]))
     sampler.req_states = SimpleNamespace(
         total_len=SimpleNamespace(gpu=torch.tensor([4, 0, 5])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([3, 0, 2])),
@@ -662,6 +666,7 @@ def test_repeated_context_mask_can_skip_partial_contexts():
 def test_gpu_sampler_contexts_are_completion_local_for_all_scopes():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=4)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=torch.tensor([[10, 11, 12, 13, 1, 2]])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
@@ -681,6 +686,7 @@ def test_gpu_sampler_contexts_are_completion_local_for_all_scopes():
 def test_gpu_sampler_all_history_skips_partial_context():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=4)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=torch.tensor([[10, 11, 12, 13, 1, 2]])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
@@ -736,6 +742,7 @@ def test_repeated_context_mask_rejects_non_positive_max_history(max_history: int
 
 def test_gpu_sampler_wires_request_history_scope():
     sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(
             gpu=torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]])
@@ -1067,6 +1074,7 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
 def test_gpu_sampler_builds_speculative_contexts_from_drafts():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(gpu=torch.tensor([[100, 101, 10, 11, 0, 0]])),
         prompt_len=SimpleNamespace(gpu=torch.tensor([2])),
@@ -1085,6 +1093,7 @@ def test_gpu_sampler_builds_speculative_contexts_from_drafts():
 def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.deduplicate_contexts = "single_turn"
     sampler.deduplicate_contexts_max_history = None
     sampler.num_speculative_tokens = 4
@@ -1122,6 +1131,7 @@ def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
 def test_rejection_sampler_skips_only_partial_speculative_contexts(scope):
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1]))
     sampler.watermarking = SimpleNamespace(gpu=torch.tensor([True]))
     sampler.deduplicate_contexts = scope
     sampler.deduplicate_contexts_max_history = None
@@ -1268,6 +1278,7 @@ def test_draft_context_deduplication_accelerator_parity(
 def test_gpu_sampler_builds_chunked_multi_request_speculative_contexts():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.watermark_context_start = SimpleNamespace(gpu=torch.tensor([-1, -1, -1]))
     sampler.req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(
             gpu=torch.tensor(
@@ -1971,3 +1982,4 @@ def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch
     )
 
     assert torch.equal(sampled, torch.tensor([3, 4]))
+

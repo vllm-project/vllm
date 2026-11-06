@@ -28,6 +28,7 @@ from .utils import (
     BeamSearchSequence,
     create_sort_beams_key_function,
     get_beam_search_eos_token_ids,
+    get_watermark_context_start,
 )
 
 logger = init_logger(__name__)
@@ -87,7 +88,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
-        self.llm_engine.input_processor.resolve_watermarking(params)
+        watermarking = self.llm_engine.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
 
@@ -116,7 +117,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
-            watermarking=False,
+            watermarking=watermarking,
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
@@ -283,9 +284,30 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         else:
             active_indices = list(range(len(all_beams)))
             active_beams = all_beams
-            active_params = self._params_to_seq(  # type: ignore[assignment]
-                base_sampling_params, len(all_beams)
-            )
+            if watermarking := base_sampling_params.watermarking:
+                # Each beam's prompt carries the beam-so-far, so the
+                # watermark sampler must treat it as generated context
+                # rather than prompt. Fresh params per beam: the context
+                # start is per prompt length.
+                active_params = [
+                    SamplingParams(
+                        logprobs=base_sampling_params.logprobs,
+                        logprob_token_ids=base_sampling_params.logprob_token_ids,
+                        max_tokens=1,
+                        temperature=base_sampling_params.temperature,
+                        watermarking=watermarking,
+                        detokenize=False,
+                        skip_clone=True,
+                        _watermark_context_start=(
+                            get_watermark_context_start(beam, watermarking)
+                        ),
+                    )
+                    for beam in all_beams
+                ]
+            else:
+                active_params = self._params_to_seq(  # type: ignore[assignment]
+                    base_sampling_params, len(all_beams)
+                )
 
         # only runs for one step
         # we don't need to use tqdm here
@@ -509,6 +531,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     else None
                 ),
                 skip_clone=True,
+                _watermark_context_start=get_watermark_context_start(
+                    beam, base_params.watermarking
+                ),
             )
             result.append((beam_params, allowed_ids))
 

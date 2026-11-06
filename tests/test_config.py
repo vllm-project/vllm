@@ -4449,6 +4449,74 @@ def test_unwatermarked_beam_does_not_bypass_engine_incompatibilities():
         )
 
 
+def _sbw_vllm_config(tmp_path: Path, logprobs_mode: str) -> VllmConfig:
+    """A VllmConfig whose engine runs SBW with a real (offline) ModelConfig."""
+    from transformers import LlamaConfig
+
+    _write_json(
+        tmp_path / "config.json",
+        LlamaConfig(
+            hidden_size=8,
+            intermediate_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            vocab_size=256,
+            max_position_embeddings=64,
+        ).to_dict(),
+    )
+    model_config = ModelConfig(
+        str(tmp_path), tokenizer_mode="skip", logprobs_mode=logprobs_mode
+    )
+    config = object.__new__(VllmConfig)
+    config.model_config = model_config
+    config.watermark_config = WatermarkConfig(key=42, algorithm="sbw")
+    config.attention_config = AttentionConfig()
+    config.speculative_config = None
+    return config
+
+
+def test_sbw_watermark_allows_beam_search_with_processed_logprobs(tmp_path):
+    config = _sbw_vllm_config(tmp_path, logprobs_mode="processed_logprobs")
+
+    assert config._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1)
+    )
+
+
+def test_sbw_watermark_warns_on_beam_search_with_raw_logprobs(
+    tmp_path, caplog_vllm, disable_log_dedup
+):
+    """Beam expansion ranks candidates by the returned logprobs, which only
+    carry the watermark bias in a processed mode; on the raw default the
+    request runs unwatermarked with a warning, like other unsupported
+    decoding modes."""
+    config = _sbw_vllm_config(tmp_path, logprobs_mode="raw_logprobs")
+
+    with caplog_vllm.at_level(logging.WARNING):
+        enabled = config._check_supports_watermarking(
+            BeamSearchParams(beam_width=2, max_tokens=1)
+        )
+
+    assert not enabled
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+
+
+def test_gumbel_watermark_rejects_beam_search_even_with_processed_logprobs(
+    tmp_path, caplog_vllm, disable_log_dedup
+):
+    config = _sbw_vllm_config(tmp_path, logprobs_mode="processed_logprobs")
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+
+    with caplog_vllm.at_level(logging.WARNING):
+        enabled = config._check_supports_watermarking(
+            BeamSearchParams(beam_width=2, max_tokens=1)
+        )
+
+    assert not enabled
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+
+
 def test_gumbel_watermark_rejects_custom_sampler():
     with pytest.raises(ValueError, match="custom samplers are not supported"):
         _watermarked_vllm_config()._check_supports_watermarking(custom_sampler=True)

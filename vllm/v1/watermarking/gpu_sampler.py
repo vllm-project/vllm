@@ -35,10 +35,19 @@ class GPUWatermarkSampler(Sampler):
         )
         self.watermarking.np.fill(True)
         self.watermarking.copy_to_uva()
+        # -1 marks "unset": the context start is the request prompt length.
+        self.watermark_context_start = UvaBackedTensor(
+            self.sampling_states.max_num_reqs, dtype=torch.int32
+        )
+        self.watermark_context_start.np.fill(-1)
+        self.watermark_context_start.copy_to_uva()
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         super().add_request(req_idx, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
+        context_start = sampling_params._watermark_context_start
+        if context_start is not None:
+            self.watermark_context_start.np[req_idx] = context_start
         if (
             sampling_params.watermarking
             and sampling_params.temperature == 0
@@ -53,6 +62,7 @@ class GPUWatermarkSampler(Sampler):
     def apply_staged_writes(self) -> None:
         super().apply_staged_writes()
         self.watermarking.copy_to_uva()
+        self.watermark_context_start.copy_to_uva()
 
     def sample(
         self,
@@ -200,10 +210,17 @@ class GPUWatermarkSampler(Sampler):
         contexts: torch.Tensor,
         expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # The mask functions index boundaries by request slot, so resolve the
+        # context start over every slot: beam requests mark where their
+        # generated tokens begin inside the submitted prompt; all others use
+        # the prompt length.
+        prompt_lens = self.req_states.prompt_len.gpu.to(torch.int64)
+        context_starts = self.watermark_context_start.gpu.to(torch.int64)
+        boundary_lens = torch.where(context_starts >= 0, context_starts, prompt_lens)
         repeated = repeated_context_mask(
             self.req_states.all_token_ids.gpu,
             expanded_idx_mapping,
-            self.req_states.prompt_len.gpu,
+            boundary_lens,
             self.req_states.total_len.gpu,
             contexts,
             self.deduplicate_contexts_max_history,
@@ -237,6 +254,12 @@ class GPUWatermarkSampler(Sampler):
         safe_req_indices = req_indices.clamp_min(0)
         total_lens = self.req_states.total_len.gpu[safe_req_indices].to(torch.int64)
         prompt_lens = self.req_states.prompt_len.gpu[safe_req_indices].to(torch.int64)
+        context_starts = self.watermark_context_start.gpu[safe_req_indices].to(
+            torch.int64
+        )
+        # Beam search marks where its generated tokens start inside the
+        # submitted prompt; every other request starts at the prompt end.
+        context_starts = torch.where(context_starts >= 0, context_starts, prompt_lens)
         if expanded_local_pos is None:
             expanded_local_pos = torch.zeros_like(req_indices)
         else:
@@ -251,7 +274,7 @@ class GPUWatermarkSampler(Sampler):
         valid_committed = (
             valid_reqs.unsqueeze(-1)
             & committed
-            & (positions >= prompt_lens.unsqueeze(-1))
+            & (positions >= context_starts.unsqueeze(-1))
         )
         committed_contexts = self.req_states.all_token_ids.gpu[
             safe_req_indices.unsqueeze(-1),

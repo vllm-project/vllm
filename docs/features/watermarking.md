@@ -68,12 +68,14 @@ When `watermark_config` is set, the Prometheus counter
 - `watermarked`: watermarking was enabled for the request, including when
   enforcement overrides an opt-out.
 - `skipped`: the request asked for the watermark (omitted or `true`) but could
-  not use it, such as `temperature=0` and trace replay requests. A beam search
-  request that asks for the watermark runs without it and logs a warning. Its
-  beam steps count as `not_watermarked`, not `skipped`, when enforcement is off.
+  not use it, such as `temperature=0` Gumbel and trace replay requests. A
+  Gumbel engine's beam search request that asks for the watermark runs without
+  it and logs a warning. Its beam steps count as `not_watermarked`, not
+  `skipped`, when enforcement is off.
 - `not_watermarked`: all other finished requests. This includes explicit
-  opt-outs, pooling requests, and the internal requests of beam search (one
-  per beam step), generative scoring and language detection, unless enforced.
+  opt-outs, pooling requests, the internal requests of Gumbel beam search and
+  unwatermarked beam search (one per beam step), generative scoring and
+  language detection, unless enforced.
 
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
@@ -112,8 +114,17 @@ generation.
   greedy decoding. Transcription and translation can use a nonzero temperature
   to apply the configured watermark.
 - `top_k=1` cannot embed a watermark, even with enforcement and nonzero temperature.
-- Beam search cannot apply a watermark. The first watermarked beam request emits
-  a server-side warning and runs without watermarking.
+- Beam search cannot apply a noise-based (Gumbel) watermark: the first such
+  beam request emits a server-side warning and runs without watermarking.
+  Logit-bias watermarking (`sbw`) can watermark beam search, but only when the
+  engine starts with `logprobs_mode="processed_logprobs"` (or
+  `"processed_logits"`), because beam expansion ranks candidates by the
+  returned logprobs. On the raw default the beam request emits a server-side
+  warning and runs without watermarking. Each beam step submits the original
+  prompt plus the beam-so-far as its prompt; the watermark sampler marks the
+  beam-so-far as generated history, so contexts slide over it exactly as in
+  ordinary inference and the winning beam detects with the standard detector
+  on its generated tokens.
 - Trace replay replaces the sampled token and therefore cannot apply a
   watermark. The first watermarked trace replay request emits a server-side
   warning and runs without watermarking.
@@ -365,8 +376,11 @@ watermarked output or to modify watermarked text so it is no longer detected.
 - High `sbw_delta` values bias token selection away from the model distribution,
   which can reduce output quality. The default of 2.0 is a reasonable starting
   point; lower values reduce the effect on quality at the cost of weaker signal.
-- Beam search expands candidates from model log probabilities and does not apply
-  Gumbel-max watermarking.
+- Beam search expands candidates from model log probabilities. Gumbel-max
+  watermarking cannot apply; `sbw` can, provided the engine runs with
+  `logprobs_mode="processed_logprobs"`: the default `raw_logprobs` come from
+  before the watermark bias and the beam request runs unwatermarked with a
+  warning.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
 - Global custom logits processors are unavailable because Model Runner V2 does
