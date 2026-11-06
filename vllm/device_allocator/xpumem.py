@@ -13,7 +13,7 @@ from vllm.device_allocator import (
     DEFERRABLE_TAGS,
     AllocationData,
     HandleType,
-    only_holding,
+    discardable_allocations,
 )
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -186,9 +186,7 @@ class XpuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
-        discarded = only_holding(
-            self.allocator_and_pools.get("weights", []), discardable
-        )
+        discarded = discardable_allocations(self.allocator_and_pools, discardable)
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:

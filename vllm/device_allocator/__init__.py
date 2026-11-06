@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Protocol, TypeAlias
 
@@ -26,15 +26,16 @@ class AllocationData:
     is_asleep: bool = False
 
 
-def only_holding(
-    pools: Iterable[tuple[Any, Any]], tensors: Collection[int]
+def discardable_allocations(
+    allocator_and_pools: Mapping[str, Iterable[tuple[Any, Any]]],
+    tensors: Collection[int],
 ) -> set[int]:
-    """Allocations of these pools whose live tensors all start at these addresses."""
+    """Weights allocations whose live tensors all start at these addresses."""
     if not tensors:
         return set()
     return {
         allocation["address"]
-        for pool, _ in pools
+        for pool, _ in allocator_and_pools.get("weights", ())
         for allocation in pool.snapshot()
         if all(
             block["state"] == "inactive" or block["address"] in tensors
