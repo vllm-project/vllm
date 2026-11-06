@@ -969,6 +969,7 @@ class Scheduler(SchedulerInterface):
             if (
                 context_pages
                 and prefill_context_pages
+                and self.max_prefill_context_pages is not None
                 and prefill_context_pages + context_pages
                 > self.max_prefill_context_pages
             ):
@@ -1518,6 +1519,7 @@ class Scheduler(SchedulerInterface):
                 if (
                     context_pages
                     and prefill_context_pages
+                    and self.max_prefill_context_pages is not None
                     and prefill_context_pages + context_pages
                     > self.max_prefill_context_pages
                 ):

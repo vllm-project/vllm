@@ -872,7 +872,7 @@ def sparse_attn_indexer(
             assert num_decode_tokens == gathered_context.num_decode_tokens
             prefill_kv_cache = gathered_context.gather(
                 forward_context.no_compile_layers[mla_layer_name].kv_cache,
-                attn_metadata[mla_layer_name].block_table,
+                attn_metadata[mla_layer_name].block_table,  # type: ignore[attr-defined]
                 kv_cache,
                 attn_metadata_narrowed.block_table,
             )

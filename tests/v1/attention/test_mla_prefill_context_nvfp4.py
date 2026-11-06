@@ -379,7 +379,10 @@ def test_nvfp4_prefill_context_gathers_each_chunk_from_its_start(
     assert chunked_context is not None
     chunks = chunked_context.chunks
     if use_dcp:
-        starts = [c.local_starts for c in chunks]
+        starts = []
+        for c in chunks:
+            assert c.local_starts is not None
+            starts.append(c.local_starts)
         lengths = [c.padded_local_seq_lens for c in chunks]
     else:
         starts = [c.starts.tolist() for c in chunks]

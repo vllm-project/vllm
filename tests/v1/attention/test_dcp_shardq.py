@@ -1280,7 +1280,9 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
 
             # The next layer's gather waits for every rank to finish reading
             # this one: rank 0 lags, and its copy must still hold this layer.
+            assert shardq is not None
             context = shardq.gathered_context
+            assert context is not None
             next_shard = _shard(
                 Replicated(lens, rep.layout), world, rank, 1, LAYER_BLOCK
             )
@@ -1297,7 +1299,8 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 next_shard.index_table,
             )
             _check_workspace(
-                *snapshot,
+                snapshot[0],
+                snapshot[1],
                 rep,
                 new_mla_rows=True,
                 fill=False,
@@ -1326,6 +1329,8 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                     assert after == before
                 else:
                     assert after[path][0] == before.get(path, [0, 0])[0] + 1
+            assert builder.dcp_shardq is not None
+            assert small.dcp_shardq is not None
             stats = builder.dcp_shardq.stats
             assert stats.total[dcp.SHARDQ][0] == len(LAYER_STEPS)
             assert small.dcp_shardq.stats.total[dcp.WORKSPACE][0] == len(LAYER_STEPS)

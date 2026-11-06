@@ -371,7 +371,7 @@ def test_profile_reservation_matches_decode_peak(merge):
     )
     q = torch.randn(num_rows, 1, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
     q_scale, weights = mqa_logits_mx_inputs(
-        q, None, torch.randn(num_rows, heads, device="cuda")
+        q, None, torch.randn(num_rows, heads, device="cuda"), torch.bfloat16
     )
     indices = torch.arange(num_rows, dtype=torch.int32, device="cuda")
     schedule = get_paged_mqa_logits_metadata(
@@ -379,9 +379,9 @@ def test_profile_reservation_matches_decode_peak(merge):
     )
     row_ends = SparseIndexerTopk._row_ends(ctx, 1, num_rows)
     torch.accelerator.synchronize()
-    torch.cuda.empty_cache()
-    base = torch.cuda.memory_allocated()
-    torch.cuda.reset_peak_memory_stats()
+    torch.accelerator.empty_cache()
+    base = torch.accelerator.memory_allocated()
+    torch.accelerator.reset_peak_memory_stats()
     logits = fp8_fp4_paged_mqa_logits(
         (q, q_scale),
         kv_cache,
@@ -391,6 +391,7 @@ def test_profile_reservation_matches_decode_peak(merge):
         schedule,
         max_model_len,
         indices=indices,
+        logits_dtype=torch.bfloat16,
     )
     assert logits.dtype == torch.bfloat16
     assert logits.shape == (num_rows, max_model_len)
@@ -407,7 +408,7 @@ def test_profile_reservation_matches_decode_peak(merge):
     else:
         as_fp32_logits(logits, row_ends)
     torch.accelerator.synchronize()
-    peak = torch.cuda.max_memory_allocated() - base
+    peak = torch.accelerator.max_memory_allocated() - base
 
     reserved = _decode_logits_profile_bytes(
         num_rows,
