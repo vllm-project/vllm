@@ -685,20 +685,37 @@ class TransferTopology:
 
 class CircuitBreaker:
     """Opens for ``cooldown_s`` after ``failure_threshold`` consecutive
-    failures; callers skip requests while it is open. After the cooldown, a
-    single failure reopens it and a success resets the failure count."""
+    failures; callers skip requests while it is open. After the cooldown,
+    ``allow()`` admits a single probe and holds others for ``probe_window_s``:
+    a failed probe reopens the breaker, a success closes it, and a probe that
+    never reports back lets the next request probe once the window passes."""
 
-    def __init__(self, name: str, cooldown_s: float, failure_threshold: int):
-        assert cooldown_s > 0 and failure_threshold > 0
+    def __init__(
+        self,
+        name: str,
+        cooldown_s: float,
+        failure_threshold: int,
+        probe_window_s: float,
+    ):
+        assert cooldown_s > 0 and failure_threshold > 0 and probe_window_s > 0
         self.name = name
         self.cooldown_s = cooldown_s
         self.failure_threshold = failure_threshold
+        self.probe_window_s = probe_window_s
         self._failures = 0
         self._open_until = 0.0
 
     @property
     def is_open(self) -> bool:
         return time.monotonic() < self._open_until
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        if now < self._open_until:
+            return False
+        if self._failures >= self.failure_threshold:
+            self._open_until = now + self.probe_window_s
+        return True
 
     def record_failure(self) -> None:
         self._failures += 1
