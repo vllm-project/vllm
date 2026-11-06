@@ -343,18 +343,6 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
     )
 
 
-def _flatten_qwen3_asr_config(config_dict: dict[str, Any]) -> dict[str, Any]:
-    """Convert an original Qwen3-ASR `config.json` to the Transformers layout."""
-    thinker_config = config_dict["thinker_config"]
-    audio_config = {**thinker_config["audio_config"], "model_type": "qwen3_asr_encoder"}
-    config_dict = {**thinker_config, **config_dict, "audio_config": audio_config}
-    del config_dict["thinker_config"]
-    if thinker_config["model_type"] == "qwen3_forced_aligner":
-        config_dict["architectures"] = ["Qwen3ASRForcedAlignerForTokenClassification"]
-        config_dict["num_labels"] = config_dict.pop("classify_num")
-    return config_dict
-
-
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -427,8 +415,17 @@ class HFConfigParser(ConfigParserBase):
         elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
             from transformers import Qwen3ASRConfig
 
+            # Original checkpoints nest their fields in `thinker_config`
+            thinker_config = config_dict.pop("thinker_config")
+            audio_config = thinker_config["audio_config"]
+            audio_config["model_type"] = "qwen3_asr_encoder"
+            config_dict = {**thinker_config, **config_dict}
+            if thinker_config["model_type"] == "qwen3_forced_aligner":
+                config_dict["architectures"] = [
+                    "Qwen3ASRForcedAlignerForTokenClassification"
+                ]
+                config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
-            config_dict = _flatten_qwen3_asr_config(config_dict)
             config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
