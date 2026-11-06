@@ -467,3 +467,17 @@ def test_indexer_parts_live_in_fused_weight(monkeypatch, model_config, layout, m
             new, expected = _indexer_checkpoint(seed, sent)
             _reload(model, new, mode, model_config, monkeypatch)
             torch.testing.assert_close(fused, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_mla_dequantizes_in_loaded_storage(monkeypatch, model_config, mode):
+    """The FP8 weight's storage is BF16-sized, so the dequantized weight takes
+    no second allocation, in either load mode."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _MlaModel()
+    before = _ptrs(model)
+    record_metadata_for_reloading(model)
+    for item in _mla_checkpoint(0).items():
+        model.load_weights([item])
+    process_weights_after_loading(model, model_config, _DEVICE)
+    assert _ptrs(model) == before

@@ -528,7 +528,7 @@ class Fp8DequantLinearMethod(LinearMethodBase):
                 weight[i * block_n : i * block_n + rows.shape[0]] = (
                     rows * s[:, : rows.shape[1]]
                 )
-            replace_parameter(layer, "weight", weight)
+            _into_own_storage(layer, weight)
         for name, param in layer.named_parameters(recurse=False):
             if name not in ("weight", "bias"):
                 retire_parameter(layer, name)
@@ -543,10 +543,33 @@ class Fp8DequantLinearMethod(LinearMethodBase):
         return self.bf16_method.apply(layer, x, bias)
 
 
+def _into_own_storage(layer: torch.nn.Module, weight: torch.Tensor) -> None:
+    """Make ``weight`` (dequantized into a temporary) the layer's weight, in the
+    loaded weight's storage when it fits (it was allocated BF16-sized), so the
+    FP8 bytes and the BF16 result share one allocation in every load mode."""
+    param = layer.weight
+    storage = param.untyped_storage()
+    if (
+        param.is_contiguous()
+        and param.storage_offset() == 0
+        and storage.nbytes() >= weight.nbytes
+    ):
+        view = storage_view(storage, 0, weight.shape, weight.stride(), weight.dtype)
+        param.data = view.copy_(weight)
+    else:
+        replace_parameter(layer, "weight", weight)
+
+
 def _load_weight_in_sent_dtype(layer: torch.nn.Module) -> None:
     """Keep a whole weight in the dtype it is sent in: FP8, or BF16 (no scale
-    needed). The loader is bound to the layer, so layerwise reload's metadata
-    does not keep the layer alive (`sanitize_layer_refs`)."""
+    needed), on storage sized for BF16. The loader is bound to the layer, so
+    layerwise reload's metadata does not keep the layer alive
+    (`sanitize_layer_refs`)."""
+    param = layer.weight
+    bf16 = torch.empty(param.shape, dtype=layer.params_dtype, device=param.device)
+    param.data = storage_view(
+        bf16.untyped_storage(), 0, param.shape, param.stride(), param.dtype
+    )
     layer.checkpoint_weight_loader = layer.weight.weight_loader
     layer.weight.weight_loader = MethodType(_weight_loader_in_sent_dtype, layer)
 
