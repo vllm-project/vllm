@@ -48,7 +48,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import dequantized_fp8_config
+from vllm.model_executor.layers.quantization.fp8 import Fp8DequantLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
     get_fp8_min_max,
@@ -1638,17 +1638,19 @@ def init_indexer_wk_weights_proj(
     quant_config: QuantizationConfig | None,
     prefix: str,
 ) -> None:
-    """Build the indexer's checkpoint layers ``wk`` (quantized as the checkpoint
-    stores it) and ``weights_proj`` (BF16), and ``wk_weights_proj``, the BF16
-    linear that runs both as one GEMM. Its weight is not a parameter: it is
-    derived from theirs after every load (`fuse_indexer_wk_weights_proj`)."""
+    """Build the indexer's checkpoint layers ``wk`` (stored as the checkpoint
+    stores it, run in BF16: `Fp8DequantLinearMethod`) and ``weights_proj``
+    (BF16), and ``wk_weights_proj``, the BF16 linear that runs both as one
+    GEMM. Its weight is not a parameter: it is derived from theirs after every
+    load (`fuse_indexer_wk_weights_proj`)."""
     indexer.wk = ReplicatedLinear(
         hidden_size,
         indexer.head_dim,
         bias=False,
-        quant_config=dequantized_fp8_config(quant_config) or quant_config,
+        quant_config=quant_config,
         prefix=f"{prefix}.wk",
     )
+    Fp8DequantLinearMethod.wrap(indexer.wk)
     indexer.weights_proj = ReplicatedLinear(
         hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
     )
