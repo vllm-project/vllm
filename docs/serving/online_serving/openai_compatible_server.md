@@ -174,6 +174,8 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+The legacy `functions` and `function_call` request fields are not supported; requests that set them are rejected with HTTP 400. Use `tools` and `tool_choice` instead. Following OpenAI, `functions: []` and `function_call: null` are treated as omitted, and `function_call: "auto"` or `"none"` are accepted as no-op values.
+
 With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
 
 #### Extra parameters
