@@ -449,8 +449,10 @@ steps:
     - vllm/v1/spec_decode/llm_base_proposer.py
     - vllm/v1/spec_decode/eagle.py
     - vllm/v1/worker/gpu/spec_decode/eagle/
+    - vllm/v1/worker/gpu/spec_decode/speculator.py
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
+    - vllm/model_executor/models/qwen3_next_mtp.py
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
