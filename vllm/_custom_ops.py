@@ -3041,7 +3041,9 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
 
     ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
     ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
-    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
+    device dequantization scales ``kv_k_scale``/``kv_v_scale``. An fp8 cache
+    uses them too when given, as ``reshape_and_cache_flash`` does, and 1.0
+    otherwise. Slot
     ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
     its E4M3 block scales, so every head is one contiguous run of the page.
 
