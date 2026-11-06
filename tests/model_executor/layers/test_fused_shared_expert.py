@@ -174,7 +174,6 @@ def get_fse_test_model_config(
             mlp_layer_types=["sparse", "sparse"],
             rotary_dim=64,
             scoring_func="sigmoid",
-            use_routing_bias=True,
             quantization_config=quantization_config,
         )
         return config, minimax_m3_model.MiniMaxM3Model

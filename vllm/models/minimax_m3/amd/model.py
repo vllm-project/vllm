@@ -458,16 +458,10 @@ class MiniMaxM3MoE(nn.Module):
         self.n_shared_experts = 1
 
         # Sigmoid routing uses a per-expert score-correction bias for selection.
-        self.use_routing_bias = getattr(config, "use_routing_bias", False)
-        if self.use_routing_bias:
-            self.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.num_local_experts, dtype=torch.float32)
-            )
-            self.e_score_correction_bias.weight_loader = (
-                MiniMaxM3MoE.ebias_weight_loader
-            )
-        else:
-            self.e_score_correction_bias = None
+        self.e_score_correction_bias = nn.Parameter(
+            torch.zeros(config.num_local_experts, dtype=torch.float32)
+        )
+        self.e_score_correction_bias.weight_loader = MiniMaxM3MoE.ebias_weight_loader
 
         # Router weights are stored in fp32; GateLinear upcasts the bf16
         # activations and computes the gate in fp32 (fp32 router logits).

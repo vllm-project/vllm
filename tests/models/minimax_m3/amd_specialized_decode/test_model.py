@@ -80,7 +80,6 @@ def model_dir(tmp_path_factory):
             num_hidden_layers=LAYERS,
             vocab_size=VOCAB,
             moe_layer_freq=layers,
-            use_routing_bias=True,
             sparse_attention_config=dict(
                 use_sparse_attention=True,
                 sparse_index_dim=128,

@@ -123,7 +123,6 @@ def _mega_moe_block(num_experts=8, top_k=2, hidden_size=512, intermediate_size=2
         num_experts_per_tok=top_k,
         scoring_func="sigmoid",
         routed_scaling_factor=2.0,
-        use_routing_bias=False,
         hidden_act="swigluoai",
         swiglu_limit=7.0,
         swiglu_alpha=1.702,
