@@ -510,7 +510,7 @@ class DotsVisionTransformer(nn.Module):
     def get_pos_ids_by_grid(self, grid_thw: list[list[int]]) -> list[torch.Tensor]:
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h, device=self.device).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -520,7 +520,7 @@ class DotsVisionTransformer(nn.Module):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = torch.arange(w, device=self.device).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -538,7 +538,6 @@ class DotsVisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        pos_ids = pos_ids.to(rotary_pos_emb_full.device)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
