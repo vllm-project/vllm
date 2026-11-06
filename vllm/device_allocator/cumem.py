@@ -11,13 +11,18 @@
 import atexit
 import gc
 import mmap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 
-from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
+from vllm.device_allocator import (
+    DEFERRABLE_TAGS,
+    AllocationData,
+    HandleType,
+    discardable_allocations,
+)
 from vllm.device_allocator.alloc_conf import (
     EXPANDABLE_SEGMENTS,
     conf_flag_enabled,
@@ -253,7 +258,11 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        discardable: Collection[int] = (),
+    ) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
@@ -261,6 +270,8 @@ class CuMemAllocator:
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+            discardable: Addresses of tensors the caller rewrites after waking.
+                Weights allocations holding nothing else are discarded too.
 
         """
         if offload_tags is None:
@@ -275,15 +286,14 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
+        discarded = discardable_allocations(self.allocator_and_pools, discardable)
 
         for ptr, data in self.pointer_to_data.items():
+            offload = data.tag in offload_tags and ptr not in discarded
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if offload != (data.cpu_backup_tensor is not None):
                     has_policy_conflict = True
                 continue
-            offload = data.tag in offload_tags
             total_bytes += data.handle[1]
             if offload:
                 backup_bytes += data.handle[1]
