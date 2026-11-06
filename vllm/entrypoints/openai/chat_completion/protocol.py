@@ -80,8 +80,10 @@ def _check_legacy_function_fields(data: dict) -> None:
     fields are not part of the request model, so they would otherwise land in
     ``model_extra`` and be silently ignored, answering the client's tool
     request with ordinary text. OpenAI treats ``[]`` and ``null`` as omitted,
-    and ``"auto"``/``"none"`` as no-op values, so only meaningful values are
-    rejected.
+    and ``"auto"`` as the default, so those carry no tool instruction and are
+    accepted. ``"none"`` is a real "do not call tools" instruction whenever
+    ``tools`` is set, which would otherwise be dropped, so it is rejected
+    there too.
     """
     functions = data.get("functions")
     if functions is not None and functions != []:
@@ -91,7 +93,18 @@ def _check_legacy_function_fields(data: dict) -> None:
             value=functions,
         )
     function_call = data.get("function_call")
-    if function_call not in (None, "none", "auto"):
+    if function_call == "none":
+        # Without tools there is nothing to suppress, so this is a no-op;
+        # with tools it changes behavior that would otherwise be dropped.
+        if not data.get("tools"):
+            return
+        raise VLLMValidationError(
+            "The legacy `function_call` field is not supported when `tools` "
+            'is set. Use `tool_choice: "none"` instead.',
+            parameter="function_call",
+            value=function_call,
+        )
+    if function_call not in (None, "auto"):
         raise VLLMValidationError(
             "The legacy `function_call` field is not supported. "
             "Use `tool_choice` instead.",

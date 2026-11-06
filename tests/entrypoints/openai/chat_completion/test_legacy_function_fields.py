@@ -88,9 +88,34 @@ def test_legacy_function_call_error_names_field_and_replacement():
     ],
 )
 def test_omitted_and_no_op_legacy_values_still_validate(extra):
-    """OpenAI treats ``[]``/``null`` as omitted and ``"none"`` as an explicit
-    no-call, so these carry no request for tools and must keep working."""
+    """OpenAI treats ``[]``/``null`` as omitted and ``"auto"`` as the default.
+    ``"none"`` is only a no-op without ``tools``; with ``tools`` it is a real
+    "do not call tools" instruction and is covered separately."""
     ChatCompletionRequest.model_validate(_request(**extra))
+
+
+def test_function_call_none_with_tools_rejected():
+    """``function_call: "none"`` suppresses tool calls, and dropping it would
+    let the caller's explicit instruction through as ``tool_choice="auto"``."""
+    with pytest.raises(
+        VLLMValidationError, match=r"parameter=function_call"
+    ) as excinfo:
+        ChatCompletionRequest.model_validate(
+            _request(
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "parameters": {}},
+                    }
+                ],
+                function_call="none",
+            )
+        )
+    assert "tool_choice" in str(excinfo.value)
+
+
+def test_function_call_none_with_empty_tools_still_validates():
+    ChatCompletionRequest.model_validate(_request(tools=[], function_call="none"))
 
 
 def test_modern_tools_unaffected():
@@ -206,6 +231,13 @@ def client():
                 "function_call": {"name": "get_weather"},
             },
             "functions",
+        ),
+        (
+            {
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+                "function_call": "none",
+            },
+            "function_call",
         ),
     ],
 )
