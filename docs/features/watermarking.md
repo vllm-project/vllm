@@ -227,8 +227,8 @@ With greedy drafts, speculative decoding keeps this per-token selection.
 The same two key streams also support probabilistic drafting without changing
 its acceptance rate. In this mode, the speculative protocol selects the key
 instead of `alpha`: draft tokens use key A, while rejection recovery and bonus
-tokens use key B. The ordinary target-to-draft probability-ratio test remains unchanged,
-implementing [SynthID-Text Supplementary Algorithm
+tokens use key B. The ordinary target-to-draft probability-ratio test remains
+unchanged, implementing [SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
 
 To use `dual_key_gumbel` with probabilistic drafting:

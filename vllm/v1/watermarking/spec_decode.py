@@ -237,12 +237,9 @@ def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermark
 def create_sampler_watermarker(
     watermarker: Watermarker, draft_sample_method: str | None
 ) -> Watermarker:
-    """Return the watermarker of the target sampler.
-
-    Probabilistic drafts carry their own watermark, so the sampler only keeps
-    the target role. Greedy drafts are verified against the sampler's sample,
-    which must then follow the same algorithm as non-speculative decoding.
-    """
+    """Probabilistic drafts carry their own watermark, so the sampler keeps only
+    the target role. Greedy drafts are verified against the sampler's own
+    sample, which therefore keeps the full algorithm."""
     if draft_sample_method == "probabilistic":
         return create_speculative_target_watermarker(watermarker)
     return watermarker

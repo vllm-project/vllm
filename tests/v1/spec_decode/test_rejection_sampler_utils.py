@@ -1261,9 +1261,9 @@ def test_greedy_drafts_are_verified_against_the_watermarked_sample(monkeypatch):
     all_token_ids[:, :4] = torch.tensor(
         [100, 101, 10, 11], dtype=torch.int32, device=device
     )
-    all_token_ids[:, :4] += torch.arange(
-        num_reqs, dtype=torch.int32, device=device
-    )[:, None]
+    all_token_ids[:, :4] += torch.arange(num_reqs, dtype=torch.int32, device=device)[
+        :, None
+    ]
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = watermarker
     sampler.deduplicate_contexts = "none"
