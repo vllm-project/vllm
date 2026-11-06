@@ -65,6 +65,7 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
+from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     MHCOverlapStream,
@@ -212,7 +213,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         if engram_layout is not None:
             layer_id = extract_layer_index(prefix)
             if layer_id in engram_layout.layer_ids:
-                self.engram = Engram(
+                self.engram = RocmEngram(
                     config,
                     vllm_config.quant_config,
                     engram_layout,
@@ -614,8 +615,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
         # Config flag is the switch. On ROCm, attention forces
-        # swa_cache_layer.bounded_replay off only when the CDNA version is
-        # not 4. CDNA4 keeps the window in bounded replay.
+        # swa_cache_layer.bounded_replay off unless the CDNA version
+        # is compatible.
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
         cut = max(config.kv_source_layer_ids)
