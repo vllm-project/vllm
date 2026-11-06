@@ -69,6 +69,7 @@ def processor(tmp_path):
         dtype="float32",
         max_model_len=128,
         skip_tokenizer_init=True,
+        enable_mm_embeds=True,
     )
     context = InputProcessingContext(model_config, tokenizer)
     info = BailingMoeV3VLProcessingInfo(context)
@@ -157,6 +158,21 @@ def test_text_only_prompt_preserves_original_token_ids(processor):
 
     assert actual_ids == prompt_ids
     assert placeholders == {}
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_precomputed_embeddings_survive_processor_finalization(processor, modality):
+    data = {
+        f"{modality}_embeds": torch.arange(4096).reshape(2, 2048).float(),
+        f"{modality}_grid_thw": torch.tensor([[1, 2, 4]]),
+    }
+    items = processor.info.parse_mm_data({modality: data})
+
+    result = processor._apply_hf_processor_main(items, {})
+
+    assert result.keys() == data.keys()
+    for key, value in data.items():
+        assert torch.equal(result[key], value)
 
 
 def _feature(modality, grid, offset):

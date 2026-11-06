@@ -39,9 +39,14 @@ def _write_config(path: Path, config: dict[str, Any]) -> None:
     (path / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
 
-def test_bailing_v3_vl_config_loads_without_remote_code(tmp_path: Path):
+@pytest.mark.parametrize("disable_merger_proj", [False, True])
+def test_bailing_v3_vl_config_loads_without_remote_code(
+    tmp_path: Path, disable_merger_proj: bool
+):
     model_path = tmp_path / "model"
-    _write_config(model_path, _bailing_v3_vl_config())
+    config_dict = _bailing_v3_vl_config()
+    config_dict["vision_config"]["disable_merger_proj"] = disable_merger_proj
+    _write_config(model_path, config_dict)
 
     config = get_config(model_path, trust_remote_code=False)
 
@@ -66,7 +71,13 @@ def test_bailing_v3_vl_config_loads_without_remote_code(tmp_path: Path):
         for layer_idx, layer_type in enumerate(text_config.layer_types)
         if layer_type == "full_attention"
     ] == [5, 11, 17, 23, 29, 35, 41]
-    assert config.vision_config.disable_merger_proj is True
+    assert config.vision_config.disable_merger_proj is disable_merger_proj
+    assert config.vision_config.out_hidden_size == (
+        4608 if disable_merger_proj else 3584
+    )
+    assert config.vision_config.deepstack_visual_indexes == (
+        [] if disable_merger_proj else [8, 16, 24]
+    )
 
     normalized = config.to_dict()
     restored = BailingMoeV3VLConfig.from_dict(normalized)

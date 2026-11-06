@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Bailing MoE V3 vision-language model."""
 
-import copy
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any, cast, get_type_hints
@@ -31,7 +30,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
@@ -224,33 +223,37 @@ class BailingMoeV3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessin
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _get_hf_mm_inputs(self, mm_items, hf_kwargs):
-        inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
-        if "videos" in inputs.hf_data:
-            video_items = mm_items["video"]
-            metadata = video_items.metadata
-            inputs.hf_data["bailing_video_metadata"] = metadata
-        return inputs
+    def _apply_hf_processor_main(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-    def _call_hf_processor(self, hf_data, hf_kwargs):
-        if not hf_data.get("videos"):
-            return super()._call_hf_processor(hf_data, hf_kwargs)
+        videos = hf_data.pop("videos", [])
+        result = self._call_hf_processor(hf_data, hf_kwargs)
+        if not videos:
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, result
+            )
+
         processor = self.info.get_hf_processor(**hf_kwargs)
         image_processor = processor.image_processor
         if not getattr(image_processor, "use_interleaved_frame_timestamp", False):
             raise ValueError(
                 "Bailing video inputs require interleaved frame timestamps"
             )
-        image_data = {
-            k: v
-            for k, v in hf_data.items()
-            if k not in ("videos", "bailing_video_metadata")
-        }
-        result = super()._call_hf_processor(image_data, hf_kwargs)
-        metadata = hf_data.get("bailing_video_metadata")
-        video_kwargs = dict(hf_kwargs.get("videos_kwargs", {}))
+        metadata = mm_items.get_items("video", VideoProcessorItems).metadata
+        video_kwargs = dict(
+            cast(Mapping[str, object], hf_kwargs.get("videos_kwargs", {}))
+        )
         pixels, grids, prompts = [], [], []
-        for index, video in enumerate(hf_data["videos"]):
+        assert isinstance(videos, list)
+        for index, video in enumerate(videos):
             meta = metadata[index] if isinstance(metadata, list) else metadata
             meta = meta or {}
             if isinstance(video, tuple):
@@ -296,7 +299,7 @@ class BailingMoeV3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessin
             video_grid_thw=torch.stack(grids),
             video_prompt_ids=prompts,
         )
-        return result
+        return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data, result)
 
     def _apply_prompt_updates(
         self,
@@ -413,21 +416,13 @@ class BailingMoeV3VisionTransformer(Qwen3_VisionTransformer):
         ):
             quant_config = None
 
-        vision_config = copy.deepcopy(vision_config)
-        disable_merger_proj = getattr(vision_config, "disable_merger_proj", False)
-        if disable_merger_proj:
-            vision_config.deepstack_visual_indexes = []
-            vision_config.out_hidden_size = (
-                vision_config.hidden_size * vision_config.spatial_merge_size**2
-            )
-
         super().__init__(
             vision_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
             prefix=prefix,
         )
-        if disable_merger_proj:
+        if vision_config.disable_merger_proj:
             self.merger = BailingMoeV3VisionPatchMerger(
                 context_dim=vision_config.hidden_size,
                 spatial_merge_size=vision_config.spatial_merge_size,
@@ -593,11 +588,7 @@ class BailingMoeV3VLForConditionalGeneration(
         assert multimodal_config is not None
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        self.vision_out_dim = (
-            vision_config.hidden_size * vision_config.spatial_merge_size**2
-            if getattr(vision_config, "disable_merger_proj", False)
-            else vision_config.out_hidden_size
-        )
+        self.vision_out_dim = vision_config.out_hidden_size
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = BailingMoeV3VisionTransformer(
                 vision_config,

@@ -249,6 +249,7 @@ class BailingMoeV3VisionConfig(PreTrainedConfig):
         out_hidden_size: int = 3584,
         num_position_embeddings: int = 2304,
         deepstack_visual_indexes: list[int] | None = None,
+        disable_merger_proj: bool = False,
         initializer_range: float = 0.02,
         **kwargs: Any,
     ) -> None:
@@ -271,6 +272,10 @@ class BailingMoeV3VisionConfig(PreTrainedConfig):
             else deepstack_visual_indexes
         )
         self.initializer_range = initializer_range
+        self.disable_merger_proj = disable_merger_proj
+        if disable_merger_proj:
+            self.deepstack_visual_indexes = []
+            self.out_hidden_size = hidden_size * spatial_merge_size**2
 
 
 class BailingMoeV3VLConfig(PreTrainedConfig):
