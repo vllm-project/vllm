@@ -1112,25 +1112,21 @@ def init_mxfp6_linear_kernel(
 ) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
     current platform."""
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
     )
 
-    linear_backend = _get_linear_backend(quantization="mxfp6")
-
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP6_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for MXFP6 layers."
-            )
-        possible = filtered
+    possible = _resolve_backend_kernels(
+        possible,
+        "MXFP6",
+        quantization="mxfp6",
+    )
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -1143,6 +1139,15 @@ def init_mxfp6_linear_kernel(
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if not kernel_cls._supports_quant_scheme(
+            weight_quant_key, activation_quant_key
+        ):
+            failure_reasons.append(
+                f"{kernel_cls.__name__}: quantization scheme "
+                f"{weight_quant_key}x{activation_quant_key} not supported"
+            )
             continue
 
         can_implement, reason = kernel_cls.can_implement(config)

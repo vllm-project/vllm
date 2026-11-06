@@ -1611,19 +1611,43 @@ def test_activation_only_override_applies_to_checkpoint_method(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         _resolve_activation_key,
     )
-    from vllm.model_executor.layers.quantization import resolve_quant_method
-
-    # The activation key the checkpoint method resolves while it is built; a
-    # `targets` override only applies to the layers it matches.
-    keys = []
-    monkeypatch.setattr(
-        result,
-        "get_quant_method",
-        lambda *_: keys.append(_resolve_activation_key(None)),
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+        resolve_quant_method,
     )
+
+    # The activation key the checkpoint method resolves while it is built, in
+    # `create_weights`, and in `process_weights_after_loading`; a `targets`
+    # override only applies to the layers it matches.
+    build_keys = []
+    create_keys = []
+    process_keys = []
+
+    class _DummyCheckpointMethod(QuantizeMethodBase):
+        def create_weights(self, layer: torch.nn.Module, *args, **kwargs):
+            create_keys.append(_resolve_activation_key(None))
+
+        def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+            process_keys.append(_resolve_activation_key(None))
+
+        def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+            raise NotImplementedError
+
+    def _get_quant_method(_layer, _prefix):
+        build_keys.append(_resolve_activation_key(None))
+        return _DummyCheckpointMethod()
+
+    monkeypatch.setattr(result, "get_quant_method", _get_quant_method)
     for prefix in ("model.layers.0.mlp.experts", "model.layers.1.mlp.experts"):
-        resolve_quant_method(result, _TestRoutedExperts(), prefix)
-    assert keys == [kMxfp8Dynamic, None if targets else kMxfp8Dynamic]
+        layer = _TestRoutedExperts()
+        method = resolve_quant_method(result, layer, prefix)
+        assert method is not None
+        method.create_weights(layer)
+        method.process_weights_after_loading(layer)
+    expected = [kMxfp8Dynamic, None if targets else kMxfp8Dynamic]
+    assert build_keys == expected
+    assert create_keys == expected
+    assert process_keys == expected
 
 
 def test_online_overlay_requires_normalized_quantization_config(tmp_path) -> None:
