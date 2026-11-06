@@ -1052,15 +1052,6 @@ class Platform:
                 attn_page_size_1_token = backend_cls.customize_spec(
                     attn_spec
                 ).page_size_bytes
-            from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
-
-            ds_blob_bytes = DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
-            if ds_blob_bytes is not None:
-                # ds_mla layouts pack NoPE + RoPE + scales into one opaque
-                # per-token blob; the generic spec derivation above prices
-                # plain quantized storage only and would under-anchor the
-                # mamba page alignment for hybrid models.
-                attn_page_size_1_token = ds_blob_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
