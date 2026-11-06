@@ -390,10 +390,11 @@ def dcp_box(runtime, heads, dsa=False, flashinfer=False, partials="default"):
         interleave = parallel.cp_kv_cache_interleave_size
         q_heads = None
         if dsa and flashinfer:
-            # trtllm-gen MLA decode takes no head count between 64 and 128.
-            q_heads = group.world_size * heads
-            if 64 < q_heads < 128:
-                q_heads = 128
+            from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+                trtllm_gen_query_heads,
+            )
+
+            q_heads = trtllm_gen_query_heads(group.world_size * heads)
         elif dsa:
             q_heads = 64 if group.world_size * heads <= 64 else 128
         # The wide rows of this box's own layer kind (the MLA box past 64 rows only

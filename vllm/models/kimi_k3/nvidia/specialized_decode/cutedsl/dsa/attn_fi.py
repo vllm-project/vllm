@@ -311,12 +311,14 @@ class FlashInferCore:
     def trtllm(self, query, kv, stride_rows, slots, valid, latent, lse, block_size):
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
+        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import _kv_counters
+
         impl, width = self.impl, slots.shape[1]
         impl._prepare_mqa_kernel(self.layer, query.device)
         # Block sizes and strides are aligned to 32 rows.
         page = math.gcd(stride_rows, block_size, 64)
         pages = kv.view(-1, page, kv.shape[-1])
-        extra: dict[str, torch.Tensor] = {}
+        extra = _kv_counters(query.shape[0], self.heads, query.device)
         if lse is not None:
             extra["lse"] = lse
         trtllm_batch_decode_with_kv_cache_mla(

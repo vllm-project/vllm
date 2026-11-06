@@ -676,6 +676,11 @@ def test_sparse_backend_decode_correctness(
         device_capability = current_platform.get_device_capability()
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+        if backend_cls == FlashInferMLASparseTRTLLMBackend:
+            from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
+
+            if not has_flashinfer_prims_ts_sparse_mla():
+                pytest.skip("nvfp4_ds_mla on FlashInfer needs its prims_ts kernel")
 
     if not backend_cls.supports_block_size(block_size):
         pytest.skip(
@@ -1041,8 +1046,11 @@ def test_sparse_backend_decode_correctness(
     assert torch.isfinite(backend_output).all()
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
-    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    if kv_cache_dtype.startswith("fp8"):
+    # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance.
+    # nvfp4_ds_mla with an E4M3 query (FlashInfer prims_ts) has the FP8 error.
+    if kv_cache_dtype.startswith("fp8") or (
+        kv_cache_dtype == "nvfp4_ds_mla" and impl.supports_quant_query_input
+    ):
         torch.testing.assert_close(
             backend_output, sdpa_reference, rtol=0.065, atol=0.05
         )
