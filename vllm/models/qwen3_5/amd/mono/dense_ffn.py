@@ -28,8 +28,11 @@ The CTA counts above are the 256-CTA grid (``FfnBuild.grid``, MI355X). On 128
 CTAs (MI350P, ``tiling``) a CTA takes 8 whole gate_up groups and 8 columns of
 a split one [TP2: 4 and 4], down's whole row groups b and 128 + b and 8 rows of
 split group 256 + b / 2 in two passes (the two whole tiles, then the split one
-on the even waves), and o_proj's owners 128 + b (b < 32) in a second pass. Each
-task's arithmetic is the same at either width.
+on the even waves), and o_proj's owners 128 + b (b < 32) in a second pass. Up to
+``LOCAL_NORM_ROWS`` rows there the owners publish their bf16 o_proj outputs and
+every CTA runs the norm on the whole rows itself (``run_norm``: the residual
+from memory, the owners' reduction order), one grid-wide hand-off in place of
+two. Each task's arithmetic is the same at either width.
 
 Every GEMM is bit-exact with the stock ``gemm_afp4wfp4`` by construction: each
 output takes the stock kernel's K splits (``gu_splits``, ``d_splits``,
@@ -264,6 +267,18 @@ class FfnBuild:
     o_split: int = 0
 
 
+# Up to LOCAL_NORM_ROWS rows on a grid narrower than 256, the o_proj owners
+# publish their outputs once and every CTA runs the norm on the whole rows itself
+# (``run_norm``, the owners' reduction order) in place of the owners' two
+# grid-wide hand-offs (sum-of-squares partials, then x). Wider, the rows kept
+# next to the in-flight gate_up weights spill.
+LOCAL_NORM_ROWS = 4
+
+
+def local_norm(key: "FfnBuild") -> bool:
+    return key.oproj and key.grid != DEFAULT_GRID and key.tokens <= LOCAL_NORM_ROWS
+
+
 def key_splits(key: "FfnBuild") -> tuple[int, int, int]:
     """(gate_up, down, o_proj) K splits of a build."""
     s = key.tokens
@@ -302,6 +317,7 @@ def scratch_layout(key: FfnBuild) -> dict:
             ("hrdy", key.grid),
             ("nsum", CHUNKS * s),
             ("xmb", s * O_CTAS * X_PAIRS),
+            ("omb", s * HIDDEN // 2 if local_norm(key) else 0),
         )
     )
     end = max(o + n for o, n in lay.values())
@@ -666,13 +682,71 @@ def o_finish(c, rraw, own=None):
     return z, lnw
 
 
-def o_more_loads(c):
-    """(owner, residual words, o weights) of each of the CTA's owner tasks past
-    its first (``o_more``; none on 256 CTAs)."""
+@traced
+def o_publish(c, own=None):
+    """``o_finish`` for the local norm: norm thread (t, j) of owner ``own`` (the
+    CTA's first by default) puts its 8 bf16 o_proj outputs (the stock GEMM's
+    output, before the residual) for every CTA."""
+    s, tid = c["S"], c["tid"]
+    bid = owner(c, own)
+    t, j = o_lane(c)
+    o = [
+        bf16_round(
+            split_total(
+                red_at(c["red"], 2 * k + j // 2, 8 * (j % 2) + e, t)
+                for k in range(c["o_n"])
+            )
+        )
+        for e in range(8)
+    ]
+    if (tid < s * 4) & (bid < O_CTAS):
+        at = t * HIDDEN + 2 * ROWS * bid + 8 * j
+        c["put_bf"](c["omb"], at, o[:4])
+        c["put_bf"](c["omb"], at + 4, o[4:])
+
+
+def o_norm_loads(c):
+    """``norm_loads`` with h taken from the owners' o_proj outputs (``o_publish``,
+    polled) instead of memory: chunk ``tid + 512 i``'s o words, residual and
+    1 + w words. The residual and 1 + w loads go first, then the polls."""
+    s, tid, a = c["S"], c["tid"], c["args"]
+    n = s * CHUNKS
+    rounds = (n + THREADS - 1) // THREADS
+    chs = [fx.min(tid + THREADS * i, n - 1) for i in range(rounds)]
+    mem = [
+        (ld4(rsrc(a["residual"]), ch * 4), ld4(rsrc(a["ln_w"]), ch % CHUNKS * 4))
+        for ch in chs
+    ]
+    specs = []
+    for ch in chs:
+        specs += [(c["omb"], ch * 4, 2), (c["omb"], ch * 4 + 2, 2)]
+    got = c["poll"](specs)
     return [
-        (own, o_res_loads(c, own), o_loads(c, splits=c["o_n"], own=own))
+        (got[2 * i] + got[2 * i + 1], mem[i][0], mem[i][1]) for i in range(len(chs))
+    ]
+
+
+def o_more_loads(c, residual=True):
+    """(owner, residual words, o weights) of each of the CTA's owner tasks past
+    its first (``o_more``; none on 256 CTAs). No residual words for the local
+    norm (``residual=False``)."""
+    return [
+        (
+            own,
+            o_res_loads(c, own) if residual else None,
+            o_loads(c, splits=c["o_n"], own=own),
+        )
         for own in o_more(c)
     ]
+
+
+def o_more_publish(c, more, width=CORE, splits=4):
+    """``o_more_passes`` for the local norm: ``o_stage`` and ``o_publish`` of
+    each owner of ``more``."""
+    for own, _, ops in more:
+        gpu.barrier()
+        o_stage(c, ops, width, splits)
+        o_publish(c, own)
 
 
 def o_more_passes(c, more, width=CORE, splits=4):
@@ -1284,6 +1358,9 @@ def build(key: FfnBuild):
         name += f"_g{key.grid}"
     if key.gu_split or key.d_split or key.o_split:
         name += f"_k{gu_n}{d_n}{o_n}"
+    local = local_norm(key)
+    if local:
+        name += "_l"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kd(
@@ -1325,6 +1402,7 @@ def build(key: FfnBuild):
             "stamps": scratch + fx.Int64(lay["stamps"][0]) if key.stamps else None,
             "put": mb.put,
             "put_words": mb.put_words,
+            "put_bf": mb.put_bf,
             "poll": mb.poll,
             "red": lds.red.ptr,
             "nrm": lds.nrm.ptr,
@@ -1339,6 +1417,7 @@ def build(key: FfnBuild):
             "os": ol.os.ptr,
             "nsum": sreg(scratch, lay["nsum"][0], "nsum"),
             "xmb": sreg(scratch, lay["xmb"][0], "xmb"),
+            "omb": sreg(scratch, lay["omb"][0], "omb"),
             "hbuf": scratch + fx.Int64(lay["h"][0]),
             "hq4": scratch + fx.Int64(lay["hq"][0]),
             "hq4s": scratch + fx.Int64(lay["hqs"][0]),
@@ -1358,7 +1437,21 @@ def build(key: FfnBuild):
             },
         }
         stamp(c, 0)
-        if const_expr(key.oproj):
+        if const_expr(local):
+            # the core first, then the o weights: vmcnt drains in order
+            craw = core_loads(c)
+            oops = o_loads(c, splits=o_n)
+            o_quant(c, craw)
+            o_stage(c, oops, splits=o_n)
+            # owners past the CTA's first (128 CTAs): loads under its reduce
+            more = o_more_loads(c, residual=False)
+            o_publish(c)
+            o_more_publish(c, more, splits=o_n)
+            stamp(c, 5)
+            # the first gate_up weights before the norm's one hand-off
+            gops = gu_loads(c, geo.g_full * bid)
+            run_norm(c, o_norm_loads(c), marks=False)
+        elif const_expr(key.oproj):
             # the core first, then the residual and o weights: vmcnt drains in order
             craw = core_loads(c)
             rraw = o_res_loads(c)
