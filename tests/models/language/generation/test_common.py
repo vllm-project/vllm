@@ -49,6 +49,19 @@ def _input_embeds(hf_model, model: str, prompts: list[str]) -> list[torch.Tensor
     return embeds
 
 
+@pytest.fixture
+def hf_reference_key(request):
+    """Cache key: every parametrized value except the one the reference ignores.
+
+    Read off the parametrization rather than listed by hand, so a parameter
+    added later joins the key on its own. If the reference turns out not to
+    depend on it the cost is a lost cache hit, never a shared wrong reference.
+    """
+    params = dict(request.node.callspec.params)
+    params.pop("use_prompt_embeds")
+    return tuple(sorted(params.items()))
+
+
 @pytest.fixture(scope="module")
 def hf_reference_cache():
     """Greedy HF logprobs, so one reference serves both use_prompt_embeds arms.
@@ -56,11 +69,10 @@ def hf_reference_cache():
     Without this, every model loads the HF checkpoint and decodes it once per
     value of a parameter the reference does not depend on. The prompts are a
     fixture constant and the only per-model edit to them is keyed on the model,
-    so the key covers everything the reference varies with. use_rocm_aiter
-    cannot reach a transformers forward pass, but stays in the key so each arm
-    keeps an independent reference. Entries hold no tensors; one is ~130 KiB.
+    so hf_reference_key covers everything the reference varies with. Entries
+    hold no tensors; one is ~130 KiB.
     """
-    cache: dict[tuple[str, bool, int, int], list] = {}
+    cache: dict[tuple[tuple[str, object], ...], list] = {}
     yield cache
     cache.clear()
 
@@ -155,6 +167,7 @@ def test_models(
     vllm_runner,
     example_prompts,
     hf_reference_cache,
+    hf_reference_key,
     model: str,
     max_tokens: int,
     num_logprobs: int,
@@ -185,8 +198,7 @@ def test_models(
         )
 
     prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
-    cache_key = (model, use_rocm_aiter, max_tokens, num_logprobs)
-    hf_outputs = hf_reference_cache.get(cache_key)
+    hf_outputs = hf_reference_cache.get(hf_reference_key)
 
     # Embeddings have to come off a live reference model, so the checkpoint is
     # still loaded for the inputs_embeds runs even on a cache hit.
@@ -208,7 +220,7 @@ def test_models(
                         current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
                     ),
                 )
-                hf_reference_cache[cache_key] = hf_outputs
+                hf_reference_cache[hf_reference_key] = hf_outputs
 
             if prompt_embeds is not None:
                 prompt_embeds.extend(_input_embeds(hf_model, model, example_prompts))
