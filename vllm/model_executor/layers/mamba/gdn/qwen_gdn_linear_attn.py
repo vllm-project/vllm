@@ -122,7 +122,7 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
-MAX_FUSED_GDN_MTP_TOKENS = 8
+MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
