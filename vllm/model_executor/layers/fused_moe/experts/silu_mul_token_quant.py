@@ -12,12 +12,13 @@ finalize never read those rows.
 
 import torch
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import (
-    FP8_MIN_SCALING_FACTOR,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# The scale floor of `dynamic_per_token_scaled_fp8_quant`, so the scales match the
+# unfused path. Defined here so that changes to `QuantFP8` do not move this kernel.
+_FP8_MIN_SCALING_FACTOR = 1.0 / (get_fp8_min_max()[1] * 512.0)
 
 
 @triton.jit
@@ -110,7 +111,7 @@ def silu_mul_token_quant(
         x.stride(0),
         q.stride(0),
         fp8_max,
-        FP8_MIN_SCALING_FACTOR,
+        _FP8_MIN_SCALING_FACTOR,
         HAS_MASK=has_mask,
         BLOCK=triton.next_power_of_2(H),
         num_warps=4 if H <= 1024 else 8,

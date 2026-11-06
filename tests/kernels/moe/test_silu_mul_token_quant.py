@@ -47,13 +47,34 @@ def _assert_matches(q, s, ref_q, ref_s):
     )
 
 
-@pytest.mark.parametrize("tokens", [1, 7, 64, 1000])
-@pytest.mark.parametrize("hidden", [256, 512, 2048])
-@pytest.mark.parametrize("ep_size", [1, 8])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_silu_mul_token_quant(tokens, hidden, ep_size, dtype):
+# The kernel handles one row per program, so the row count, the hidden size and the
+# routing do not interact. Each axis is swept on its own from a common base case.
+# `hidden=768` has `BLOCK=1024`, so the last 256 lanes are masked off (the other
+# sizes are powers of two and fill the block).
+BASE = dict(
+    tokens=64,
+    hidden=2048,
+    num_experts=64,
+    top_k=8,
+    ep_size=8,
+    dtype=torch.bfloat16,
+)
+CASES = {
+    "base": {},
+    **{f"tokens={t}": dict(tokens=t) for t in (1, 7, 1000)},
+    **{f"hidden={h}": dict(hidden=h) for h in (256, 768, 4096)},
+    "no-ep": dict(ep_size=1),
+    "ep4": dict(ep_size=4),
+    "experts256-top8-ep8": dict(num_experts=256),
+    "experts8-top2-ep2": dict(num_experts=8, top_k=2, ep_size=2),
+    "fp16": dict(dtype=torch.float16),
+}
+
+
+@pytest.mark.parametrize("overrides", CASES.values(), ids=CASES.keys())
+def test_silu_mul_token_quant(overrides):
+    tokens, hidden, num_experts, top_k, ep_size, dtype = {**BASE, **overrides}.values()
     set_random_seed(0)
-    top_k, num_experts = 8, 64
     rows = tokens * top_k
     x = torch.randn(rows, 2 * hidden, device="cuda", dtype=dtype) * 3
     x[: rows // 4] *= 1e-3  # small rows exercise the minimum scale
@@ -67,6 +88,7 @@ def test_silu_mul_token_quant(tokens, hidden, ep_size, dtype):
         expert_map[local : 2 * local] = torch.arange(
             local, dtype=torch.int32, device="cuda"
         )
+        topk_ids[0, 0] = local  # a single-token step still has a local row to compare
 
     ref_q, ref_s = _reference(x)
     q, s = silu_mul_token_quant(
@@ -78,6 +100,7 @@ def test_silu_mul_token_quant(tokens, hidden, ep_size, dtype):
     keep = torch.ones(rows, dtype=torch.bool, device="cuda")
     if expert_map is not None:
         keep = expert_map[topk_ids.reshape(-1).long()] >= 0
+    assert keep.any()
     _assert_matches(q[keep], s[keep], ref_q[keep], ref_s[keep])
 
 
