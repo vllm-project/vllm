@@ -3,6 +3,7 @@
 
 import types
 from dataclasses import dataclass, replace
+from typing import NotRequired, TypedDict
 
 import pytest
 import torch
@@ -12,6 +13,7 @@ from tests.kernels.moe.utils import (
     check_deferred_moe_finalize,
     make_dummy_moe_config,
 )
+from tests.kernels.utils import torch_moe
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -24,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.math_utils import next_power_of_2
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -42,13 +45,15 @@ ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
+ROCM_GFX1250 = False
 
 if ROCM_AVAILABLE:
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx950, on_gfx1250
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
+    ROCM_GFX1250 = on_gfx1250()
 
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
@@ -87,11 +92,11 @@ def enable_pickle(monkeypatch):
 @pytest.mark.parametrize(
     "model_case",
     [
-        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
-        ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
+        ModelCase("vllm-project/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
+        ModelCase("vllm-project/deepseek_r1_3_layers_mxfp4", tp=8),
+        ModelCase("vllm-project/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        ModelCase("vllm-project/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
+        ModelCase("vllm-project/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
 @pytest.mark.skipif(
@@ -131,7 +136,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         #     assert isinstance(layer.mlp.experts.quant_method,
         #                       QuarkOCP_MX_MoEMethod)
 
-        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+        # if model_case.model_id == "vllm-project/qwen_1.5-moe-a2.7b-mxfp4":
         #     llm.apply_model(check_model)
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output
@@ -809,6 +814,190 @@ def test_trtllm_mxfp4_deferred_finalize(
         router_weights=topk_weights,
         chunked=chunk_size is not None,
     )
+
+
+@pytest.mark.parametrize("activation_key", ["bf16", "mxfp8"])
+@pytest.mark.skipif(
+    not TRTLLM_GEN_MXFP4_AVAILABLE,
+    reason="nvidia gpu and compute capability sm100 is required for this test",
+)
+@torch.inference_mode()
+def test_trtllm_mxfp4_modular_padding_robust(
+    activation_key: str, workspace_init, default_vllm_config
+):
+    """Padding rows (topk_ids == -1) must be skipped, never fed into results.
+
+    DeepEP v2 hands the modular MXFP4 experts a PaddedStandard buffer whose
+    tail rows are inactive. Construct that layout directly, poison the padding
+    rows with NaN, and check the valid outputs are finite, bit-identical to a
+    zero-padding run, and bit-identical to the unpadded kernel run, which also
+    matches a float32 reference.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+        TrtLlmMxfp4ExpertsModular,
+        TrtLlmMxfp4Mxfp8ExpertsModular,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_quant_config,
+    )
+
+    if activation_key == "bf16":
+        backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
+        experts_cls = TrtLlmMxfp4ExpertsModular
+    else:
+        backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+        experts_cls = TrtLlmMxfp4Mxfp8ExpertsModular
+
+    m, n, k, e, topk, pad = 64, 1024, 1024, 128, 8, 64
+    device = torch.device("cuda:0")
+    torch.manual_seed(0)
+
+    def quantize_weights(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        w_q, w_scale = fp4_quantize(
+            w,
+            torch.tensor(1.0, device=device),
+            32,
+            sf_use_ue8m0=True,
+            is_sf_swizzled_layout=False,
+        )
+        return (
+            w_q.reshape(*w.shape[:-1], -1),
+            w_scale.view(torch.uint8).reshape(*w.shape[:-1], -1),
+        )
+
+    def quantize_activations(
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if activation_key == "bf16":
+            return x, None
+        x_q, x_scale = mxfp8_quantize(x, is_sf_swizzled_layout=False)
+        return x_q, x_scale.view(x.shape[0], k // 32)
+
+    def dequantize_activations(
+        x: torch.Tensor, x_scale: torch.Tensor | None
+    ) -> torch.Tensor:
+        return x.float() if x_scale is None else mxfp8_dequantize(x, x_scale)
+
+    w13 = torch.randn(e, 2 * n, k, device=device, dtype=torch.bfloat16) / 10
+    w2 = torch.randn(e, k, n, device=device, dtype=torch.bfloat16) / 10
+    w13_q, w13_scale = quantize_weights(w13)
+    w2_q, w2_scale = quantize_weights(w2)
+    # Preserve the checkpoint layout for the independent torch reference.
+    w13_q_ref, w13_scale_ref = w13_q.clone(), w13_scale.clone()
+    w2_q_ref, w2_scale_ref = w2_q.clone(), w2_scale.clone()
+    w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+        backend,
+        torch.nn.Module(),
+        w13_q,
+        w2_q,
+        w13_scale,
+        w2_scale,
+        None,
+        None,
+        _cache_permute_indices={},
+    )
+    quant_config = make_mxfp4_moe_quant_config(
+        backend, w1_scale=w13_scale, w2_scale=w2_scale
+    )
+    assert quant_config is not None
+    moe_config = FusedMoEConfig(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size=n,
+        num_local_experts=e,
+        num_logical_experts=e,
+        activation=MoEActivation.SILU,
+        device=device,
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        max_num_tokens=next_power_of_2(m + pad),
+    )
+    experts = experts_cls(moe_config=moe_config, quant_config=quant_config)
+
+    def run(
+        hidden_states: torch.Tensor,
+        hidden_states_scale: torch.Tensor | None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        output = torch.empty(
+            (hidden_states.shape[0], experts.hidden_dim_unpadded),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        empty_ws = torch.empty((0,), device=device, dtype=torch.bfloat16)
+        experts.apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            a1q_scale=hidden_states_scale,
+            a2_scale=None,
+            workspace13=empty_ws,
+            workspace2=empty_ws,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        return output
+
+    a = torch.randn((m, k), device=device, dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device=device, dtype=torch.bfloat16)
+    scores = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(scores, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    topk_ids_padded = torch.full((m + pad, topk), -1, device=device, dtype=torch.int32)
+    topk_ids_padded[:m] = topk_ids
+    topk_weights_padded = torch.zeros(
+        (m + pad, topk), device=device, dtype=topk_weights.dtype
+    )
+    topk_weights_padded[:m] = topk_weights
+
+    a_clean = torch.zeros((m + pad, k), device=device, dtype=torch.bfloat16)
+    a_clean[:m] = a
+    a_poison = a_clean.clone()
+    a_poison[m:] = float("nan")
+
+    hs_clean, scale_clean = quantize_activations(a_clean)
+    hs_poison, scale_poison = quantize_activations(a_poison)
+    hs_unpadded, scale_unpadded = quantize_activations(a)
+
+    out_clean = run(hs_clean, scale_clean, topk_weights_padded, topk_ids_padded)
+    out_poison = run(hs_poison, scale_poison, topk_weights_padded, topk_ids_padded)
+    out_unpadded = run(hs_unpadded, scale_unpadded, topk_weights, topk_ids)
+
+    assert torch.isfinite(out_poison[:m]).all(), (
+        "padding garbage leaked into valid outputs"
+    )
+    torch.testing.assert_close(out_poison[:m], out_clean[:m], rtol=0, atol=0)
+    torch.testing.assert_close(out_clean[:m], out_unpadded, rtol=0, atol=0)
+
+    reference = torch_moe(
+        dequantize_activations(hs_unpadded, scale_unpadded),
+        mxfp4_dequantize(w13_q_ref, w13_scale_ref),
+        mxfp4_dequantize(w2_q_ref, w2_scale_ref),
+        score.float(),
+        topk,
+        activation=MoEActivation.SILU,
+    )
+    # mxfp8 activations add their own accumulation error on top of the bf16
+    # path's, so use the looser tolerance for both.
+    torch.testing.assert_close(out_unpadded.float(), reference, atol=2e-2, rtol=2e-1)
 
 
 @pytest.mark.parametrize("topk", [1, 4])
@@ -1520,10 +1709,21 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
 # -----------------------------------------------------------------------------
+class RocmBackendConfig(TypedDict):
+    activation: str
+    rtol: float
+    percent: float
+    requires_aiter: bool
+    requires_gfx950: bool
+    requires_gfx1250: NotRequired[bool]
+    interleaved_layout: NotRequired[bool]
+    act_type: NotRequired[str]
+
+
 # TODO: Further tighten the accuracy threshold.
 # - More accurate ref moe to include activation quantization
 # - Check aiter kernel accuracy. E.g., quant / dequant details.
-ROCM_BACKEND_CONFIGS = {
+ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
     "TRITON": {
         "activation": "SWIGLUOAI",
         "rtol": 0.3,
@@ -1568,6 +1768,15 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_TRITON_MXFP4_MXFP4": {
+        "activation": "SILU",
+        "act_type": "mxfp4",
+        "rtol": 1.0,
+        "percent": 0.8,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "requires_gfx1250": True,
+    },
 }
 
 
@@ -1607,6 +1816,8 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if config.get("requires_gfx1250") and not ROCM_GFX1250:
+        pytest.skip(f"Backend {backend_name} requires GFX1250")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1801,6 +2012,7 @@ def test_rocm_mxfp4_moe_oracle(
                 apply_router_weight_on_input=False,
             )
 
+    assert isinstance(out, torch.Tensor)
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
     assert not torch.any(torch.isnan(out)), "Output contains NaN"
@@ -1868,6 +2080,137 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+
+
+@pytest.mark.parametrize("intermediate_size_unpadded", [640, 704])
+@pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950")
+@pytest.mark.skipif(not ROCM_AITER_AVAILABLE, reason="Requires AITER")
+@torch.inference_mode()
+def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
+    intermediate_size_unpadded: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """At MoE tp_size == 1 the W4A4 MoE masks the padding and nothing else.
+
+    The experts are stored 768 wide with zeros past the real width, so the
+    layer computes the same function whether the kernel is told that the tail
+    is padding or not. A pad that is doubled twice (once by vLLM, once inside
+    AITER for the fused gate/up weight) masks live intermediate rows as well.
+    640 stored at 768 is Qwen3.8 Flash Next's shape at TP1 and under expert
+    parallelism before the W4A4 intermediate was aligned to 128.
+    """
+    import vllm.distributed.parallel_state as ps
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        backend_to_kernel_cls,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_kernel,
+        make_mxfp4_moe_quant_config,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+    monkeypatch.setattr(ps, "_TP", types.SimpleNamespace(world_size=1))
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+
+    backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+    experts_cls = backend_to_kernel_cls(backend)[0]
+    num_experts, topk, num_tokens = 8, 2, 64
+    hidden_size, intermediate_size = 512, 768
+    dtype, device = torch.bfloat16, "cuda:0"
+
+    torch.manual_seed(0)
+    w13 = torch.randn(
+        num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+    )
+    w13[:, intermediate_size_unpadded:intermediate_size] = 0
+    w13[:, intermediate_size + intermediate_size_unpadded :] = 0
+    w2 = torch.randn(
+        num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+    )
+    w2[..., intermediate_size_unpadded:] = 0
+    w13_q, w13_scale = dynamic_mxfp4_quant(w13.reshape(-1, hidden_size))
+    w2_q, w2_scale = dynamic_mxfp4_quant(w2.reshape(-1, intermediate_size))
+    w13_q = w13_q.reshape(num_experts, 2 * intermediate_size, -1)
+    w13_scale = w13_scale.reshape(num_experts, 2 * intermediate_size, -1)
+    w2_q = w2_q.reshape(num_experts, hidden_size, -1)
+    w2_scale = w2_scale.reshape(num_experts, hidden_size, -1)
+
+    layer = types.SimpleNamespace(w13_input_scale=None, w2_input_scale=None)
+    w13_q, w2_q, w13_scale, w2_scale, _, _ = (
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=backend,
+            layer=layer,
+            w13_weight=w13_q,
+            w2_weight=w2_q,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+            w13_bias=None,
+            w2_bias=None,
+        )
+    )
+    weights = (w13_q, w2_q, w13_scale, w2_scale)
+    weights_before = [w.clone() for w in weights]
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    topk_weights, topk_ids = torch.topk(
+        torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device),
+        k=topk,
+        dim=-1,
+    )
+    topk_weights = torch.softmax(topk_weights, dim=-1)
+
+    def run(unpadded: int) -> torch.Tensor:
+        moe_config = FusedMoEConfig(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_size,
+            intermediate_size=intermediate_size,
+            num_local_experts=num_experts,
+            num_logical_experts=num_experts,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=dtype,
+            device=device,
+            routing_method=RoutingMethodType.Renormalize,
+            intermediate_size_per_partition_unpadded=unpadded,
+        )
+        quant_config = make_mxfp4_moe_quant_config(
+            mxfp4_backend=backend, w1_scale=w13_scale, w2_scale=w2_scale
+        )
+        with set_current_vllm_config(VllmConfig()):
+            kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=quant_config,
+                moe_config=moe_config,
+                mxfp4_backend=backend,
+                experts_cls=experts_cls,
+                routing_tables=None,
+            )
+            return kernel.apply(
+                hidden_states=x,
+                w1=w13_q,
+                w2=w2_q,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+    padded = run(intermediate_size_unpadded)
+    unpadded = run(intermediate_size)
+
+    for before, after in zip(weights_before, weights):
+        assert torch.equal(before, after), "the MoE op modified its weights"
+    torch.testing.assert_close(padded, unpadded, atol=1e-2, rtol=1e-2)
 
 
 # -----------------------------------------------------------------------------
@@ -2013,6 +2356,24 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+@pytest.mark.parametrize("override", [None, "mxfp8"])
+def test_moe_activation_override_wins_over_checkpoint(monkeypatch, override):
+    """An explicit `moe.activation`, `null` (BF16) included, overrides the
+    checkpoint's activation."""
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.config.quantization import QUANT_KEY_NAMES
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+    )
+
+    key = None if override is None else QUANT_KEY_NAMES[override]
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: key)
+    monkeypatch.setattr(
+        mxfp4_oracle, "_user_moe_activation_override_is_set", lambda: True
+    )
+    assert mxfp4_oracle._resolve_activation_key(kFp8StaticTensorSym) == key
+
+
 @pytest.mark.parametrize(
     "moe_backend,w4a4,supported,expected",
     [
@@ -2061,10 +2422,11 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
 
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
 @pytest.mark.parametrize("use_ep", [False, True])
-def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
+def test_aiter_mxfp4_monolithic_expert_parallel_support(
     monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
 ):
-    """Global routing cannot index local expert weights, even without all-to-all."""
+    """Naive EP (no all-to-all) is supported by W4A16, which takes an expert_map;
+    W4A8's global routing cannot index local expert weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -2109,8 +2471,10 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
         FusedMoEActivationFormat.Standard,
     )
 
-    assert supported is not use_ep
-    if use_ep:
+    expect_supported = not use_ep or backend_name == "AITER_TRITON_MXFP4_BF16"
+    assert supported is expect_supported
+    if not expect_supported:
+        assert reason is not None
         assert "parallel config" in reason
 
 

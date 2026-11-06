@@ -1,3 +1,0 @@
-Qwen3-30B-A3B-Fp8-AutoFp8-marlin.yaml
-Qwen3-30B-A3B-Fp8-AutoFp8-triton.yaml
-Qwen3-30B-A3B-BF16-triton.yaml

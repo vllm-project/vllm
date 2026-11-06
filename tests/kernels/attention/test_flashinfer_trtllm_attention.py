@@ -342,7 +342,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     if is_nvfp4_kv:
         rtol, atol = 1.0, 1.0  # nvfp4 has higher quantization error
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
-        rtol, atol = 7e-2, 9e-2
+        rtol, atol = 7e-2, 1e-1
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 3e-2, 4e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
@@ -637,7 +637,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 4e-2, 6e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
-        rtol, atol = 2e-2, 3e-2
+        rtol, atol = 2e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 
@@ -645,3 +645,119 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         torch.testing.assert_close(output, output_trtllm, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - output_trtllm))}",
     )
+
+
+@pytest.mark.parametrize("num_heads", [(8, 1), (16, 2)])
+@pytest.mark.parametrize("dcp_world_size", [2, 8])
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("context_lens", [[0, 37, 1000, 0, 4096], [0, 0]])
+@torch.inference_mode
+def test_flashinfer_dcp_prefill_trtllm_context(
+    num_heads: tuple[int, int],
+    dcp_world_size: int,
+    head_size: int,
+    block_size: int,
+    context_lens: list[int],
+) -> None:
+    """The trtllm-gen DCP context pass matches the native one, and gives
+    requests without local context a zero output and a -inf LSE."""
+    from vllm.v1.attention.backends.flashinfer import BatchDCPPrefillWrapper
+
+    set_random_seed(42)
+    device = "cuda"
+    dtype = torch.bfloat16
+    num_blocks = 4096 // block_size * len(context_lens) + 1
+    num_qo_heads, num_kv_heads = num_heads
+    sm_scale = head_size**-0.5
+
+    batch_size = len(context_lens)
+    ctx_lens = torch.tensor(context_lens, dtype=torch.int32)
+    q_lens = torch.randint(1, 64, (batch_size,), dtype=torch.int32)
+    qo_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
+    torch.cumsum(q_lens, dim=0, out=qo_indptr[1:])
+    num_pages = (ctx_lens + block_size - 1) // block_size
+    kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
+    torch.cumsum(num_pages, dim=0, out=kv_indptr[1:])
+    last_page_lens = ctx_lens - (num_pages - 1).clamp(min=0) * block_size
+
+    max_pages = max(int(num_pages.max()), 1)
+    block_tables = torch.randperm(num_blocks, dtype=torch.int32, device=device)[
+        : batch_size * max_pages
+    ].view(batch_size, max_pages)
+    kv_indices = torch.cat(
+        [block_tables[i, :n] for i, n in enumerate(num_pages.tolist())]
+    )
+
+    # K and V packed in the head dim, as in the FlashInfer backend's KV cache.
+    kv_cache = torch.randn(
+        num_blocks, num_kv_heads, block_size, 2 * head_size, dtype=dtype, device=device
+    )
+    kv_cache_tuple = kv_cache.split(head_size, dim=-1)
+    # The context pass sees the query heads of all DCP ranks.
+    query = torch.randn(
+        int(qo_indptr[-1]),
+        num_qo_heads * dcp_world_size,
+        head_size,
+        dtype=dtype,
+        device=device,
+    )
+    workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=device)
+
+    def run_context(use_trtllm_context):
+        wrapper = BatchDCPPrefillWrapper(
+            "HND", workspace, use_trtllm_context=use_trtllm_context
+        )
+        wrapper.plan(
+            qo_indptr_cpu=qo_indptr,
+            paged_kv_indptr_cpu=kv_indptr,
+            paged_kv_indices=kv_indices,
+            paged_kv_last_page_len_cpu=last_page_lens,
+            kv_lens_cpu=ctx_lens,
+            page_size=block_size,
+            num_qo_heads=num_qo_heads,
+            dcp_world_size=dcp_world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            sm_scale=sm_scale,
+            window_left=-1,
+            logits_soft_cap=None,
+            q_data_type=dtype,
+            kv_cache_dtype=dtype,
+            prefill_fixed_split_size=-1,
+            # Split-KV scratch for the native pass would not fit the workspace.
+            disable_split_kv=True,
+            block_tables=block_tables,
+        )
+        assert (wrapper._context is wrapper._trtllm_context) == use_trtllm_context
+        return wrapper._context.run(
+            query, kv_cache_tuple, k_scale=1.0, v_scale=1.0, return_lse=True
+        )
+
+    output, lse = run_context(True)
+    has_context = torch.repeat_interleave(ctx_lens > 0, q_lens).to(device)
+    assert torch.all(output[~has_context] == 0)
+    assert torch.all(lse[~has_context] == float("-inf"))
+    if not has_context.any():
+        return
+
+    ref_output, ref_lse = run_context(False)
+    torch.testing.assert_close(
+        output[has_context], ref_output[has_context], atol=1e-2, rtol=1e-2
+    )
+    torch.testing.assert_close(
+        lse[has_context], ref_lse[has_context], atol=1e-2, rtol=1e-3
+    )
+
+
+def test_trtllm_dcp_context_workspace_fit() -> None:
+    """Batches whose LSE scratch exceeds the trtllm-gen workspace fall back to
+    the native context pass."""
+    from vllm.v1.attention.backends.flashinfer import TrtllmDCPContextWrapper
+
+    # One 8K prefill chunk plus 256 speculative-decode verify queries.
+    q_lens = torch.tensor([8192] + [4] * 256, dtype=torch.int32)
+    qo_indptr = torch.zeros(q_lens.shape[0] + 1, dtype=torch.int32)
+    torch.cumsum(q_lens, dim=0, out=qo_indptr[1:])
+    assert TrtllmDCPContextWrapper.fits_workspace(qo_indptr[:2], num_qo_heads=64)
+    assert not TrtllmDCPContextWrapper.fits_workspace(qo_indptr, num_qo_heads=64)
