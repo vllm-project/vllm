@@ -23,6 +23,8 @@ from vllm.lora.layers import (
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
+    MLAKVBProjWithLoRA,
+    MLAKVBProjWithShardedLoRA,
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
     ReplicatedLinearWithLoRA,
@@ -71,13 +73,19 @@ TOLERANCES = {
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
 @pytest.mark.parametrize("is_query", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 7])
+@pytest.mark.parametrize("fully_sharded", [False, True])
 def test_mla_absorbed_projection_applies_updated_adapters(
-    default_vllm_config, dist_init, is_query, num_tokens
+    default_vllm_config, dist_init, is_query, num_tokens, fully_sharded
 ):
     """Cached MLA projections must track adapters, including a decode prefix."""
     torch.manual_seed(53)
     heads, latent, key_dim, value_dim, rank = 2, 32, 16, 16, 8
-    config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
+    config = LoRAConfig(
+        max_loras=2,
+        max_lora_rank=rank,
+        lora_dtype=torch.bfloat16,
+        fully_sharded_loras=fully_sharded,
+    )
     with torch.device("cuda"), torch.inference_mode():
         base = ColumnParallelLinear(
             latent,
@@ -86,7 +94,11 @@ def test_mla_absorbed_projection_applies_updated_adapters(
             params_dtype=torch.bfloat16,
         )
         base.weight.copy_(torch.randn_like(base.weight) / latent**0.5)
+        base.is_mla_kv_b_proj = True  # as MLAAttention marks it
         layer = from_layer(base, 2, config, [])
+        assert type(layer) is (
+            MLAKVBProjWithShardedLoRA if fully_sharded else MLAKVBProjWithLoRA
+        )
         punica = get_punica_wrapper(7, 7, base.weight.device, lora_config=config)
         layer.set_mapping(punica)
         ids = [2, 0, 1, 2, 1, 0, 2]

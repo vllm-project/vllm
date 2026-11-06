@@ -12,11 +12,13 @@ import torch
 from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.distributed import get_dcp_group, tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 
 from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
+    ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithLoRA,
 )
 
@@ -236,6 +238,73 @@ class Step5SparseIndexerWWithLoRA(ColumnParallelLinearWithLoRA):
             type(source_layer).__name__ == "Step5SparseIndexerIndexTPLinear"
             and not lora_config.fully_sharded_loras
         )
+
+
+class MLAKVBProjWithLoRA(ColumnParallelLinearWithLoRA):
+    """``kv_b_proj`` of an ``MLAAttention`` layer, which marks it.
+
+    Absorbed MLA folds ``kv_b_proj`` into the cached ``W_UK``/``W_UV``, so the
+    attention layer adds the adapter after its BMMs instead of calling forward.
+    """
+
+    def apply_mla_absorbed_kv_b_lora(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        qk_nope_head_dim: int,
+        is_query: bool,
+        gather_dcp: bool = False,
+    ) -> None:
+        """Add the adapter to MLA's absorbed, head-major projection.
+
+        Args:
+            x: ``[num_heads, num_tokens, dim]`` input of the absorbed ``W_UK``
+                (query) or ``W_UV`` (value) BMM.
+            out: The token-major BMM output, updated in place.
+            qk_nope_head_dim: Per-head rows of LoRA-B before the value rows.
+            is_query: Whether ``x`` is the query side.
+            gather_dcp: Gather LoRA-B heads across decode context parallel ranks.
+
+        """
+        lora_a = self.lora_a_stacked[0]
+        lora_b = self.lora_b_stacked[0]
+        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
+            lora_a = tensor_model_parallel_all_gather(lora_a, dim=2)
+        if gather_dcp:
+            lora_b = get_dcp_group().all_gather(lora_b, dim=2)
+        # MQA may consume only the decode prefix of the mapped batch.
+        indices = self.punica_wrapper.token_lora_indices[: x.shape[1]]
+        for slot in range(lora_a.shape[0]):
+            a = lora_a[slot, 0]
+            b = lora_b[slot, 0].view(x.shape[0], -1, lora_b.shape[-1])
+            if is_query:
+                delta = torch.matmul(x, b[:, :qk_nope_head_dim]) @ a
+            else:
+                delta = torch.matmul(x @ a.T, b[:, qk_nope_head_dim:].transpose(1, 2))
+            out.add_(
+                torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0)
+            )
+
+    @classmethod
+    def can_replace_layer(
+        cls, source_layer, lora_config, packed_modules_list, model_config=None
+    ) -> bool:
+        if not getattr(source_layer, "is_mla_kv_b_proj", False):
+            return False
+        # The next base in the MRO decides between the plain and sharded variant.
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+        )
+
+
+class MLAKVBProjWithShardedLoRA(
+    MLAKVBProjWithLoRA, ColumnParallelLinearWithShardedLoRA
+):
+    """Fully sharded variant: LoRA-A is sharded across TP ranks."""
 
 
 class Glm5NextIndexerWkWeightsWithLoRA(MergedColumnParallelLinearWithLoRA):

@@ -633,6 +633,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # reference CPU MLA backend calls it but isn't perf-critical. Skip
         # the packed-kernel dispatch either way.
         kv_b_proj._cpu_skip_gemm_dispatch = True
+        # Selects the LoRA wrapper that adds adapters to the absorbed BMMs.
+        kv_b_proj.is_mla_kv_b_proj = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
