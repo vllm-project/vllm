@@ -21,10 +21,18 @@ class XpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        global_ranks: list[int] | None = None,
+        global_world_size: int | None = None,
         use_all2all: bool = False,
     ):
         super().__init__(
-            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            global_ranks=global_ranks,
+            global_world_size=global_world_size,
+            use_all2all=use_all2all,
         )
         self.ca_comm: None = None
         if self.use_all2all:

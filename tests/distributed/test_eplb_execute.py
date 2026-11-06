@@ -7,11 +7,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed
+import torch.multiprocessing as mp
 
 import vllm.distributed.eplb.eplb_communicator as eplb_comm
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_communicator import (
+    TorchDistXCCLStagedEplbCommunicator,
     create_eplb_communicator,
     has_nixl,
 )
@@ -26,6 +28,8 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
+from vllm.utils.network_utils import get_open_port
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -936,3 +940,80 @@ def test_eplb_communicator_pipeline_parallel(world_size, backend):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_eplb_communicator_pipeline_parallel, world_size, backend)
+
+
+def _test_stateless_eplb_communicator_xccl_worker(rank, world_size, port):
+    """Build a StatelessGroupCoordinator (the path used by elastic EP to
+    create dynamically-scaled process groups) directly, with no prior
+    `init_distributed_environment` call, and verify that:
+      1. XPU resolves an `XpuCommunicator` as its device communicator
+         instead of hitting the (formerly) hard-coded CUDA-only assert.
+      2. A `TorchDistXCCLStagedEplbCommunicator` can be built on top of the
+         resulting stateless device group.
+      3. A real xccl collective over that stateless group produces the
+         correct result.
+    """
+    from torch.distributed import TCPStore
+
+    from vllm.distributed.device_communicators.xpu_communicator import (
+        XpuCommunicator,
+    )
+    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+    torch.xpu.set_device(rank)
+    coord_store = TCPStore(
+        host_name="127.0.0.1",
+        port=port,
+        world_size=world_size,
+        is_master=(rank == 0),
+    )
+    group = StatelessGroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=rank,
+        torch_distributed_backend="xccl",
+        use_device_communicator=True,
+        coord_store=coord_store,
+        group_name="test_stateless_eplb_xccl",
+        global_rank=rank,
+        global_world_size=world_size,
+    )
+    assert isinstance(group.device_communicator, XpuCommunicator)
+
+    eplb_comm = TorchDistXCCLStagedEplbCommunicator(ep_group=group.device_group)
+    assert eplb_comm is not None
+
+    tensor = torch.ones(4, device=f"xpu:{rank}") * (rank + 1)
+    torch.distributed.all_reduce(tensor, group=group.device_group)
+    expected = sum(range(1, world_size + 1))
+    torch.testing.assert_close(tensor, torch.full_like(tensor, float(expected)))
+
+
+def test_stateless_eplb_communicator_xccl():
+    """Regression test for StatelessGroupCoordinator previously
+    hard-asserting a CUDA-only device communicator, which made elastic EP
+    with the torch_xccl backend impossible to construct on XPU.
+
+    Requires XPUPlatform.stateless_init_device_torch_dist_pg, which is not
+    yet implemented on main (see vllm-project/vllm#57196); skips until
+    that lands.
+    """
+    if not current_platform.is_xpu():
+        pytest.skip("torch_xccl requires XPU")
+    if (
+        current_platform.stateless_init_device_torch_dist_pg.__func__
+        is Platform.stateless_init_device_torch_dist_pg.__func__
+    ):
+        pytest.skip(
+            "XPUPlatform.stateless_init_device_torch_dist_pg is not "
+            "implemented yet (see vllm-project/vllm#57196)"
+        )
+    world_size = 2
+    if torch.xpu.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} XPUs to run the test")
+    port = get_open_port()
+    mp.spawn(
+        _test_stateless_eplb_communicator_xccl_worker,
+        args=(world_size, port),
+        nprocs=world_size,
+        join=True,
+    )
