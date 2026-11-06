@@ -18,6 +18,7 @@ if not on_gfx950():
     pytest.skip("gfx950 instructions", allow_module_level=True)
 
 from tests.kernels.attention.minimax_m3_nvfp4_ref import dequant  # noqa: E402
+from vllm.models.minimax_m3.amd import indexer_nvfp4  # noqa: E402
 from vllm.models.minimax_m3.amd.ops.nvfp4_index_decode import (  # noqa: E402
     host as decode_host,
 )
@@ -502,3 +503,25 @@ def test_index_prefill_matches_reference(
             sl = seen[:, r0:r1]
             _assert_scores(got[sl], want[sl], (q_len, s))
         q_start += q_len
+
+
+@pytest.mark.parametrize(
+    ("num_decodes", "query_len", "scores_with_cp"),
+    [
+        (indexer_nvfp4.CP_MIN_REQS - 1, 8, False),  # DSpark 7 below the gate
+        (indexer_nvfp4.CP_MIN_REQS, 8, True),
+        (1, 4, True),  # DSpark 3 keeps CP at any batch size
+    ],
+)
+def test_decode_cp_gate(monkeypatch, num_decodes, query_len, scores_with_cp):
+    """DSpark 7 steps with fewer than ``CP_MIN_REQS`` requests score locally."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.amd.ops.index_cp import host as index_cp
+
+    cp = SimpleNamespace(max_rows=1024)
+    monkeypatch.setattr(index_cp, "get", lambda: cp)
+    impl = object.__new__(indexer_nvfp4.MiniMaxM3IndexerRocmNvfp4Impl)
+    impl.num_index_heads = 1
+    expected = cp if scores_with_cp else None
+    assert impl._decode_cp(num_decodes, query_len) is expected

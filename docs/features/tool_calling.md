@@ -614,6 +614,33 @@ Existing automatic parser selection for Muse Glimmer is unchanged.
 
 Parser availability alone does not enable Muse Spark model execution.
 
+### ZAYA1 Models (`zaya`)
+
+Supported models:
+
+* `Zyphra/ZAYA1-8B`
+* `Zyphra/ZAYA1-74B-preview`
+
+ZAYA1 uses the Qwen3-Coder XML format inside `<zyphra_tool_call>` tags. Pair it
+with `--reasoning-parser zaya`, which also treats a tool call as the end of
+reasoning.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser zaya --reasoning-parser zaya`
+
+`zaya_xml` is an alias of `zaya`.
+
+### Ripple Models (`ripple`)
+
+Supported models:
+
+* `ricursiveAI/Ripple-65B-Preview`
+* `ricursiveAI/Ripple-65B-Preview-NVFP4`
+
+Ripple emits Hermes-style JSON tool calls inside `<tool_call>` tags after an
+optional `<think>` block. Pair it with `--reasoning-parser ripple`.
+
+Flags: `--enable-auto-tool-choice --tool-call-parser ripple --reasoning-parser ripple`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
