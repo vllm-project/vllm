@@ -14,6 +14,9 @@ Usage:
         --prefiller-host 127.0.0.1 --prefiller-port 8100 \
         --decoder-host   127.0.0.1 --decoder-port  8200 \
         --p2p-connector-host 127.0.0.1 --p2p-connector-port 5710
+
+With several prefiller instances, pass one --p2p-connector-host/-port per
+instance (in --prefiller-hosts order); a single value applies to all.
 """
 
 import argparse
@@ -37,7 +40,9 @@ async def lifespan(app: FastAPI):
     app.state.prefill_clients = []
     app.state.decode_clients = []
 
-    for i, (host, port) in enumerate(global_args.prefiller_instances):
+    for i, ((host, port), (pd_host, pd_port)) in enumerate(
+        zip(global_args.prefiller_instances, global_args.prefiller_pd_addrs)
+    ):
         app.state.prefill_clients.append(
             {
                 "client": httpx.AsyncClient(
@@ -49,6 +54,8 @@ async def lifespan(app: FastAPI):
                 ),
                 "host": host,
                 "port": port,
+                "pd_host": pd_host,
+                "pd_port": pd_port,
                 "id": i,
             }
         )
@@ -82,15 +89,14 @@ async def lifespan(app: FastAPI):
     mode = "decoder-first" if global_args.decoder_first else "prefiller-first"
     if global_args.p2p:
         mode += ",p2p"
-    pd_host = global_args.p2p_connector_host
-    pd_port = global_args.p2p_connector_port
+    pd_addrs = ", ".join(f"{h}:{p}" for h, p in global_args.prefiller_pd_addrs)
     n_pref = len(app.state.prefill_clients)
     n_dec = len(app.state.decode_clients)
     print(
         f"Proxy ready [{mode}]: "
         f"{n_pref} prefiller(s) x dp={global_args.prefiller_dp_size}, "
         f"{n_dec} decoder(s) x dp={global_args.decoder_dp_size}. "
-        f"P2PConnector base at {pd_host}:{pd_port}"
+        f"P2PConnector base(s) at {pd_addrs}"
     )
     yield
 
@@ -115,15 +121,19 @@ def parse_args():
     p.add_argument(
         "--p2p-connector-host",
         type=str,
-        default="127.0.0.1",
-        help="Host of the prefiller's P2PConnector ZMQ socket",
+        nargs="+",
+        default=["127.0.0.1"],
+        help="Host of each prefiller's P2PConnector ZMQ socket (one per "
+        "prefiller instance, or a single value for all)",
     )
     p.add_argument(
         "--p2p-connector-port",
         type=int,
-        default=int(os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")),
-        help="Port of the prefiller's P2PConnector ZMQ socket "
-        "(default: $VLLM_P2P_SIDE_CHANNEL_PORT or 5710)",
+        nargs="+",
+        default=[int(os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710"))],
+        help="Port of each prefiller's P2PConnector ZMQ socket (one per "
+        "prefiller instance, or a single value for all; "
+        "default: $VLLM_P2P_SIDE_CHANNEL_PORT or 5710)",
     )
     # P2PConnector coordinates of the decoder — injected into prefill requests
     # so the prefiller's submit_store can resolve the peer to push KV to.
@@ -178,6 +188,19 @@ def parse_args():
         raise ValueError("Decoder host/port count mismatch")
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
+    num_prefillers = len(args.prefiller_instances)
+    pd_hosts, pd_ports = args.p2p_connector_host, args.p2p_connector_port
+    for name, vals in (("host", pd_hosts), ("port", pd_ports)):
+        if len(vals) not in (1, num_prefillers):
+            raise ValueError(
+                f"--p2p-connector-{name} takes 1 or {num_prefillers} values, "
+                f"got {len(vals)}"
+            )
+    if len(pd_hosts) == 1:
+        pd_hosts = pd_hosts * num_prefillers
+    if len(pd_ports) == 1:
+        pd_ports = pd_ports * num_prefillers
+    args.prefiller_pd_addrs = list(zip(pd_hosts, pd_ports))
     return args
 
 
@@ -268,15 +291,16 @@ async def _handle_completions(api: str, request: Request):
         prefill_client = _get_next(request.app, "prefill")
         await _prefill(prefill_client, api, req_data, request_id, dp_rank=prefill_hdr)
 
-        # Inject the prefiller's P2PConnector address so the decoder can pull
-        # KV blocks from it. remote_port = base + prefill_rank targets the
-        # replica that produced the KV (base+0 == base when dp=1).
+        # Inject the P2PConnector address of the prefiller instance that ran
+        # the prefill so the decoder can pull KV blocks from it. remote_port =
+        # base + prefill_rank targets the replica that produced the KV
+        # (base+0 == base when dp=1).
         decoder_key = "remote_kv_source" if global_args.p2p else "remote_prefiller"
         req_data["kv_transfer_params"] = {
             decoder_key: {
                 "kv_request_id": request_id,
-                "remote_host": global_args.p2p_connector_host,
-                "remote_port": global_args.p2p_connector_port + prefill_rank,
+                "remote_host": prefill_client["pd_host"],
+                "remote_port": prefill_client["pd_port"] + prefill_rank,
             },
         }
 
@@ -329,8 +353,8 @@ async def _handle_completions_decoder_first(api: str, request: Request):
         decode_data["kv_transfer_params"] = {
             decoder_key: {
                 "kv_request_id": request_id,
-                "remote_host": global_args.p2p_connector_host,
-                "remote_port": global_args.p2p_connector_port + prefill_rank,
+                "remote_host": prefill_client["pd_host"],
+                "remote_port": prefill_client["pd_port"] + prefill_rank,
             },
         }
 
