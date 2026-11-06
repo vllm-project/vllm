@@ -18,6 +18,7 @@ from vllm.v1.token_buffer import (
     extend_from_slice,
     rfind_token_sequences,
     rfind_tokens,
+    token_slice,
 )
 
 
@@ -135,6 +136,19 @@ def test_token_ids_view_searches_in_place():
     assert list(view) == [1, 2, 3] and view[-1] == 3
     view.pop()
     assert list(view) == [1, 2] and rfind_tokens(view, (3,)) == -1
+
+
+def test_token_slice_reads_a_view_in_place():
+    view = TokenIdsView(TokenBuffer([1, 2, 3, 4]), [5, 6])
+    assert list(token_slice(view, 2, 5)) == [3, 4, 5]
+    assert list(token_slice(view, 4, 9)) == [5, 6]
+    view.pop()
+    view.pop()
+    view.pop()
+    assert list(token_slice(view, 1, 9)) == [2, 3]
+    assert view._list is None  # slicing didn't copy the tokens
+    assert list(view) == [1, 2, 3] and list(token_slice(view, 0, 2)) == [1, 2]
+    assert list(token_slice(view, -2, 3)) == [2, 3]
 
 
 def test_token_buffer_pickles_out_of_band_snapshot():

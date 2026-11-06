@@ -150,7 +150,10 @@ def rfind_token_sequences(
 
 def token_slice(tokens: Sequence[int], start: int, stop: int) -> Sequence[int]:
     """``tokens[start:stop]``; for a TokenBuffer an int32 array, so that no
-    Python ints are made until it is read."""
+    Python ints are made until it is read, and for a TokenIdsView without
+    copying the rest of it."""
+    if isinstance(tokens, TokenIdsView):
+        return tokens.slice_ids(start, stop)
     if isinstance(tokens, array):
         return array.__getitem__(tokens, slice(start, stop))
     return tokens[start:stop]
@@ -198,6 +201,16 @@ class TokenIdsView(Sequence[int]):
         if self._list is not None:
             self._list.pop()
         self._len -= 1
+
+    def slice_ids(self, start: int, stop: int) -> list[int]:
+        """``self[start:stop]``, without copying for non-negative bounds."""
+        if self._list is not None or start < 0 or stop < 0:
+            return self._as_list()[start:stop]
+        num_tokens = len(self._tokens)
+        stop = min(stop, self._len)
+        head = token_slice(self._tokens, start, min(stop, num_tokens))
+        suffix = self._suffix[max(0, start - num_tokens) : max(0, stop - num_tokens)]
+        return [*head, *suffix]
 
     def rfind(self, targets: Collection[int | None], start: int, stop: int) -> int:
         if self._list is not None:
