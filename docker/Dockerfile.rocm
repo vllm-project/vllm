@@ -142,7 +142,7 @@ ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
 
-# Remove NVIDIA-only dependencies and accept the runtime's NumPy version.
+# Remove NVIDIA-only dependencies and align NumPy and OpenTelemetry with the runtime.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
         "${LMCACHE_REPO}" /app/lmcache \
@@ -151,9 +151,15 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
     && test "$(grep -Fxc 'numpy<=2.2.6' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
         -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e '/^opentelemetry-api /s/<= 1\.40\.0$/<= 1.45.2/' \
+        -e '/^opentelemetry-exporter-prometheus /s/<= 0\.61b0$/<= 0.66b2/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
@@ -323,10 +329,13 @@ RUN --mount=type=bind,source=requirements/common.txt,target=/r/common.txt \
 # USE_ROCM and can detect libamdhip64.so at runtime.
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/r/test.txt \
     --mount=type=cache,target=/root/.cache/pip \
-    FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /r/test.txt | head -1)" \
-    && test -n "${FASTSAFETENSORS_REQ}" \
-    && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}"
+    awk '/^fastsafetensors(==| @ )/ {keep=1} \
+         keep {print; if ($0 !~ /\\$/) exit}' \
+        /r/test.txt > /tmp/fastsafetensors-req.txt \
+    && test -s /tmp/fastsafetensors-req.txt \
+    && python3 -m pip install --force-reinstall --no-deps --require-hashes \
+        --no-binary fastsafetensors -r /tmp/fastsafetensors-req.txt \
+    && rm /tmp/fastsafetensors-req.txt
 
 # ROCm profiler limits workaround.
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > /app/libkineto.conf
@@ -572,12 +581,18 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     fi
 
 FROM test-base AS test
+# Native fault reporter for AMD CI pytest runs (.buildkite/scripts/hardware_ci/amd_ci_fast_exit.py).
+RUN --mount=type=bind,source=.buildkite/scripts/hardware_ci/amd_ci_fault_trap.c,target=/tmp/trap.c \
+    cc -O2 -shared -fPIC -o /usr/local/lib/libamd_ci_fault_trap.so /tmp/trap.c
 COPY --link --from=native /out /
 COPY --link --from=install /out /
 COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
+# run-amd-test.sh's pytest plugin, in site-packages: commands that set PYTHONPATH still load it.
+RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
+    "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"
 
 FROM test AS test-smoke
 RUN --network=none python3 -c "import vllm, vllm._C, vllm._rocm_C; print(vllm.__version__)"
