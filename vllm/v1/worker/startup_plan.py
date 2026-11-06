@@ -27,6 +27,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.utils import normalize_value
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -49,6 +50,8 @@ def compute_plan_fingerprint(
     name, total memory, compute capability, and the torch/CUDA build are
     added here. The vLLM version is also pinned as an explicit factor so
     version invalidation holds no matter how ``compute_hash`` evolves.
+    Multimodal preprocessing and profiling settings are included separately
+    because the compiler hash can omit them.
     Rank is included because per-rank memory use differs under TP/PP.
     Driver-only changes are not part of the key; the free-memory gate at
     apply time bounds the residual risk.
@@ -70,6 +73,9 @@ def compute_plan_fingerprint(
         "rank": rank,
         "world_size": world_size,
     }
+    mm_config = vllm_config.model_config.multimodal_config
+    if mm_config is not None:
+        factors["multimodal_config"] = normalize_value(mm_config)
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]
 
@@ -140,9 +146,13 @@ def maybe_apply_startup_plan(worker: "Worker") -> None:
         or worker.cache_config.kv_cache_memory_bytes is not None
     ):
         return
-    fingerprint = compute_plan_fingerprint(
-        worker.vllm_config, worker.rank, worker.parallel_config.world_size
-    )
+    try:
+        fingerprint = compute_plan_fingerprint(
+            worker.vllm_config, worker.rank, worker.parallel_config.world_size
+        )
+    except TypeError as e:
+        logger.warning("Skipping startup plan for unsupported config: %s", e)
+        return
     plan = _load_plan(fingerprint)
     if plan is None:
         return
@@ -170,9 +180,13 @@ def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> Non
     never raised."""
     if not envs.VLLM_ENABLE_STARTUP_PLAN:
         return
-    fingerprint = compute_plan_fingerprint(
-        worker.vllm_config, worker.rank, worker.parallel_config.world_size
-    )
+    try:
+        fingerprint = compute_plan_fingerprint(
+            worker.vllm_config, worker.rank, worker.parallel_config.world_size
+        )
+    except TypeError as e:
+        logger.warning("Skipping startup plan for unsupported config: %s", e)
+        return
     path = _plan_path(fingerprint)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
