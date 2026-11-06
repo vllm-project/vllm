@@ -6,7 +6,8 @@ void rms_norm_impl(scalar_t* __restrict__ out,
                    const scalar_t* __restrict__ input,
                    const scalar_t* __restrict__ weight, const bool has_weight,
                    const float epsilon, const int num_tokens,
-                   const int hidden_size) {
+                   const int hidden_size, const int64_t tokens_per_weight_row,
+                   const int64_t weight_stride) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
   TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
@@ -31,7 +32,9 @@ void rms_norm_impl(scalar_t* __restrict__ out,
       vec_op::FP32Vec8 fp32_x(x);
       vec_op::FP32Vec8 fp32_out;
       if (has_weight) {
-        scalar_vec_t w(weight + j);
+        // 2D weight: row = outermost input index (weight_stride 0 for 1D).
+        scalar_vec_t w(weight + (i / tokens_per_weight_row) * weight_stride +
+                       j);
         vec_op::FP32Vec8 fp32_w(w);
         fp32_out = fp32_x * fp32_s_variance * fp32_w;
       } else {
@@ -101,15 +104,29 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input,
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   const bool has_weight = weight.has_value();
+  int64_t weight_stride = 0;
+  int64_t tokens_per_weight_row = num_tokens > 0 ? num_tokens : 1;
   if (has_weight) {
     TORCH_CHECK(weight->is_contiguous());
+    if (weight->dim() == 1) {
+      TORCH_CHECK(weight->size(0) == hidden_size);
+    } else if (weight->dim() == 2) {
+      TORCH_CHECK(input.dim() >= 2 && weight->size(0) == input.size(0));
+      TORCH_CHECK(weight->size(1) == hidden_size);
+      weight_stride = weight->stride(0);
+      tokens_per_weight_row =
+          input.size(0) > 0 ? num_tokens / input.size(0) : 1;
+    } else {
+      TORCH_CHECK(false, "rms_norm weight must be 1D or 2D");
+    }
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_impl", [&] {
     CPU_KERNEL_GUARD_IN(rms_norm_impl)
     rms_norm_impl(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
                   has_weight ? weight->data_ptr<scalar_t>() : nullptr,
-                  has_weight, epsilon, num_tokens, hidden_size);
+                  has_weight, epsilon, num_tokens, hidden_size,
+                  tokens_per_weight_row, weight_stride);
     CPU_KERNEL_GUARD_OUT(rms_norm_impl)
   });
 }
