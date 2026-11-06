@@ -1156,6 +1156,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
+                    wrapped = _lora_base_layer_name(name_mapped)
+                    if wrapped in params_dict:
+                        name_mapped = wrapped
                 # QKV fusion: skip if fused module doesn't exist in model
                 if param_name == ".fused_qkv_a_proj" and name_mapped not in params_dict:
                     continue
@@ -1209,6 +1213,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                         and not _is_linear_attn(self.config)
                     ):  # noqa: E501
                         continue
+                    if name not in params_dict:
+                        wrapped = _lora_base_layer_name(name)
+                        if wrapped in params_dict:
+                            name = wrapped
                     # Remapping the name of FP8 kv-scale.
                     remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                     if remapped_name is None:
@@ -1624,6 +1632,23 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
+def _lora_base_layer_name(name: str) -> str:
+    """Where a LoRA wrapper keeps parameter `name`: on its `base_layer`."""
+    module, _, leaf = name.rpartition(".")
+    return f"{module}.base_layer.{leaf}"
+
+
+def _find_unique_weight_name(params_dict, name):
+    """Resolve a checkpoint weight by exact suffix through LoRA wrappers."""
+    names = (name, _lora_base_layer_name(name))
+    for candidate in names:
+        if candidate in params_dict:
+            return candidate
+    suffixes = tuple(f".{candidate}" for candidate in names)
+    matches = [candidate for candidate in params_dict if candidate.endswith(suffixes)]
+    return matches[0] if len(matches) == 1 else None
+
+
 # MLA projections the model runs in BF16 that a quantized checkpoint may store
 # as block-FP8: checkpoint suffix -> the parameter the projection loads into.
 _FP8_ATTN_PROJS = {
@@ -1662,10 +1687,14 @@ def _mla_proj_checkpoint_tensor(
     if suffix is None:
         return name, tensor
     prefix = name.rsplit(suffix, 1)[0]
-    scale_name = f"{prefix}.{_FP8_ATTN_PROJS[suffix]}.weight_scale_inv"
-    if scale_name not in params_dict:  # no q_lora_rank: kv_a is not fused
-        scale_name = f"{prefix}{suffix}weight_scale_inv"
-    is_fp8_proj = scale_name in params_dict  # see `bf16_linear`
+    scale_name = _find_unique_weight_name(
+        params_dict, f"{prefix}.{_FP8_ATTN_PROJS[suffix]}.weight_scale_inv"
+    )
+    if scale_name is None:  # no q_lora_rank: kv_a is not fused
+        scale_name = _find_unique_weight_name(
+            params_dict, f"{prefix}{suffix}weight_scale_inv"
+        )
+    is_fp8_proj = scale_name is not None  # see `bf16_linear`
     if is_fp8_proj and name.endswith(".weight_scale"):
         name = f"{name}_inv"
     if kv_a_pad_size > 0 and suffix == ".kv_a_proj_with_mqa.":

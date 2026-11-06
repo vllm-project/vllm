@@ -1961,7 +1961,6 @@ class Glm4vForConditionalGeneration(
             "k_proj",
             "v_proj",
         ],
-        "qkv": ["qkv"],
         "gate_up_proj": ["gate_up_proj"],
     }
 

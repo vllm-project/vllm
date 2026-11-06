@@ -79,13 +79,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         return self.moe_quant_config
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
-        routed_experts = getattr(layer, "routed_experts", None)
-        if routed_experts is None:
-            routed_experts = getattr(
-                getattr(layer, "base_layer", None), "routed_experts", None
-            )
-        if routed_experts is not None:
-            layer = routed_experts
+        # FusedMoEWithLoRA exposes this method as its ``quant_method``, so
+        # post-load passes reach it through the wrapper too. The wrapped
+        # RoutedExperts is visited on its own; process the weights only there.
+        if getattr(layer, "routed_experts", None) is not None:
+            return
 
         old_kernel = self.old_quant_method.moe_kernel
         self.old_quant_method.process_weights_after_loading(layer)
