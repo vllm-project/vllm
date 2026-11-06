@@ -585,7 +585,10 @@ class DefaultModelLoader(BaseModelLoader):
                         #   fall back to defaults when a checkpoint has none;
                         # - empty placeholders hold no data, e.g. the qzeros
                         #   moe_wna16 registers for symmetric GPTQ;
-                        # - _CONFIG_BUILT_PARAMS come from the quantization config.
+                        # - _CONFIG_BUILT_PARAMS come from the quantization config;
+                        # - optional_in_checkpoint parameters stay registered for
+                        #   exports that write them, but no kernel reads them, e.g.
+                        #   the input scales of weight-only NVFP4 layers.
                         # Unquantized models, where this check runs by default,
                         # keep the module-wide exemption.
                         if (
@@ -595,6 +598,7 @@ class DefaultModelLoader(BaseModelLoader):
                             and param.numel() > 0
                             and param_name.rsplit(".", 1)[-1]
                             not in _CONFIG_BUILT_PARAMS
+                            and not getattr(param, "optional_in_checkpoint", False)
                         ):
                             continue
                         full_name = f"{name}.{param_name}" if name else param_name
