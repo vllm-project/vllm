@@ -412,6 +412,19 @@ class RequestOffloadState:
             )
 
     def update_offload_keys(self) -> None:
+        if self.req_context.kv_hints is not None:
+            self.req_context.set_state(
+                RequestHashChain(
+                    request_id=self.req.request_id,
+                    block_hashes=tuple(self.req.block_hashes),
+                    tokens_per_hash=self.config.tokens_per_hash,
+                    group_chunks=tuple(
+                        (g.group_idx, g.tokens_per_chunk)
+                        for g in self.config.kv_group_configs
+                    ),
+                    anchor_tokens=self.config.alignment_tokens,
+                )
+            )
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
@@ -545,6 +558,17 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
         # all entries were invalid — fall back to ALL
         return TierFilter.ALL
     return TierFilter(matchers=tuple(matchers))
+
+
+@dataclass(frozen=True)
+class RequestHashChain:
+    """Scheduler-owned hash snapshot and offload group geometry."""
+
+    request_id: str
+    block_hashes: tuple[bytes, ...]
+    tokens_per_hash: int
+    group_chunks: tuple[tuple[int, int], ...]
+    anchor_tokens: int | None
 
 
 class _RequestTokens(NamedTuple):

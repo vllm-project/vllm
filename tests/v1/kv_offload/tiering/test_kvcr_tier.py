@@ -30,7 +30,7 @@ from kvcr.types import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
-from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -78,6 +78,7 @@ class RecordingKVCR:
         self.framework_control: _StubControlChannel | None = None
         self.inventory_sink = None
         self.query_status = QueryStatus.MISS
+        self.query_calls = []
         self.stats: OffloadingConnectorStats | None = None
         self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
@@ -105,6 +106,7 @@ class RecordingKVCR:
         keys: Collection[BlockKey],
         request_id: str | None = None,
     ) -> list[tuple[QueryStatus, CacheTier | None]]:
+        self.query_calls.append((tuple(keys), request_id))
         tier = {
             QueryStatus.HIT: CacheTier.LOCAL_G2,
             QueryStatus.FETCHING: CacheTier.LOCAL_G2,
@@ -193,6 +195,7 @@ def _make_tier(
     control_ports: list[int] | None = None,
     data_parallel_rank_local: int | None = None,
     backpressure: dict[str, Any] | None = None,
+    opportunistic_query: bool = True,
 ) -> KVCRSecondaryTierManager:
     def make_control(_bind_host, bind_port, advertise_host):
         return _StubControlChannel(f"tcp://{advertise_host}:{int(bind_port)}")
@@ -213,6 +216,7 @@ def _make_tier(
     monkeypatch.setattr(kvcr_manager, "ZmqPeerControlChannel", make_control)
     tier_config = {
         "type": "kvcr",
+        "opportunistic_query": opportunistic_query,
         "router_capabilities": ["router_hint"],
         "control_host": "127.0.0.1",
         "control_ports": control_ports if control_ports is not None else [7777],
@@ -703,3 +707,152 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch, successes, expected):
     tier.drain_jobs()
 
     assert list(tier.get_finished_jobs()) == [expected]
+
+
+def test_strict_rejection_keeps_local_lookup_and_dispatch(monkeypatch):
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = ReqContext(req_id="req")
+    key = make_offload_key(bytes(32), 0)
+    tier.on_new_request(ctx)
+    kvcr.query_status = QueryStatus.HIT
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert kvcr.query_calls == [((key,), None)]
+    # A local eviction between query and dispatch must not enable remote work.
+    kvcr.query_status = QueryStatus.MISS
+    tier.submit_load(_job(7, ctx, key))
+    assert kvcr.deliver_calls[0][2] is None
+    assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
+
+
+def _hint_context(anchors=(4,), *, source="tcp://source:7000", **payload):
+    return ReqContext(
+        req_id="req",
+        kv_hints=KvHintsEnvelope(
+            "0.1",
+            "msg",
+            [
+                KvHintAction(
+                    "fetch",
+                    "kv.fetch",
+                    "1.0",
+                    {
+                        "source_control_endpoint": source,
+                        "block_hashes": list(anchors),
+                        **payload,
+                    },
+                )
+            ],
+        ),
+    )
+
+
+def _set_chain(ctx, hashes=(1, 2, 3, 4), groups=((0, 16), (1, 32)), **kwargs):
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        RequestHashChain,
+    )
+
+    ctx.set_state(
+        RequestHashChain(
+            request_id=ctx.req_id,
+            block_hashes=tuple(h.to_bytes(32, "big") for h in hashes),
+            tokens_per_hash=16,
+            group_chunks=groups,
+            anchor_tokens=64,
+            **kwargs,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "anchors,payload,authorized",
+    [
+        ((4,), {}, True),
+        ((99,), {}, False),
+        ((3,), {}, False),
+        ((True,), {}, False),
+        ((4,), {"mode": "move"}, False),
+        ((4,), {"no_retain": False}, False),
+    ],
+)
+def test_strict_hybrid_prefix_and_mixed_dispatch(
+    monkeypatch, anchors, payload, authorized
+):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context(anchors, **payload)
+    _set_chain(ctx)
+    tier.on_new_request(ctx)
+    fine = make_offload_key((1).to_bytes(32, "big"), 0)
+    wrong_group = make_offload_key((1).to_bytes(32, "big"), 1)
+    kvcr.query_status = QueryStatus.HIT
+    for key in (fine, wrong_group):
+        assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert [call[1] for call in kvcr.query_calls] == [
+        "req" if authorized else None,
+        None,
+    ]
+    if authorized:
+        hints = kvcr.submit_hint_calls[-1][1]["hints"]
+        assert set(hints.actions[0].payload["block_hashes"]) == {1, 2, 3, 4}
+    tier.submit_load(
+        TransferJob(
+            job_id=7,
+            keys=[fine, wrong_group],
+            chunk_ids=np.array([0, 1]),
+            is_promotion=True,
+            req_context=ctx,
+        )
+    )
+    dispatched = {
+        key: request for _, blocks, request in kvcr.deliver_calls for key in blocks
+    }
+    assert dispatched == {fine: "req" if authorized else None, wrong_group: None}
+    assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
+
+
+@pytest.mark.parametrize("conflicting_source", [False, True])
+def test_strict_preserves_all_actions_and_last_fetch(monkeypatch, conflicting_source):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    import msgspec
+
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    unknown = KvHintAction("other", "other", "1.0", {})
+    first = ctx.kv_hints.actions[0]
+    second = _hint_context(
+        (8,), source="tcp://other:7000" if conflicting_source else "tcp://source:7000"
+    ).kv_hints.actions[0]
+    ctx.kv_hints = msgspec.structs.replace(
+        ctx.kv_hints, actions=[unknown, first, second]
+    )
+    _set_chain(ctx, hashes=tuple(range(1, 9)))
+    tier.on_new_request(ctx)
+    submitted = kvcr.submit_hint_calls[-1][1]["hints"]
+    assert [a.action_type for a in submitted.actions] == [
+        "other",
+        "kv.fetch",
+        "kv.fetch",
+    ]
+    assert set(submitted.actions[-1].payload["block_hashes"]) == set(range(1, 9))
+    key = make_offload_key((7).to_bytes(32, "big"), 0)
+    kvcr.query_status = QueryStatus.HIT
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert kvcr.query_calls[-1][1] == (None if conflicting_source else "req")
+
+
+@pytest.mark.parametrize("hashes", [(1, 2, 3, 4, 4), (1, 2, 3, 4, (1 << 64) + 4)])
+def test_strict_ambiguous_anchor_stays_local(monkeypatch, hashes):
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    _set_chain(ctx, hashes=hashes)
+    tier.on_new_request(ctx)
+    key = make_offload_key((1).to_bytes(32, "big"), 0)
+    kvcr.query_status = QueryStatus.HIT
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert kvcr.query_calls[-1][1] is None
+    assert kvcr.submit_hint_calls == []

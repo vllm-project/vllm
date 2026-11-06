@@ -8,9 +8,11 @@ import socket
 import time
 import uuid
 from collections.abc import Collection, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import msgspec
 from kvcr import (
     DURATION_METRIC,
     KVCR,
@@ -72,6 +74,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.policies.base import order_request_keys
 from vllm.v1.kv_offload.tiering.base import (
@@ -263,7 +266,13 @@ class _VllmKeyAdapter:
 
 
 # Job metadata, remaining blocks, aggregate success, and successful load keys.
-_JobState = tuple[TransferJob, int, bool, set[OffloadKey] | None]
+@dataclass
+class _JobState:
+    job: TransferJob
+    remaining: int
+    success: bool
+    successful_keys: set[OffloadKey] | None
+    handles: set[OpHandle] = field(default_factory=set)
 
 
 # Held for the process lifetime after a startup failure that could not stop
@@ -344,6 +353,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             raise ValueError(
                 "KVCR local G2/G3 inventory requires self_describing_kv_events"
             )
+        self._opportunistic_query = opportunistic_query
         self._key_adapter: KeyAdapter = _VllmKeyAdapter()
         advertise_host = control_advertise_host or socket.gethostname()
         dp_local_rank = offloading_spec.config.parallel.data_parallel_rank_local
@@ -483,10 +493,115 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         self._finished_jobs: list[JobResult] = []
         self._jobs_by_op: dict[OpHandle, _JobState] = {}
 
+    def _remote_keys(self, ctx: ReqContext) -> set[OffloadKey]:
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+            RequestHashChain,
+        )
+
+        chain = ctx.get_state(RequestHashChain)
+        hint = ctx.kv_hints
+        if chain is None or hint is None or chain.request_id != ctx.req_id:
+            return set()
+        step, groups = chain.tokens_per_hash, chain.group_chunks
+        if (
+            type(step) is not int
+            or step <= 0
+            or not groups
+            or len(dict(groups)) != len(groups)
+            or any(
+                type(g) is not int
+                or not 0 <= g < 1 << 32
+                or type(span) is not int
+                or span <= 0
+                or span % step
+                for g, span in groups
+            )
+            or type(chain.anchor_tokens) is not int
+            or chain.anchor_tokens <= 0
+            or chain.anchor_tokens % step
+            or hint.protocol_version != "0.1"
+        ):
+            return set()
+        positions: dict[int, int] = {}
+        for index, block_hash in enumerate(chain.block_hashes, 1):
+            if type(block_hash) is not bytes or len(block_hash) != 32:
+                return set()
+            value = self._key_adapter.encode_to_router(
+                BlockKey(make_offload_key(block_hash, 0))
+            )
+            if type(value) is not int or value in positions:
+                return set()
+            positions[value] = index * step
+        actions = []
+        eligible: set[OffloadKey] = set()
+        sources = set()
+        for action in hint.actions:
+            if action.action_type != "kv.fetch":
+                actions.append(action)
+                continue
+            payload = action.payload
+            source, anchors = (
+                payload.get("source_control_endpoint"),
+                payload.get("block_hashes"),
+            )
+            if (
+                action.action_version != "1.0"
+                or not isinstance(source, str)
+                or not source
+                or payload.get("mode", "copy") != "copy"
+                or "no_retain" in payload
+                or not isinstance(anchors, list)
+                or not anchors
+                or any(
+                    type(a) is not int
+                    or a not in positions
+                    or positions[a] % chain.anchor_tokens
+                    for a in anchors
+                )
+            ):
+                continue
+            ends = [positions[a] for a in anchors]
+            # Repeated anchors retain the set semantics of the KVCR parser.
+            if any(a > b for a, b in zip(ends, ends[1:])):
+                continue
+            cutoff = ends[-1]
+            eligible = {
+                make_offload_key(h, g)
+                for index, h in enumerate(chain.block_hashes, 1)
+                for g, span in groups
+                if index * step <= cutoff and index * step % span == 0
+            }
+            expanded = dict(
+                payload,
+                block_hashes=list(
+                    dict.fromkeys(
+                        [
+                            *anchors,
+                            *(int.from_bytes(k[-12:-4], "big") for k in eligible),
+                        ]
+                    )
+                ),
+            )
+            actions.append(msgspec.structs.replace(action, payload=expanded))
+            sources.add(source)
+        if actions:
+            self._kvcr.submit_hint(
+                request_id=ctx.req_id,
+                hints=msgspec.structs.replace(hint, actions=actions),
+            )
+        return eligible if len(sources) == 1 else set()
+
+    def _remote_request_id(self, key: OffloadKey, ctx: ReqContext) -> str | None:
+        if self._opportunistic_query or key in self._remote_keys(ctx):
+            return ctx.req_id
+        return None
+
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         block_key = self._key_adapter.decode_from_framework(key)
-        status, _ = self._kvcr.query((block_key,), req_context.req_id)[0]
+        status, _ = self._kvcr.query(
+            (block_key,), self._remote_request_id(key, req_context)
+        )[0]
         if status is QueryStatus.FETCHING:
             return LookupResult.RETRY
         if status in (QueryStatus.HIT, QueryStatus.FETCHABLE):
@@ -509,15 +624,17 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
             return
 
-        op_handle = self._kvcr.deliver(
-            blocks, request_id=job_metadata.req_context.req_id
-        )
-        self._jobs_by_op[op_handle] = (
-            job_metadata,
-            len(blocks),
-            True,
-            set(),
-        )
+        ctx = job_metadata.req_context
+        eligible = None if self._opportunistic_query else self._remote_keys(ctx)
+        partitions: dict[str | None, dict[BlockKey, list[MemoryRef]]] = {}
+        for key, refs in blocks.items():
+            request_id = ctx.req_id if eligible is None or key in eligible else None
+            partitions.setdefault(request_id, {})[key] = refs
+        state = _JobState(job_metadata, len(blocks), True, set())
+        for request_id, partition in partitions.items():
+            handle = self._kvcr.deliver(partition, request_id=request_id)
+            state.handles.add(handle)
+            self._jobs_by_op[handle] = state
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
@@ -535,11 +652,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
             return
         op_handle = self._kvcr.deposit(blocks)
-        self._jobs_by_op[op_handle] = (
-            job_metadata,
-            len(blocks),
-            True,
-            None,
+        self._jobs_by_op[op_handle] = _JobState(
+            job_metadata, len(blocks), True, None, {op_handle}
         )
 
     @override
@@ -570,7 +684,10 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             job_state = self._jobs_by_op.get(op_handle)
             if job_state is None:
                 continue
-            job, remaining, success, successful_keys = job_state
+            job = job_state.job
+            remaining = job_state.remaining
+            success = job_state.success
+            successful_keys = job_state.successful_keys
             remaining -= len(entries)
             success = success and all(entry.success for entry in entries.values())
             if successful_keys is not None and (remaining > 0 or not success):
@@ -580,14 +697,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     if entry.success
                 )
             if remaining > 0:
-                self._jobs_by_op[op_handle] = (
-                    job,
-                    remaining,
-                    success,
-                    successful_keys,
-                )
+                job_state.remaining = remaining
+                job_state.success = success
                 continue
-            self._jobs_by_op.pop(op_handle, None)
+            for handle in job_state.handles:
+                self._jobs_by_op.pop(handle, None)
             positions = job.req_context._offload_key_positions
             end_token = max((positions.get(key, -1) for key in job.keys), default=-1)
             # Preserve ordering across requests, which may share prefix keys.
@@ -624,7 +738,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        if (hint := req_context.kv_hints) is not None:
+        if not self._opportunistic_query:
+            self._remote_keys(req_context)
+        elif (hint := req_context.kv_hints) is not None:
             self._kvcr.submit_hint(
                 request_id=req_context.req_id,
                 hints=hint,
