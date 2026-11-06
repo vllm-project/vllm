@@ -43,13 +43,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
-from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
-    ACTIVE_STAGE,
-    LAMPORT_GENERATIONS,
-    NEXT_STAGE,
-    _QuadFinalizePublishDeviceKernel,
-)
-from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     VEC_BF16,
     WARP_SIZE,
     _asm,
@@ -69,6 +63,12 @@ from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.primitives import (
     store_shared_cluster_f32,
     to_cute,
     to_cute_dynamic,
+)
+from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
+    ACTIVE_STAGE,
+    LAMPORT_GENERATIONS,
+    NEXT_STAGE,
+    _QuadFinalizePublishDeviceKernel,
 )
 
 HC = 4

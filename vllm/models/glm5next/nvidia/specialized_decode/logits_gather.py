@@ -27,7 +27,7 @@ from cutlass import BFloat16, Int32, Int64, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
 from vllm.distributed import get_tp_group
-from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     current_cu_stream,
     make_fake_dynamic_compact_tensor,
     to_cute,
