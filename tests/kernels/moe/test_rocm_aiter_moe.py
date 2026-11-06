@@ -32,7 +32,7 @@ import torch.nn.functional as F
 from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950, on_mi3xx
+from vllm.platforms.rocm import get_cdna_version, on_cdna, on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -847,7 +847,9 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
 
 
 @pytest.mark.skipif(
-    not on_mi3xx(),
+    # AITER only ships an asm tkw1 build for CDNA 3/4 today; not an
+    # architectural limit, so widen this if gfx1250 gets one too.
+    get_cdna_version() not in (3, 4),
     reason="AITER tkw1 asm MoE is MI300/MI350 only",
 )
 def test_aiter_fp8_channel_tkw1_metadata_token_counts():
