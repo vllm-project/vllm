@@ -752,17 +752,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
+            # The kernel emits the normed output, so out_proj cannot quantize it.
+            or not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
         ):
             return (
                 "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
                 "2 or 3 value heads per key head, conv width 4, SiLU conv and gate "
-                "activations, a BF16 convolution cache and a BF16 or FP32 recurrent "
-                "state"
+                "activations, a BF16 convolution cache, a BF16 or FP32 recurrent "
+                "state and an unquantized out_proj"
             )
-        if not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod):
-            # The kernel emits the normed output, so the norm cannot be fused
-            # with the out_proj input quantization.
-            return "out_proj is quantized"
         return None
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
