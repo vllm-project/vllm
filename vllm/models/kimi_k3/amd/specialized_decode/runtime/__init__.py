@@ -214,7 +214,7 @@ def unsupported(vllm_config) -> list[str]:
             "KDA cache dtypes other than a BF16 conv state and an FP32 recurrent "
             "state (mamba cache dtype)",
         ),
-        (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
+        (cc.use_replayssm or cc.use_recoverssm, "ReplaySSM / RecoverSSM"),
         # the model state hooks build the executor and bind it to each KV cache
         (
             not vllm_config.use_v2_model_runner,
