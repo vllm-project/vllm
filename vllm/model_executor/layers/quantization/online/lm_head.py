@@ -20,6 +20,7 @@ from vllm.model_executor.kernels.linear import (
     init_nvfp4_linear_kernel,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineLinearMethod,
     OnlineLinearBase,
@@ -297,7 +298,45 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
     for param in head.parameters(recurse=False):
         if hasattr(param, "weight_loader"):
             del param.weight_loader
+    method = head.quant_method
+    if isinstance(method, OnlineLMHeadMethodBase):
+        max_rows = method.kernel_cls.max_fast_rows(method.mp_config)
+        if max_rows is not None:
+            head.quant_method = _SourceAboveRowsMethod(method, lm_head, max_rows)
     return head
+
+
+class _SourceAboveRowsMethod(QuantizeMethodBase):
+    """Runs the copy up to `max_rows` rows and the source head above them,
+    where the copy's kernel leaves its fast path (e.g. RDNA W4A16 past the
+    HIP skinny GEMM, which is slower than bf16 on a large vocab)."""
+
+    def __init__(
+        self, method: QuantizeMethodBase, source: ParallelLMHead, max_rows: int
+    ):
+        self.method = method
+        self.source = source
+        self.max_rows = max_rows
+        # QuantizeMethodBase defines it, so __getattr__ would not forward it.
+        self.uses_meta_device = method.uses_meta_device
+
+    def __getattr__(self, name: str):
+        if name == "method":
+            raise AttributeError(name)
+        return getattr(self.method, name)
+
+    def create_weights(self, *args, **kwargs):
+        raise NotImplementedError("wraps an already-built lm_head copy")
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        self.method.process_weights_after_loading(layer)
+
+    def apply(
+        self, layer: Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if x.shape[0] > self.max_rows:
+            return self.source.quant_method.apply(self.source, x, bias)
+        return self.method.apply(layer, x, bias)
 
 
 # Each quantized copy maps to the head it is derived from. Weak keys, and no

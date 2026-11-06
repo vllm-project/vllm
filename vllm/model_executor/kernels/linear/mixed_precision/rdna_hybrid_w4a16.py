@@ -732,6 +732,14 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         return 0
 
     @classmethod
+    def max_fast_rows(cls, c: MPLinearLayerConfig) -> int | None:
+        # The rows `_rdna_hybrid_w4a16_apply_impl` sends to the HIP skinny GEMM.
+        if _on_gfx115x():
+            return MAX_SKINNY_BATCH_SIZE
+        K = c.partition_weight_shape[0]
+        return min(MAX_SKINNY_BATCH_SIZE, MEDIUM_SKINNY_LIMIT_ELEMENTS // K)
+
+    @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return False, "RDNAHybridW4A16LinearKernel only targets ROCm"
