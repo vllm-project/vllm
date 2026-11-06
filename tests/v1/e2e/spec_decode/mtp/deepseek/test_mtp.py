@@ -14,7 +14,7 @@ from .._correctness import check_mtp_correctness
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
         pytest.param(
-            ("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1, None),
+            ("mtp", "vllm-project/DeepSeek-V3-4layers-MTP-FP8", 1, None),
             False,
             0.0,
             marks=pytest.mark.skipif(
