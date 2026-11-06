@@ -540,6 +540,8 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
     release_ahead = threading.Event()
     real_open = open
     real_safe_open_handle = wu._safe_open_handle
+    real_pread = wu.os.pread
+    monkeypatch.delattr(wu.os, "preadv", raising=False)
 
     def track_open(path, *args, **kwargs):
         opened.append(path)
@@ -547,12 +549,17 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
         handles.append(handle)
         if len(opened) == 2:
             ahead.set()
-            # Hold the shard that is read ahead before any byte is read from
-            # it, so the mapping state below is deterministic.
-            assert release_ahead.wait(5), "Ahead shard was never released"
         return handle
 
+    def gated_pread(fd, count, offset):
+        # The shard that is read ahead must stay unmapped while its reads are
+        # still in flight, so hold its reads until the assertions have run.
+        if len(handles) > 1 and fd == handles[1].fileno():
+            assert release_ahead.wait(5), "Ahead shard read was never released"
+        return real_pread(fd, count, offset)
+
     monkeypatch.setattr(wu, "open", track_open, raising=False)
+    monkeypatch.setattr(wu.os, "pread", gated_pread)
 
     def track_mapping(handle, *args, **kwargs):
         mapped_handles.append(handle)
