@@ -1397,6 +1397,7 @@ def instanttensor_weights_iterator(
     use_tqdm_on_load: bool,
     local_expert_ids: set[int] | None = None,
     *,
+    ep_filter_enabled: bool = False,
     load_engram_on_cpu: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Load with InstantTensor, optionally mapping Engram tables on CPU."""
@@ -1429,9 +1430,10 @@ def instanttensor_weights_iterator(
                 else:
                     gpu_weight_names.append(name)
 
-    # Every rank must make the same decision about collective loading.
+    # Every rank must make the same decision about collective loading, so it
+    # follows the config: local_expert_ids can be None on only some ranks.
     empty_expert_ids: set[int] = set()
-    filter_experts = local_expert_ids is not None and any(
+    filter_experts = ep_filter_enabled and any(
         should_skip_weight(name, empty_expert_ids) for name in gpu_weight_names
     )
     tensor_filter: list[str] | None = None

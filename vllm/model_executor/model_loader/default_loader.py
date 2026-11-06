@@ -92,6 +92,7 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        self.ep_filter_enabled = False
         # Set in load_weights when --mm-encoder-only; used to drop LM-only shards.
         self._encoder_only_lm_prefixes: tuple[str, ...] | None = None
         self._encoder_only_weights_mapper: WeightsMapper | None = None
@@ -323,6 +324,7 @@ class DefaultModelLoader(BaseModelLoader):
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                     local_expert_ids=self.local_expert_ids,
+                    ep_filter_enabled=self.ep_filter_enabled,
                     load_engram_on_cpu=bool(
                         engram_config and engram_config.cpu_offload
                     ),
@@ -468,6 +470,10 @@ class DefaultModelLoader(BaseModelLoader):
         ep_size = dp_size * pcp_size * tp_size
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
 
+        # From the config alone, so that every rank agrees on it: the layout
+        # check below can differ across pipeline stages.
+        self.ep_filter_enabled = ep_size > 1 and not parallel_config.enable_elastic_ep
+
         if parallel_config.enable_eplb:
             # Redundant slots replicate experts from other ranks' shards, so
             # filter by the initial EPLB placement instead of the EP shard.
@@ -515,6 +521,8 @@ class DefaultModelLoader(BaseModelLoader):
                 ep_rank,
                 len(self.local_expert_ids),
                 num_experts,
+                # Rank 0 can be on a stage that does not filter.
+                scope="process",
             )
 
     @instrument(span_name="Load weights")
