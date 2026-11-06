@@ -347,6 +347,52 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
     assert "moe.runner.gate" not in manager.modules
 
 
+def test_moe_runner_alias_does_not_shadow_block_path(
+    default_vllm_config, dist_init, dummy_model, monkeypatch
+):
+    """Adapters target `moe.shared.up`, so that path must be the tracked one even
+    when the runner holding its alias comes first in the module tree.
+    """
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class Shared(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.up = ReplicatedLinear(10, 4, bias=False)
+
+    class Runner(nn.Module):
+        def __init__(self, shared: nn.Module):
+            super().__init__()
+            self.layer = shared
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = Shared()
+            self.experts = Runner(shared)
+            self.shared = shared
+
+    monkeypatch.setattr("vllm.lora.model_manager.MoERunner", Runner)
+    model = dummy_model
+    model.add_module("moe", Block())
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+        default_vllm_config,
+    )
+
+    assert "moe.shared.up" in manager.modules
+    assert "moe.experts.layer.up" not in manager.modules
+    assert manager.model.moe.experts.layer.up is manager.model.moe.shared.up
+
+
 def test_lm_head_exempt_from_dedup(default_vllm_config, dist_init, dummy_model):
     """The dedup logic must NOT collapse `lm_head` even when it is reachable
     from another attribute path (tied-embedding models do
