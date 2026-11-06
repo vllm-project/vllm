@@ -30,6 +30,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_token_sequences
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -65,16 +66,7 @@ def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) 
     Equivalent to comparing two ``_subseq_index`` results, but a single backward
     pass that stops at the first hit instead of walking to index 0 twice.
     """
-    if not a or not b:
-        return -1
-    a0, b0 = a[0], b[0]
-    for i in range(len(haystack) - min(len(a), len(b)), -1, -1):
-        head = haystack[i]
-        if head == a0 and i + len(a) <= len(haystack) and _match_at(haystack, i, a):
-            return 0
-        if head == b0 and i + len(b) <= len(haystack) and _match_at(haystack, i, b):
-            return 1
-    return -1
+    return -1 if not a or not b else rfind_token_sequences(haystack, (a, b))[1]
 
 
 class KimiK3ReasoningParser(ReasoningParser):
@@ -133,6 +125,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         )
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
+        )
+        self._response_open_ids = tokenizer.encode(
+            self._response_open, add_special_tokens=False
         )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
@@ -210,6 +205,43 @@ class KimiK3ReasoningParser(ReasoningParser):
         if cached_delta_ids == tuple(input_ids) and cached_content_ids is not None:
             return cached_content_ids
         return self._extract_content_ids(input_ids)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if not self._thinking_enabled:
+            return 0
+        think_open = self._think_open_ids
+        think_close = self._think_close_ids
+        response_open = self._response_open_ids
+        first_ids = {m[0] for m in (think_open, think_close, response_open) if m}
+        n = len(token_ids)
+        count = 0
+        in_reasoning = True
+        seen_open = False
+        i = 0
+        while i < n:
+            head = token_ids[i]
+            if head in first_ids:
+                if i + len(think_open) <= n and _match_at(token_ids, i, think_open):
+                    in_reasoning = True
+                    seen_open = True
+                    i += len(think_open)
+                    continue
+                if i + len(think_close) <= n and _match_at(token_ids, i, think_close):
+                    in_reasoning = False
+                    i += len(think_close)
+                    continue
+                if (
+                    not seen_open
+                    and i + len(response_open) <= n
+                    and _match_at(token_ids, i, response_open)
+                ):
+                    in_reasoning = False
+                    i += len(response_open)
+                    continue
+            if in_reasoning:
+                count += 1
+            i += 1
+        return count
 
     def _strip_content_wrapper(self, text: str) -> str:
         """Strip ``<|open|>response<|sep|>…<|close|>response<|sep|>`` wrapper and

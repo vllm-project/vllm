@@ -9,6 +9,7 @@ import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoFeatureExtractor,
+    AutoTokenizer,
     BatchFeature,
 )
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -162,56 +163,6 @@ class WavFrontend(nn.Module):
             feats_pad = feats[0][None, :, :]
         else:
             feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
-        return feats_pad, feats_lens
-
-    def forward_fbank(
-        self, input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = input.size(0)
-        feats = []
-        feats_lens = []
-        for i in range(batch_size):
-            waveform_length = input_lengths[i]
-            waveform = input[i][:waveform_length]
-            waveform = waveform * (1 << 15)
-            waveform = waveform.unsqueeze(0)
-            mat = kaldi.fbank(
-                waveform,
-                num_mel_bins=self.n_mels,
-                frame_length=self.frame_length,
-                frame_shift=self.frame_shift,
-                dither=self.dither,
-                energy_floor=0.0,
-                window_type=self.window,
-                sample_frequency=self.fs,
-            )
-
-            feat_length = mat.size(0)
-            feats.append(mat)
-            feats_lens.append(feat_length)
-
-        feats_lens = torch.as_tensor(feats_lens)
-        feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
-        return feats_pad, feats_lens
-
-    def forward_lfr_cmvn(
-        self, input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = input.size(0)
-        feats = []
-        feats_lens = []
-        for i in range(batch_size):
-            mat = input[i, : input_lengths[i], :]
-            if self.lfr_m != 1 or self.lfr_n != 1:
-                mat = apply_lfr(mat, self.lfr_m, self.lfr_n)
-            if self.cmvn is not None:
-                mat = apply_cmvn(mat, self.cmvn)
-            feat_length = mat.size(0)
-            feats.append(mat)
-            feats_lens.append(feat_length)
-
-        feats_lens = torch.as_tensor(feats_lens)
-        feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
         return feats_pad, feats_lens
 
 
@@ -386,6 +337,19 @@ class FunASRProcessor(ProcessorMixin):
 
     feature_extractor_class = "FunASRFeatureExtractor"
     tokenizer_class = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        # Bypass ProcessorMixin's dynamic module lookup, see MiniMaxVLProcessor
+        tokenizer = kwargs.pop("tokenizer", None)
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path, **kwargs
+            )
+        feature_extractor = FunASRFeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path, **kwargs
+        )
+        return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
     def __init__(
         self,

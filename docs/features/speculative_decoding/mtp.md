@@ -74,3 +74,12 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   is a good default to start with.
 - If your model does not support MTP, use another method such as EAGLE or draft
   model speculation.
+- When the MTP head shares the target's unquantized lm_head (most MTP models),
+  `"draft_lm_head_quantization": "fp8"` or `"nvfp4"` in `--speculative-config`
+  gives the drafter a quantized copy of that head (Model Runner V2). The target
+  still verifies with its own head, so outputs are unchanged; only the
+  acceptance length can move. It helps most on bandwidth-bound GPUs with a
+  large vocabulary. The copy costs about one byte (FP8) or 0.56 bytes (NVFP4)
+  per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
+  counted in the model weights, so with `--kv-cache-memory-bytes` leave room
+  for it.

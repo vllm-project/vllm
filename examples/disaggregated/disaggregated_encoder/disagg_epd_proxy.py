@@ -468,18 +468,29 @@ def content_uuid(item: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
+def rewrite_for_decode(req_data: dict, item_meta: dict[int, list[dict]]) -> dict:
     """Replace each media item with a metadata-only reference for the decoder.
 
-    The decoder does not need the pixels: the encoder instance already produced
-    the embedding and published it through the EC connector under the same uuid.
-    Sending only the grid lets the decoder size the placeholder range without
-    re-running the media transform.
+    The decoder receives embeddings through the connector. Sending only the
+    placeholder metadata avoids repeating media preprocessing.
 
-    `item_meta` holds what the encoder reported for each item (its cache key and
-    the grid its processor actually produced), so the grid is never re-derived
-    here -- a second derivation could disagree with the encoder's.
+    Each source item may produce multiple features (e.g. video and its audio).
+    Their modalities, cache keys and placeholder metadata come from the encoder.
     """
+    mm_items = extract_mm_items(req_data)
+    # Audio processors may consume placeholders from other modalities too.
+    # Keep the whole request raw if any item cannot be rewritten safely.
+    raw_audio_request = any(
+        item["type"] in {"audio_url", "input_audio"}
+        or (
+            item["type"] == "video_url"
+            and (req_data.get("mm_processor_kwargs") or {}).get("use_audio_in_video")
+        )
+        for item in mm_items
+    ) and any(
+        not item_meta.get(i) or any(not feature["metadata"] for feature in item_meta[i])
+        for i in range(len(mm_items))
+    )
     rewritten = 0
     transfer_items = []
     idx = 0
@@ -494,24 +505,22 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             if item.get("type") not in MM_TYPES:
                 new_content.append(item)
                 continue
-            meta = dict(item_meta.get(idx) or {})
+            features = item_meta.get(idx, [])
             idx += 1
-            item_uuid = meta.pop("mm_hash", None)
-            ec_mm_hash = meta.pop("ec_mm_hash", None) or item_uuid
-            transfer_id = meta.pop("transfer_id", None)
+            item_uuid = item.get("uuid") or content_uuid(item)
+            for feature in features:
+                if transfer_id := feature.get("transfer_id"):
+                    transfer_items.append(
+                        {"mm_hash": feature["mm_hash"], "transfer_id": transfer_id}
+                    )
+            if raw_audio_request:
+                new_content.append({**item, "uuid": item_uuid})
+                continue
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
             # not need to know their names.
             # Downstream stacks per item; keep the existing per-item vector shape.
-            metadata = {
-                k: [
-                    x
-                    for item in v
-                    for x in (item if isinstance(item, list) else [item])
-                ]
-                for k, v in meta.items()
-            }
-            if not metadata or not item_uuid:
+            if not features or any(not feature["metadata"] for feature in features):
                 # Nothing to size the placeholder range with. A processor cache
                 # hit is not a cause on its own: with the default `lru` type the
                 # engine restores the item before the scheduler reports it. It
@@ -521,20 +530,23 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                 # it. Send the media so the decoder can derive the grid itself.
                 new_content.append(item)
                 continue
-            embeds_type = EMBEDS_TYPES[item["type"]]
+            metadata = {
+                feature["modality"] + "_embeds": {
+                    k: [x for v in values for x in (v if isinstance(v, list) else [v])]
+                    for k, values in feature["metadata"].items()
+                }
+                for feature in features
+            }
             new_content.append(
-                {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
+                {"type": EMBEDS_TYPES[item["type"]], **metadata, "uuid": item_uuid}
             )
-            if transfer_id is not None:
-                transfer_items.append(
-                    {"mm_hash": ec_mm_hash, "transfer_id": transfer_id}
-                )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
-    if not rewritten:
+    if not rewritten and not raw_audio_request:
         return req_data
-    logger.info("Rewrote %d media item(s) as metadata references", rewritten)
+    if rewritten:
+        logger.info("Rewrote %d media item(s) as metadata references", rewritten)
     rewritten_request = {**req_data, "messages": new_messages}
     if transfer_items:
         ec_transfer_params = dict(req_data.get("ec_transfer_params") or {})
@@ -566,7 +578,7 @@ async def fanout_encoder_primer(
     e_urls: list[str],
     req_id: str,
     consumer_zmq: str | None = None,
-) -> tuple[dict[int, dict], dict[str, Any]]:
+) -> tuple[dict[int, list[dict]], dict[str, Any]]:
     """1. Group images by encoder, retaining per-item round-robin assignment.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
@@ -591,9 +603,9 @@ async def fanout_encoder_primer(
 
     tasks = []
     item_uuids: dict[int, str] = {}
-    item_transfer_ids: dict[int, str] = {}
-    item_meta: dict[int, dict] = {}
-    transfer_items: dict[int, dict[str, str]] = {}
+    item_transfer_ids: dict[int, list[str]] = {}
+    item_meta: dict[int, list[dict]] = {}
+    transfer_items: dict[int, list[dict[str, str]]] = {}
     ec_params: dict[str, Any] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
@@ -632,10 +644,18 @@ async def fanout_encoder_primer(
         content = []
         for idx in indices:
             item = mm_items[idx]
-            item_uuid = None if NO_REWRITE else content_uuid(item)
+            item_uuid = None if NO_REWRITE else (item.get("uuid") or content_uuid(item))
             if item_uuid is not None:
                 item_uuids[idx] = item_uuid
-            item_transfer_ids[idx] = uuid.uuid4().hex
+            num_features = 1 + int(
+                item["type"] == "video_url"
+                and bool(
+                    (orig_request.get("mm_processor_kwargs") or {}).get(
+                        "use_audio_in_video"
+                    )
+                )
+            )
+            item_transfer_ids[idx] = [uuid.uuid4().hex for _ in range(num_features)]
             content.append(item if item_uuid is None else {**item, "uuid": item_uuid})
 
         encoder_req = {
@@ -659,12 +679,14 @@ async def fanout_encoder_primer(
             if key in orig_request:
                 encoder_req[key] = orig_request[key]
         if consumer_zmq is not None:
-            # The engine may rehash UUIDs with processing options. Match by
-            # position instead; batches contain only images in input order.
+            # Feature positions, not source UUIDs: processing options rehash
+            # UUIDs and a video with audio produces two features.
             encoder_req["ec_transfer_params"] = {
                 "consumer_zmq": consumer_zmq,
                 "ec_items": [
-                    {"transfer_id": item_transfer_ids[idx]} for idx in indices
+                    {"transfer_id": transfer_id}
+                    for idx in indices
+                    for transfer_id in item_transfer_ids[idx]
                 ],
             }
         tasks.append(
@@ -708,8 +730,7 @@ async def fanout_encoder_primer(
                 detail=f"Encoder request failed: {detail}",
             )
 
-        # The encoder reports each mm_hash's metadata (e.g. the grid) here,
-        # keyed by the same uuid this proxy assigned above.
+        # Each processed feature has its own hash, position and metadata.
         try:
             params = msgspec.json.decode(await r.read()).get("ec_transfer_params") or {}
         except Exception:
@@ -729,54 +750,72 @@ async def fanout_encoder_primer(
                         raise HTTPException(502, "Duplicate encoder item index")
                     by_index[local_index] = (mm_hash, reported)
             for local_index, idx in enumerate(indices):
-                matched = by_index.get(local_index)
-                if matched is None:
-                    # Compatibility with encoders without position metadata.
-                    mm_hash = item_uuids.get(idx)
-                    if mm_hash in params:
-                        matched = (mm_hash, params[mm_hash])
-                    elif len(indices) == 1 and len(params) == 1:
-                        matched = next(iter(params.items()))
-                    elif (
-                        mm_items[idx]["type"] == "video_url"
-                        and (orig_request.get("mm_processor_kwargs") or {}).get(
-                            "use_audio_in_video"
-                        )
-                        and len(params) == 2
-                        and consumer_zmq is None
-                        and all(
-                            entry.keys() <= {"metadata", "item_indices"}
-                            for entry in params.values()
-                        )
-                    ):
-                        # Keep raw video for its audio/video features when no transfer
-                        # handles need to be forwarded.
-                        continue
-                    else:
-                        raise HTTPException(502, "Encoder metadata cannot be matched")
-                ec_mm_hash, reported = matched
-                metadata = reported.get("metadata") or {}
-                if metadata:
-                    item_meta[idx] = {
-                        **metadata,
-                        "mm_hash": item_uuids.get(idx, ec_mm_hash),
-                        "ec_mm_hash": ec_mm_hash,
+                audio_in_video = (
+                    len(item_transfer_ids[idx]) == 2
+                    and len(params) == 2
+                    and {entry.get("modality") for entry in params.values()}
+                    == {
+                        "video",
+                        "audio",
                     }
-                    if idx in item_transfer_ids:
-                        item_meta[idx]["transfer_id"] = item_transfer_ids[idx]
+                )
+                if audio_in_video:
+                    features = sorted(
+                        params.items(), key=lambda pair: pair[1]["modality"] != "video"
+                    )
+                    positions = [entry.get("item_indices") for _, entry in features]
+                    if positions not in ([[0], [1]], [[1], [0]]):
+                        raise HTTPException(502, "Invalid encoder audio/video indices")
+                else:
+                    matched = by_index.get(local_index)
+                    if matched is None:
+                        # Compatibility with encoders without position metadata.
+                        mm_hash = item_uuids.get(idx)
+                        if mm_hash in params:
+                            matched = (mm_hash, params[mm_hash])
+                        elif len(indices) == 1 and len(params) == 1:
+                            matched = next(iter(params.items()))
+                        else:
+                            raise HTTPException(
+                                502, "Encoder metadata cannot be matched"
+                            )
+                    features = [matched]
+                item_meta[idx] = []
+                for mm_hash, reported in features:
+                    feature_index = reported["item_indices"][0] if audio_in_video else 0
+                    # Push IDs are per occurrence; reports may be grouped by hash.
+                    transfer_id = item_transfer_ids[idx][feature_index]
+                    if consumer_zmq is None:
+                        transfer_id = reported.get("transfer_id") or transfer_id
+                    item_meta[idx].append(
+                        {
+                            "metadata": reported.get("metadata") or {},
+                            "modality": reported.get("modality")
+                            or EMBEDS_TYPES[mm_items[idx]["type"]].removesuffix(
+                                "_embeds"
+                            ),
+                            "mm_hash": mm_hash,
+                            "transfer_id": transfer_id,
+                        }
+                    )
                 # Whatever the encoder reported alongside `metadata` is the
                 # connector's own handle on the published embedding (for NIXL,
                 # peer_host/peer_port/size_bytes). The decoder's connector
                 # looks it up by mm_hash on the request, so carry it through.
-                ec_params[ec_mm_hash] = reported
+                ec_params.update(features)
                 if NO_REWRITE and consumer_zmq is not None:
-                    transfer_items[idx] = {
-                        "mm_hash": ec_mm_hash,
-                        "transfer_id": item_transfer_ids[idx],
-                    }
+                    transfer_items[idx] = [
+                        {
+                            "mm_hash": feature["mm_hash"],
+                            "transfer_id": feature["transfer_id"],
+                        }
+                        for feature in item_meta[idx]
+                    ]
 
     if transfer_items:
-        ec_params["ec_items"] = [transfer_items[idx] for idx in sorted(transfer_items)]
+        ec_params["ec_items"] = [
+            feature for idx in sorted(transfer_items) for feature in transfer_items[idx]
+        ]
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(groups)

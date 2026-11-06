@@ -6,6 +6,7 @@ from collections.abc import Generator
 
 import pytest
 
+from tests.tool_parsers.utils import get_function_delta
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -100,7 +101,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -225,7 +226,7 @@ def test_extract_tool_calls(
 ):
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -263,7 +264,7 @@ def test_extract_tool_calls_list_structure(
     """Test extraction of tool calls when the model outputs a list-structured tool call."""  # noqa: E501
     extracted_tool_calls = xlam_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -501,6 +502,7 @@ def test_extract_tool_calls_streaming_incremental(
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].id:
             header_found = True
+            assert chunk.tool_calls[0].function is not None
             assert (
                 chunk.tool_calls[0].function.name == expected_first_tool.function.name
             )
@@ -515,9 +517,11 @@ def test_extract_tool_calls_streaming_incremental(
     # Should have chunks with incremental arguments
     arg_chunks = []
     for chunk in chunks:
+        if not chunk.tool_calls:
+            continue
+        assert chunk.tool_calls[0].function is not None
         if (
-            chunk.tool_calls
-            and chunk.tool_calls[0].function.arguments
+            chunk.tool_calls[0].function.arguments
             and chunk.tool_calls[0].function.arguments != ""
             and chunk.tool_calls[0].index
             == 0  # Only collect arguments from the first tool call
@@ -542,15 +546,18 @@ def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streamin
 
     if streaming:
         request = ChatCompletionRequest(model=MODEL, messages=[])
-        args = "".join(
-            delta.tool_calls[0].function.arguments
-            for delta in stream_delta_message_generator(
-                xlam_tool_parser, xlam_tokenizer, model_output, request
-            )
-            if delta.tool_calls and delta.tool_calls[0].function.arguments
-        )
+        arg_chunks: list[str] = []
+        for delta in stream_delta_message_generator(
+            xlam_tool_parser, xlam_tokenizer, model_output, request
+        ):
+            if not delta.tool_calls:
+                continue
+            arguments = get_function_delta(delta.tool_calls[0]).arguments
+            if arguments:
+                arg_chunks.append(arguments)
+        args = "".join(arg_chunks)
     else:
-        extracted = xlam_tool_parser.extract_tool_calls(model_output, request=None)  # type: ignore[arg-type]
+        extracted = xlam_tool_parser.extract_tool_calls(model_output, request=None)
         args = "".join(tc.function.arguments for tc in extracted.tool_calls)
 
     assert "北京" in args

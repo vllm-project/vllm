@@ -8,7 +8,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
 use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::reasoning::ReasoningControl;
@@ -175,7 +175,7 @@ impl InklingChatRenderer {
         )
     }
 
-    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[&ChatTool]) -> Result<()> {
+    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[ChatTool]) -> Result<()> {
         if tools.is_empty() {
             return Ok(());
         }
@@ -304,8 +304,7 @@ impl ChatRenderer for InklingChatRenderer {
             &self.default_template_kwargs,
         )?)?;
         let effective_template_kwargs = reasoning.template_kwargs(request);
-        let tools = rendered_tools(request);
-        self.write_tool_declarations(&mut out, &tools)?;
+        self.write_tool_declarations(&mut out, request.tools())?;
         let mut reasoning_effort = if reasoning.is_enabled() {
             reasoning.effort().and_then(EffortValue::as_f64)
         } else {
@@ -344,6 +343,9 @@ impl ChatRenderer for InklingChatRenderer {
                         tool_call_id,
                         &tool_call_id_to_name,
                     )?;
+                }
+                ChatMessage::Custom { role, .. } => {
+                    return Err(Error::UnsupportedChatRole { role: role.clone() });
                 }
             }
         }
@@ -411,31 +413,10 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
     })
 }
 
-fn rendered_tools(request: &ChatRequest) -> Vec<&ChatTool> {
-    if !request.tool_parsing_enabled() {
-        return Vec::new();
-    }
-
-    request.tools().iter().collect()
-}
-
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
     let name_json = serde_json::to_string(&tool_call.name)
         .map_err(|error| Error::ChatTemplate(error.as_report().to_string()))?;
-    let arguments = if tool_call.arguments.trim().is_empty() {
-        Value::Object(Map::new())
-    } else {
-        serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::ChatTemplate(format!(
-                "Inkling tool call arguments must decode to a JSON object: {error}"
-            ))
-        })?
-    };
-    let Value::Object(_) = arguments else {
-        return Err(Error::ChatTemplate(
-            "Inkling tool call arguments must decode to a JSON object".to_string(),
-        ));
-    };
+    let arguments = Value::Object(tool_call_arguments_or_empty(&tool_call.arguments));
     let args_json = compact_json(&sort_json(&arguments))?;
     Ok(format!("{{\"name\":{name_json},\"args\":{args_json}}}"))
 }

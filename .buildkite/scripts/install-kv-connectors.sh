@@ -9,9 +9,20 @@ if python3 -c "import torch; raise SystemExit(0 if torch.version.hip is not None
     exit 0
 fi
 
-REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv_connectors.txt}"
+# Select requirements before optional packages can change the installed Torch.
+CUDA_MAJOR=$(python3 -c 'import torch; print(torch.version.cuda.split(".", 1)[0])')
+DEFAULT_REQUIREMENTS=/vllm-workspace/requirements/kv_connectors.txt
+if [ "${CUDA_MAJOR}" = "12" ]; then
+    DEFAULT_REQUIREMENTS=/vllm-workspace/requirements/kv_connectors_cu12.txt
+fi
+REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-${DEFAULT_REQUIREMENTS}}"
 
-uv pip install --system -r "${REQUIREMENTS_FILE}"
+CONSTRAINTS_DIR=$(mktemp -d)
+trap 'rm -rf "${CONSTRAINTS_DIR}"' EXIT
+uv pip freeze --system > "${CONSTRAINTS_DIR}/installed.txt"
+grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
+    "${CONSTRAINTS_DIR}/installed.txt" > "${CONSTRAINTS_DIR}/constraints.txt"
+uv pip install --system -c "${CONSTRAINTS_DIR}/constraints.txt" -r "${REQUIREMENTS_FILE}"
 
 KV_METADATA=$(python3 - <<'PY'
 import importlib.metadata as metadata
@@ -56,5 +67,5 @@ PY
 # build first to avoid a clash.
 if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then
     uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true
-    uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"
+    uv pip install --system -c "${CONSTRAINTS_DIR}/constraints.txt" "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"
 fi

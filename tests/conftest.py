@@ -133,7 +133,6 @@ def sample_json_schema():
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
-_SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
 
@@ -309,25 +308,6 @@ def dynamo_reset():
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
-
-
-@pytest.fixture
-def example_system_message() -> str:
-    with open(_SYS_MSG) as f:
-        return f.read()
-
-
-class DecoderPromptType(Enum):
-    """For encoder/decoder models only."""
-
-    CUSTOM = 1
-    NONE = 2
-    EMPTY_STR = 3
-
-
-@pytest.fixture
-def example_long_prompts() -> list[str]:
-    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture(scope="session")
@@ -837,10 +817,10 @@ class HfRunner:
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
-        for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-            # drop prompt logprobs
-            if tok_idx == 0:
-                tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+        for tok_logprobs in seq_logprobs:
+            # Keep only the last position: the first step (and every step when
+            # use_cache=False) also returns logprobs for the preceding tokens.
+            tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
             topk = tok_logprobs.topk(num_logprobs)
 
             tok_logprobs_dct = {}
@@ -928,7 +908,7 @@ class HfRunner:
             # shutdown. This is helpful in cases where the HfRunner is
             # initialized after significant GPU memory is already occupied,
             # e.g. in
-            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            # tests/basic_correctness/models/test_basic_correctness.py::test_models_distributed
             # where vllm worker processes are still alive and holding GPU
             # memory when hf_runner.__exit__ is called.
             from tests.utils import record_gpu_memory_usage_stats
@@ -982,6 +962,8 @@ class VllmRunner:
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
     - `enforce_eager`: Set to `False` to test CUDA graph.
+    - `kernel_config.enable_jit_warmup`: Set to `False` to reduce test startup
+      time.
     """
 
     def __init__(
@@ -1010,6 +992,8 @@ class VllmRunner:
             else set_default_torch_num_threads(default_torch_num_threads)
         )
 
+        kwargs.setdefault("kernel_config", {"enable_jit_warmup": False})
+
         if not kwargs.get("compilation_config", None):
             # Note(@tdoublep): This is set to 4 because some tests (e.g., hybrid
             # model tests) may set max_num_seqs=4. If min cudagraph_capture_size is
@@ -1028,9 +1012,12 @@ class VllmRunner:
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
-            gpu_memory_utilization = kwargs.get(
-                "gpu_memory_utilization",
-                CacheConfig.gpu_memory_utilization,
+            # An unset utilization resolves to 1.0 with the extensible KV cache,
+            # which no longer needs the memory free up front; wait for the
+            # standard fraction in that case.
+            gpu_memory_utilization = (
+                kwargs.get("gpu_memory_utilization")
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
             )
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing
@@ -1172,7 +1159,7 @@ class VllmRunner:
                 output_logprobs = sample.logprobs
             if include_prompt_token_ids:
                 outputs.append(
-                    (  # type: ignore[arg-type]
+                    (
                         output_ids,
                         output_str,
                         output_logprobs,
@@ -1394,6 +1381,7 @@ class VllmRunner:
         # because when the next test starts some GPU memory is still in use.
         gpu_memory_utilization = (
             self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
         )
         from vllm.platforms import current_platform
 
@@ -1422,20 +1410,25 @@ def vllm_runner():
 
 
 @pytest.fixture()
-def temporary_enable_log_propagate():
+def temporary_enable_log_propagate(monkeypatch):
     import logging
 
-    logger = logging.getLogger("vllm")
-    logger.propagate = True
-    yield
-    logger.propagate = False
+    from vllm.logger import DEFAULT_LOGGING_CONFIG
+
+    # The first LLM init in a process reapplies DEFAULT_LOGGING_CONFIG, which
+    # would otherwise turn propagation back off mid-test.
+    monkeypatch.setitem(DEFAULT_LOGGING_CONFIG["loggers"]["vllm"], "propagate", True)
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
 
 
 @pytest.fixture()
 def caplog_vllm(temporary_enable_log_propagate, caplog):
-    # To capture vllm log, we should enable propagate=True temporarily
-    # because caplog depends on logs propagated to the root logger.
-    yield caplog
+    # caplog depends on logs propagated to the root logger. The vLLM logger
+    # inherits this INFO level until runtime initialization configures it.
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        yield caplog
 
 
 @pytest.fixture()
@@ -1784,6 +1777,24 @@ def disable_deepgemm_ue8m0(monkeypatch):
         # Clear cache so the next time it is used it is processed with the
         # default VLLM_USE_DEEP_GEMM_E8M0  setting.
         is_deep_gemm_e8m0_used.cache_clear()
+
+
+@pytest.fixture
+def gpu_memory_cleared():
+    """Wait for prior tests to release GPU memory on gfx950."""
+    if not current_platform.is_rocm():
+        return
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_ratio=0.08,
+            timeout_s=30,
+            stable_duration_s=1,
+        )
 
 
 def _should_clean_gpu_memory_between_tests() -> bool:
