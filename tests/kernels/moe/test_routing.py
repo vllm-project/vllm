@@ -6,30 +6,18 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from transformers import DeepseekV3Config, Qwen3MoeConfig
+from transformers import DeepseekV3Config
 
-import vllm.model_executor.layers.fused_moe.layer as moe_layer
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
-    EPLBConfig,
-    ModelConfig,
-    ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.custom_op import PluggableLayer, op_registry_oot
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.expert_substitution import (
-    SubstitutedRoutedExperts,
-)
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
-)
-from vllm.model_executor.layers.fused_moe.router.cpu_router import CPURouter
-from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
-    CustomRoutingRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
@@ -46,15 +34,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
-from vllm.model_executor.models.gpt_oss import GptOssRoutedExperts
 from vllm.model_executor.models.llama4 import Llama4MoE
-from vllm.model_executor.models.transformers.moe import (
-    TransformersMoERunner,
-    TransformersMoEState,
-)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -136,185 +118,6 @@ def oot_registry_scope():
         op_registry_oot.update(original)
 
 
-@pytest.fixture
-def pluggable_moe_components(oot_registry_scope, request):
-    class OOTRoutedExperts(RoutedExperts):
-        pass
-
-    class OOTGptOssRoutedExperts(GptOssRoutedExperts):
-        pass
-
-    class OOTRunner(MoERunner):
-        pass
-
-    class OOTTransformersMoERunner(TransformersMoERunner):
-        pass
-
-    router_cls = CPURouter if current_platform.is_cpu() else FusedTopKRouter
-
-    oot_router_cls = type("OOTRouter", (router_cls,), {})
-
-    experts_classes: dict[type, type] = {RoutedExperts: OOTRoutedExperts}
-    runner_classes: dict[type, type] = {MoERunner: OOTRunner}
-    if getattr(request, "param", False):
-        experts_classes[GptOssRoutedExperts] = OOTGptOssRoutedExperts
-        runner_classes[TransformersMoERunner] = OOTTransformersMoERunner
-    for selected, replacement in (experts_classes | runner_classes).items():
-        PluggableLayer.register_oot(replacement, name=selected.__name__)
-    PluggableLayer.register_oot(oot_router_cls, name=router_cls.__name__)
-    return experts_classes, runner_classes, oot_router_cls
-
-
-@pytest.mark.parametrize("enable_eplb", [False, True])
-def test_pluggable_provides_default_fused_moe_components(
-    pluggable_moe_components, enable_eplb
-):
-    experts_classes, runner_classes, router_cls = pluggable_moe_components
-    with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
-        runner = moe_layer.FusedMoEFactory(
-            num_experts=4,
-            top_k=2,
-            hidden_size=128,
-            intermediate_size=128,
-            params_dtype=torch.bfloat16,
-            tp_size=1,
-            dp_size=1,
-            pcp_size=1,
-            enable_eplb=enable_eplb,
-            prefix="pluggable_defaults",
-        )
-    assert isinstance(runner, runner_classes[MoERunner])
-    assert isinstance(runner.router, router_cls)
-    assert isinstance(runner.routed_experts, experts_classes[RoutedExperts])
-    assert (runner.eplb_state is not None) == enable_eplb
-
-
-@pytest.mark.parametrize("enable_eplb", [False, True])
-@pytest.mark.parametrize(
-    "pluggable_moe_components",
-    [False, True],
-    indirect=True,
-    ids=["fallback", "adapted"],
-)
-def test_pluggable_model_component_adaptation(pluggable_moe_components, enable_eplb):
-    """Selective adaptation and fallback preserve each model's component contract."""
-    experts_classes, runner_classes, _ = pluggable_moe_components
-    moe_state = TransformersMoEState()
-    eplb_state = EplbLayerState() if enable_eplb else None
-    with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
-        router = CPURouter(top_k=2, global_num_experts=4, eplb_state=eplb_state)
-        runner = moe_layer.FusedMoEFactory(
-            num_experts=4,
-            top_k=2,
-            hidden_size=128,
-            intermediate_size=128,
-            params_dtype=torch.bfloat16,
-            tp_size=1,
-            dp_size=1,
-            pcp_size=1,
-            routed_experts_cls=GptOssRoutedExperts,
-            runner_cls=TransformersMoERunner,
-            runner_args={"moe_state": moe_state},
-            router=router,
-            enable_eplb=enable_eplb,
-            prefix="pluggable_components",
-        )
-    assert type(runner) is runner_classes.get(
-        TransformersMoERunner, TransformersMoERunner
-    )
-    assert runner.router is router
-    assert type(runner.routed_experts) is experts_classes.get(
-        GptOssRoutedExperts, GptOssRoutedExperts
-    )
-    assert runner.eplb_state is eplb_state
-    assert runner._moe_state is moe_state
-
-    experts = runner.routed_experts
-    weight = experts.w13_weight
-    checkpoint_weight = torch.arange(
-        weight[0].numel(), dtype=weight.dtype, device=weight.device
-    ).reshape(weight.shape[2], weight.shape[1])
-    experts.weight_loader(
-        weight, checkpoint_weight, "w13_weight", "gpt_oss_w13", 0, return_success=False
-    )
-    torch.testing.assert_close(weight[0], checkpoint_weight.t(), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("adapt_substitution", [False, True])
-def test_pluggable_preserves_expert_substitution(
-    pluggable_moe_components, tmp_path, adapt_substitution
-):
-    class OOTSubstitutedExperts(SubstitutedRoutedExperts):
-        pass
-
-    if adapt_substitution:
-        SubstitutedRoutedExperts.register_oot(OOTSubstitutedExperts)
-    hf_config = Qwen3MoeConfig(
-        hidden_size=128,
-        intermediate_size=128,
-        moe_intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=4,
-        num_experts_per_tok=2,
-        vocab_size=128,
-        max_position_embeddings=128,
-        approximate_experts={"0": [1]},
-    )
-    hf_config.architectures = ["Qwen3MoeForCausalLM"]
-    hf_config.save_pretrained(tmp_path)
-    config = VllmConfig(
-        model_config=ModelConfig(
-            model=str(tmp_path),
-            skip_tokenizer_init=True,
-            dtype="bfloat16",
-            enforce_eager=True,
-        )
-    )
-    with set_current_vllm_config(config), torch.device(DEVICE):
-        runner = moe_layer.FusedMoEFactory(
-            num_experts=4,
-            top_k=2,
-            hidden_size=128,
-            intermediate_size=128,
-            params_dtype=torch.bfloat16,
-            tp_size=1,
-            dp_size=1,
-            pcp_size=1,
-            prefix="model.layers.0.mlp.experts",
-        )
-    experts = runner.routed_experts
-    assert type(experts) is (
-        OOTSubstitutedExperts if adapt_substitution else SubstitutedRoutedExperts
-    )
-    assert experts.w13_weight.shape[0] == 3
-    substitution = experts.expert_substitution
-    assert substitution.substituted_expert_ids == (1,)
-    assert substitution.physical_expert_id(2) == 1
-    value = torch.arange(128, dtype=torch.bfloat16, device=DEVICE)
-    substitution.weight_loader(substitution.values, value, 1)
-    torch.testing.assert_close(substitution.values[0], value, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("enable_eplb", [False, True])
-def test_pluggable_router_initializes_selected_subclass(
-    oot_registry_scope, enable_eplb
-):
-    selected_cls = CPURouter if current_platform.is_cpu() else FusedTopKRouter
-
-    oot_router_cls = type("OOTRouter", (selected_cls,), {})
-
-    PluggableLayer.register_oot(oot_router_cls, name=selected_cls.__name__)
-    state = EplbLayerState() if enable_eplb else None
-    router = create_fused_moe_router(top_k=2, global_num_experts=8, eplb_state=state)
-    assert type(router) is oot_router_cls
-    assert isinstance(router, torch.nn.Module)
-    assert router.top_k == 2
-    assert router.global_num_experts == 8
-    assert router.eplb_state is state
-
-
 @pytest.mark.parametrize("scheme", ["plain", "grouped_sigmoid_bias"])
 def test_pluggable_router_output_parity(oot_registry_scope, scheme):
     kwargs: dict[str, Any] = dict(top_k=2, global_num_experts=8)
@@ -351,24 +154,6 @@ def test_pluggable_router_output_parity(oot_registry_scope, scheme):
     torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
 
 
-def test_pluggable_custom_router_preserves_contiguity_guard(oot_registry_scope):
-    class OOTCustomRouter(CustomRoutingRouter):
-        pass
-
-    CustomRoutingRouter.register_oot(OOTCustomRouter)
-
-    def packed_routing(hidden_states, gating_output, topk, renormalize):
-        return gating_output[:, :topk], gating_output[:, topk:].to(torch.int32)
-
-    router = CustomRoutingRouter(
-        top_k=1, global_num_experts=4, custom_routing_function=packed_routing
-    )
-    assert type(router) is OOTCustomRouter
-    routing = torch.tensor([[0.5, 3.0], [0.25, 1.0]], device=DEVICE)
-    with pytest.raises(ValueError, match="non-contiguous"):
-        router.select_experts(torch.empty((2, 8), device=DEVICE), routing)
-
-
 def test_pluggable_router_preserves_model_bias_loading(dist_init):
     """The model's gate retains the checkpoint path when its router is a module."""
     hf_config = DeepseekV3Config(
@@ -382,9 +167,7 @@ def test_pluggable_router_preserves_model_bias_loading(dist_init):
         topk_method="noaux_tc",
         scoring_func="sigmoid",
     )
-    config = VllmConfig(
-        parallel_config=ParallelConfig(eplb_config=EPLBConfig(num_redundant_experts=0))
-    )
+    config = VllmConfig()
     with (
         set_current_vllm_config(config),
         set_default_torch_dtype(torch.bfloat16),
