@@ -2056,6 +2056,15 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
+    def _config_hash(self) -> str | None:
+        """`compute_hash()` of the initialized config, the hash part of a
+        frontend's `system_fingerprint`. Like the frontend, never fail startup
+        over the fingerprint."""
+        try:
+            return self.vllm_config.compute_hash()
+        except Exception:
+            return None
+
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
@@ -2114,6 +2123,9 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             prefix_hash_config=self.prefix_hash_config,
+            cache_config_info=self.vllm_config.cache_config.metrics_info(),
+            config_hash=self._config_hash(),
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
         )
 
     def process_input_sockets(

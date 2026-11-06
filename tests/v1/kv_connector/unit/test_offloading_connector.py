@@ -856,10 +856,10 @@ def test_p2p_cache_reset_with_absent_decoder(monkeypatch):
     llm = LLM(
         model="facebook/opt-125m",
         max_model_len=256,
-        block_size=16,
         max_num_batched_tokens=256,
         gpu_memory_utilization=0.2,
         attention_config={"backend": "TRITON_ATTN"},
+        block_size=16,
         enforce_eager=True,
         async_scheduling=False,
         disable_log_stats=False,
