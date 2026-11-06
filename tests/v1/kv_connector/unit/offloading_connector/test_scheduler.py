@@ -7047,18 +7047,41 @@ def _put_output(**scheduled):
     return output
 
 
-@pytest.mark.parametrize("batch,budget,expected", [(1, 1, 0), (1, 3, 3), (3, 6, 3)])
-def test_put_batches_share_aligned_frontier(batch, budget, expected):
+@pytest.mark.parametrize("batch,budget", [(1, 3), (3, 6)])
+def test_put_batches_share_aligned_frontier(batch, budget):
     scheduler = _make_put_scheduler(
         batch=batch, capacity=max(batch, budget), block_sizes=(16, 32)
     )
     _, state = _put_request(scheduler)
-    jobs = scheduler._build_store_jobs(_put_output(put=128))
-    assert sum(len(scheduler._jobs[jid].keys) for jid in jobs) == expected
-    if expected:
-        [job] = jobs.values()
-        assert job.src_spec.block_ids.tolist() == [1, 2, 101]
-        assert [g.next_stored_chunk_idx for g in state.group_states] == [2, 1]
+    [job] = scheduler._build_store_jobs(_put_output(put=128)).values()
+    assert job.src_spec.block_ids.tolist() == [1, 2, 101]
+    assert [g.next_stored_chunk_idx for g in state.group_states] == [2, 1]
+
+
+@pytest.mark.parametrize(
+    "capacity,reserve,pool", [(2, 0, None), (3, 1, None), (8, 8, None), (3, 0, 2)]
+)
+def test_put_rejects_limits_that_never_admit_a_unit(capacity, reserve, pool):
+    # Two full-attention groups (16, 32 tokens/chunk) align into 3-key units.
+    with pytest.raises(ValueError, match="aligned unit needs"):
+        _make_put_scheduler(
+            batch=1,
+            capacity=capacity,
+            reserve=reserve,
+            block_sizes=(16, 32),
+            pool=pool,
+        )
+
+
+def _pin_one_primary_chunk(scheduler):
+    """Hold one primary chunk with a GET reader, shrinking real capacity."""
+    primary = scheduler.manager.primary_tier
+    keys = to_keys([999])
+    ctx = ReqContext("get")
+    assert primary.prepare_store(keys, ctx) is not None
+    primary.complete_store(keys, ctx)
+    primary.prepare_load(keys, ctx)
+    return lambda: primary.complete_load(keys, ctx)
 
 
 @pytest.mark.parametrize("missing_first", [False, True])
@@ -7107,8 +7130,9 @@ def test_put_retries_rotate_after_capacity_returns():
     assert scheduler._jobs[second_id].req_id == "b"
 
 
-def test_put_impossible_alignment_has_bounded_periodic_retry(monkeypatch):
-    scheduler = _make_put_scheduler(batch=1, capacity=2, block_sizes=(16, 32))
+def test_put_blocked_alignment_has_bounded_periodic_retry(monkeypatch):
+    scheduler = _make_put_scheduler(batch=1, capacity=3, block_sizes=(16, 32))
+    _pin_one_primary_chunk(scheduler)
     _put_request(scheduler)
     calls = []
     original = scheduler._clip_put_frontier
@@ -7139,7 +7163,8 @@ def test_put_finished_preempted_does_not_read_reused_gpu_blocks():
 
 
 def test_put_blocked_request_does_not_starve_smaller_offer():
-    scheduler = _make_put_scheduler(batch=1, capacity=2, block_sizes=(16, 32))
+    scheduler = _make_put_scheduler(batch=1, capacity=3, block_sizes=(16, 32))
+    _pin_one_primary_chunk(scheduler)
     _put_request(scheduler, "a")
     _, smaller = _put_request(scheduler, "b")
     smaller.group_states[0].block_ids[0] = 0
@@ -7151,15 +7176,10 @@ def test_put_blocked_request_does_not_starve_smaller_offer():
 def test_put_capacity_change_retries_without_periodic_delay():
     scheduler = _make_put_scheduler(batch=1, capacity=3, block_sizes=(16, 32))
     _put_request(scheduler)
-    primary = scheduler.manager.primary_tier
-    keys = to_keys([999])
-    ctx = ReqContext("get")
-    assert primary.prepare_store(keys, ctx) is not None
-    primary.complete_store(keys, ctx)
-    primary.prepare_load(keys, ctx)
+    release = _pin_one_primary_chunk(scheduler)
     output = _put_output(put=128)
     assert scheduler._build_store_jobs(output) == {}
-    primary.complete_load(keys, ctx)
+    release()
     [job] = scheduler._build_store_jobs(output).values()
     assert job.src_spec.block_ids.tolist() == [1, 2, 101]
 
@@ -7250,3 +7270,23 @@ def test_put_deferred_swa_prompt_tail_survives_decode():
     [second] = scheduler._build_store_jobs(_put_output(put=16)).values()
     assert second.src_spec.block_ids.tolist() == [2, 107, 108]
     assert [g.next_stored_chunk_idx for g in state.group_states] == [2, 8]
+
+
+def test_put_admission_state_is_read_once_per_step_plus_per_store(monkeypatch):
+    scheduler = _make_put_scheduler(batch=1, capacity=2)
+    names = "abcdef"
+    for name in names:
+        _put_request(scheduler, name)
+    calls = []
+    original = scheduler.manager.get_put_admission_state
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(scheduler.manager, "get_put_admission_state", counted)
+    jobs = scheduler._build_store_jobs(_put_output(**dict.fromkeys(names, 128)))
+    # Two requests take the two credits; the other four are skipped without
+    # re-reading the manager's admission state.
+    assert len(jobs) == 2
+    assert len(calls) == 3

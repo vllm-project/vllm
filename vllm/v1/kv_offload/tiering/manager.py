@@ -1425,9 +1425,18 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.shutdown()
 
     def configure_put_batching(
-        self, batch_chunks: int, max_inflight_chunks: int, get_reserve_chunks: int
+        self,
+        batch_chunks: int,
+        max_inflight_chunks: int,
+        get_reserve_chunks: int,
+        *,
+        min_unit_chunks: int = 1,
     ) -> None:
-        """Enable scheduler-owned PUT admission on the existing primary pool."""
+        """Enable scheduler-owned PUT admission on the existing primary pool.
+
+        ``min_unit_chunks`` is the fewest credits one aligned batch unit can
+        need. Limits that can never admit it would silently disable offload.
+        """
         if (
             type(batch_chunks) is not int
             or batch_chunks <= 0
@@ -1437,6 +1446,17 @@ class TieringOffloadingManager(OffloadingManager):
             or get_reserve_chunks < 0
         ):
             raise ValueError("Invalid PUT batching limits")
+        admissible = min(
+            max_inflight_chunks, self.primary_tier._num_chunks - get_reserve_chunks
+        )
+        if min_unit_chunks > admissible:
+            raise ValueError(
+                f"PUT batching can admit at most {admissible} chunks (max inflight "
+                f"{max_inflight_chunks}, primary pool "
+                f"{self.primary_tier._num_chunks} minus GET reserve "
+                f"{get_reserve_chunks}), but one aligned unit needs "
+                f"{min_unit_chunks}"
+            )
         self._put_max_inflight = max_inflight_chunks
         self._put_get_reserve = get_reserve_chunks
         self._put_staging_keys: set[OffloadKey] = set()

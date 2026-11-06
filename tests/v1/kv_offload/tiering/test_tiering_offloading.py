@@ -2113,3 +2113,13 @@ def test_put_credits_ignore_store_jobs_served_to_peers():
     job = manager.create_store_job(keys, peer)
     assert manager.get_put_admission_budget() == 4
     manager.primary_tier.complete_read(job.keys, peer)
+
+
+def test_put_batching_rejects_reserve_that_leaves_no_capacity():
+    primary = CPUPrimaryTierOffloadingManager(8, _mock_mmap_region(8))
+    manager = TieringOffloadingManager(primary)
+    with pytest.raises(ValueError, match="aligned unit needs"):
+        manager.configure_put_batching(2, 4, 8)
+    with pytest.raises(ValueError, match="aligned unit needs"):
+        manager.configure_put_batching(2, 4, 0, min_unit_chunks=5)
+    manager.configure_put_batching(2, 4, 4, min_unit_chunks=4)

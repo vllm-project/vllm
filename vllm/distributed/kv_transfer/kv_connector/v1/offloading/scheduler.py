@@ -622,14 +622,27 @@ class OffloadingConnectorScheduler:
         self._put_retry_after: ReqId | None = None
         self._put_retry_gate: dict[ReqId, tuple[tuple[int, ...], int]] = {}
         self._put_manager: TieringOffloadingManager | None = None
+        # Batches admit whole units aligned across every group's chunks.
+        self._put_alignment = lcm(
+            self.config.alignment_tokens or 1,
+            *(g.tokens_per_chunk for g in self.config.kv_group_configs),
+        )
         if self._put_batch_chunks:
             if not isinstance(self.manager, TieringOffloadingManager):
                 raise ValueError("PUT batching requires a tiering manager")
             self._put_manager = self.manager
+            # Full-attention groups store every chunk of a unit, so a unit
+            # needs at least this many credits; sparse groups may add more.
+            min_unit_chunks = sum(
+                self._put_alignment // g.tokens_per_chunk
+                for g in self.config.kv_group_configs
+                if g.sliding_window_size_in_chunks is None and not g.requires_cow_source
+            )
             self.manager.configure_put_batching(
                 self._put_batch_chunks,
                 spec.extra_config.get("guard_put_max_inflight_chunks", 512),
                 spec.extra_config.get("guard_put_get_reserve_chunks", 128),
+                min_unit_chunks=max(1, min_unit_chunks),
             )
         self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
 
@@ -1998,10 +2011,7 @@ class OffloadingConnectorScheduler:
         ``budget=None`` admits every unit: a finished request's blocks are
         freed after this step, so its tail is offered once, in full.
         """
-        alignment = lcm(
-            self.config.alignment_tokens or 1,
-            *(g.tokens_per_chunk for g in self.config.kv_group_configs),
-        )
+        alignment = self._put_alignment
         units: dict[int, set[OffloadKey]] = {}
         for end, key, _, _ in key_ends:
             units.setdefault(cdiv(end, alignment) * alignment, set()).add(key)
@@ -2053,6 +2063,10 @@ class OffloadingConnectorScheduler:
             if self._put_retry_after in req_ids:
                 start = req_ids.index(self._put_retry_after) + 1
                 req_ids = req_ids[start:] + req_ids[:start]
+            # Computed once per step and refreshed only after a store is
+            # prepared: gated or blocked requests leave it unchanged.
+            assert self._put_manager is not None
+            admission_state = self._put_manager.get_put_admission_state()
         for req_id in req_ids:
             req_status = self._req_status.get(req_id)
             if req_status is None:
@@ -2064,8 +2078,6 @@ class OffloadingConnectorScheduler:
                     if self._put_retry_after == req_id:
                         self._put_retry_after = None
                     continue
-                assert self._put_manager is not None
-                admission_state = self._put_manager.get_put_admission_state()
                 budget: int | None = admission_state[0]
                 previous, retries = self._put_retry_gate.get(req_id, ((), 0))
                 if (
@@ -2275,6 +2287,9 @@ class OffloadingConnectorScheduler:
             store_output = self.manager.prepare_store(
                 new_offload_keys, req_status.req_context
             )
+            if self._put_batch_chunks:
+                assert self._put_manager is not None
+                admission_state = self._put_manager.get_put_admission_state()
             if store_output is None:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
