@@ -1324,7 +1324,7 @@ class Gemma4ForConditionalGeneration(
         position_embeddings = embedder._position_embeddings(
             pixel_position_ids, padding_positions
         )
-        return hidden_states + position_embeddings
+        return (hidden_states + position_embeddings).to(self.model_dtype)
 
     # ------------------------------------------------------------------ #
     # Image processing
