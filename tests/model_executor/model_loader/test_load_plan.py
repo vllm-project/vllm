@@ -552,20 +552,14 @@ def test_e8m0_scales_stay_direct(sent, held):
     """E8M0 scales sent as float8_e8m0fnu into a uint8 parameter, or the
     other way round: the loader's copy keeps their bytes, so the name is
     direct and the planned update writes the sent bytes."""
-    name, scales = "layer.weight_scale", torch.arange(256).to(torch.uint8)
-
-    def make():
-        model = _Toy()
-        model.layer = _Layer()
-        model.layer.weight_scale = _param(256, dtype=held)
-        return model
-
+    name, scales = "layer.weight", torch.arange(256).to(torch.uint8)
+    make, _ = _single(None, shape=(256,), dtype=held)
     model = _cold_start(make, {name: scales.flip(0).view(sent)})
     start_reload(model)
     plan = _plan(model, {name: ((256,), sent)})
     assert plan.get_dest(name) is not None
     _planned_reload(model, plan, {name: scales.view(sent)})
-    assert torch.equal(model.layer.weight_scale.view(torch.uint8), scales)
+    assert torch.equal(model.layer.weight.view(torch.uint8), scales)
 
 
 def test_tensors_sharing_one_storage():
