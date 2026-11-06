@@ -235,9 +235,9 @@ class InputHadamardOCPMXEmulationExperts(OCP_MXQuantizationEmulationTritonExpert
 
     The checkpoint stores w13 and w2 already rotated, so only the activations
     are rotated here: the hidden states before the first GEMM, and the SwiGLU
-    output before it is quantized for the second. The fused MXFP4 kernel
-    quantizes that second activation internally, which is why this cannot go
-    through it.
+    output before it is quantized for the second. Fused kernels quantize that
+    second activation internally, so this is the fallback when AITER's W4A4
+    path (which takes the rotation as ``inter_hadamard``) is unavailable.
     """
 
     def __init__(

@@ -27,6 +27,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    InputHadamardOCPMXEmulationExperts,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -66,9 +69,6 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
-)
-from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
-    InputHadamardOCPMXEmulationExperts,
 )
 from vllm.model_executor.layers.quantization.input_hadamard import hadamard_matrix
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -1689,10 +1689,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.experts_cls is None:
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
 
-        if self.rotation_size is not None:
-            # The fused kernel quantizes the second GEMM's input itself, so the
-            # SwiGLU output cannot be rotated from Python. Emulation quantizes
-            # after the activation, which is where the second rotation runs.
+        if self.rotation_size is not None and not (
+            self.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+            and rocm_aiter_ops.fused_moe_supports_inter_hadamard()
+        ):
+            # Other fused kernels quantize the second GEMM's input themselves,
+            # so the SwiGLU output cannot be rotated from Python. Emulation
+            # quantizes after the activation, where the second rotation runs.
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
             self.experts_cls = InputHadamardOCPMXEmulationExperts
 
@@ -1901,9 +1904,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "online-rotated MoE layer."
             )
         if not torch.equal(w13, w2):
-            raise NotImplementedError(
-                "w1/w3 and w2 must share one input rotation."
-            )
+            raise NotImplementedError("w1/w3 and w2 must share one input rotation.")
         del layer.w13_input_rotation
         del layer.w2_input_rotation
 
