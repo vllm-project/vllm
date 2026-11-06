@@ -912,6 +912,135 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
     assert args.tokenizer == "s3://bucket/tokenizer"
 
 
+def test_spec_model_resolved_when_hf_hub_offline(monkeypatch):
+    """Speculative draft model ID should be resolved to local path via
+    get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(
+        "vllm.engine.arg_utils.get_model_path",
+        lambda model, revision=None: f"/local/path/to/{model}",
+    )
+
+    args = EngineArgs(model="facebook/opt-125m", spec_model="facebook/opt-125m")
+    assert args.model == "/local/path/to/facebook/opt-125m"
+    assert args.spec_model == "/local/path/to/facebook/opt-125m"
+
+
+def test_speculative_config_model_resolved_when_hf_hub_offline(monkeypatch):
+    """Speculative draft model ID in speculative_config dict should be resolved
+    to local path via get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(
+        "vllm.engine.arg_utils.get_model_path",
+        lambda model, revision=None: f"/local/path/to/{model}",
+    )
+
+    args = EngineArgs(
+        model="facebook/opt-125m",
+        speculative_config={"model": "facebook/opt-125m", "num_speculative_tokens": 4},
+    )
+    assert args.model == "/local/path/to/facebook/opt-125m"
+    assert args.speculative_config["model"] == "/local/path/to/facebook/opt-125m"
+
+
+def test_cloud_storage_spec_model_skips_get_model_path(monkeypatch):
+    """Cloud storage speculative model URI should not be passed to
+    get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(
+        model="s3://bucket/model",
+        spec_model="s3://bucket/spec_model",
+        speculative_config={"model": "s3://bucket/spec_model_2"},
+    )
+    assert args.model == "s3://bucket/model"
+    assert args.spec_model == "s3://bucket/spec_model"
+    assert args.speculative_config["model"] == "s3://bucket/spec_model_2"
+
+
+@pytest.mark.parametrize("ngram_model", ["[ngram]", "ngram"])
+def test_ngram_spec_model_skips_get_model_path(monkeypatch, ngram_model):
+    """Ngram sentinel/model should not be passed to get_model_path()
+    when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    resolved = []
+
+    def mock_get_model_path(model, revision=None):
+        resolved.append(model)
+        return f"/local/path/to/{model}"
+
+    monkeypatch.setattr("vllm.engine.arg_utils.get_model_path", mock_get_model_path)
+
+    args = EngineArgs(
+        model="facebook/opt-125m",
+        spec_model=ngram_model,
+        speculative_config={"model": ngram_model, "num_speculative_tokens": 3},
+    )
+    assert args.model == "/local/path/to/facebook/opt-125m"
+    assert args.spec_model == ngram_model
+    assert args.speculative_config["model"] == ngram_model
+    assert ngram_model not in resolved
+
+
+def test_ngram_method_skips_get_model_path(monkeypatch):
+    """When speculative method is ngram or suffix, get_model_path()
+    should not be called for draft models."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    resolved = []
+
+    def mock_get_model_path(model, revision=None):
+        resolved.append(model)
+        return f"/local/path/to/{model}"
+
+    monkeypatch.setattr("vllm.engine.arg_utils.get_model_path", mock_get_model_path)
+
+    args = EngineArgs(
+        model="facebook/opt-125m",
+        spec_method="ngram",
+        spec_model="[ngram]",
+        speculative_config={"method": "ngram", "num_speculative_tokens": 3},
+    )
+    assert args.model == "/local/path/to/facebook/opt-125m"
+    assert args.spec_model == "[ngram]"
+    assert "[ngram]" not in resolved
+
+
+def test_custom_proposer_path_skips_get_model_path(monkeypatch):
+    """Custom proposer dotted module path should not be passed to
+    get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    resolved = []
+
+    def mock_get_model_path(model, revision=None):
+        resolved.append(model)
+        return f"/local/path/to/{model}"
+
+    monkeypatch.setattr("vllm.engine.arg_utils.get_model_path", mock_get_model_path)
+
+    custom_path = "custom_module.proposer.MyProposer"
+    args = EngineArgs(
+        model="facebook/opt-125m",
+        spec_model=custom_path,
+        speculative_config={"model": custom_path},
+    )
+    assert args.model == "/local/path/to/facebook/opt-125m"
+    assert args.spec_model == custom_path
+    assert args.speculative_config["model"] == custom_path
+    assert custom_path not in resolved
+
+
 class TestDeviceIds:
     @pytest.mark.parametrize("device_ids", [[0, 2], [-1]])
     def test_device_ids_with_cvd_out_of_range(self, monkeypatch, device_ids):

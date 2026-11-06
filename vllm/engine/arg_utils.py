@@ -484,6 +484,17 @@ class DeprecatedLogConfigFileAction(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
+def _is_resolvable_spec_model(model: str | None) -> bool:
+    """Return True if model represents an HF repository or local path that
+    should be resolved in offline mode, rather than a sentinel, method name,
+    cloud URI, or custom proposer path."""
+    if not model or is_cloud_storage(model):
+        return False
+    if model in ("ngram", "[ngram]") or (model.startswith("[") and model.endswith("]")):
+        return False
+    return not SpeculativeConfig._is_custom_proposer_path(model)
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -960,6 +971,47 @@ class EngineArgs:
                         "to tokenizer_path [%s]",
                         tokenizer_id,
                         self.tokenizer,
+                    )
+            spec_method = self.spec_method or (
+                self.speculative_config.get("method")
+                if isinstance(self.speculative_config, dict)
+                else None
+            )
+            spec_revision = (
+                self.speculative_config.get("revision")
+                if isinstance(self.speculative_config, dict)
+                else None
+            )
+            if spec_method not in (
+                "ngram",
+                "ngram_gpu",
+                "suffix",
+            ) and _is_resolvable_spec_model(self.spec_model):
+                spec_model_id = self.spec_model
+                self.spec_model = get_model_path(self.spec_model, spec_revision)
+                if spec_model_id is not self.spec_model:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace spec_model_id [%s] "
+                        "to spec_model_path [%s]",
+                        spec_model_id,
+                        self.spec_model,
+                    )
+            if (
+                isinstance(self.speculative_config, dict)
+                and "model" in self.speculative_config
+                and spec_method not in ("ngram", "ngram_gpu", "suffix")
+                and _is_resolvable_spec_model(self.speculative_config["model"])
+            ):
+                spec_model_id = self.speculative_config["model"]
+                self.speculative_config["model"] = get_model_path(
+                    spec_model_id, spec_revision
+                )
+                if spec_model_id is not self.speculative_config["model"]:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace speculative_config['model'] "
+                        "[%s] to spec_model_path [%s]",
+                        spec_model_id,
+                        self.speculative_config["model"],
                     )
 
     @staticmethod
