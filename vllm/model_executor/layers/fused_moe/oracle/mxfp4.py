@@ -7,13 +7,13 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MoEBackend,
 )
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -234,10 +234,15 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
             TrtLlmMxfp4ExpertsModular,
             TrtLlmMxfp4ExpertsMonolithic,
+            TrtLlmMxfp4Mxfp8ExpertsModular,
         )
 
         # NOTE: prefer Monolithic > Modular, so return Monolithic first.
-        return [TrtLlmMxfp4ExpertsMonolithic, TrtLlmMxfp4ExpertsModular]
+        return [
+            TrtLlmMxfp4ExpertsMonolithic,
+            TrtLlmMxfp4Mxfp8ExpertsModular,
+            TrtLlmMxfp4ExpertsModular,
+        ]
 
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
@@ -311,7 +316,7 @@ def backend_to_kernel_cls(
             AiterW4A16ExpertsMonolithic,
         )
 
-        return [AiterW4A16ExpertsMonolithic]
+        return [AiterW4A16ExpertsMonolithic]  # type: ignore
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -503,27 +508,30 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None
-    return args.moe.activation
+    return user_activation_override("moe", get_current_vllm_config())[0]
+
+
+def _user_moe_activation_override_is_set() -> bool:
+    """Whether the user set the MoE activation, explicit `null` included."""
+    return user_activation_override("moe", get_current_vllm_config_or_none())[1]
 
 
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing)."""
+    """Apply ``--quantization-config.moe.activation`` to the checkpoint's
+    activation key. An explicit override wins, ``null`` included (BF16)."""
     user_override = _user_moe_activation_override()
-    if user_override is None:
+    if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key
-    if model_activation_key is None or model_activation_key == user_override:
-        return user_override
-    raise ValueError(
-        f"checkpoint declares MoE activation={model_activation_key} but "
-        f"quantization_config.moe.activation={user_override}; remove the "
-        f"override or align it with the checkpoint."
-    )
+    if model_activation_key is not None and model_activation_key != user_override:
+        logger.warning_once(
+            "Overriding the checkpoint MoE activation=%s with "
+            "quantization_config.moe.activation=%s.",
+            model_activation_key,
+            user_override,
+        )
+    return user_override
 
 
 def _humming_input_schema(model_activation_key: QuantKey | None):
@@ -683,17 +691,13 @@ def select_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(
             runner_backend, requested_activation_key
         )
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
@@ -783,11 +787,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
@@ -800,7 +800,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
             # the BF16 variant would drop SM100+ W4A8 variants on devices where
             # the BF16 variant is gated to SM90.
             requested_backends = map_mxfp4_backend(runner_backend)
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
@@ -2276,7 +2276,7 @@ def _activation_format_for_config(
 ) -> mk.FusedMoEActivationFormat:
     return (
         mk.FusedMoEActivationFormat.BatchedExperts
-        if moe_config.moe_parallel_config.use_batched_activation_format
+        if moe_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
 
@@ -2330,7 +2330,7 @@ def make_mxfp4_moe_kernel(
     logger.info_once("Using %s", experts_cls.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(
