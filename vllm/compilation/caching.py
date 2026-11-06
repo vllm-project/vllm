@@ -614,6 +614,6 @@ def _compute_code_hash(files: set[str]) -> str:
         if not os.path.isfile(filepath):
             file_contents[filepath] = ""
         else:
-            with open(filepath) as f:
+            with open(filepath, encoding="utf-8") as f:
                 file_contents[filepath] = f.read()
     return _compute_code_hash_with_content(file_contents)
