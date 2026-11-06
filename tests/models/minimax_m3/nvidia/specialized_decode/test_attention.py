@@ -158,8 +158,10 @@ def _randint(low, high, shape, generator):
 def _inputs(context, num_reqs, query_len, seed):
     """Queries, caches, block table and seq_lens of one step. Fifteen pages of
     each request score far above its others (their index keys scaled up), so
-    the stock top-k's 16-bit key resolution cannot change the selection, and
-    each page's values have their own scale, so a wrong page moves a row."""
+    the stock top-k's 16-bit key resolution cannot change the selection;
+    every page holds random values of the same scales, so each selected page
+    carries about 1/16 of a row's output and a wrong one moves the row by
+    about a third."""
     lengths = _lengths(
         context, num_reqs, query_len, torch.Generator().manual_seed(seed)
     )
@@ -175,9 +177,8 @@ def _inputs(context, num_reqs, query_len, seed):
     kv = _randint(0, 256, (pool, 2, PAGE * 72), generator)
     index = _randint(0, 256, (pool, PAGE * 72), generator)
     codes = PAGE * HEAD_DIM // 2
-    # E4M3 scales: K and index keys 0.25-0.9, V 0.25-14 by page.
-    kv[:, 0, codes:] = _randint(0x28, 0x37, (pool, PAGE * 8), generator)
-    kv[:, 1, codes:] = _randint(0x28, 0x58, (pool, 1), generator)
+    # E4M3 scales of K, V and the index keys between 0.25 and 0.9.
+    kv[:, :, codes:] = _randint(0x28, 0x37, (pool, 2, PAGE * 8), generator)
     index[:, codes:] = _randint(0x28, 0x37, (pool, PAGE * 8), generator)
     cursor = 0
     for b, n in enumerate(lengths):
@@ -260,12 +261,13 @@ def _stock(attrs, inputs):
 
 def _check(out, expected, live):
     """Per live row, within the rounding of the two paths: FP8 against F16
-    attention probabilities, and the BF16 and MXFP8 roundings of o_proj's
-    input. A wrong page, mask or scale moves a row by far more."""
+    attention probabilities, and the MXFP8 rounding of o_proj's input (about
+    4% at most between them). A wrong page moves a row by about a third (see
+    ``_inputs``), a wrong mask or scale also far more."""
     for row in torch.nonzero(live).flatten().tolist():
         got, want = out[row].float(), expected[row].float()
         error = float((got - want).norm() / want.norm())
-        assert error < 0.03, f"row {row}: relative error {error:.4f}"
+        assert error < 0.06, f"row {row}: relative error {error:.4f}"
 
 
 def _run(low_batch, inputs):
