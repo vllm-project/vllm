@@ -663,7 +663,8 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (2048, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
         (8192, _tiled(128, 256, 128, 1, True, 2, 2, 32, 0)),
     ],
-    # wq_b, TP1
+    # wq_b, TP1. Tiers above M=512 come from #63821, which measured
+    # faster there; likewise for the other three TP1 shapes below.
     (32768, 1280): [
         (2, _packed(8, 16, 256, 2, 2, 3, 16, 0)),
         (4, _packed(4, 32, 128, 4, 4, 2, 16, 0)),
@@ -674,7 +675,8 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
         (384, _tiled(128, 128, 128, 1, True, 8, 2, 32, 0)),
         (512, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
-        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
+        (1280, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
+        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
     ],
     # wo_b, TP1
     (5120, 8192): [
@@ -688,7 +690,12 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (256, _tiled(128, 128, 256, 1, True, 4, 2, 16, 1, 3)),
         (384, _tiled(128, 128, 256, 2, False, 4, 2, 16, 1, 2)),
         (512, _tiled(128, 128, 256, 1, True, 4, 2, 16, 1)),
-        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
+        (768, _tiled(128, 128, 256, 1, True, 4, 2, 16, 0)),
+        (1024, _tiled(128, 128, 256, 2, True, 4, 2, 16, 0)),
+        (1536, _tiled(128, 128, 256, 1, True, 8, 2, 32, 0)),
+        (2048, _tiled(128, 128, 256, 1, True, 8, 2, 32, 2)),
+        (3072, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
+        (8192, _tiled(128, 128, 256, 1, True, 8, 2, 32, 2)),
     ],
     # shared expert gate_up, TP1
     (4608, 5120): [
@@ -705,7 +712,10 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (256, _tiled(128, 128, 256, 1, True, 8, 2, 16, 0, 3)),
         (384, _tiled(128, 128, 256, 2, False, 4, 2, 16, 1, 2)),
         (512, _tiled(128, 128, 256, 1, True, 4, 2, 32, 1)),
-        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
+        (896, _tiled(128, 128, 256, 1, True, 4, 2, 16, 0)),
+        (1792, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
+        (2560, _tiled(128, 128, 256, 1, True, 8, 2, 32, 0)),
+        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
     ],
     # shared expert down, TP1
     (5120, 2304): [
@@ -722,7 +732,10 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (256, _tiled(64, 64, 256, 1, True, 4, 2, 32, 0)),
         (384, _tiled(128, 64, 256, 1, True, 8, 3, 32, 0)),
         (512, _tiled(128, 128, 256, 1, True, 4, 2, 32, 1)),
-        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
+        (768, _tiled(128, 128, 256, 1, True, 8, 2, 32, 2)),
+        (2048, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
+        (3072, _tiled(128, 256, 128, 1, True, 8, 3, 32, 2)),
+        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
     ],
     # engram wkv
     (25600, 6144): [
