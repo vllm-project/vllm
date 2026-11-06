@@ -22,12 +22,23 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA3 W4A8 MoE kernel is ROCm-only", allow_module_level=True)
 
+from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
 from vllm import _custom_ops as ops  # noqa: E402
+from vllm.config import VllmConfig, set_current_vllm_config  # noqa: E402
+from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
     int4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (  # noqa: E402
+    RDNA3_W4A8_MAX_TOKENS,
+    Rdna3W4A8Experts,
+    moe_w4a8_workspace_bytes,
     rdna3_w4a8_moe_kernel_available,
+)
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (  # noqa: E402
+    TritonWNA16Experts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (  # noqa: E402
     fused_experts,
@@ -136,9 +147,17 @@ def _setup(E, K, N, top_k, group, dtype, with_zp, M, seed=0):
     return x, ids, wts, (w13, w13_s, w13_zp, w2, w2_s, w2_zp), (w13_deq, w2_deq)
 
 
-def _run(x, ids, wts, w):
+def _workspace(M, K, N, top_k):
+    nbytes = moe_w4a8_workspace_bytes(M, K, N, top_k)
+    return torch.empty(nbytes, dtype=torch.uint8, device=device)
+
+
+def _run(x, ids, wts, w, expert_map=None, workspace=None):
     out = torch.empty_like(x)
-    ops.moe_w4a8_decode_rdna3(out, x, ids, wts, *w)
+    w13 = w[0]
+    if workspace is None:
+        workspace = _workspace(x.size(0), x.size(1), w13.size(1) // 2, ids.size(1))
+    ops.moe_w4a8_decode_rdna3(out, x, ids, wts, expert_map, workspace, *w)
     return out
 
 
@@ -201,3 +220,147 @@ def test_deterministic():
     first = _run(x, ids, wts, w)
     for _ in range(3):
         assert torch.equal(_run(x, ids, wts, w), first)
+
+
+@pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("wts_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_routing_dtypes(ids_dtype, wts_dtype):
+    """topk_ids and topk_weights are read in the router's dtypes."""
+    E, K, N, top_k, group = 16, 512, 256, 4, 64
+    x, ids, wts, w, deq = _setup(E, K, N, top_k, group, torch.bfloat16, True, 4)
+    wts = wts.to(wts_dtype)
+    out = _run(x, ids.to(ids_dtype), wts, w)
+    # Reference with the same (rounded) routing weights.
+    assert _rel_err(out, _reference(x, ids, wts.float(), *deq)) < 1e-2
+
+
+def test_expert_map():
+    """Global ids go through expert_map; experts of other ranks (-1) are
+    skipped."""
+    E_global, K, N, top_k, group = 16, 256, 128, 4, 64
+    x, ids, wts, w, deq = _setup(E_global, K, N, top_k, group, torch.bfloat16, True, 6)
+    local = torch.arange(E_global, device=device) % 2 == 0  # this rank: even ids
+    expert_map = torch.full((E_global,), -1, dtype=torch.int32, device=device)
+    expert_map[local] = torch.arange(int(local.sum()), dtype=torch.int32, device=device)
+    sel = local.nonzero().flatten()
+    w_local = (
+        w[0][sel],
+        w[1][sel],
+        w[2][sel] if w[2] is not None else None,
+        w[3][sel],
+        w[4][sel],
+        w[5][sel] if w[5] is not None else None,
+    )
+    out = _run(x, ids, wts, w_local, expert_map=expert_map)
+    masked = torch.where(local[ids.long()], ids, torch.full_like(ids, -1))
+    assert _rel_err(out, _reference(x, masked, wts, *deq)) < 1e-2
+
+
+def test_workspace_too_small_is_rejected():
+    E, K, N, top_k, group = 8, 256, 128, 4, 64
+    x, ids, wts, w, _ = _setup(E, K, N, top_k, group, torch.bfloat16, False, 2)
+    small = _workspace(2, K, N, top_k)[:-16]
+    with pytest.raises(RuntimeError, match="workspace"):
+        _run(x, ids, wts, w, workspace=small)
+
+
+# ----------------------------------------------- through Rdna3W4A8Experts
+
+
+def _experts(cls, E, K, N, top_k, w, num_experts=None):
+    w13, w13_s, w13_zp, w2, w2_s, w2_zp = w
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts or E,
+        num_local_experts=E,
+        experts_per_token=top_k,
+        hidden_dim=K,
+        intermediate_size=N,
+        in_dtype=torch.bfloat16,
+    )
+    quant_config = int4_w4a16_moe_quant_config(
+        w1_scale=w13_s,
+        w2_scale=w2_s,
+        w1_zp=w13_zp,
+        w2_zp=w2_zp,
+        block_shape=[0, K // w13_s.size(2)],
+    )
+    return cls(moe_config, quant_config)
+
+
+def _apply(experts, x, w, ids, wts, expert_map=None, global_num_experts=-1):
+    w13, w2 = w[0], w[3]
+    M, K = x.shape
+    ws13_shape, ws2_shape, out_shape = experts.workspace_shapes(
+        M, w13.size(1), K, ids.size(1), global_num_experts, w13.size(0), None,
+        MoEActivation.SILU,
+    )  # fmt: skip
+    ws13 = torch.empty(ws13_shape, dtype=x.dtype, device=device)
+    ws2 = torch.empty(ws2_shape, dtype=x.dtype, device=device)
+    out = torch.zeros(out_shape, dtype=x.dtype, device=device)
+    experts.apply(
+        out, x, w13, w2, wts, ids, MoEActivation.SILU, global_num_experts,
+        expert_map, None, None, ws13, ws2, None, False,
+    )  # fmt: skip
+    return out
+
+
+@pytest.fixture
+def vllm_config():
+    with set_current_vllm_config(VllmConfig()):
+        yield
+
+
+@pytest.mark.parametrize("M", [1, 4, RDNA3_W4A8_MAX_TOKENS])
+def test_apply_matches_triton(vllm_config, M):
+    E, K, N, top_k, group = 16, 512, 256, 4, 64
+    x, ids, wts, w, _ = _setup(E, K, N, top_k, group, torch.bfloat16, True, M)
+    out = _apply(_experts(Rdna3W4A8Experts, E, K, N, top_k, w), x, w, ids, wts)
+    ref = _apply(_experts(TritonWNA16Experts, E, K, N, top_k, w), x, w, ids, wts)
+    assert _rel_err(out, ref) < 5e-2
+
+
+def test_apply_falls_back_to_triton_above_max_tokens(vllm_config):
+    E, K, N, top_k, group = 16, 512, 256, 4, 64
+    M = RDNA3_W4A8_MAX_TOKENS + 1
+    x, ids, wts, w, _ = _setup(E, K, N, top_k, group, torch.bfloat16, True, M)
+    out = _apply(_experts(Rdna3W4A8Experts, E, K, N, top_k, w), x, w, ids, wts)
+    ref = _apply(_experts(TritonWNA16Experts, E, K, N, top_k, w), x, w, ids, wts)
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
+def test_apply_expert_map(vllm_config):
+    """EP: global ids are remapped and remote experts (-1) contribute 0, as in
+    the Triton path."""
+    E_global, K, N, top_k, group = 16, 512, 256, 4, 64
+    x, ids, wts, w, _ = _setup(E_global, K, N, top_k, group, torch.bfloat16, True, 4)
+    local = torch.arange(E_global, device=device) >= E_global // 2  # upper half
+    expert_map = torch.full((E_global,), -1, dtype=torch.int32, device=device)
+    expert_map[local] = torch.arange(int(local.sum()), dtype=torch.int32, device=device)
+    sel = local.nonzero().flatten()
+    w_local = tuple(t[sel] if t is not None else None for t in w)
+    E = int(local.sum())
+    kwargs = dict(expert_map=expert_map, global_num_experts=E_global)
+    out = _apply(
+        _experts(Rdna3W4A8Experts, E, K, N, top_k, w_local, E_global),
+        x, w_local, ids, wts, **kwargs,
+    )  # fmt: skip
+    ref = _apply(
+        _experts(TritonWNA16Experts, E, K, N, top_k, w_local, E_global),
+        x, w_local, ids, wts, **kwargs,
+    )  # fmt: skip
+    assert _rel_err(out, ref) < 5e-2
+
+
+def test_apply_fused_shared_expert(vllm_config):
+    """A fused shared expert is an extra row of w13/w2 (w1.shape[0] > routed
+    experts) that every token selects."""
+    E_routed, K, N, top_k, group = 16, 512, 256, 4, 64
+    x, ids, wts, w, _ = _setup(
+        E_routed + 1, K, N, top_k, group, torch.bfloat16, True, 4
+    )
+    ids = ids % E_routed
+    ids[:, -1] = E_routed  # the shared expert slot
+    E = E_routed + 1
+    out = _apply(_experts(Rdna3W4A8Experts, E, K, N, top_k, w), x, w, ids, wts)
+    ref = _apply(_experts(TritonWNA16Experts, E, K, N, top_k, w), x, w, ids, wts)
+    assert _rel_err(out, ref) < 5e-2

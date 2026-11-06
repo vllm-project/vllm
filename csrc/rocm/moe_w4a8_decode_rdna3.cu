@@ -18,16 +18,20 @@
 // The scheme follows ggml's MMVQ MoE path (llama.cpp, MIT License).
 //
 // Layouts (the TritonWNA16Experts tensors, no repack):
-//   x         [M, K]          fp16 / bf16
-//   w13       [E, 2N, K/2]    uint8, low nibble = even k;
-//                             rows [0, N) gate, rows [N, 2N) up
-//   w13_scale [E, 2N, K/G1]   same dtype as x
-//   w13_zp    [E, N, K/G1]    uint8, two zero points per byte along rows,
-//                             low nibble = even row; absent = symmetric (8)
-//   w2        [E, K, N/2], w2_scale [E, K, N/G2], w2_zp [E, K/2, N/G2]
-//   topk_ids  [M, top_k] int32, entries outside [0, E) are skipped
-//   topk_w    [M, top_k] fp32
-//   out       [M, K]          same dtype as x
+//   x          [M, K]          fp16 / bf16
+//   w13        [E, 2N, K/2]    uint8, low nibble = even k;
+//                              rows [0, N) gate, rows [N, 2N) up
+//   w13_scale  [E, 2N, K/G1]   same dtype as x
+//   w13_zp     [E, N, K/G1]    uint8, two zero points per byte along rows,
+//                              low nibble = even row; absent = symmetric (8)
+//   w2         [E, K, N/2], w2_scale [E, K, N/G2], w2_zp [E, K/2, N/G2]
+//   topk_ids   [M, top_k] int32 or int64 global expert ids
+//   topk_w     [M, top_k] fp32, fp16 or bf16
+//   expert_map [global E] int32, optional: global -> local expert id, -1 for
+//              experts on other ranks. Slots whose local id is outside [0, E)
+//              are skipped.
+//   workspace  uint8, at least workspace_bytes(M, K, N, top_k)
+//   out        [M, K]          same dtype as x
 //
 // Quantized activations store each group of 8 values in the order
 // (0, 2, 4, 6, 1, 3, 5, 7), so the low and high nibbles of four weight bytes
@@ -38,17 +42,23 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cuda_runtime.h>
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
 
 #include <optional>
-#include <string>
 #include <type_traits>
 
 #include "core/cuda_compat.h"
 
 #if defined(__GFX11__)
   #define __HIP__MOE_W4A8_GFX11__
+#endif
+
+#if defined(NDEBUG)
+  #undef NDEBUG
+  #include <assert.h>
+  #define UNREACHABLE_CODE assert(false);
+  #define NDEBUG
+#else
+  #define UNREACHABLE_CODE assert(false);
 #endif
 
 namespace {
@@ -64,27 +74,39 @@ static_assert(kTileCols == kGroup,
 static_assert(kTileCols == kWave,
               "gate_up epilogue maps one lane to one column");
 
-template <typename T>
-__device__ __forceinline__ float to_float(T v);
-template <>
-__device__ __forceinline__ float to_float(half v) {
-  return __half2float(v);
-}
-template <>
-__device__ __forceinline__ float to_float(__hip_bfloat16 v) {
-  return __bfloat162float(v);
-}
+enum WeightDtype : int { kWeightF32, kWeightF16, kWeightBF16 };
 
-template <typename T>
-__device__ __forceinline__ T from_float(float v);
-template <>
-__device__ __forceinline__ half from_float(float v) {
-  return __float2half(v);
-}
-template <>
-__device__ __forceinline__ __hip_bfloat16 from_float(float v) {
-  return __float2bfloat16(v);
-}
+// The router outputs, read in the dtypes the router produced.
+struct Routing {
+  const void* ids;        // [M * top_k] int32 or int64 global expert ids
+  const int* expert_map;  // [num_global] int32, or nullptr
+  const void* weights;    // [M * top_k], WeightDtype
+  int num_global;         // valid global ids are [0, num_global)
+  int num_local;          // experts in w13 / w2
+  bool ids_int64;
+  int weight_dtype;
+
+  // Local expert of slot `ms`, or -1 if the slot is skipped.
+  __device__ __forceinline__ int expert(int ms) const {
+    const int64_t g = ids_int64 ? static_cast<const int64_t*>(ids)[ms]
+                                : static_cast<const int*>(ids)[ms];
+    if (g < 0 || g >= num_global) return -1;
+    const int e = expert_map != nullptr ? expert_map[g] : static_cast<int>(g);
+    return e < num_local ? e : -1;
+  }
+
+  __device__ __forceinline__ float weight(int ms) const {
+    switch (weight_dtype) {
+      case kWeightF32:
+        return static_cast<const float*>(weights)[ms];
+      case kWeightF16:
+        return static_cast<float>(static_cast<const c10::Half*>(weights)[ms]);
+      default:
+        return static_cast<float>(
+            static_cast<const c10::BFloat16*>(weights)[ms]);
+    }
+  }
+};
 
 #if defined(__HIP__MOE_W4A8_GFX11__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -94,14 +116,8 @@ __device__ __forceinline__ int permuted_pos(int i) {
   return (i & ~7) | ((r & 1) ? 4 + (r >> 1) : (r >> 1));
 }
 
-__device__ __forceinline__ float wave_sum(float v) {
-  #pragma unroll
-  for (int o = kWave / 2; o > 0; o >>= 1)
-    v += VLLM_SHFL_XOR_SYNC_WIDTH(v, o, kWave);
-  return v;
-}
-
-__device__ __forceinline__ int wave_sum(int v) {
+template <typename V>
+__device__ __forceinline__ V wave_sum(V v) {
   #pragma unroll
   for (int o = kWave / 2; o > 0; o >>= 1)
     v += VLLM_SHFL_XOR_SYNC_WIDTH(v, o, kWave);
@@ -147,6 +163,8 @@ __device__ __forceinline__ int zero_point(const uint8_t* __restrict__ zp,
   }
 }
 
+#endif  // __HIP__MOE_W4A8_GFX11__ || !__HIP_DEVICE_COMPILE__
+
 // One thread per 32-value group of one token.
 template <typename T>
 __global__ void moe_w4a8_quant_act_kernel(const T* __restrict__ x,
@@ -154,6 +172,7 @@ __global__ void moe_w4a8_quant_act_kernel(const T* __restrict__ x,
                                           float* __restrict__ xs,
                                           int* __restrict__ xsum, int M,
                                           int K) {
+#if defined(__HIP__MOE_W4A8_GFX11__) || !defined(__HIP_DEVICE_COMPILE__)
   const int groups = K / kGroup;
   const int m = blockIdx.x;
   const int g = blockIdx.y * blockDim.x + threadIdx.x;
@@ -164,7 +183,7 @@ __global__ void moe_w4a8_quant_act_kernel(const T* __restrict__ x,
   float amax = 0.f;
   #pragma unroll
   for (int i = 0; i < kGroup; ++i) {
-    v[i] = to_float(src[i]);
+    v[i] = static_cast<float>(src[i]);
     amax = fmaxf(amax, fabsf(v[i]));
   }
   const float scale = fmaxf(amax / 127.0f, 1e-12f);
@@ -179,6 +198,9 @@ __global__ void moe_w4a8_quant_act_kernel(const T* __restrict__ x,
   }
   xs[(int64_t)m * groups + g] = scale;
   xsum[(int64_t)m * groups + g] = sum;
+#else
+  UNREACHABLE_CODE
+#endif
 }
 
 // grid (M * top_k, N / 32), block (32, 8). Each wave computes the gate and
@@ -187,14 +209,15 @@ template <typename T, bool kHasZp>
 __global__ void __launch_bounds__(kWave* kWavesPerBlock)
     moe_w4a8_gate_up_kernel(
         const int8_t* __restrict__ xq, const float* __restrict__ xs,
-        const int* __restrict__ xsum, const int* __restrict__ topk_ids,
+        const int* __restrict__ xsum, const Routing routing,
         const uint8_t* __restrict__ w13, const T* __restrict__ w13_scale,
         const uint8_t* __restrict__ w13_zp, int8_t* __restrict__ hq,
-        float* __restrict__ hs, int* __restrict__ hsum, int top_k,
-        int num_experts, int K, int N, int group_size) {
+        float* __restrict__ hs, int* __restrict__ hsum, int top_k, int K,
+        int N, int group_size) {
+#if defined(__HIP__MOE_W4A8_GFX11__) || !defined(__HIP_DEVICE_COMPILE__)
   const int ms = blockIdx.x;
-  const int e = topk_ids[ms];
-  if (e < 0 || e >= num_experts) return;
+  const int e = routing.expert(ms);
+  if (e < 0) return;
 
   const int m = ms / top_k;
   const int lane = threadIdx.x;
@@ -229,7 +252,7 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock)
           w_e + (int64_t)row * (K / 2) + b * (kGroup / 2));
       const int dot = dot_group(w, a0, a1);
       const int z = zero_point<kHasZp>(z_e, row, g, s_groups);
-      const float w_s = to_float(s_e[(int64_t)row * s_groups + g]);
+      const float w_s = static_cast<float>(s_e[(int64_t)row * s_groups + g]);
       acc[r] += a_s * w_s * (float)(dot - z * a_sum);
     }
   }
@@ -262,6 +285,9 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock)
     hs[(int64_t)ms * n_groups + blockIdx.y] = scale;
     hsum[(int64_t)ms * n_groups + blockIdx.y] = q_sum;
   }
+#else
+  UNREACHABLE_CODE
+#endif
 }
 
 // grid (M, K / 32), block (32, 8). Each wave computes 4 output columns;
@@ -269,11 +295,11 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock)
 template <typename T, bool kHasZp>
 __global__ void __launch_bounds__(kWave* kWavesPerBlock) moe_w4a8_down_kernel(
     const int8_t* __restrict__ hq, const float* __restrict__ hs,
-    const int* __restrict__ hsum, const int* __restrict__ topk_ids,
-    const float* __restrict__ topk_w, const uint8_t* __restrict__ w2,
-    const T* __restrict__ w2_scale, const uint8_t* __restrict__ w2_zp,
-    T* __restrict__ out, int top_k, int num_experts, int K, int N,
-    int group_size) {
+    const int* __restrict__ hsum, const Routing routing,
+    const uint8_t* __restrict__ w2, const T* __restrict__ w2_scale,
+    const uint8_t* __restrict__ w2_zp, T* __restrict__ out, int top_k, int K,
+    int N, int group_size) {
+#if defined(__HIP__MOE_W4A8_GFX11__) || !defined(__HIP_DEVICE_COMPILE__)
   const int m = blockIdx.x;
   const int lane = threadIdx.x;
   const int wave = threadIdx.y;
@@ -289,13 +315,13 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock) moe_w4a8_down_kernel(
     const int slot = t / n_groups;
     const int b = t - slot * n_groups;
     const int ms = m * top_k + slot;
-    const int e = topk_ids[ms];
-    if (e < 0 || e >= num_experts) continue;
+    const int e = routing.expert(ms);
+    if (e < 0) continue;
 
     const int8_t* hp = hq + (int64_t)ms * N + b * kGroup;
     const int4 a0 = *reinterpret_cast<const int4*>(hp);
     const int4 a1 = *reinterpret_cast<const int4*>(hp + 16);
-    const float a_s = hs[(int64_t)ms * n_groups + b] * topk_w[ms];
+    const float a_s = hs[(int64_t)ms * n_groups + b] * routing.weight(ms);
     const int a_sum = hsum[(int64_t)ms * n_groups + b];
     const int g = b * kGroup / group_size;
 
@@ -310,7 +336,7 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock) moe_w4a8_down_kernel(
           w_e + (int64_t)row * (N / 2) + b * (kGroup / 2));
       const int dot = dot_group(w, a0, a1);
       const int z = zero_point<kHasZp>(z_e, row, g, s_groups);
-      const float w_s = to_float(s_e[(int64_t)row * s_groups + g]);
+      const float w_s = static_cast<float>(s_e[(int64_t)row * s_groups + g]);
       acc[c] += a_s * w_s * (float)(dot - z * a_sum);
     }
   }
@@ -318,83 +344,67 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock) moe_w4a8_down_kernel(
   #pragma unroll
   for (int c = 0; c < kColsPerWave; ++c) {
     const float v = wave_sum(acc[c]);
-    if (lane == c) out[(int64_t)m * K + col0 + c] = from_float<T>(v);
+    if (lane == c) out[(int64_t)m * K + col0 + c] = T(v);
   }
-}
-
-#else  // non-gfx11 device pass: empty kernels for symbol parity.
-
-template <typename T>
-__global__ void moe_w4a8_quant_act_kernel(const T*, int8_t*, float*, int*, int,
-                                          int) {}
-
-template <typename T, bool kHasZp>
-__global__ void moe_w4a8_gate_up_kernel(const int8_t*, const float*, const int*,
-                                        const int*, const uint8_t*, const T*,
-                                        const uint8_t*, int8_t*, float*, int*,
-                                        int, int, int, int, int) {}
-
-template <typename T, bool kHasZp>
-__global__ void moe_w4a8_down_kernel(const int8_t*, const float*, const int*,
-                                     const int*, const float*, const uint8_t*,
-                                     const T*, const uint8_t*, T*, int, int,
-                                     int, int, int) {}
-
-#endif  // __HIP__MOE_W4A8_GFX11__ || !__HIP_DEVICE_COMPILE__
-
-bool moe_w4a8_on_gfx11() {
-  static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
-    const std::string arch = dprops->gcnArchName;
-    return arch.rfind("gfx11", 0) == 0;
-  }();
-  return result;
+#else
+  UNREACHABLE_CODE
+#endif
 }
 
 bool aligned16(const at::Tensor& t) {
   return reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0;
 }
 
+constexpr int64_t align16(int64_t bytes) { return (bytes + 15) / 16 * 16; }
+
+// Scratch carved from the workspace, in this order (each 16-byte aligned):
+//   xq [M, K] int8, xs [M, K/32] fp32, xsum [M, K/32] int32,
+//   hq [M*top_k, N] int8, hs [M*top_k, N/32] fp32, hsum [M*top_k, N/32] int32
+// Mirrored by `moe_w4a8_workspace_bytes` in rdna3_w4a8_moe.py.
+int64_t workspace_bytes(int64_t M, int64_t K, int64_t N, int64_t top_k) {
+  const int64_t MS = M * top_k;
+  return align16(M * K) + 2 * align16(M * (K / kGroup) * 4) + align16(MS * N) +
+         2 * align16(MS * (N / kGroup) * 4);
+}
+
 template <typename T>
-void launch(at::Tensor& out, const at::Tensor& x, const at::Tensor& topk_ids,
-            const at::Tensor& topk_weights, const at::Tensor& w13,
+void launch(at::Tensor& out, const at::Tensor& x, const Routing& routing,
+            at::Tensor& workspace, const at::Tensor& w13,
             const at::Tensor& w13_scale,
             const std::optional<at::Tensor>& w13_zp, const at::Tensor& w2,
             const at::Tensor& w2_scale, const std::optional<at::Tensor>& w2_zp,
-            int M, int K, int N, int E, int top_k, int group1, int group2) {
+            int M, int K, int N, int top_k, int group1, int group2) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int k_groups = K / kGroup;
   const int n_groups = N / kGroup;
   const int MS = M * top_k;
 
-  auto i8 = x.options().dtype(torch::kInt8);
-  auto f32 = x.options().dtype(torch::kFloat32);
-  auto i32 = x.options().dtype(torch::kInt32);
-  auto xq = torch::empty({M, K}, i8);
-  auto xs = torch::empty({M, k_groups}, f32);
-  auto xsum = torch::empty({M, k_groups}, i32);
-  auto hq = torch::empty({MS, N}, i8);
-  auto hs = torch::empty({MS, n_groups}, f32);
-  auto hsum = torch::empty({MS, n_groups}, i32);
+  uint8_t* scratch = workspace.data_ptr<uint8_t>();
+  auto take = [&](int64_t bytes) {
+    uint8_t* p = scratch;
+    scratch += align16(bytes);
+    return p;
+  };
+  auto* xq = reinterpret_cast<int8_t*>(take((int64_t)M * K));
+  auto* xs = reinterpret_cast<float*>(take((int64_t)M * k_groups * 4));
+  auto* xsum = reinterpret_cast<int*>(take((int64_t)M * k_groups * 4));
+  auto* hq = reinterpret_cast<int8_t*>(take((int64_t)MS * N));
+  auto* hs = reinterpret_cast<float*>(take((int64_t)MS * n_groups * 4));
+  auto* hsum = reinterpret_cast<int*>(take((int64_t)MS * n_groups * 4));
 
   const dim3 q_block(64);
   const dim3 q_grid(M, (k_groups + 63) / 64);
-  moe_w4a8_quant_act_kernel<T><<<q_grid, q_block, 0, stream>>>(
-      reinterpret_cast<const T*>(x.data_ptr()), xq.data_ptr<int8_t>(),
-      xs.data_ptr<float>(), xsum.data_ptr<int>(), M, K);
+  moe_w4a8_quant_act_kernel<T>
+      <<<q_grid, q_block, 0, stream>>>(x.data_ptr<T>(), xq, xs, xsum, M, K);
 
   const dim3 block(kWave, kWavesPerBlock);
-  const int* ids = topk_ids.data_ptr<int>();
-
   const dim3 gu_grid(MS, N / kTileCols);
   auto gate_up = [&](auto has_zp) {
     constexpr bool kHasZp = decltype(has_zp)::value;
     moe_w4a8_gate_up_kernel<T, kHasZp><<<gu_grid, block, 0, stream>>>(
-        xq.data_ptr<int8_t>(), xs.data_ptr<float>(), xsum.data_ptr<int>(), ids,
-        w13.data_ptr<uint8_t>(),
-        reinterpret_cast<const T*>(w13_scale.data_ptr()),
-        kHasZp ? w13_zp->data_ptr<uint8_t>() : nullptr, hq.data_ptr<int8_t>(),
-        hs.data_ptr<float>(), hsum.data_ptr<int>(), top_k, E, K, N, group1);
+        xq, xs, xsum, routing, w13.data_ptr<uint8_t>(), w13_scale.data_ptr<T>(),
+        kHasZp ? w13_zp->data_ptr<uint8_t>() : nullptr, hq, hs, hsum, top_k, K,
+        N, group1);
   };
   if (w13_zp.has_value())
     gate_up(std::true_type{});
@@ -405,11 +415,9 @@ void launch(at::Tensor& out, const at::Tensor& x, const at::Tensor& topk_ids,
   auto down = [&](auto has_zp) {
     constexpr bool kHasZp = decltype(has_zp)::value;
     moe_w4a8_down_kernel<T, kHasZp><<<down_grid, block, 0, stream>>>(
-        hq.data_ptr<int8_t>(), hs.data_ptr<float>(), hsum.data_ptr<int>(), ids,
-        topk_weights.data_ptr<float>(), w2.data_ptr<uint8_t>(),
-        reinterpret_cast<const T*>(w2_scale.data_ptr()),
-        kHasZp ? w2_zp->data_ptr<uint8_t>() : nullptr,
-        reinterpret_cast<T*>(out.data_ptr()), top_k, E, K, N, group2);
+        hq, hs, hsum, routing, w2.data_ptr<uint8_t>(), w2_scale.data_ptr<T>(),
+        kHasZp ? w2_zp->data_ptr<uint8_t>() : nullptr, out.data_ptr<T>(), top_k,
+        K, N, group2);
   };
   if (w2_zp.has_value())
     down(std::true_type{});
@@ -434,15 +442,15 @@ void check_zp(const std::optional<at::Tensor>& zp, int64_t E, int64_t rows,
 void moe_w4a8_decode_rdna3(at::Tensor& out, const at::Tensor& x,
                            const at::Tensor& topk_ids,
                            const at::Tensor& topk_weights,
-                           const at::Tensor& w13, const at::Tensor& w13_scale,
+                           const std::optional<at::Tensor>& expert_map,
+                           at::Tensor& workspace, const at::Tensor& w13,
+                           const at::Tensor& w13_scale,
                            const std::optional<at::Tensor>& w13_zp,
                            const at::Tensor& w2, const at::Tensor& w2_scale,
                            const std::optional<at::Tensor>& w2_zp) {
-  TORCH_CHECK(moe_w4a8_on_gfx11(),
-              "moe_w4a8_decode_rdna3 requires an RDNA3/RDNA3.5 (gfx11) GPU");
   for (const at::Tensor* t : std::initializer_list<const at::Tensor*>{
-           &out, &x, &topk_ids, &topk_weights, &w13, &w13_scale, &w2,
-           &w2_scale}) {
+           &out, &x, &topk_ids, &topk_weights, &workspace, &w13, &w13_scale,
+           &w2, &w2_scale}) {
     TORCH_CHECK(t->is_cuda() && t->is_contiguous(),
                 "moe_w4a8_decode_rdna3: all tensors must be contiguous and on "
                 "the GPU");
@@ -456,10 +464,14 @@ void moe_w4a8_decode_rdna3(at::Tensor& out, const at::Tensor& x,
   TORCH_CHECK(
       w13.scalar_type() == at::kByte && w2.scalar_type() == at::kByte,
       "moe_w4a8_decode_rdna3: w13 and w2 must be uint8 (two codes per byte)");
-  TORCH_CHECK(topk_ids.scalar_type() == at::kInt &&
-                  topk_weights.scalar_type() == at::kFloat,
-              "moe_w4a8_decode_rdna3: topk_ids must be int32 and topk_weights "
-              "float32");
+  TORCH_CHECK(topk_ids.scalar_type() == at::kInt ||
+                  topk_ids.scalar_type() == at::kLong,
+              "moe_w4a8_decode_rdna3: topk_ids must be int32 or int64");
+  const auto w_dtype = topk_weights.scalar_type();
+  TORCH_CHECK(w_dtype == at::kFloat || w_dtype == at::kHalf ||
+                  w_dtype == at::kBFloat16,
+              "moe_w4a8_decode_rdna3: topk_weights must be float32, float16 "
+              "or bfloat16");
   TORCH_CHECK(x.dim() == 2 && out.dim() == 2 && topk_ids.dim() == 2 &&
                   w13.dim() == 3 && w13_scale.dim() == 3 && w2.dim() == 3 &&
                   w2_scale.dim() == 3,
@@ -498,17 +510,39 @@ void moe_w4a8_decode_rdna3(at::Tensor& out, const at::Tensor& x,
               group1, " and ", group2);
   check_zp(w13_zp, E, 2 * N, w13_scale.size(2), "w13_zp");
   check_zp(w2_zp, E, K, w2_scale.size(2), "w2_zp");
-  TORCH_CHECK(aligned16(w13) && aligned16(w2),
-              "moe_w4a8_decode_rdna3: w13 and w2 must be 16-byte aligned");
+  TORCH_CHECK(aligned16(w13) && aligned16(w2) && aligned16(workspace),
+              "moe_w4a8_decode_rdna3: w13, w2 and workspace must be 16-byte "
+              "aligned");
+  TORCH_CHECK(workspace.scalar_type() == at::kByte &&
+                  workspace.numel() >= workspace_bytes(M, K, N, top_k),
+              "moe_w4a8_decode_rdna3: workspace must be uint8 with at least ",
+              workspace_bytes(M, K, N, top_k), " bytes");
+  if (expert_map.has_value()) {
+    TORCH_CHECK(expert_map->is_cuda() && expert_map->is_contiguous() &&
+                    expert_map->scalar_type() == at::kInt &&
+                    expert_map->dim() == 1,
+                "moe_w4a8_decode_rdna3: expert_map must be a contiguous 1-D "
+                "int32 GPU tensor");
+  }
+
+  const Routing routing{
+      topk_ids.data_ptr(),
+      expert_map.has_value() ? expert_map->data_ptr<int>() : nullptr,
+      topk_weights.data_ptr(),
+      static_cast<int>(expert_map.has_value() ? expert_map->numel() : E),
+      static_cast<int>(E),
+      topk_ids.scalar_type() == at::kLong,
+      w_dtype == at::kFloat  ? kWeightF32
+      : w_dtype == at::kHalf ? kWeightF16
+                             : kWeightBF16};
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   if (x.scalar_type() == at::kHalf) {
-    launch<half>(out, x, topk_ids, topk_weights, w13, w13_scale, w13_zp, w2,
-                 w2_scale, w2_zp, M, K, N, E, top_k, group1, group2);
+    launch<c10::Half>(out, x, routing, workspace, w13, w13_scale, w13_zp, w2,
+                      w2_scale, w2_zp, M, K, N, top_k, group1, group2);
   } else {
-    launch<__hip_bfloat16>(out, x, topk_ids, topk_weights, w13, w13_scale,
-                           w13_zp, w2, w2_scale, w2_zp, M, K, N, E, top_k,
-                           group1, group2);
+    launch<c10::BFloat16>(out, x, routing, workspace, w13, w13_scale, w13_zp,
+                          w2, w2_scale, w2_zp, M, K, N, top_k, group1, group2);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

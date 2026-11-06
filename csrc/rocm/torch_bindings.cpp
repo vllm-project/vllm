@@ -85,8 +85,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // Fused int4 x int8 (W4A8) MoE decode for RDNA3/RDNA3.5 (gfx11).
   rocm_ops.def(
       "moe_w4a8_decode_rdna3(Tensor! out, Tensor x, Tensor topk_ids, "
-      "Tensor topk_weights, Tensor w13, Tensor w13_scale, Tensor? w13_zp, "
-      "Tensor w2, Tensor w2_scale, Tensor? w2_zp) -> ()");
+      "Tensor topk_weights, Tensor? expert_map, Tensor! workspace, "
+      "Tensor w13, Tensor w13_scale, Tensor? w13_zp, Tensor w2, "
+      "Tensor w2_scale, Tensor? w2_zp) -> ()");
   rocm_ops.impl("moe_w4a8_decode_rdna3", torch::kCUDA, &moe_w4a8_decode_rdna3);
 #endif
 

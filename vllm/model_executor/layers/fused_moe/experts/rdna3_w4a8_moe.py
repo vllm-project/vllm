@@ -11,8 +11,12 @@ with ``--moe-backend rdna3_w4a8``.
 
 Weights stay in the ``TritonWNA16Experts`` format (uint8, two codes per byte,
 optional nibble-packed zero points), so larger batches and unsupported
-configurations fall back to the Triton kernels on the same tensors.
+configurations fall back to the Triton kernels on the same tensors. A request
+therefore decodes with int8 activations while the batch has at most
+``RDNA3_W4A8_MAX_TOKENS`` tokens and with fp16/bf16 activations above that.
 """
+
+from math import prod
 
 import torch
 
@@ -33,6 +37,24 @@ from vllm.platforms import current_platform
 
 # Above this many tokens the weight reuse of the Triton GEMMs wins.
 RDNA3_W4A8_MAX_TOKENS = 8
+
+
+def _align16(nbytes: int) -> int:
+    return (nbytes + 15) // 16 * 16
+
+
+def moe_w4a8_workspace_bytes(M: int, K: int, N: int, top_k: int) -> int:
+    """Scratch bytes `moe_w4a8_decode_rdna3` carves from its workspace: int8
+    activations with fp32 scales and int32 sums per 32 values, for the input
+    [M, K] and the activation output [M * top_k, N] (N = intermediate size).
+    Mirrors `workspace_bytes` in csrc/rocm/moe_w4a8_decode_rdna3.cu."""
+    rows = M * top_k
+    return (
+        _align16(M * K)
+        + 2 * _align16(M * (K // 32) * 4)
+        + _align16(rows * N)
+        + 2 * _align16(rows * (N // 32) * 4)
+    )
 
 
 def rdna3_w4a8_moe_kernel_available() -> bool:
@@ -113,6 +135,35 @@ class Rdna3W4A8Experts(TritonWNA16Experts):
             and (N // groups2) % 32 == 0
         )
 
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        workspace13, workspace2, output = super().workspace_shapes(
+            M,
+            N,
+            K,
+            topk,
+            global_num_experts,
+            local_num_experts,
+            expert_tokens_meta,
+            activation,
+        )
+        if M <= RDNA3_W4A8_MAX_TOKENS:
+            # The decode kernel's scratch lives in workspace2, which holds
+            # fp16/bf16 elements (N is the gate_up width, 2x intermediate).
+            needed = -(-moe_w4a8_workspace_bytes(M, K, N // 2, topk) // 2)
+            if needed > prod(workspace2):
+                workspace2 = (needed,)
+        return workspace13, workspace2, output
+
     def apply(
         self,
         output: torch.Tensor,
@@ -154,14 +205,16 @@ class Rdna3W4A8Experts(TritonWNA16Experts):
             return
 
         assert self.w1_scale is not None and self.w2_scale is not None
-        # The kernel skips slots whose expert id is outside [0, E), which is
-        # where expert_map sends experts owned by other ranks (-1).
-        local_ids = topk_ids if expert_map is None else expert_map[topk_ids]
+        # The kernel maps global ids through expert_map itself and skips slots
+        # whose local expert is outside [0, E), which is where expert_map
+        # sends experts owned by other ranks (-1).
         ops.moe_w4a8_decode_rdna3(
             output,
             hidden_states,
-            local_ids.to(torch.int32).contiguous(),
-            topk_weights.to(torch.float32).contiguous(),
+            topk_ids.contiguous(),
+            topk_weights.contiguous(),
+            expert_map,
+            workspace2.view(-1).view(torch.uint8),
             w1,
             self.w1_scale,
             self.w1_zp,

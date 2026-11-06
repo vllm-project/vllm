@@ -256,81 +256,59 @@ class TestCMakeGuards:
     def _read_cmake():
         return _read_source_or_skip("CMakeLists.txt")
 
-    def test_rdna3_cu_files_inside_gfx1100_conditional(self):
-        """All RDNA3 .cu files must be listed inside the
-        ``if(VLLM_GPU_ARCHES MATCHES "gfx1100")`` block, not unconditionally.
+    @pytest.mark.parametrize(
+        "arch_marker,cu_files",
+        [
+            ('VLLM_GPU_ARCHES MATCHES "gfx1100"', RDNA3_CU_FILES),
+            ('VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+"', GFX11_CU_FILES),
+        ],
+        ids=["gfx1100", "gfx11"],
+    )
+    def test_cu_files_inside_arch_conditional(self, arch_marker, cu_files):
+        """RDNA .cu files must be listed inside their
+        ``if(VLLM_GPU_ARCHES MATCHES ...)`` block, not unconditionally, so CDNA
+        builds do not compile them (and, for gfx11, a gfx1151-only build does).
         """
         cmake = self._read_cmake()
-        for cu_file in RDNA3_CU_FILES:
+        for cu_file in cu_files:
             assert cu_file in cmake, f"{cu_file} not found in CMakeLists.txt"
-
-            lines = cmake.splitlines()
-            in_gfx1100_block = False
-            for line in lines:
-                if 'VLLM_GPU_ARCHES MATCHES "gfx1100"' in line:
-                    in_gfx1100_block = True
-                if in_gfx1100_block and "endif()" in line:
-                    in_gfx1100_block = False
-                if cu_file in line:
-                    assert in_gfx1100_block, (
-                        f"{cu_file} is listed OUTSIDE the gfx1100 "
-                        f"conditional in CMakeLists.txt — CDNA builds "
-                        f"would compile RDNA3 code. Line: {line.strip()}"
-                    )
-
-    def test_gfx11_cu_files_inside_gfx11_conditional(self):
-        """The gfx11 .cu files must be listed inside the
-        ``if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")`` block, so a build that
-        targets only gfx1151 still compiles them and CDNA builds do not.
-        """
-        cmake = self._read_cmake()
-        for cu_file in GFX11_CU_FILES:
-            assert cu_file in cmake, f"{cu_file} not found in CMakeLists.txt"
-            in_gfx11_block = False
+            in_block = False
             for line in cmake.splitlines():
-                if 'VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+"' in line:
-                    in_gfx11_block = True
-                if in_gfx11_block and "endif()" in line:
-                    in_gfx11_block = False
+                if arch_marker in line:
+                    in_block = True
+                if in_block and "endif()" in line:
+                    in_block = False
                 if cu_file in line:
-                    assert in_gfx11_block, (
-                        f"{cu_file} is listed outside the gfx11 conditional "
-                        f"in CMakeLists.txt. Line: {line.strip()}"
+                    assert in_block, (
+                        f"{cu_file} is listed outside the {arch_marker!r} "
+                        f"conditional in CMakeLists.txt. Line: {line.strip()}"
                     )
 
-    def test_gfx11_compile_definition_only_for_gfx11(self):
-        """VLLM_ROCM_GFX11 compile definition must be conditional."""
+    @pytest.mark.parametrize(
+        "has_flag,define",
+        [
+            ("VLLM_ROCM_HAS_GFX1100", "VLLM_ROCM_GFX1100"),
+            ("VLLM_ROCM_HAS_GFX11", "VLLM_ROCM_GFX11"),
+        ],
+        ids=["gfx1100", "gfx11"],
+    )
+    def test_compile_definition_inside_conditional(self, has_flag, define):
+        """The compile definition must only be set inside
+        ``if(<has_flag>)``, or CDNA builds would define it."""
         cmake = self._read_cmake()
-        in_gfx11_block = False
+        in_block = False
         for line in cmake.splitlines():
-            if "VLLM_ROCM_HAS_GFX11)" in line:
-                in_gfx11_block = True
-            if in_gfx11_block and "endif()" in line:
-                in_gfx11_block = False
+            if f"{has_flag})" in line:
+                in_block = True
+            if in_block and "endif()" in line:
+                in_block = False
             if (
-                re.search(r"\bVLLM_ROCM_GFX11\b", line)
+                re.search(rf"\b{define}\b", line)
                 and "target_compile_definitions" in line
             ):
-                assert in_gfx11_block, (
-                    "VLLM_ROCM_GFX11 compile definition is set outside the "
-                    f"VLLM_ROCM_HAS_GFX11 conditional. Line: {line.strip()}"
-                )
-
-    def test_compile_definition_only_for_gfx1100(self):
-        """VLLM_ROCM_GFX1100 compile definition must be conditional."""
-        cmake = self._read_cmake()
-        lines = cmake.splitlines()
-        in_gfx1100_block = False
-        for line in lines:
-            if "VLLM_ROCM_HAS_GFX1100)" in line:
-                in_gfx1100_block = True
-            if in_gfx1100_block and "endif()" in line:
-                in_gfx1100_block = False
-            if "VLLM_ROCM_GFX1100" in line and "target_compile_definitions" in line:
-                assert in_gfx1100_block, (
-                    "VLLM_ROCM_GFX1100 compile definition is set outside "
-                    "the VLLM_ROCM_HAS_GFX1100 conditional — CDNA builds "
-                    f"would define it. Line: {line.strip()}"
+                assert in_block, (
+                    f"{define} compile definition is set outside the "
+                    f"{has_flag} conditional. Line: {line.strip()}"
                 )
 
 
