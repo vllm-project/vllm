@@ -1,403 +1,447 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Streaming resolution of `open_pattern` / `close_pattern` boundaries.
+//! PCRE2 matching for response-template boundaries, anchors, and content.
 //!
-//! Transformers relies on the Python `regex` module's `partial=True` search to
-//! decide whether a match at the end of the buffer is final, could still appear,
-//! or is impossible. The Rust `regex` crate has no partial-match API, so this
-//! module answers that question by stepping a `regex-automata` DFA, and uses a
-//! `meta::Regex` for the actual match span and captures.
+//! Hard partial matching holds back a boundary while more input could change it.
+//! Searches keep the entire subject and a start offset so lookbehind and anchors
+//! see the same context regardless of chunk boundaries.
 
-use regex_automata::dfa::{Automaton, StartKind, dense};
-use regex_automata::meta::Regex;
-use regex_automata::nfa::thompson::{self, WhichCaptures};
-use regex_automata::util::primitives::StateID;
-use regex_automata::{Anchored, Input, MatchKind, PatternID};
-use regex_syntax::hir::literal::{ExtractKind, Extractor};
-use regex_syntax::hir::{Hir, HirKind};
+use std::ffi::CStr;
+use std::ptr::{self, NonNull};
+use std::sync::Arc;
+
+use pcre2_sys::*;
 use serde_json::{Map, Value};
-use thiserror_ext::AsReport as _;
 
 use super::{Result, unsupported};
+use crate::unified::{self, parsing_failed};
 
-/// Upper bound for the memory of one boundary DFA.
-const DFA_SIZE_LIMIT: usize = 16 << 20;
-
-/// Named capture groups of a boundary match, as string values: the scope a
-/// transform template reads them from.
 pub(super) type Captures = Map<String, Value>;
 
-/// Outcome of resolving a boundary at a candidate position.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum Resolution {
-    /// The boundary matches `len` bytes; more input cannot change the match.
-    Matched { len: usize, captures: Captures },
-    /// More input could still produce or change a match.
-    Pending,
-    /// No match starts here, whatever input follows.
+    Matched {
+        start: usize,
+        len: usize,
+        captures: Captures,
+    },
+    Pending {
+        start: usize,
+    },
     NoMatch,
 }
 
-/// A regex boundary that can be resolved against a growing buffer.
 #[derive(Debug, Clone)]
-pub(super) struct StreamingPattern {
-    /// Finite set of non-empty literals, one of which starts every match.
-    prefixes: Vec<String>,
-    /// Anchored leftmost-first DFA of the pattern: decides whether the
-    /// leftmost-first match is final. Unicode word boundaries are handled
-    /// heuristically, quitting on non-ASCII bytes.
-    first: dense::DFA<Vec<u32>>,
-    /// Anchored DFA with every look-around assertion removed and
-    /// `MatchKind::All`, used when `first` quits. Relaxing an assertion only
-    /// enlarges the language, so once this DFA is dead no continuation can
-    /// produce a later-ending match of the real pattern. `MatchKind::All` is
-    /// required for that argument: leftmost-first pruning could discard the
-    /// thread the real pattern takes when an assertion fails (`a\b|ab` on `ab`).
-    fallback: Option<dense::DFA<Vec<u32>>>,
-    /// The pattern itself, for the match span and named captures.
-    exact: Regex,
+pub(super) struct Pattern(Arc<Code>);
+
+#[derive(Debug)]
+struct Code {
+    raw: NonNull<pcre2_code_8>,
+    names: Vec<(String, usize)>,
+    capture_count: u32,
+    jit: bool,
 }
 
-/// Result of walking a DFA over the available bytes.
-enum Walk {
-    /// No continuation can change the result.
-    Final,
-    /// More input could still change the result.
-    Alive,
-    /// The DFA gave up (non-ASCII byte near a Unicode word boundary).
-    Quit,
+// Compilation, including JIT, finishes before sharing; match state is per parser.
+unsafe impl Send for Code {}
+unsafe impl Sync for Code {}
+
+impl Drop for Code {
+    fn drop(&mut self) {
+        // SAFETY: this allocation belongs to Code and is freed exactly once.
+        unsafe { pcre2_code_free_8(self.raw.as_ptr()) }
+    }
 }
 
-impl StreamingPattern {
-    /// Compile a boundary pattern in Python `regex` syntax, with `re.DOTALL`.
-    ///
-    /// Streaming resolution only starts at occurrences of the pattern's literal
-    /// prefixes, so every match must start with one of a finite set of non-empty
-    /// literals.
+/// Scratch space owned by one parser, reused across its boundary searches.
+#[derive(Default)]
+pub(super) struct MatchState {
+    data: Option<MatchData>,
+    capture_count: u32,
+}
+
+impl MatchState {
+    pub fn new(capture_count: u32) -> Self {
+        Self {
+            data: None,
+            capture_count,
+        }
+    }
+}
+
+struct MatchData {
+    data: NonNull<pcre2_match_data_8>,
+    context: NonNull<pcre2_match_context_8>,
+}
+
+// Match data is exclusively accessed through its owning parser's mutable borrow.
+unsafe impl Send for MatchData {}
+
+impl Drop for MatchData {
+    fn drop(&mut self) {
+        // SAFETY: both allocations are exclusively owned and are no longer used.
+        unsafe {
+            pcre2_match_data_free_8(self.data.as_ptr());
+            pcre2_match_context_free_8(self.context.as_ptr());
+        }
+    }
+}
+
+impl Pattern {
+    /// Compile a UTF-8 pattern with DOTALL and Unicode character properties.
     pub fn new(scope: &str, pattern: &str) -> Result<Self> {
-        let hir = regex_syntax::ParserBuilder::new()
-            .dot_matches_new_line(true)
-            .build()
-            .parse(pattern)
-            .map_err(|error| {
-                unsupported!(
-                    "{scope}: regex {pattern:?} is not supported by the Rust regex engine: {}",
-                    error.as_report()
-                )
-            })?;
-
-        let prefixes = literal_prefixes(&hir).ok_or_else(|| {
+        let mut error = 0;
+        let mut offset = 0;
+        // SAFETY: pattern is live for its explicit length; PCRE2 copies it.
+        let raw = unsafe {
+            pcre2_compile_8(
+                pattern.as_ptr(),
+                pattern.len(),
+                PCRE2_DOTALL | PCRE2_UTF | PCRE2_UCP | PCRE2_NEVER_BACKSLASH_C,
+                &mut error,
+                &mut offset,
+                ptr::null_mut(),
+            )
+        };
+        let raw = NonNull::new(raw).ok_or_else(|| {
             unsupported!(
-                "{scope}: pattern {pattern:?} must start with a literal prefix for streaming \
-                 matching (e.g. `<tool_call>` in `<tool_call>(?P<name>\\w+)`)"
+                "{scope}: PCRE2 pattern {pattern:?} at byte {offset}: {}",
+                error_message(error)
             )
         })?;
-
-        let first = build_dfa(scope, pattern, &hir, MatchKind::LeftmostFirst)?;
-        let fallback = hir
-            .properties()
-            .look_set()
-            .contains_word_unicode()
-            .then(|| build_dfa(scope, pattern, &relax_assertions(&hir), MatchKind::All))
-            .transpose()?;
-        let exact = Regex::builder().build_from_hir(&hir).map_err(|error| {
-            unsupported!(
-                "{scope}: failed to compile regex {pattern:?}: {}",
-                error.as_report()
-            )
-        })?;
-
-        Ok(Self {
-            prefixes,
-            first,
-            fallback,
-            exact,
-        })
+        let mut code = Code {
+            raw,
+            names: Vec::new(),
+            capture_count: 0,
+            jit: false,
+        };
+        let mut count: u32 = 0;
+        let mut size: u32 = 0;
+        let mut table: *const u8 = ptr::null();
+        // SAFETY: the output types match these PCRE2_INFO requests, and the name
+        // table stays valid for the lifetime of the compiled code.
+        unsafe {
+            pcre2_pattern_info_8(
+                raw.as_ptr(),
+                PCRE2_INFO_CAPTURECOUNT,
+                (&mut code.capture_count as *mut u32).cast(),
+            );
+            pcre2_pattern_info_8(
+                raw.as_ptr(),
+                PCRE2_INFO_NAMECOUNT,
+                (&mut count as *mut u32).cast(),
+            );
+            pcre2_pattern_info_8(
+                raw.as_ptr(),
+                PCRE2_INFO_NAMEENTRYSIZE,
+                (&mut size as *mut u32).cast(),
+            );
+            pcre2_pattern_info_8(
+                raw.as_ptr(),
+                PCRE2_INFO_NAMETABLE,
+                (&mut table as *mut *const u8).cast(),
+            );
+            for index in 0..count {
+                let entry = table.add((index * size) as usize);
+                let group = (usize::from(*entry) << 8) | usize::from(*entry.add(1));
+                let name = CStr::from_ptr(entry.add(2).cast()).to_string_lossy().into_owned();
+                code.names.push((name, group));
+            }
+        }
+        // SAFETY: code is still exclusively owned. JIT is optional: unsupported
+        // patterns or platforms keep using the interpreter.
+        let mut jit_size: usize = 0;
+        code.jit = unsafe {
+            pcre2_jit_compile_8(raw.as_ptr(), PCRE2_JIT_COMPLETE | PCRE2_JIT_PARTIAL_HARD) == 0
+                && pcre2_pattern_info_8(
+                    raw.as_ptr(),
+                    PCRE2_INFO_JITSIZE,
+                    (&mut jit_size as *mut usize).cast(),
+                ) == 0
+                && jit_size > 0
+        };
+        Ok(Self(Arc::new(code)))
     }
 
-    /// Literals, one of which starts every match.
-    pub fn prefixes(&self) -> &[String] {
-        &self.prefixes
-    }
-
-    /// Named capture groups of the pattern.
     pub fn group_names(&self) -> impl Iterator<Item = &str> {
-        self.exact.group_info().pattern_names(PatternID::ZERO).flatten()
+        self.0.names.iter().map(|(name, _)| name.as_str())
     }
 
-    /// Resolve a match starting at the beginning of `text`.
-    ///
-    /// `eof` means no more input will arrive.
-    pub fn resolve(&self, text: &str, eof: bool) -> Resolution {
-        let walk = match walk(&self.first, text) {
-            Walk::Quit => walk(
-                self.fallback.as_ref().expect("quits imply a fallback"),
-                text,
-            ),
-            walk => walk,
-        };
-        if matches!(walk, Walk::Alive) && !eof {
-            return Resolution::Pending;
-        }
+    pub fn capture_count(&self) -> u32 {
+        self.0.capture_count
+    }
 
-        let input = Input::new(text).anchored(Anchored::Yes);
-        let mut captures = self.exact.create_captures();
-        self.exact.search_captures(&input, &mut captures);
-        let Some(found) = captures.get_match() else {
-            return Resolution::NoMatch;
-        };
-        let names = self.exact.group_info().pattern_names(PatternID::ZERO);
-        let captures = names
-            .enumerate()
-            .filter_map(|(index, name)| {
-                let span = captures.get_group(index)?;
-                Some((
-                    name?.to_string(),
-                    Value::String(text[span.range()].to_string()),
-                ))
+    /// Search from `offset`, retaining earlier text as assertion context.
+    pub fn search(
+        &self,
+        text: &str,
+        offset: usize,
+        eof: bool,
+        state: &mut MatchState,
+    ) -> unified::Result<Resolution> {
+        if !text.is_char_boundary(offset) {
+            return Err(parsing_failed!(
+                "PCRE2 search offset is not a UTF-8 boundary"
+            ));
+        }
+        if state.data.is_none() || state.capture_count < self.0.capture_count {
+            let capture_count = state.capture_count.max(self.0.capture_count);
+            // SAFETY: null selects PCRE2's default allocator; include group zero.
+            let data = NonNull::new(unsafe {
+                pcre2_match_data_create_8(capture_count + 1, ptr::null_mut())
             })
-            .collect();
-        Resolution::Matched {
-            len: found.end(),
-            captures,
+            .ok_or_else(|| parsing_failed!("PCRE2 could not allocate match data"))?;
+            // PCRE2 may cap the requested vector size; never expose more slots
+            // than the allocation contains when reading captures below.
+            if unsafe { pcre2_get_ovector_count_8(data.as_ptr()) } <= capture_count {
+                // SAFETY: allocation has not yet been transferred into MatchData.
+                unsafe { pcre2_match_data_free_8(data.as_ptr()) };
+                return Err(parsing_failed!("PCRE2 capture vector is too small"));
+            }
+            if let Some(state) = &mut state.data {
+                // SAFETY: replace the exclusively owned, undersized capture data.
+                unsafe { pcre2_match_data_free_8(state.data.as_ptr()) };
+                state.data = data;
+            } else {
+                // SAFETY: null selects the default allocator.
+                let context =
+                    NonNull::new(unsafe { pcre2_match_context_create_8(ptr::null_mut()) });
+                let Some(context) = context else {
+                    // SAFETY: allocation has not yet been transferred into MatchData.
+                    unsafe { pcre2_match_data_free_8(data.as_ptr()) };
+                    return Err(parsing_failed!("PCRE2 could not allocate match context"));
+                };
+                // SAFETY: context is live and exclusively owned.
+                unsafe {
+                    pcre2_set_match_limit_8(context.as_ptr(), 1_000_000);
+                    pcre2_set_depth_limit_8(context.as_ptr(), 1_000);
+                    pcre2_set_heap_limit_8(context.as_ptr(), 8 * 1024);
+                }
+                state.data = Some(MatchData { data, context });
+            }
+            state.capture_count = capture_count;
         }
-    }
-}
-
-/// Walk `dfa` from an anchored start over `text`.
-///
-/// The walk is final once the DFA is dead, or once it is in a match state whose
-/// transitions are all dead: that removes the one byte of holdback that delayed
-/// DFA match reporting would otherwise add. A quit transition counts as live.
-fn walk(dfa: &dense::DFA<Vec<u32>>, text: &str) -> Walk {
-    let input = Input::new(text).anchored(Anchored::Yes);
-    let Ok(mut state) = dfa.start_state_forward(&input) else {
-        return Walk::Quit;
-    };
-    for byte in text.bytes() {
-        state = dfa.next_state(state, byte);
-        if dfa.is_quit_state(state) {
-            return Walk::Quit;
-        }
-        if dfa.is_dead_state(state) || is_terminal_match(dfa, state) {
-            return Walk::Final;
-        }
-    }
-    Walk::Alive
-}
-
-/// Return whether `state` reports a match and cannot continue.
-fn is_terminal_match(dfa: &dense::DFA<Vec<u32>>, state: StateID) -> bool {
-    dfa.is_match_state(state)
-        && (0..=u8::MAX).all(|byte| dfa.is_dead_state(dfa.next_state(state, byte)))
-}
-
-/// Build an anchored dense DFA for `hir`.
-fn build_dfa(
-    scope: &str,
-    pattern: &str,
-    hir: &Hir,
-    kind: MatchKind,
-) -> Result<dense::DFA<Vec<u32>>> {
-    let nfa = thompson::Compiler::new()
-        .configure(thompson::Config::new().which_captures(WhichCaptures::None))
-        .build_from_hir(hir)
-        .map_err(|error| {
-            unsupported!(
-                "{scope}: failed to compile regex {pattern:?}: {}",
-                error.as_report()
-            )
-        })?;
-    dense::Builder::new()
-        .configure(
-            dense::Config::new()
-                .match_kind(kind)
-                .start_kind(StartKind::Anchored)
-                .unicode_word_boundary(true)
-                .dfa_size_limit(Some(DFA_SIZE_LIMIT))
-                .determinize_size_limit(Some(DFA_SIZE_LIMIT)),
-        )
-        .build_from_nfa(&nfa)
-        .map_err(|error| {
-            unsupported!(
-                "{scope}: regex {pattern:?} cannot be matched incrementally: {}",
-                error.as_report()
-            )
-        })
-}
-
-/// Replace every look-around assertion with the empty regex.
-fn relax_assertions(hir: &Hir) -> Hir {
-    match hir.kind() {
-        HirKind::Look(_) => Hir::empty(),
-        HirKind::Repetition(repetition) => {
-            let mut repetition = repetition.clone();
-            repetition.sub = Box::new(relax_assertions(&repetition.sub));
-            Hir::repetition(repetition)
-        }
-        HirKind::Capture(capture) => {
-            let mut capture = capture.clone();
-            capture.sub = Box::new(relax_assertions(&capture.sub));
-            Hir::capture(capture)
-        }
-        HirKind::Concat(subs) => Hir::concat(subs.iter().map(relax_assertions).collect()),
-        HirKind::Alternation(subs) => Hir::alternation(subs.iter().map(relax_assertions).collect()),
-        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) => hir.clone(),
-    }
-}
-
-/// Extract the finite set of non-empty literal prefixes starting every match.
-fn literal_prefixes(hir: &Hir) -> Option<Vec<String>> {
-    let seq = Extractor::new().kind(ExtractKind::Prefix).extract(hir);
-    let mut prefixes: Vec<String> = Vec::new();
-    for literal in seq.literals()? {
-        let bytes = literal.as_bytes();
-        // Truncated inexact literals may end inside a UTF-8 sequence; any valid
-        // prefix of a prefix is still a prefix.
-        let valid = match std::str::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).ok()?,
+        let state = state.data.as_mut().unwrap();
+        // JIT's SIMD loads require a readable address even for length zero;
+        // an empty Rust allocation may instead have a dangling pointer.
+        let subject = if text.is_empty() {
+            c"".as_ptr().cast()
+        } else {
+            text.as_ptr()
         };
-        if valid.is_empty() {
-            return None;
+        // SAFETY: pointers are live and uniquely owned by this search; subject
+        // and offset are UTF-8, and match data was sized for this pattern. Both
+        // matching modes were compiled when selecting the JIT entry point.
+        let result = unsafe {
+            let options = PCRE2_NO_UTF_CHECK | if eof { 0 } else { PCRE2_PARTIAL_HARD };
+            let interpret = || {
+                pcre2_match_8(
+                    self.0.raw.as_ptr(),
+                    subject,
+                    text.len(),
+                    offset,
+                    options | PCRE2_NO_JIT,
+                    state.data.as_ptr(),
+                    state.context.as_ptr(),
+                )
+            };
+            if self.0.jit {
+                let result = pcre2_jit_match_8(
+                    self.0.raw.as_ptr(),
+                    subject,
+                    text.len(),
+                    offset,
+                    options,
+                    state.data.as_ptr(),
+                    state.context.as_ptr(),
+                );
+                // JIT uses its bounded default stack. A pattern that needs more
+                // can still run under the interpreter's resource limits.
+                if result == PCRE2_ERROR_JIT_STACKLIMIT {
+                    interpret()
+                } else {
+                    result
+                }
+            } else {
+                interpret()
+            }
+        };
+        if result == PCRE2_ERROR_NOMATCH {
+            return Ok(Resolution::NoMatch);
         }
-        if !prefixes.iter().any(|prefix| prefix == valid) {
-            prefixes.push(valid.to_string());
+        if result < 0 && result != PCRE2_ERROR_PARTIAL {
+            return Err(parsing_failed!(
+                "PCRE2 matching failed: {}",
+                error_message(result)
+            ));
         }
+        // SAFETY: a match or partial match initializes the first pair; complete
+        // matches initialize every capture slot, using PCRE2_UNSET for absences.
+        let spans = unsafe {
+            std::slice::from_raw_parts(
+                pcre2_get_ovector_pointer_8(state.data.as_ptr()),
+                if result == PCRE2_ERROR_PARTIAL {
+                    2
+                } else {
+                    2 * (self.0.capture_count as usize + 1)
+                },
+            )
+        };
+        if result == PCRE2_ERROR_PARTIAL {
+            return Ok(Resolution::Pending {
+                start: spans[0].max(offset),
+            });
+        }
+        let mut captures = Captures::new();
+        for (name, index) in &self.0.names {
+            let start = spans[2 * index];
+            if start != PCRE2_UNSET {
+                let value = text
+                    .get(start..spans[2 * index + 1])
+                    .ok_or_else(|| parsing_failed!("PCRE2 capture is not a UTF-8 span"))?;
+                captures.insert(name.clone(), Value::String(value.to_string()));
+            }
+        }
+        let start = spans[0];
+        let end = spans[1];
+        if start < offset || start > end || text.get(start..end).is_none() {
+            return Err(parsing_failed!("PCRE2 match is not a forward UTF-8 span"));
+        }
+        Ok(Resolution::Matched {
+            start,
+            len: end - start,
+            captures,
+        })
     }
-    (!prefixes.is_empty()).then_some(prefixes)
+}
+
+fn error_message(code: i32) -> String {
+    let mut buffer = [0; 256];
+    // SAFETY: the output buffer is writable for the supplied length.
+    let len = unsafe { pcre2_get_error_message_8(code, buffer.as_mut_ptr(), buffer.len()) };
+    if len < 0 {
+        return format!("error {code}");
+    }
+    String::from_utf8_lossy(&buffer[..len as usize]).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const MUSE_INVOKE: &str = r#"<atem:invoke\b[^>]*?\bname="(?P<name>[^"]+)">"#;
-    const GEMMA4_CALL: &str = r"<\|tool_call>call:(?P<name>\w+)";
-    const GPT_OSS_CALL: &str =
-        r"<\|channel\|>commentary to=functions\.(?P<name>\w+).*?<\|message\|>";
-
-    fn pattern(source: &str) -> StreamingPattern {
-        StreamingPattern::new("test", source).unwrap()
-    }
-
-    fn matched(len: usize, name: &str) -> Resolution {
-        Resolution::Matched {
-            len,
-            captures: Captures::from_iter([("name".to_string(), name.into())]),
-        }
+    #[test]
+    fn partial_matching_retains_lookaround_and_unicode_context() {
+        let mut state = MatchState::default();
+        let pattern = Pattern::new("test", r"(?<=天气)<call>(?P<name>\w+)(?=\{)").unwrap();
+        assert!(matches!(
+            pattern.search("天气<call>获取", 6, false, &mut state).unwrap(),
+            Resolution::Pending { start: 6 }
+        ));
+        assert_eq!(
+            pattern.search("天气<call>获取{", 6, false, &mut state).unwrap(),
+            Resolution::Matched {
+                start: 6,
+                len: 12,
+                captures: Captures::from_iter([("name".into(), "获取".into())])
+            }
+        );
+        let negative = Pattern::new("test", r"<call>(?!bad)").unwrap();
+        assert!(matches!(
+            negative.search("<call>ba", 0, false, &mut state).unwrap(),
+            Resolution::Pending { .. }
+        ));
+        assert_eq!(
+            negative.search("<call>bad", 0, false, &mut state).unwrap(),
+            Resolution::NoMatch
+        );
     }
 
     #[test]
-    fn extracts_literal_prefixes() {
-        assert_eq!(pattern(GEMMA4_CALL).prefixes(), ["<|tool_call>call:"]);
-        assert_eq!(pattern(MUSE_INVOKE).prefixes(), ["<atem:invoke"]);
+    fn greedy_tails_wait_and_matching_limits_are_errors() {
+        let mut state = MatchState::default();
+        let pattern = Pattern::new("test", r"<call>(?P<name>\w+)").unwrap();
+        assert!(matches!(
+            pattern.search("<call>get", 0, false, &mut state).unwrap(),
+            Resolution::Pending { .. }
+        ));
+        assert!(matches!(
+            pattern.search("<call>get", 0, true, &mut state).unwrap(),
+            Resolution::Matched { len: 9, .. }
+        ));
+        let expensive = Pattern::new("test", r"(*NO_START_OPT)(*NO_AUTO_POSSESS)^(a+)+$").unwrap();
+        assert!(expensive.search(&format!("{}!", "a".repeat(100)), 0, true, &mut state).is_err());
+        let deep = Pattern::new("test", r"^(a|aa)+$").unwrap();
+        let error = deep.search(&"a".repeat(10_000), 0, true, &mut state).unwrap_err();
+        assert!(format!("{error}").contains("depth limit"));
+    }
+
+    #[test]
+    fn reused_state_grows_captures_and_clears_absent_groups() {
+        let mut state = MatchState::default();
+        let literal = Pattern::new("test", "end").unwrap();
+        let captures = Pattern::new("test", r"(?P<first>a)(?P<second>b)?").unwrap();
+        literal.search("end", 0, true, &mut state).unwrap();
         assert_eq!(
-            pattern(r"to=(?:user|commentary)<\|message\|>").prefixes(),
-            ["to=user<|message|>", "to=commentary<|message|>"]
+            captures.search("ab", 0, true, &mut state).unwrap(),
+            Resolution::Matched {
+                start: 0,
+                len: 2,
+                captures: Captures::from_iter([
+                    ("first".into(), "a".into()),
+                    ("second".into(), "b".into()),
+                ]),
+            }
         );
+        literal.search("end", 0, true, &mut state).unwrap();
         assert_eq!(
-            pattern(r"\n?</response>").prefixes(),
-            ["\n</response>", "</response>"]
+            captures.search("a", 0, true, &mut state).unwrap(),
+            Resolution::Matched {
+                start: 0,
+                len: 1,
+                captures: Captures::from_iter([("first".into(), "a".into())]),
+            }
         );
-        for source in [r"(?:^|<think>\s*)", r"(?:<\|m\|>)?[^<]*<\|c\|>", r".*x"] {
-            let result = StreamingPattern::new("test", source);
-            assert!(
-                matches!(
-                    result,
-                    Err(super::super::HfTemplateError::Unsupported { .. })
-                ),
-                "{source}"
+    }
+
+    #[test]
+    fn empty_subject_is_safe_and_remains_empty() {
+        let text = String::new();
+        let mut state = MatchState::default();
+        let literal = Pattern::new("test", "<call>").unwrap();
+        for eof in [false, true] {
+            assert_eq!(
+                literal.search(&text, 0, eof, &mut state).unwrap(),
+                Resolution::NoMatch
             );
         }
-    }
-
-    #[test]
-    fn word_boundaries_follow_unicode_semantics() {
-        let muse = pattern(MUSE_INVOKE);
+        let empty = Pattern::new("test", r"\A\z").unwrap();
         assert_eq!(
-            muse.resolve(r#"<atem:invoke name="get">rest"#, false),
-            matched(24, "get")
-        );
-        let unicode_attr = r#"<atem:invoke title="天气" name="获取">rest"#;
-        assert_eq!(
-            muse.resolve(unicode_attr, false),
-            matched(unicode_attr.len() - 4, "获取")
-        );
-        assert_eq!(
-            muse.resolve(r#"<atem:invoke name="get"#, false),
-            Resolution::Pending
-        );
-        assert_eq!(
-            muse.resolve(r#"<atem:invoker name="x">r"#, false),
-            Resolution::NoMatch
-        );
-        assert_eq!(
-            muse.resolve(r#"<atem:invoke xname="x">r"#, false),
-            Resolution::NoMatch
-        );
-        assert_eq!(
-            muse.resolve(r#"<atem:invoke é name="x">r"#, false),
-            matched(25, "x")
-        );
-        assert_eq!(
-            muse.resolve(r#"<atem:invoke éname="x">r"#, false),
-            Resolution::NoMatch
-        );
-        assert_eq!(
-            muse.resolve("<atem:invoke 使用标签", false),
-            Resolution::Pending
-        );
-        assert_eq!(
-            muse.resolve("<atem:invoke 使用标签", true),
-            Resolution::NoMatch
-        );
-        assert_eq!(
-            muse.resolve("<atem:invoke 使用> 正文", false),
-            Resolution::NoMatch
-        );
-
-        let alternation = pattern(r"a\b|ab");
-        assert_eq!(
-            alternation.resolve("ab!", true),
+            empty.search(&text, 0, true, &mut state).unwrap(),
             Resolution::Matched {
-                len: 2,
+                start: 0,
+                len: 0,
                 captures: Captures::new()
             }
         );
     }
 
     #[test]
-    fn greedy_and_lazy_tails_commit_like_transformers() {
-        let gemma4 = pattern(GEMMA4_CALL);
+    fn interpreter_fallback_preserves_partial_matches() {
+        let pattern = Pattern::new("test", r"(*NO_JIT)(?<=天气)<call>(?P<name>\w+)(?=\{)").unwrap();
+        assert!(!pattern.0.jit);
+        let mut state = MatchState::default();
         assert_eq!(
-            gemma4.resolve("<|tool_call>call:get_wea", false),
-            Resolution::Pending
+            pattern.search("天气<call>获取", 6, false, &mut state).unwrap(),
+            Resolution::Pending { start: 6 }
         );
         assert_eq!(
-            gemma4.resolve("<|tool_call>call:get_weather{", false),
-            matched(28, "get_weather")
-        );
-        assert_eq!(
-            gemma4.resolve("<|tool_call>call:天气{", false),
-            matched(23, "天气")
-        );
-        assert_eq!(
-            gemma4.resolve("<|tool_call>call:{", false),
-            Resolution::NoMatch
-        );
-        assert_eq!(
-            gemma4.resolve("<|tool_call>call:get", true),
-            matched(20, "get")
-        );
-
-        let gpt_oss = pattern(GPT_OSS_CALL);
-        let opener = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>";
-        assert_eq!(gpt_oss.resolve(opener, false), Resolution::Pending);
-        assert_eq!(
-            gpt_oss.resolve(&format!("{opener}{{\"a\""), false),
-            matched(opener.len(), "get_weather")
+            pattern.search("天气<call>获取{", 6, false, &mut state).unwrap(),
+            Resolution::Matched {
+                start: 6,
+                len: 12,
+                captures: Captures::from_iter([("name".into(), "获取".into())]),
+            }
         );
     }
 }

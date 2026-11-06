@@ -5821,6 +5821,7 @@ dependencies = [
  "expect-test",
  "futures",
  "openai-protocol",
+ "pcre2-sys",
  "regex-automata",
  "regex-syntax",
  "serde",

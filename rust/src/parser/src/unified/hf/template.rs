@@ -9,11 +9,10 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use regex_automata::meta::Regex;
 use serde_json::Value;
 
-use super::content::{ContentParser, TextArgs, compile_regex};
-use super::pattern::{Captures, Resolution, StreamingPattern};
+use super::content::{ContentParser, TextArgs};
+use super::pattern::{MatchState, Pattern, Resolution};
 use super::spec::{AnchorSpec, FieldSpec, TemplateSpec};
 use super::transform::{FieldTransform, Transform};
 use super::{Result, invalid, unsupported};
@@ -22,13 +21,14 @@ use super::{Result, invalid, unsupported};
 #[derive(Debug)]
 pub struct ResponseTemplate {
     /// Matches the start of the current assistant turn in the prompt.
-    start_anchor: Regex,
+    pub(super) start_anchor: Boundary,
     pub(super) regions: Vec<Region>,
     /// The field without an opener: the implicit-open / leftover sink.
     pub(super) implicit: Option<usize>,
     /// Boundaries watched outside explicit regions: every explicit open plus the
     /// implicit region's close.
     pub(super) idle_watch: WatchSet,
+    pub(super) capture_count: u32,
     warned_missing_anchor: AtomicBool,
 }
 
@@ -101,10 +101,9 @@ pub(super) struct ToolCallRegion {
 
 /// A region delimiter.
 #[derive(Debug)]
-pub(super) enum Boundary {
-    /// Literal alternatives, longest first.
-    Literals(Vec<String>),
-    Pattern(Box<StreamingPattern>),
+pub(super) struct Boundary {
+    pattern: Pattern,
+    pub literals: Vec<String>,
 }
 
 /// One boundary the executor watches for in a given state.
@@ -124,9 +123,6 @@ pub(super) enum WatchKind {
 #[derive(Debug, Default)]
 pub(super) struct WatchSet {
     pub boundaries: Vec<Watch>,
-    /// Literals, deduplicated, whose occurrences are the only positions any of
-    /// the boundaries can match at.
-    pub markers: Vec<String>,
 }
 
 impl ResponseTemplate {
@@ -155,16 +151,7 @@ impl ResponseTemplate {
         }
         let implicit = implicit_fields.first().map(|(index, _)| *index);
 
-        let start_anchor = match spec.start_anchor()? {
-            AnchorSpec::Literals(mut literals) => {
-                // Sort longest-first so alternation prefers the longer alternative when both could match.
-                literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
-                let alternation: Vec<_> =
-                    literals.iter().map(|literal| regex_syntax::escape(literal)).collect();
-                compile_regex("response_template", &alternation.join("|"))?
-            }
-            AnchorSpec::Pattern(pattern) => compile_regex("response_template", pattern)?,
-        };
+        let start_anchor = Boundary::compile("response_template", spec.start_anchor()?)?;
 
         let opens = regions.iter().enumerate().filter_map(|(region, spec)| {
             let watch = Watch {
@@ -181,12 +168,20 @@ impl ResponseTemplate {
             Some((watch, regions[region].close.as_ref()?))
         });
         let idle_watch = WatchSet::new(opens.chain(implicit_close));
+        let capture_count = regions
+            .iter()
+            .flat_map(|region| region.open.iter().chain(&region.close))
+            .chain([&start_anchor])
+            .map(|boundary| boundary.pattern.capture_count())
+            .max()
+            .unwrap_or(0);
 
         Ok(Self {
             start_anchor,
             regions,
             implicit,
             idle_watch,
+            capture_count,
             warned_missing_anchor: AtomicBool::new(false),
         })
     }
@@ -206,10 +201,8 @@ impl ResponseTemplate {
         self.regions
             .iter()
             .find_map(|region| match (&region.kind, &region.close) {
-                (RegionKind::Text(text), Some(Boundary::Literals(closers)))
-                    if text.role == TextRole::Reasoning =>
-                {
-                    Some(closers.as_slice())
+                (RegionKind::Text(text), Some(boundary)) if text.role == TextRole::Reasoning => {
+                    Some(boundary.literals.as_slice())
                 }
                 _ => None,
             })
@@ -218,11 +211,26 @@ impl ResponseTemplate {
 
     /// Return the start and end offsets of the last start-anchor match in
     /// `prompt`.
-    pub(super) fn last_start_anchor(&self, prompt: &str) -> Option<(usize, usize)> {
-        self.start_anchor
-            .find_iter(prompt)
-            .last()
-            .map(|found| (found.start(), found.end()))
+    pub(super) fn last_start_anchor(
+        &self,
+        prompt: &str,
+        state: &mut MatchState,
+    ) -> crate::unified::Result<Option<(usize, usize)>> {
+        let mut last = None;
+        let mut offset = 0;
+        while let Resolution::Matched { start, len, .. } =
+            self.start_anchor.pattern.search(prompt, offset, true, state)?
+        {
+            last = Some((start, start + len));
+            offset = start + len;
+            if len == 0 {
+                let Some(ch) = prompt[offset..].chars().next() else {
+                    break;
+                };
+                offset += ch.len_utf8();
+            }
+        }
+        Ok(last)
     }
 
     /// Log once per template that the prompt carried no start anchor.
@@ -423,84 +431,43 @@ impl fmt::Display for FieldName {
 }
 
 impl Boundary {
-    /// Compile an anchor into a boundary.
+    /// Compile a boundary, preserving longest-first literal alternatives.
     fn compile(scope: &str, spec: AnchorSpec<'_>) -> Result<Self> {
-        Ok(match spec {
+        let (pattern, literals) = match spec {
             AnchorSpec::Literals(mut literals) => {
-                // Sort longest-first so the longer alternative wins when both match.
                 literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
-                Self::Literals(literals)
+                let pattern = literals
+                    .iter()
+                    .map(|literal| regex_syntax::escape(literal))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                (Pattern::new(scope, &pattern)?, literals)
             }
-            AnchorSpec::Pattern(pattern) => {
-                Self::Pattern(Box::new(StreamingPattern::new(scope, pattern)?))
-            }
-        })
+            AnchorSpec::Pattern(pattern) => (Pattern::new(scope, pattern)?, Vec::new()),
+        };
+        Ok(Self { pattern, literals })
     }
 
-    /// Literals whose occurrences are the only positions this boundary can match at.
-    pub fn markers(&self) -> &[String] {
-        match self {
-            Self::Literals(literals) => literals,
-            Self::Pattern(pattern) => pattern.prefixes(),
-        }
-    }
-
-    /// Named capture groups.
     pub fn group_names(&self) -> impl Iterator<Item = &str> {
-        match self {
-            Self::Literals(_) => None,
-            Self::Pattern(pattern) => Some(pattern.group_names()),
-        }
-        .into_iter()
-        .flatten()
+        self.pattern.group_names()
     }
 
-    /// Resolve this boundary at the start of `text`.
-    pub fn resolve(&self, text: &str, eof: bool) -> Resolution {
-        let markers = self.markers();
-        // A marker the available text is a proper prefix of: more input decides.
-        let partial = !eof
-            && markers
-                .iter()
-                .any(|marker| marker.len() > text.len() && marker.starts_with(text));
-        match self {
-            Self::Literals(literals) => {
-                if partial {
-                    return Resolution::Pending;
-                }
-                match literals.iter().find(|literal| text.starts_with(literal.as_str())) {
-                    Some(literal) => Resolution::Matched {
-                        len: literal.len(),
-                        captures: Captures::new(),
-                    },
-                    None => Resolution::NoMatch,
-                }
-            }
-            Self::Pattern(pattern) => {
-                if markers.iter().any(|marker| text.starts_with(marker.as_str())) {
-                    pattern.resolve(text, eof)
-                } else if partial {
-                    Resolution::Pending
-                } else {
-                    Resolution::NoMatch
-                }
-            }
-        }
+    pub fn search(
+        &self,
+        text: &str,
+        offset: usize,
+        eof: bool,
+        state: &mut MatchState,
+    ) -> crate::unified::Result<Resolution> {
+        self.pattern.search(text, offset, eof, state)
     }
 }
 
 impl WatchSet {
-    /// Collect the watched boundaries and their deduplicated markers.
+    /// Collect the boundaries watched in this mode.
     fn new<'a>(entries: impl IntoIterator<Item = (Watch, &'a Boundary)>) -> Self {
-        let mut set = Self::default();
-        for (watch, boundary) in entries {
-            set.boundaries.push(watch);
-            for marker in boundary.markers() {
-                if !set.markers.contains(marker) {
-                    set.markers.push(marker.clone());
-                }
-            }
+        Self {
+            boundaries: entries.into_iter().map(|(watch, _)| watch).collect(),
         }
-        set
     }
 }

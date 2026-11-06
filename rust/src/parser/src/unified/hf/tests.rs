@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer as _};
 
-use super::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
+use super::{HfUnifiedParser, ResponseTemplate};
 use crate::tool::Tool;
 use crate::tool::test_utils::split_by_chars;
 use crate::unified::{UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput};
@@ -216,6 +216,73 @@ fn parse(template: Value, text: &str) -> Value {
     message(&parse_events(&compile(template), &[], "", &[text]).unwrap())
 }
 
+// The opener leaves whitespace outside tool calls to content.
+fn glm_response_template() -> Value {
+    json!({
+        "start_anchor": "<|assistant|>",
+        "fields": {
+            "reasoning_content": {
+                "open_pattern": "<think>|(?=</think>)",
+                "close_pattern": "</think>|(?=<tool_call>)",
+                "content_args": {"strip": true}, "repeats": true, "join": ""
+            },
+            "tool_calls": {
+                "open_pattern": r"<tool_call>\s*(?P<name>[^<]*?)\s*(?=<arg_key>|</tool_call>)",
+                "close": "</tool_call>", "repeats": true, "content": "xml-inline",
+                "content_args": {"tag_pattern": r"<arg_key>\s*(?P<key>.*?)\s*</arg_key>\s*<arg_value>(?P<value>.*?)</arg_value>"},
+                "transform": {"type": "function", "function": {"name": "{name}", "arguments": "{content}"}}
+            },
+            "content": {
+                "close": ["<|user|>", "<|observation|>", "<|endoftext|>"],
+                "content_args": {"strip": false}, "repeats": true, "join": ""
+            }
+        }
+    })
+}
+
+#[test]
+fn glm_lookarounds_preserve_content_and_finish_partial_calls() {
+    let template = compile(glm_response_template());
+    let cases = [
+        (
+            "</think>    return x\n",
+            json!({"content": "    return x\n"}),
+        ),
+        (
+            "</think>before\n<tool_call>f</tool_call>\nafter",
+            json!({"content": "before\n\nafter", "tool_calls": [{"name": "f", "arguments": {}}]}),
+        ),
+        (
+            "  reason  <tool_call>f<arg_key>x</arg_key><arg_value>1</arg_value><arg_key>y</arg_key><arg_value>unfinished",
+            json!({"reasoning": "reason", "tool_calls": [{"name": "f", "arguments": {"x": "1"}}]}),
+        ),
+        (
+            "</think><tool_call>f<arg_key>x</arg_key><arg_value>unfinished",
+            json!({"tool_calls": [{"name": "f", "arguments": {}}]}),
+        ),
+        ("</think><tool_call>f", json!({"content": "<tool_call>f"})),
+        (
+            "</think><tool_call>f</tool_call><tool_call>g</tool_call>",
+            json!({"tool_calls": [{"name": "f", "arguments": {}}, {"name": "g", "arguments": {}}]}),
+        ),
+    ];
+    for (text, expected) in cases {
+        for split in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+            let events = parse_events(
+                &template,
+                &[],
+                "<|assistant|><think>",
+                &[&text[..split], &text[split..]],
+            )
+            .unwrap();
+            assert_eq!(message(&events), expected, "split {split}: {text}");
+        }
+        let chunks = split_by_chars(text, 1);
+        let events = parse_events(&template, &[], "<|assistant|><think>", &chunks).unwrap();
+        assert_eq!(message(&events), expected);
+    }
+}
+
 /// Split `text` at pseudo-random char boundaries (xorshift, seeded).
 fn random_chunks(text: &str, seed: u64) -> Vec<&str> {
     let mut state = seed | 1;
@@ -327,9 +394,9 @@ fn upstream_fixtures_match_transformers_values() {
     }
 }
 
-/// Upstream fixtures whose patterns have no literal prefix are rejected at load.
+/// Prefix-free and zero-width boundaries still route text through the parser.
 #[test]
-fn patterns_without_literal_prefix_are_unsupported() {
+fn patterns_without_literal_prefix_parse_content() {
     let ernie = json!({
         "start_anchor": "Assistant:",
         "fields": {"thinking": {"open_pattern": r"(?:^|<think>\s*)", "close": "</think>"}},
@@ -338,11 +405,16 @@ fn patterns_without_literal_prefix_are_unsupported() {
         "start_anchor": "<|message_model|>",
         "fields": {"content": {"open_pattern": r"(?:<\|message_model\|>)?[^<]*<\|content_text\|>", "close": "<|end_message|>"}},
     });
-    for template in [ernie, inkling] {
-        assert!(matches!(
-            ResponseTemplate::from_json(&template),
-            Err(HfTemplateError::Unsupported { .. })
-        ));
+    for (template, text, expected) in [
+        (ernie, "reason</think>", json!({"reasoning": "reason"})),
+        (
+            inkling,
+            "route<|content_text|>answer<|end_message|>",
+            json!({"content": "answer"}),
+        ),
+    ] {
+        let events = parse_events(&compile(template), &[], "", &split_by_chars(text, 1)).unwrap();
+        assert_eq!(message(&events), expected);
     }
 }
 
@@ -646,6 +718,27 @@ fn prefix_sets_the_initial_state() {
     assert_eq!(message(&events), json!({"content": " here it is"}));
 }
 
+#[test]
+fn start_anchor_lookbehind_uses_the_whole_prompt() {
+    let template = compile(json!({
+        "start_anchor_pattern": r"(?<!abc)assistant:",
+        "fields": {
+            "thinking": {"open": "<think>", "close": "</think>"},
+            "content": {}
+        }
+    }));
+    let prompt = format!(
+        "assistant:<think>{}abcassistant:{}",
+        "x".repeat(100),
+        "y".repeat(52)
+    );
+    let events = parse_events(&template, &[], &prompt, &["generated</think>answer"]).unwrap();
+    assert_eq!(
+        message(&events),
+        json!({"reasoning": "generated", "content": "answer"})
+    );
+}
+
 /// Diverges from Transformers, which runs the whole prompt through the parser
 /// when the start anchor is absent.
 #[test]
@@ -932,4 +1025,29 @@ fn tool_call_value_shapes() {
         }
     "#]]
         .assert_debug_eq(&parse(r#"<tool_call>{"name": 1}</tool_call>"#).unwrap_err());
+}
+
+#[test]
+fn lookbehind_keeps_emitted_text_as_context_and_cycles_fail() {
+    let template = compile(json!({
+        "start_anchor_pattern": r"(?<=user:)assistant:",
+        "fields": {
+            "content": {"content_args": {"strip": false}},
+            "thinking": {"open_pattern": r"(?<=前)<think>(?!bad)", "close": "</think>"}
+        }
+    }));
+    let text = "前<think>reason</think>after";
+    let events = parse_events(&template, &[], "user:assistant:", &split_by_chars(text, 1)).unwrap();
+    assert_eq!(
+        message(&events),
+        json!({"content": "前after", "reasoning": "reason"})
+    );
+
+    let cycle = compile(json!({"start_anchor": "assistant:", "fields": {
+        "thinking": {"open_pattern": "(?=x)", "close_pattern": "(?=x)"}
+    }}));
+    let error = parse_events(&cycle, &[], "", &["x"]).unwrap_err();
+    assert!(
+        matches!(error, UnifiedParserError::ParsingFailed { message } if message.contains("cycle"))
+    );
 }

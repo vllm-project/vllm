@@ -196,11 +196,18 @@ Either parser can be selected on its own. Startup fails if the tokenizer has no 
 field the selected parser needs. The `hf` parser cannot be combined with other reasoning or tool call parsers.
 
 When streaming, each tool call is emitted whole once its region parses. A call cut off before its closer, for example by a closer that is also a
-stop token, is parsed from the text generated so far; a call that does not parse is dropped.
+stop token, is parsed from the text generated so far; a call that does not parse is dropped. XML calls can contain only the arguments completed
+before truncation. The native Rust GLM parsers instead report `IncompleteToolCall` for an unclosed call.
 
 Response templates currently provide parsing, not format-specific constrained decoding. The parser therefore rejects requests for strict tools,
 required or named tool choice, or `parallel_tool_calls=false`. A custom server or request chat template is allowed, but the parser still expects the
 checkpoint's output format.
+
+The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) uses PCRE2 for template patterns, including lookahead and supported lookbehind. Templates must use
+PCRE2-compatible syntax; Python `regex` features such as unbounded lookbehind and fuzzy matching are unsupported.
+
+To preserve content whitespace, set `content_args.strip` to `false`. Delimiter patterns still consume any whitespace they match, such as a leading
+`\s*` in `open_pattern`.
 
 !!! note
     With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.

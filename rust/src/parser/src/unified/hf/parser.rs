@@ -24,10 +24,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
 use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
-use winnow::error::{ErrMode, ModalResult};
-use winnow::stream::{Partial, Stream};
 
-use super::pattern::{Captures, Resolution};
+use super::pattern::{Captures, MatchState, Resolution};
 use super::template::{
     FieldName, Region, RegionKind, Repeat, ResponseTemplate, TextRegion, TextRole, ToolCallRegion,
     Watch, WatchKind, WatchSet,
@@ -36,7 +34,6 @@ use crate::tool::{Tool, ToolCallDelta, ToolSchemas};
 use crate::unified::{
     Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, parsing_failed,
 };
-use crate::utils::{incomplete, parse_buffered_event, safe_text_len_mul};
 
 /// Prompt tail windows, in tokens, searched for the start anchor before
 /// decoding the whole prompt.
@@ -51,6 +48,10 @@ pub struct HfUnifiedParser {
     tool_schemas: ToolSchemas,
     tokenizer: DynTokenizer,
     buffer: DecodedText,
+    /// Retained assertion context, including text already emitted.
+    subject: String,
+    match_state: MatchState,
+    zero_width: Vec<Watch>,
     mode: HfMode,
     /// Whether each region has closed an occurrence.
     closed: Vec<bool>,
@@ -120,6 +121,7 @@ enum HfEvent {
 /// A committable boundary match at the current position.
 struct BoundaryMatch {
     watch: Watch,
+    start: usize,
     len: usize,
     captures: Captures,
 }
@@ -127,8 +129,12 @@ struct BoundaryMatch {
 impl BoundaryMatch {
     /// Preference order of `_scan`: longest first, opens before closes, then by
     /// field name.
-    fn key(&self, template: &ResponseTemplate) -> (std::cmp::Reverse<usize>, bool, FieldName) {
+    fn key(
+        &self,
+        template: &ResponseTemplate,
+    ) -> (usize, std::cmp::Reverse<usize>, bool, FieldName) {
         (
+            self.start,
             std::cmp::Reverse(self.len),
             self.watch.kind == WatchKind::Close,
             template.regions[self.watch.region].name,
@@ -160,10 +166,13 @@ impl HfUnifiedParser {
             closed: vec![false; template.regions.len()],
             strip: template.regions.iter().map(StripState::new).collect(),
             mode: HfMode::Discard,
+            match_state: MatchState::new(template.capture_count),
             template,
             tool_schemas: ToolSchemas::from_tools(tools),
             tokenizer,
             buffer: DecodedText::default(),
+            subject: String::new(),
+            zero_width: Vec::new(),
             emitted_tool_count: 0,
         };
         parser.reset_to_implicit();
@@ -203,6 +212,8 @@ impl HfUnifiedParser {
     /// Clear all per-stream state.
     fn reset_state(&mut self) {
         self.buffer.clear();
+        self.subject.clear();
+        self.zero_width.clear();
         self.closed.fill(false);
         self.strip = self.template.regions.iter().map(StripState::new).collect();
         self.emitted_tool_count = 0;
@@ -260,12 +271,28 @@ impl HfUnifiedParser {
                 HfMode::Discard | HfMode::Implicit(_) => &template.idle_watch,
             };
             let eof = matches!(phase, Phase::Eof);
-            let Some((step, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
-                parse_next_event(input, &template, watch, eof)
-            })?
+            let offset = self.subject.len() - self.buffer.text.len();
+            let Some((step, consumed_len)) = parse_next_event(
+                &self.subject,
+                offset,
+                &template,
+                watch,
+                eof,
+                &mut self.match_state,
+            )?
             else {
                 return Ok(());
             };
+            if consumed_len > 0 {
+                self.zero_width.clear();
+            } else if let HfEvent::Boundary { watch, .. } = &step {
+                if self.zero_width.contains(watch) {
+                    return Err(parsing_failed!(
+                        "response_template boundaries cycle without consuming text"
+                    ));
+                }
+                self.zero_width.push(*watch);
+            }
             let piece = self.buffer.drain_prefix(consumed_len);
             match step {
                 HfEvent::Text => self.route(piece, output, phase),
@@ -455,19 +482,23 @@ impl HfUnifiedParser {
 
     /// Return the prompt text after the last start-anchor match, if any.
     ///
-    /// Searches geometrically growing tail windows before decoding the whole
-    /// prompt. A decoded suffix can differ from the full decode only in its first
-    /// character, so a match is accepted only after that character unless the
-    /// window is the whole prompt.
-    fn prompt_remainder(&self, prompt_token_ids: &[u32]) -> Result<Option<String>> {
+    /// Literal anchors use growing tail windows; regex anchors need the whole
+    /// prompt for assertions. A decoded suffix can differ from the full decode
+    /// in its first character, so literal matches must start after it.
+    fn prompt_remainder(&mut self, prompt_token_ids: &[u32]) -> Result<Option<String>> {
         let len = prompt_token_ids.len();
-        let windows = PROMPT_WINDOWS.into_iter().filter(|window| *window < len).chain([len]);
+        let windows = PROMPT_WINDOWS
+            .into_iter()
+            .filter(|window| !self.template.start_anchor.literals.is_empty() && *window < len)
+            .chain([len]);
         for window in windows {
             let text = self.tokenizer.decode(&prompt_token_ids[len - window..], false).map_err(
                 |error| parsing_failed!("failed to decode prompt: {}", error.as_report()),
             )?;
             let whole = window == len;
-            if let Some((start, end)) = self.template.last_start_anchor(&text) {
+            if let Some((start, end)) =
+                self.template.last_start_anchor(&text, &mut self.match_state)?
+            {
                 let first_char = text.chars().next().map_or(0, char::len_utf8);
                 if whole || start >= first_char {
                     return Ok(Some(text[end..].to_string()));
@@ -632,33 +663,29 @@ fn serialize_arguments(arguments: &impl serde::Serialize) -> Result<String> {
     })
 }
 
-/// Parse one event: safe text before the next marker, or a boundary at it.
+/// Find the earliest complete or pending boundary, then emit only safe text.
 fn parse_next_event(
-    input: &mut Partial<&str>,
+    text: &str,
+    offset: usize,
     template: &ResponseTemplate,
     watch: &WatchSet,
     eof: bool,
-) -> ModalResult<HfEvent> {
-    let markers: Vec<&str> = watch.markers.iter().map(String::as_str).collect();
-    match safe_text_len_mul(input, &markers) {
-        Ok(_) => return Ok(HfEvent::Text),
-        // A marker, complete or partial, starts here (or the input is empty).
-        Err(ErrMode::Backtrack(_) | ErrMode::Incomplete(_)) => {}
-        Err(error) => return Err(error),
-    }
-
-    // Any pending boundary blocks the position; otherwise the preferred match
-    // wins. At the end of the stream, a partial marker matches nothing and is
-    // released as text one character at a time.
-    let text = **input;
+    state: &mut MatchState,
+) -> Result<Option<(HfEvent, usize)>> {
     let mut best: Option<BoundaryMatch> = None;
+    let mut pending = text.len() + 1;
     for &watch in &watch.boundaries {
-        match template.boundary(watch).resolve(text, eof) {
-            Resolution::Pending => return incomplete(),
+        match template.boundary(watch).search(text, offset, eof, state)? {
+            Resolution::Pending { start } => pending = pending.min(start),
             Resolution::NoMatch => {}
-            Resolution::Matched { len, captures } => {
+            Resolution::Matched {
+                start,
+                len,
+                captures,
+            } => {
                 let candidate = BoundaryMatch {
                     watch,
+                    start,
                     len,
                     captures,
                 };
@@ -668,23 +695,21 @@ fn parse_next_event(
             }
         }
     }
-
-    match best {
-        Some(BoundaryMatch {
-            watch,
-            len,
-            captures,
-        }) => {
-            input.next_slice(len);
-            Ok(HfEvent::Boundary { watch, captures })
-        }
-        None => {
-            // Not a boundary: the marker's first character is plain text.
-            let len = text.chars().next().map_or(0, char::len_utf8);
-            input.next_slice(len);
-            Ok(HfEvent::Text)
-        }
+    let next = best.as_ref().map_or(text.len(), |best| best.start).min(pending);
+    if next > offset {
+        return Ok(Some((HfEvent::Text, next - offset)));
     }
+    if pending == offset {
+        return Ok(None);
+    }
+    Ok(best.map(
+        |BoundaryMatch {
+             watch,
+             len,
+             captures,
+             ..
+         }| (HfEvent::Boundary { watch, captures }, len),
+    ))
 }
 
 impl UnifiedParser for HfUnifiedParser {
@@ -709,6 +734,7 @@ impl UnifiedParser for HfUnifiedParser {
         };
         // A partial boundary at the end of the prompt stays buffered, so the
         // generated text can complete it.
+        self.subject.clone_from(&remainder);
         self.buffer = DecodedText::unattributed(remainder);
         self.drive(&mut UnifiedParserOutput::default(), Phase::Prefill)
     }
@@ -722,6 +748,7 @@ impl UnifiedParser for HfUnifiedParser {
     // TODO: derive a structural-tag output grammar from literal-bounded templates.
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
+        self.subject.push_str(&delta.text);
         self.buffer.append(delta);
         self.drive(output, Phase::Stream)
     }

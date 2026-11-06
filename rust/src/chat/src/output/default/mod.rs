@@ -695,6 +695,61 @@ mod tests {
         assert!(keeps_special_tokens("other-model", &loaded_template(), &hf, &hf).unwrap());
     }
 
+    #[tokio::test]
+    async fn hf_lookahead_preserves_whitespace_in_final_message() {
+        let template = Ok(Arc::new(
+            ResponseTemplate::from_json(&serde_json::json!({
+                "start_anchor": "<|assistant|>",
+                "fields": {
+                    "thinking": {"open_pattern": "(?=</think>)", "close": "</think>"},
+                    "content": {"content_args": {"strip": false}}
+                }
+            }))
+            .unwrap(),
+        ));
+        let hf = ParserSelection::Explicit("hf".to_string());
+        let mut processor = DefaultChatOutputProcessor::with_response_template(
+            &mut ChatRequest::for_test(),
+            "other-model",
+            tokenizer(),
+            &template,
+            &hf,
+            &hf,
+            None,
+        )
+        .unwrap();
+        processor.initialize(&[]).unwrap();
+        let decoded = stream::iter([Ok(DecodedTextEvent::TextDelta {
+            decoded: DecodedText::unattributed("</think>    return x\n"),
+            sampled: SampledDelta::default(),
+            finished: Some(Box::new(Finished {
+                usage: vllm_llm::TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop(None),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+                sampling_mask: None,
+                spec_decode_metrics: None,
+                weight_versions: None,
+                timestamps: Default::default(),
+            })),
+        })]);
+        let events =
+            Box::new(processor).process(decoded.boxed()).unwrap().collect::<Vec<_>>().await;
+        let Some(Ok(ChatEvent::Done { message, .. })) = events.last() else {
+            panic!("expected final assistant message: {events:?}");
+        };
+        expect_test::expect![[r#"
+            AssistantMessage {
+                content: [
+                    Text {
+                        text: "    return x\n",
+                    },
+                ],
+            }
+        "#]]
+        .assert_debug_eq(message);
+    }
+
     #[test]
     fn explicit_hf_without_usable_template_fails() {
         let hf = ParserSelection::Explicit("hf".to_string());

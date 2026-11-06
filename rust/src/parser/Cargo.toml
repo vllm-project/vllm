@@ -11,6 +11,7 @@ test-util = []
 auto_impl.workspace = true
 easy-ext.workspace = true
 educe.workspace = true
+pcre2-sys.workspace = true
 regex-automata.workspace = true
 regex-syntax.workspace = true
 serde.workspace = true
