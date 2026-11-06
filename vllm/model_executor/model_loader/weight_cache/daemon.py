@@ -91,6 +91,7 @@ import select
 import socket
 import threading
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -150,8 +151,12 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed import (
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
 )
+from vllm.model_executor.model_loader.weight_cache.weight_seed.topology import (
+    ReplicaTopology,
+)
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
+from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -179,7 +184,10 @@ class WeightCacheDaemon:
             raise ValueError("The weight cache daemon does not support EPLB.")
         self.warmup_caches = [FlashInferWarmupCache()]
         self.weight_seed = WeightShardSeed(self)
-        self.d2d = SeedTransport([*self.warmup_caches, self.weight_seed], seed_config)
+        self.seed_config = seed_config or SeedConfig()
+        self.d2d = SeedTransport(
+            [*self.warmup_caches, self.weight_seed], self.seed_config
+        )
         # Seed peers are served on their own thread; this serializes their
         # reads of the state with the local socket's requests. Reentrant
         # because the local "seed" command re-enters it through
@@ -241,11 +249,41 @@ class WeightCacheDaemon:
         self.cache_key = build_weight_cache_key(
             vllm_config, self.model_config, is_draft=is_draft
         )
+        # Registered late because it serves world_size and cache_key, assigned
+        # after the SeedTransport was built; requests are answered by kind, so
+        # seedable order does not matter.
+        self.topology_seed = ReplicaTopology(self.world_size, is_draft, self.cache_key)
+        self.d2d._seedables.append(self.topology_seed)
 
     def warmup(self) -> None:
         """Run each warmup cache's pass (adopting remote caches via D2D)."""
         for cache in self.warmup_caches:
             cache.warmup(self, self.d2d)
+
+    def gather_listener_map(self) -> None:
+        """Collect the group's dialable D2D endpoints into the topology seed.
+
+        Runs on the live world group between warmup and release_distributed.
+        A daemon without a remote listener (Unix sockets only) has nothing
+        to report.
+        """
+        listen = self.seed_config.listen
+        if listen is None:
+            return
+        host, port = listen
+        if host in ("0.0.0.0", "::"):
+            # A wildcard binds every NIC; report the primary one, like the
+            # Mooncake session does (see weight_seed/rdma.py).
+            host = get_ip()
+        gathered: list[Any] = [None] * self.world_size
+        torch.distributed.all_gather_object(
+            gathered,
+            (self.global_rank, host, port),
+            group=get_world_group().cpu_group,
+        )
+        self.topology_seed.set_ranks(
+            {rank: (peer_host, peer_port) for rank, peer_host, peer_port in gathered}
+        )
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.device_index)
@@ -588,6 +626,8 @@ def _run_daemon(
     )
     daemon.load_model()
     daemon.warmup()
+    # Gathered while the world group is still alive, before it is torn down.
+    daemon.gather_listener_map()
     daemon.release_distributed()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))

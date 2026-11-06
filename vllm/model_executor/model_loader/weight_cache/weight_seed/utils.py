@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 import torch
 
 from vllm.config import replace
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     WeightCacheKey,
@@ -18,10 +19,16 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_socket_owner,
 )
+from vllm.model_executor.model_loader.weight_cache.transport import (
+    SeedConfig,
+    SeedTransport,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 _CONNECT_TIMEOUT_S = 5.0
 
@@ -191,6 +198,213 @@ def seed_address(
     else:
         host, port = remote_hosts[0]
     return host, port + port_offset + global_rank
+
+
+def _request_topology(
+    address: tuple[str, int], token: str, *, hint: str = ""
+) -> dict[str, Any] | None:
+    """One ``topology`` request; None only when the source predates the kind."""
+    transport = SeedTransport(seed_config=SeedConfig(source=address, token=token))
+    response = transport.request({"kind": "topology"})
+    host, port = address
+    if response is None:
+        raise RuntimeError(
+            f"Cannot reach the seed source at {host}:{port}: is the source "
+            "replica still serving, and was it launched with "
+            f"--seed-listen-host/--seed-listen-port?{hint}"
+        )
+    status = response.get("status")
+    if status == "ok":
+        payload = response.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Seed source at {host}:{port} returned a malformed topology payload"
+            )
+        return payload
+    message = str(response.get("message", response))
+    if "Unauthorized" in message:
+        raise RuntimeError(
+            f"Seed source at {host}:{port} rejected the topology request "
+            f"({message}); check that --seed-token matches the source "
+            "replica's token"
+        )
+    if status == "error" and "unsupported seed kind" in message:
+        return None
+    raise RuntimeError(
+        f"Seed source at {host}:{port} refused the topology request "
+        f"(status {status}): {message}"
+    )
+
+
+def _parse_topology_ranks(
+    payload: dict[str, Any],
+    world_size: int,
+    *,
+    is_draft: bool,
+    address: tuple[str, int],
+) -> dict[int, tuple[str, int]]:
+    """Validate one topology payload into a ``{rank: (host, port)}`` map."""
+    host, port = address
+    label = "draft " if is_draft else ""
+    source_world_size = payload.get("world_size")
+    if source_world_size != world_size:
+        raise RuntimeError(
+            f"Seed source at {host}:{port} reports a {label}world size of "
+            f"{source_world_size}, but this replica's world size is "
+            f"{world_size}; the source and mirror replicas must use the "
+            "same DP x PP x TP layout"
+        )
+    if payload.get("is_draft") is not is_draft:
+        raise RuntimeError(
+            f"Seed source at {host}:{port} reported is_draft="
+            f"{payload.get('is_draft')} where is_draft={is_draft} was "
+            "expected; the source and mirror replicas must run the same "
+            "speculative draft configuration"
+        )
+    ranks = payload.get("ranks")
+    if not isinstance(ranks, dict):
+        raise RuntimeError(
+            f"Seed source at {host}:{port} returned a topology payload "
+            "without a ranks map"
+        )
+    resolved: dict[int, tuple[str, int]] = {}
+    for key, entry in ranks.items():
+        if (
+            not isinstance(entry, list | tuple)
+            or len(entry) != 2
+            or not isinstance(entry[0], str)
+            or not isinstance(entry[1], int)
+        ):
+            raise RuntimeError(
+                f"Seed source at {host}:{port} returned a malformed "
+                f"topology entry for rank {key!r}: {entry!r}"
+            )
+        try:
+            rank = int(key)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f"Seed source at {host}:{port} returned a topology entry "
+                f"with a non-integer rank {key!r}"
+            ) from None
+        resolved[rank] = (entry[0], entry[1])
+    missing = [rank for rank in range(world_size) if rank not in resolved]
+    if missing:
+        raise RuntimeError(
+            f"Seed source at {host}:{port} reported no address for "
+            f"{label}rank(s) {missing}; the source replica looks partially "
+            "started, retry once every source daemon is serving"
+        )
+    return resolved
+
+
+def discover_seed_topology(
+    address: tuple[str, int],
+    token: str,
+    world_size: int,
+    need_draft: bool,
+) -> dict[int, dict[int, tuple[str, int]]] | None:
+    """Discover a source replica's per-rank daemon addresses.
+
+    Queries the ``topology`` seedable of the source at ``address`` (the
+    base ``host:base_port`` of a single-address ``--weight-cache-seed``)
+    and returns ``{group_index: {rank: (host, port)}}``: group 0 is the
+    target group, group 1 the speculative draft group when ``need_draft``.
+    Returns None when the source predates the ``topology`` kind, so the
+    caller can fall back to the single-host assumption of
+    :func:`seed_address`.
+
+    Raises:
+        RuntimeError: If the source is unreachable, rejects the token, or
+            reports a topology inconsistent with this replica.
+
+    """
+    payload = _request_topology(address, token)
+    if payload is None:
+        logger.info(
+            "Seed source at %s:%d predates topology discovery; assuming "
+            "every source rank lives at that host:base_port",
+            *address,
+        )
+        return None
+    maps: dict[int, dict[int, tuple[str, int]]] = {
+        0: _parse_topology_ranks(payload, world_size, is_draft=False, address=address)
+    }
+    if need_draft:
+        rank0_host, rank0_port = maps[0][0]
+        draft_address = (rank0_host, rank0_port + world_size)
+        draft_payload = _request_topology(draft_address, token)
+        if draft_payload is None:
+            raise RuntimeError(
+                "This mirror runs a speculative draft daemon group, but the "
+                f"seed source has no draft listener at {draft_address[0]}:"
+                f"{draft_address[1]}; the source replica predates topology "
+                "discovery or was launched without draft daemons"
+            )
+        maps[1] = _parse_topology_ranks(
+            draft_payload, world_size, is_draft=True, address=draft_address
+        )
+    logger.info(
+        "Discovered seed source topology: %d rank(s)%s",
+        world_size,
+        ", plus a draft daemon group" if need_draft else "",
+    )
+    return maps
+
+
+def preflight_seed_sources(
+    maps: dict[int, dict[int, tuple[str, int]]],
+    token: str,
+    world_size: int,
+) -> None:
+    """Probe every resolved source daemon before any mirror daemon spawns.
+
+    Sends one ``topology`` request to each address in ``maps`` (as returned
+    by :func:`discover_seed_topology`) so a missing or misconfigured source
+    daemon fails the launch up front instead of mid-seed.
+
+    Raises:
+        RuntimeError: If any source daemon is unreachable, rejects the
+            token, predates the ``topology`` kind, or reports a world size
+            or role inconsistent with this replica.
+
+    """
+    for group_index, ranks in maps.items():
+        expect_draft = group_index == 1
+        for rank, address in sorted(ranks.items()):
+            hint = f" (preflighting group {group_index} rank {rank})"
+            payload = _request_topology(address, token, hint=hint)
+            host, port = address
+            if payload is None:
+                raise RuntimeError(
+                    f"Seed source rank {rank} (group {group_index}) at "
+                    f"{host}:{port} predates topology discovery; every "
+                    "source daemon must run a topology-capable version "
+                    "when the mirror discovers the source topology"
+                )
+            source_world_size = payload.get("world_size")
+            if source_world_size != world_size:
+                raise RuntimeError(
+                    f"Seed source rank {rank} (group {group_index}) at "
+                    f"{host}:{port} reports a world size of "
+                    f"{source_world_size}, but this replica's world size "
+                    f"is {world_size}; the source and mirror replicas must "
+                    "use the same DP x PP x TP layout"
+                )
+            if payload.get("is_draft") is not expect_draft:
+                raise RuntimeError(
+                    f"Seed source rank {rank} (group {group_index}) at "
+                    f"{host}:{port} reported is_draft="
+                    f"{payload.get('is_draft')} where is_draft="
+                    f"{expect_draft} was expected; the source and mirror "
+                    "replicas must run the same speculative draft "
+                    "configuration"
+                )
+    total = sum(len(ranks) for ranks in maps.values())
+    logger.info(
+        "Preflighted %d source daemon(s) across %d group(s)",
+        total,
+        len(maps),
+    )
 
 
 def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":

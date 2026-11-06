@@ -202,9 +202,13 @@ form pulls over Mooncake RDMA and requires `--seed-token`.
 
 ### Seeding from a source spread across multiple nodes
 
-When the source replica spans several nodes, `--weight-cache-seed` takes one
-`host:base_port` entry per source node, in source node order, and each entry
-may carry its own base port:
+A single `host:base_port` address covers a source replica spread across
+several nodes. Before spawning any daemon, the mirror's launcher requests
+the source's topology from that address: the source daemons collect every
+global rank's reachable `host:port` among themselves at startup, so one
+query returns where each rank listens. The address can be any source rank's
+listener; the natural choice is the source node 0's rank 0, i.e. the base
+port itself:
 
 ```bash
 # source replica: TP8 across two 4-GPU nodes
@@ -221,20 +225,39 @@ vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --seed-listen-host 0.0.0.0 --seed-listen-port 29700 \
     --seed-token "$TOKEN"
 
-# mirror replica: also TP8 across two 4-GPU nodes; every mirror node's
-# launcher passes the same seed list
+# mirror replica: also TP8 across two 4-GPU nodes; the seed address is
+# identical on every mirror node
 # node 0
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --nnodes 2 --node-rank 0 --master-addr 10.0.0.3 \
     --weight-cache-master-port 29600 \
-    --weight-cache-seed 10.0.0.1:29700,10.0.0.2:29700 \
+    --weight-cache-seed 10.0.0.1:29700 \
     --seed-token "$TOKEN"
 # node 1
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
     --nnodes 2 --node-rank 1 --master-addr 10.0.0.3 \
     --weight-cache-master-port 29600 \
-    --weight-cache-seed 10.0.0.1:29700,10.0.0.2:29700 \
+    --weight-cache-seed 10.0.0.1:29700 \
     --seed-token "$TOKEN"
+```
+
+Once discovery succeeds, the launcher preflights the topology: it probes
+each source rank address the mirror will dial, checking reachability, the
+token, that the source's world size matches the local one, and that a draft
+daemon group exists when the mirror has one. A failed check names the rank
+and address and aborts the launch before any daemon is spawned. A source
+daemon too old to answer a topology request is handled by the original
+assumption that every rank listens on the given host, so behavior against
+older sources is unchanged.
+
+The explicit multi-host list remains as the form for older sources and as an
+escape hatch when a source's self-reported addresses are not reachable from
+the mirror (multi-NIC or NAT environments, see [Limitations](#limitations)).
+It takes one `host:base_port` entry per source node, in source node order,
+and each entry may carry its own base port:
+
+```bash
+--weight-cache-seed 10.0.0.1:29700,10.0.0.2:29700
 ```
 
 vLLM assigns global ranks to nodes in contiguous blocks, so global rank *g*
@@ -242,11 +265,12 @@ resolves to entry `g // (world_size // N)` of the list: above, ranks 0-3
 seed from `10.0.0.1:29700` and ranks 4-7 from `10.0.0.2:29700`, with each
 rank dialing its entry's base port plus the group offset and its global
 rank — the same rule the source's listeners bind by. The number of entries
-must divide the world size, and a single entry is exactly the single-host
-form above. The draft daemon group's port block rule is unchanged: its
-listeners sit past the target group's block on each source node, so the
-same list seeds the draft group too. Socket paths and `host:port` entries
-cannot be mixed in one list.
+must divide the world size, and a single entry is the single-address form
+above, which goes through topology discovery first. The draft daemon group's
+port block rule is unchanged: its listeners sit past the target group's
+block on each source node, so the discovered topology — or the same list —
+seeds the draft group too. Socket paths and `host:port` entries cannot be
+mixed in one list.
 
 !!! warning
     The seed listener is a network service. It is JSON only and
@@ -393,6 +417,12 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   copies the weights into its own memory, so it does not depend on the
   source staying alive afterwards, and a mirror replica forms its own world
   group like a normal preload.
+- **Topology discovery**: when a source's seed listener binds a wildcard
+  address (`0.0.0.0` / `::`), the reachable address it reports for a rank
+  comes from `get_ip()` — the same assumption Mooncake's TransferEngine
+  makes. In multi-NIC or NAT environments, verify that address is reachable
+  from the mirror; if it is not, use the explicit multi-host list form of
+  `--weight-cache-seed`.
 - **Autotuning cannot overlap the load**: autotuning picks a tactic by timing
   candidates, so running it while a daemon is still copying weights onto the
   same GPU would measure the wrong thing and cache the wrong choice. To pay

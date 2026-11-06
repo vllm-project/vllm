@@ -798,6 +798,10 @@ steps:
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
   - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  - >-
+    pytest -v -s model_executor/model_loader/test_weight_cache.py
+    -m 'not distributed'
+    -k 'seed_address or replica_topology or discover_seed_topology or preflight_seed_sources'
   mirror:
     amd:
       automatic_shard: true
