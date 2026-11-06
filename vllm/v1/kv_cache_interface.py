@@ -1142,7 +1142,14 @@ class MambaSpec(KVCacheSpec):
     def page_size_bytes(self) -> int:
         page_size = self.state_content_size_bytes
         if self.page_size_padded is not None:
-            assert self.page_size_padded >= page_size
+            assert self.page_size_padded >= page_size, (
+                f"page_size_padded ({self.page_size_padded}) is smaller than "
+                f"the actual page size ({page_size}). This can happen when "
+                "the mamba page-size estimate used for padding was computed "
+                "with different parameters (e.g. a model's "
+                "get_mamba_state_shape_from_config not accounting for "
+                "num_speculative_tokens) than the layer's state shape."
+            )
             return self.page_size_padded
         return page_size
 
