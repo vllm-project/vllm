@@ -1481,6 +1481,14 @@ class Gemma4ForConditionalGeneration(
         """
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
         num_tokens = [n // pooling_k2 for n in _num_valid_patches(pixel_position_ids)]
+        if not num_tokens:  # no images or video frames
+            hidden_size = self.config.text_config.hidden_size
+            empty = torch.empty(
+                (0, hidden_size),
+                dtype=self.model_dtype,
+                device=self.vision_tower.device,
+            )
+            return empty, []
         # Tower LoRA maps adapters over the whole encoder batch: one call.
         max_tokens = sum(num_tokens) if self._tower_lora else _MAX_SOFT_TOKENS_PER_CALL
         bounds = [0]
