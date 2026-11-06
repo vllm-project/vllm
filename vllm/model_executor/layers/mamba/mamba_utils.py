@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
@@ -28,26 +29,47 @@ logger = init_logger(__name__)
 ConvStateLayoutType = Literal["SD", "DS"]
 
 
-def gdn_replayssm_geometry(
-    num_speculative_tokens: int, state_dtype: torch.dtype = torch.bfloat16
-) -> tuple[int, int]:
-    """Return the selected GDN provider's query width and physical ring slots.
+GDN_REPLAYSSM_LOGICAL_WINDOW = 16
+"""Committed tokens per request kept in the GDN ReplaySSM rings. Older history
+is folded into the checkpoint state."""
+GDN_REPLAYSSM_RING_SLOTS = 32
+"""Physical u/k/G ring slots per request. FlashInfer's UMMA kernel appends up
+to eight tokens after the 16-token window and takes a 32-slot ring."""
 
-    Both paths retain at most 16 logical history records. MTP needs extra
-    physical slots for verification writes while other blocks read history.
-    BF16 STP folds the current token. FP16 UMMA STP uses the MTP ring contract.
+
+def gdn_replayssm_executed_width(num_speculative_tokens: int) -> int:
+    """Return the tokens per request that one GDN ReplaySSM launch computes.
+
+    Shorter rows are padded with no-op tokens up to this width.
     """
     if num_speculative_tokens == 0:
-        return 1, 32 if state_dtype == torch.float16 else 16
+        return 1
     if 1 <= num_speculative_tokens <= 3:
-        return 4, 32
+        return 4
     if 4 <= num_speculative_tokens <= 7:
-        return 8, 32
+        return 8
     raise ValueError(
-        "FlashInfer GDN ReplaySSM supports 0 through 7 speculative "
-        "tokens by padding MTP launches to width 4 or 8; got "
+        "FlashInfer GDN ReplaySSM supports 0 through 7 speculative tokens; got "
         f"{num_speculative_tokens}"
     )
+
+
+def configure_flashinfer_gdn_env() -> None:
+    """Select FP16 state in FlashInfer's GDN prefix materializer.
+
+    FlashInfer reads ``GDN_UCACHE_STATE_DTYPE`` once, when ``flashinfer`` is
+    first imported, so it must be set before vLLM starts its workers.
+
+    Raises:
+        ValueError: The environment already selects another state dtype.
+
+    """
+    state = os.environ.setdefault("GDN_UCACHE_STATE_DTYPE", "fp16")
+    if state.strip().lower() not in ("fp16", "float16", "half"):
+        raise ValueError(
+            f"GDN_UCACHE_STATE_DTYPE={state!r} conflicts with the FP16 recurrent "
+            "state cache that GDN ReplaySSM uses; unset it"
+        )
 
 
 def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
@@ -339,15 +361,15 @@ class MambaStateShapeCalculator:
         num_v_heads: int,
         head_k_dim: int,
         head_v_dim: int,
-        ring_slots: int = 32,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """Return FlashInfer GDN ``(u, k, G)`` ring shapes."""
         local_k_heads = divide(num_k_heads, tp_world_size)
         local_v_heads = divide(num_v_heads, tp_world_size)
+        slots = GDN_REPLAYSSM_RING_SLOTS
         return (
-            (local_v_heads, ring_slots, head_v_dim),
-            (local_k_heads, ring_slots, head_k_dim),
-            (local_v_heads, ring_slots),
+            (local_v_heads, slots, head_v_dim),
+            (local_k_heads, slots, head_k_dim),
+            (local_v_heads, slots),
         )
 
     @classmethod

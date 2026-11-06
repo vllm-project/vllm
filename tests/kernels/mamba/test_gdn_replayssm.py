@@ -10,51 +10,16 @@ import torch
 import torch.nn.functional as F
 
 from vllm.model_executor.layers.mamba.gdn.replayssm import (
-    check_gdn_replayssm_dependencies,
+    load_gdn_replayssm_kernel,
+    load_gdn_replayssm_materializer,
     pack_replayssm_rows,
     run_gdn_replayssm,
 )
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    _load_gdn_replayssm_materialize,
-)
 
 
-@pytest.mark.parametrize(
-    "width,mode", [(1, "stp"), (4, "mtp"), (8, "mtp"), (1, "umma"), (4, "umma")]
-)
-def test_dependencies_import_only_selected_decode_api(monkeypatch, width, mode):
-    """An MTP-only FlashInfer installation must not need the STP module."""
-    module = ModuleType("provider")
-    kernel = lambda **kwargs: None
-    if mode == "umma":
-        api_name = "gated_delta_rule_mtp_ucache_flush_umma"
-        expected = "flashinfer.gdn_kernels.gdn_replay_mtp_umma"
-    else:
-        api_name = f"gated_delta_rule_{mode}_ucache_flush"
-        suffix = "stp" if mode == "stp" else "flush"
-        expected = f"flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_{suffix}"
-    setattr(module, api_name, kernel)
-    original_import = builtins.__import__
-
-    def import_provider(name, *args, **kwargs):
-        if name.startswith("flashinfer"):
-            assert name == expected, f"Unselected dependency: {name}"
-            return module
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setenv("SGLANG_GDN_WY_STRIDED_QKV", "1")
-    monkeypatch.setattr(builtins, "__import__", import_provider)
-    check_gdn_replayssm_dependencies.cache_clear()
-    try:
-        state_dtype = torch.float16 if mode == "umma" else torch.bfloat16
-        assert check_gdn_replayssm_dependencies(width, False, state_dtype) is kernel
-    finally:
-        check_gdn_replayssm_dependencies.cache_clear()
-
-
-@pytest.mark.parametrize("loaded_dtype", [torch.bfloat16, torch.float16])
-def test_materializer_rejects_dtype_change_after_import(monkeypatch, loaded_dtype):
-    """Changing the environment cannot change an imported provider's state dtype."""
+@pytest.mark.parametrize("loaded_dtype", [torch.float16, torch.bfloat16])
+def test_materializer_requires_fp16_state(monkeypatch, loaded_dtype):
+    """A FlashInfer imported before vLLM set its state dtype must be rejected."""
     provider = ModuleType("provider")
     materialize = lambda **kwargs: None
     monkeypatch.setattr(provider, "gdn_prefix_materialize", materialize, raising=False)
@@ -67,20 +32,15 @@ def test_materializer_rejects_dtype_change_after_import(monkeypatch, loaded_dtyp
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", import_provider)
-    _load_gdn_replayssm_materialize.cache_clear()
+    load_gdn_replayssm_materializer.cache_clear()
     try:
-        assert _load_gdn_replayssm_materialize(loaded_dtype) is materialize
-        requested_dtype = (
-            torch.float16 if loaded_dtype == torch.bfloat16 else torch.bfloat16
-        )
-        monkeypatch.setenv(
-            "GDN_UCACHE_STATE_DTYPE",
-            "fp16" if requested_dtype == torch.float16 else "bf16",
-        )
-        with pytest.raises(ValueError, match="before process startup"):
-            _load_gdn_replayssm_materialize(requested_dtype)
+        if loaded_dtype == torch.float16:
+            assert load_gdn_replayssm_materializer() is materialize
+        else:
+            with pytest.raises(ValueError, match="GDN_UCACHE_STATE_DTYPE=fp16"):
+                load_gdn_replayssm_materializer()
     finally:
-        _load_gdn_replayssm_materialize.cache_clear()
+        load_gdn_replayssm_materializer.cache_clear()
 
 
 def test_pack_replayssm_rows_preserves_tokens_and_masks_padding():
@@ -112,43 +72,17 @@ def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
     aligned = pack_replayssm_rows(unaligned, starts, width, uniform=True)
     assert aligned.data_ptr() % 16 == 0
     torch.testing.assert_close(aligned, packed)
-    strided = torch.zeros(2 * width, 8, dtype=values.dtype)[:, ::2]
-    strided.copy_(values)
-    repacked = pack_replayssm_rows(
-        strided, starts, width, uniform=True, allow_strided_rows=True
-    )
-    assert repacked.is_contiguous()
-    torch.testing.assert_close(repacked, packed)
+    # A column slice of a wider projection is copied to a contiguous buffer.
     projection = torch.zeros(2 * width, 8, dtype=values.dtype)[:, :4]
     projection.copy_(values)
-    viewed = pack_replayssm_rows(
-        projection, starts, width, uniform=True, allow_strided_rows=True
-    )
-    assert viewed.data_ptr() == projection.data_ptr()
-    assert viewed.stride() == (width * 8, 8, 1)
-    torch.testing.assert_close(viewed, packed)
-    gate = pack_replayssm_rows(projection, starts, width, uniform=True)
-    assert gate.is_contiguous() and gate.data_ptr() % 16 == 0
-    torch.testing.assert_close(gate, packed)
+    sliced = pack_replayssm_rows(projection, starts, width, uniform=True)
+    assert sliced.is_contiguous() and sliced.data_ptr() % 16 == 0
+    torch.testing.assert_close(sliced, packed)
     # Eager staging can include a zero-token graph-padding row.
     padded_starts = torch.tensor([0, width, width])
     padded = pack_replayssm_rows(values[:width], padded_starts, width, uniform=True)
     torch.testing.assert_close(padded[0], values[:width])
     assert padded[1].eq(0).all()
-
-
-@pytest.mark.parametrize("query_lens", [[1, 1], [1, 0]])
-def test_single_token_packing_matches_ragged_path(query_lens):
-    """STP copies strided inputs and preserves zero-token padding rows."""
-    num_tokens = sum(query_lens)
-    values = torch.arange(num_tokens * 8, dtype=torch.bfloat16).view(num_tokens, 8)
-    values = values[:, ::2]
-    starts = torch.tensor([0, *torch.tensor(query_lens).cumsum(0).tolist()])
-    packed = pack_replayssm_rows(values, starts, 4, single_token=True)
-    expected = pack_replayssm_rows(values, starts, 4)
-    torch.testing.assert_close(packed, expected, rtol=0, atol=0)
-    assert packed.data_ptr() % 16 == 0
-    assert packed[:, 1:].eq(0).all()
 
 
 def _reference_gdn_step(
@@ -212,43 +146,20 @@ def _reconstruct_replayssm_state(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
-    reason="FlashInfer GDN ReplaySSM requires an SM90+ CUDA device",
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="FlashInfer GDN ReplaySSM requires an SM100-class CUDA device",
 )
 @pytest.mark.parametrize(
-    "width,query_len,accepted,state_dtype",
-    [
-        (1, 1, 1, torch.bfloat16),
-        (4, 3, 2, torch.bfloat16),
-        (4, 4, 2, torch.bfloat16),
-        (8, 6, 4, torch.bfloat16),
-        (8, 8, 4, torch.bfloat16),
-        (1, 1, 1, torch.float16),
-        (4, 3, 2, torch.float16),
-        (8, 6, 4, torch.float16),
-    ],
+    "width,query_len,accepted",
+    [(1, 1, 1), (4, 3, 2), (4, 4, 2), (8, 6, 4), (8, 8, 4)],
 )
 @torch.inference_mode()
-def test_gdn_replayssm_output_and_accepted_state(
-    monkeypatch, width, query_len, accepted, state_dtype
-):
+def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
     """Check nonzero outputs and accepted state through replay, wrap, and flush."""
-    monkeypatch.setenv("SGLANG_GDN_WY_STRIDED_QKV", "1")
-    if state_dtype == torch.float16:
-        if torch.cuda.get_device_capability()[0] != 10:
-            pytest.skip("FP16 GDN ReplaySSM requires an SM100-class CUDA device")
-        module = "gdn_replay_mtp_umma"
-    else:
-        module = (
-            "gdn_decode_bf16_wy_ucache_stp"
-            if width == 1
-            else "gdn_decode_bf16_wy_ucache_flush"
-        )
-    pytest.importorskip(f"flashinfer.gdn_kernels.{module}")
+    pytest.importorskip("flashinfer.gdn_kernels.gdn_replay_mtp_umma")
     device, dtype = torch.device("cuda"), torch.bfloat16
     generator = torch.Generator(device=device).manual_seed(20260909 + width)
-    native_stp = width == 1 and state_dtype == torch.bfloat16
-    ring_slots = 16 if native_stp else 32
+    ring_slots = 32
 
     def random_tensor(*shape):
         return torch.randn(*shape, generator=generator, device=device).to(dtype)
@@ -260,7 +171,7 @@ def test_gdn_replayssm_output_and_accepted_state(
         (1, ring_slots, 128),
         (2, ring_slots),
     ]
-    dtypes = [state_dtype, dtype, dtype, torch.float32]
+    dtypes = [torch.float16, dtype, dtype, torch.float32]
     sizes = [math.prod(shape) * dt.itemsize for shape, dt in zip(shapes, dtypes)]
     pages = torch.zeros(2, sum(sizes) + 16, dtype=torch.uint8, device=device)
     states = []
@@ -272,17 +183,17 @@ def test_gdn_replayssm_output_and_accepted_state(
     pages[0].fill_(17)  # Nonzero canaries catch writes to the padding page.
     checkpoint.copy_(random_tensor(2, 2, 128, 128) * 0.03)
     ring_start = torch.zeros(2, dtype=torch.int32, device=device)
-    if width == 1 and not native_stp:
-        ring_start[1] = 24  # Cross the UMMA ring boundary before the first flush.
+    if width == 1:
+        ring_start[1] = 24  # Cross the ring boundary before the first flush.
     committed = torch.zeros_like(ring_start)
     A_log = torch.nn.Parameter(torch.full((2,), -3.0, device=device))
     dt_bias = torch.nn.Parameter(random_tensor(2) * 0.2)
     accepted_state = checkpoint[1].float().clone()
     padding_page = pages[0].clone()
-    capture = width == 1 or (state_dtype == torch.float16 and width == 4)
+    capture = width in (1, 4)
     graph = None
 
-    # Eighteen steps cross the native STP flush and the MTP ring boundary.
+    # Eighteen steps cross a flush and the ring boundary.
     for step in range(18):
         if capture and step == 9:
             # Captured execution must observe an in-place weight reload.
@@ -300,7 +211,7 @@ def test_gdn_replayssm_output_and_accepted_state(
             a, b = gates[:, 0], gates[:, 1]
         if capture:
             # Captured padding has input storage but no token or live state.
-            padding_tokens = 1 if width == 1 else width
+            padding_tokens = width
             mixed_qkv = torch.cat(
                 (
                     mixed_qkv,
@@ -334,7 +245,8 @@ def test_gdn_replayssm_output_and_accepted_state(
                 dtype=torch.int32,
                 device=device,
             ),
-            executed_query_width=width,
+            kernel=load_gdn_replayssm_kernel(),
+            executed_width=width,
             uniform_query_length=query_len,
             num_k_heads=1,
             num_v_heads=2,
@@ -380,9 +292,7 @@ def test_gdn_replayssm_output_and_accepted_state(
             dt_bias,
         )
         old_committed = int(committed[1].item())
-        if native_stp:
-            committed[1] = 0 if old_committed >= 15 else old_committed + 1
-        elif old_committed + width > 16:
+        if old_committed + width > 16:
             ring_start[1] = (ring_start[1] + old_committed) % ring_slots
             committed[1] = accepted
         else:

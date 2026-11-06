@@ -4,8 +4,9 @@
 
 import math
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, TypeVar
 
+import numpy as np
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -14,7 +15,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import gdn_replayssm_geometry
+from vllm.model_executor.layers.mamba.mamba_utils import gdn_replayssm_executed_width
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -91,6 +92,32 @@ class GDNAttentionBackend(AttentionBackend):
         return True
 
 
+ArrayT = TypeVar("ArrayT", np.ndarray, torch.Tensor)
+
+
+def gdn_replayssm_prefill_rows(
+    *,
+    is_prefilling: ArrayT,
+    is_last_prefill: ArrayT,
+    has_prior_state: ArrayT,
+    query_lens: ArrayT,
+    num_draft_tokens: ArrayT | None,
+) -> ArrayT:
+    """Return the rows that GDN ReplaySSM must run as canonical prefill.
+
+    Prompt chunks run as prefill, except the last chunk of a prompt that
+    already has state when it is shaped like a decode row: one token, or one
+    token plus its draft tokens. That chunk replays instead. Accepts NumPy
+    arrays or CPU tensors.
+    """
+    decode_shaped = query_lens == 1
+    if num_draft_tokens is not None:
+        decode_shaped = decode_shaped | (
+            (num_draft_tokens >= 0) & (query_lens == num_draft_tokens + 1)
+        )
+    return is_prefilling & ~(is_last_prefill & has_prior_state & decode_shaped)
+
+
 @dataclass
 class GDNAttentionMetadata:
     num_prefills: int
@@ -122,10 +149,10 @@ class GDNAttentionMetadata:
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
     uniform_spec_sequence_length: int | None = None  # None for ragged batches
 
-    # FlashInfer GDN ReplaySSM packs real-token rows into T=1/4/8 launches and
-    # gathers these dense output positions back afterward.
+    # GDN ReplaySSM routes every replayed decode row, with or without draft
+    # tokens, through the spec_* fields above. Its kernel pads each row to the
+    # launch width; these indices select the real-token outputs.
     replayssm_output_indices: torch.Tensor | None = None
-    replayssm_executed_query_width: int | None = None
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -199,8 +226,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
         self.use_gdn_replayssm = vllm_config.is_gdn_replayssm_enabled()
-        self.replayssm_executed_query_width = (
-            gdn_replayssm_geometry(self.num_spec)[0] if self.use_gdn_replayssm else None
+        self.replayssm_executed_width = (
+            gdn_replayssm_executed_width(self.num_spec)
+            if self.use_gdn_replayssm
+            else None
         )
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
@@ -383,22 +412,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     "sequence-length metadata"
                 )
             query_lens_cpu_all = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-            decode_rows = query_lens_cpu_all == 1
-            if num_decode_draft_tokens_cpu is not None:
-                decode_rows |= (num_decode_draft_tokens_cpu >= 0) & (
-                    query_lens_cpu_all == num_decode_draft_tokens_cpu + 1
-                )
-            assert self.replayssm_executed_query_width is not None
-            replayssm_prefilling = m.is_prefilling & ~(
-                m.is_last_prefill
-                & (m.seq_lens_cpu_upper_bound > query_lens_cpu_all)
-                & decode_rows
+            assert self.replayssm_executed_width is not None
+            prefill_rows = gdn_replayssm_prefill_rows(
+                is_prefilling=m.is_prefilling,
+                is_last_prefill=m.is_last_prefill,
+                has_prior_state=m.seq_lens_cpu_upper_bound > query_lens_cpu_all,
+                query_lens=query_lens_cpu_all,
+                num_draft_tokens=num_decode_draft_tokens_cpu,
             )
-            replay_width = self.replayssm_executed_query_width
             spec_sequence_masks_cpu = (
-                ~replayssm_prefilling
+                ~prefill_rows
                 & (query_lens_cpu_all > 0)
-                & (query_lens_cpu_all <= replay_width)
+                & (query_lens_cpu_all <= self.replayssm_executed_width)
             )
             num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
             if num_spec_decodes == 0:
@@ -448,6 +473,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 no_prior_state &= m.is_prefilling
             else:
                 no_prior_state = torch.zeros_like(no_prior_state)
+            # Under GDN ReplaySSM every decode row replays above, so the rows
+            # here keep the scheduler's prefill flag.
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(
                     m
@@ -511,6 +538,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_decode_tokens = 0
 
             if num_prefills == 0 and num_decodes == 0:
+                # Replay rows can be shorter than num_spec + 1 tokens.
                 spec_token_size = (
                     query_start_loc_cpu[-1].item()
                     if self.use_gdn_replayssm
@@ -593,14 +621,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             else:
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
             if self.use_gdn_replayssm:
-                assert self.replayssm_executed_query_width is not None
+                assert self.replayssm_executed_width is not None
                 replay_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
                 row_offsets = torch.arange(
-                    self.replayssm_executed_query_width, dtype=torch.int32
+                    self.replayssm_executed_width, dtype=torch.int32
                 ).unsqueeze(0)
                 dense_indices = (
                     torch.arange(num_spec_decodes, dtype=torch.int32).unsqueeze(1)
-                    * self.replayssm_executed_query_width
+                    * self.replayssm_executed_width
                     + row_offsets
                 )
                 replayssm_output_indices = async_tensor_h2d(
@@ -761,7 +789,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.replayssm_output_indices[:output_count].copy_(
                     replayssm_output_indices, non_blocking=True
                 )
-                # Captured graphs retain a longer view when live rows shrink.
+                # A captured graph keeps its capture-time view length; zero the
+                # stale tail so its extra indices stay in bounds.
                 self.replayssm_output_indices[output_count:].zero_()
                 replayssm_output_indices = self.replayssm_output_indices[:output_count]
 
@@ -809,7 +838,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens=num_accepted_tokens,
             uniform_spec_sequence_length=uniform_spec_sequence_length,
             replayssm_output_indices=replayssm_output_indices,
-            replayssm_executed_query_width=self.replayssm_executed_query_width,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,

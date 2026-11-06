@@ -397,7 +397,9 @@ class MambaHybridModelState(DefaultModelState):
                 assert self._mamba_ctx is not None
                 replay = self._mamba_ctx.replayssm
                 assert replay is not None
-                # Speculative CPU positions are upper bounds, so keep MTP conservative.
+                # Skip GDN's per-layer materialization when no request can reach
+                # a block boundary. With draft tokens the CPU positions here are
+                # only upper bounds, so the gate applies to standard decoding.
                 self._replayssm_may_materialize = may_cross_mamba_block_boundary(
                     input_batch.num_computed_tokens_np,
                     input_batch.num_scheduled_tokens,
@@ -423,6 +425,7 @@ class MambaHybridModelState(DefaultModelState):
                     isinstance(mamba_metadata, GDNAttentionMetadata)
                     and mamba_metadata.spec_sequence_masks_cpu is not None
                 ):
+                    # GDN replay rows are the spec rows; all others prefilled.
                     replayssm_prefilling = ~mamba_metadata.spec_sequence_masks_cpu[
                         :num_reqs
                     ]

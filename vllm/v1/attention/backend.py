@@ -450,8 +450,8 @@ class CommonAttentionMetadata:
 
     is_last_prefill: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if this scheduled chunk reaches the end
-    of a request's prompt. Used with ``is_prefilling`` by recurrent backends
-    that can safely route only the final one-token prompt chunk as decode."""
+    of a request's prompt. GDN ReplaySSM replays such a chunk as a decode row
+    when it is decode-shaped; earlier chunks must update the canonical state."""
 
     seq_lens_cpu_upper_bound: torch.Tensor | None = None
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows

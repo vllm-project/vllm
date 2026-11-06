@@ -158,6 +158,51 @@ def test_flashinfer_replayssm_validates_config(
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+def _gdn_replayssm_config(mode: str, ssm_dtype: str = "float16") -> SimpleNamespace:
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            replayssm_buffer_len=16,
+            mamba_cache_mode=mode,
+            enable_prefix_caching=mode == "align",
+            mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype=ssm_dtype,
+        ),
+        num_speculative_tokens=3,
+        speculative_config=None,
+        model_config=SimpleNamespace(
+            architecture="Qwen3_5MoeForCausalLM",
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(
+                linear_key_head_dim=128, linear_value_head_dim=128
+            ),
+        ),
+        mamba_config=SimpleNamespace(enable_stochastic_rounding=False),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=False),
+        kv_transfer_config=None,
+    )
+
+
+def test_gdn_replayssm_requires_fp16_state():
+    with pytest.raises(ValueError, match="--mamba-ssm-cache-dtype float16"):
+        VllmConfig.validate_gdn_replayssm(_gdn_replayssm_config("none", "bfloat16"))
+
+
+def test_gdn_replayssm_align_configures_flashinfer_materializer(monkeypatch):
+    """--use-replayssm selects FlashInfer's FP16 materializer before import."""
+    # Register the variable so monkeypatch removes what the validator sets.
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "")
+    monkeypatch.delenv("GDN_UCACHE_STATE_DTYPE")
+    VllmConfig.validate_gdn_replayssm(_gdn_replayssm_config("none"))
+    assert "GDN_UCACHE_STATE_DTYPE" not in os.environ
+    VllmConfig.validate_gdn_replayssm(_gdn_replayssm_config("align"))
+    assert os.environ["GDN_UCACHE_STATE_DTYPE"] == "fp16"
+    monkeypatch.setenv("GDN_UCACHE_STATE_DTYPE", "bf16")
+    with pytest.raises(ValueError, match="GDN_UCACHE_STATE_DTYPE='bf16'"):
+        VllmConfig.validate_gdn_replayssm(_gdn_replayssm_config("align"))
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")

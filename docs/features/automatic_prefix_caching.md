@@ -65,6 +65,28 @@ FlashInfer ReplaySSM has these limits:
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+#### Qwen3.5 Gated DeltaNet
+
+On Qwen3.5 models, `--use-replayssm` applies ReplaySSM to the Gated DeltaNet layers. It runs FlashInfer's UMMA kernel, which requires FlashInfer 0.7.3 or later, an SM100-class GPU, and FP16 recurrent state:
+
+```bash
+vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
+    --dtype bfloat16 \
+    --mamba-ssm-cache-dtype float16 \
+    --use-replayssm \
+    --enable-prefix-caching \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":7}'
+```
+
+Remove `--speculative-config` for standard decoding. Qwen3.5 Gated DeltaNet ReplaySSM has these limits:
+
+- Model activations and the convolution state must be BF16, with 128-element key and value heads and at most four value heads per key head.
+- Speculative decoding supports up to seven draft tokens. Adaptive verification is not supported; set `enable_adaptive_verification` to `false`.
+- `--replayssm-buffer-len` must be 16, the default.
+- Mamba cache stochastic rounding, pipeline parallelism, microbatching, and KV connectors are not supported.
+
+With prefix caching, vLLM sets `GDN_UCACHE_STATE_DTYPE=fp16` before starting its workers, because FlashInfer reads it when first imported. If your own code imports FlashInfer before creating the engine, set this variable before that import.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

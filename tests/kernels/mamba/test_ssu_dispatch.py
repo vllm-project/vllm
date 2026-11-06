@@ -4,6 +4,7 @@
 import os
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import NamedTuple
 from unittest.mock import Mock
 
 import pytest
@@ -314,26 +315,45 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         torch.testing.assert_close(states[1], before_shrink[name], atol=0, rtol=0)
 
 
+class _PostprocessCase(NamedTuple):
+    ring_slots: int
+    executed_width: int  # 0: fold decisions use the row's query length.
+    query_len: int
+    committed: int  # Live slot history before the step.
+    flush_count: int
+    ring_start: int
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
-@pytest.mark.parametrize("gdn_mode", ["none", "stp", "umma_stp"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        # Mamba2: 2 + 4 fits the window, so replay 2 old + 4 accepted tokens.
+        pytest.param(_PostprocessCase(20, 0, 4, 2, 6, 3), id="mamba2"),
+        # GDN standard decoding: 16 + 1 > 16 folds; publish only the new token.
+        pytest.param(_PostprocessCase(32, 1, 1, 16, 1, 19), id="gdn-stp-fold"),
+        # A 4-token row in a width-8 GDN launch folds at 10 + 8 > 16, although
+        # 10 + 4 would fit.
+        pytest.param(_PostprocessCase(32, 8, 4, 10, 4, 13), id="gdn-mtp-fold"),
+        pytest.param(_PostprocessCase(32, 8, 4, 8, 12, 3), id="gdn-mtp-append"),
+    ],
+)
 def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
-    post_step, gdn_mode
+    post_step, case
 ):
     """Skip prefill self-copies, reset trackers, and preserve in-place MTP replay."""
-    gdn_stp = gdn_mode == "stp"
-    umma_stp = gdn_mode == "umma_stp"
-    ring_slots = 16 if gdn_stp else 32 if umma_stp else 20
+    slots = case.ring_slots
     mixer = _replayssm_mixer(
         kv_cache=(
             torch.empty(0, device="cuda"),
             torch.empty(6, 1, 1, 1, device="cuda"),
-            torch.empty(6, 1, ring_slots, 1, device="cuda"),
-            torch.empty(6, 1, ring_slots, device="cuda"),
-            torch.empty(6, 1, ring_slots, 1, device="cuda"),
+            torch.empty(6, 1, slots, 1, device="cuda"),
+            torch.empty(6, 1, slots, device="cuda"),
+            torch.empty(6, 1, slots, 1, device="cuda"),
         ),
         ring_start=_cuda_ints([3] * 6),
-        committed=_cuda_ints([2, 2, 2, 2, 15 if gdn_stp else 16 if umma_stp else 2, 2]),
+        committed=_cuda_ints([2, 2, 2, 2, case.committed, 2]),
         A=torch.empty(1, device="cuda"),
     )
     spec = MambaSpec(
@@ -351,9 +371,10 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
         ]
     )
     context = ReplaySSMModelContext.create([([mixer], spec, table)], max_num_reqs=4)
-    # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
-    # padded slot; padded request.
-    query_len = 1 if gdn_stp or umma_stp else 4
+    # Reordered rows: canonical prefill in slot 2; in-place replay in slot 4
+    # that accepts every token and reaches the block boundary at 32; padded
+    # slot; padded request.
+    query_len = case.query_len
     _postprocess_replayssm_kernel[(4, 1)](
         _cuda_ints([1, 2, 0, -1]),
         _cuda_ints([0, 48, 48 + query_len, 64 + query_len, 64 + query_len])
@@ -375,15 +396,14 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
         MAX_NUM_REQS=4,
         MAMBA_BLOCK_SIZE=16,
         LOGICAL_WINDOW=16,
-        RING_BUFFER_LEN=ring_slots,
+        RING_BUFFER_LEN=slots,
         PAD_SLOT_ID=NULL_BLOCK_ID,
         QUERY_METADATA_IS_CUMULATIVE=post_step,
         NUM_COMPUTED_IS_POST_STEP=post_step,
         HAS_IDX_MAPPING=True,
         MATERIALIZE_PREFIXES=True,
         LIVE_COL_IS_ZERO=False,
-        EXECUTED_QUERY_WIDTH=1 if gdn_stp or umma_stp else 0,
-        GDN_STP=gdn_stp,
+        EXECUTED_QUERY_WIDTH=case.executed_width,
     )
     _compact_replayssm_requests_kernel[(1,)](
         context.plan_flush_count,
@@ -394,12 +414,8 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
         BLOCK_SIZE=4,
     )
 
-    assert context.plan_flush_count.tolist() == [
-        -1,
-        0 if gdn_stp else 1 if umma_stp else 6,
-        -1,
-        -1,
-    ]
+    assert context.plan_flush_count.tolist() == [-1, case.flush_count, -1, -1]
+    assert context.plan_ring_start[1].item() == case.ring_start
     assert context.active_request_indices.tolist() == [1, -1, -1, -1]
     assert context.src_slots[0, 1].item() == 4
     assert context.dst_slots[0, 1].item() == 4

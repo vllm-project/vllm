@@ -451,31 +451,6 @@ def selective_state_update_replayssm_flashinfer(
     )
 
 
-@cache
-def _load_gdn_replayssm_materialize(
-    state_dtype: torch.dtype = torch.bfloat16,
-) -> Callable[..., None]:
-    try:
-        from flashinfer.gdn_kernels.gdn_prefix_materialize import (
-            gdn_prefix_materialize,
-            state_ty_torch,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "FlashInfer GDN ReplaySSM prefix caching requires "
-            "flashinfer.gdn_kernels.gdn_prefix_materialize"
-        ) from e
-    if state_ty_torch() != state_dtype:
-        dtype_name = "fp16" if state_dtype == torch.float16 else "bf16"
-        raise ValueError(
-            f"FlashInfer GDN prefix materialization loaded state dtype "
-            f"{state_ty_torch()}, but vLLM requires {state_dtype}. Set "
-            f"GDN_UCACHE_STATE_DTYPE={dtype_name} before process startup. "
-            "Changing the environment after importing FlashInfer is insufficient."
-        )
-    return gdn_prefix_materialize
-
-
 def initialize_mamba_ssu_backend(
     mamba_config: MambaConfig,
     kv_cache_config: KVCacheConfig,

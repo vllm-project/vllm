@@ -2028,12 +2028,10 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
             runner.initialize_kv_cache(kv_cache_config)
 
 
-def test_gdn_intermediate_prefill_rejects_full_graph_dispatch(dist_init, monkeypatch):
+def test_gdn_intermediate_prefill_rejects_full_graph_dispatch(dist_init):
     from vllm.config import CompilationConfig, CUDAGraphMode
     from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
-    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "flashinfer_replayssm")
-    monkeypatch.setenv("SGLANG_GDN_WY_STRIDED_QKV", "1")
     config = VllmConfig(
         model_config=ModelConfig(model="Qwen/Qwen3.5-0.8B", dtype="bfloat16"),
         scheduler_config=SchedulerConfig(
@@ -2046,7 +2044,7 @@ def test_gdn_intermediate_prefill_rejects_full_graph_dispatch(dist_init, monkeyp
             use_replayssm=True,
             replayssm_buffer_len=16,
             mamba_cache_dtype="bfloat16",
-            mamba_ssm_cache_dtype="bfloat16",
+            mamba_ssm_cache_dtype="float16",
             mamba_cache_mode="none",
             enable_prefix_caching=False,
         ),

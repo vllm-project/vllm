@@ -285,7 +285,7 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state[0].item() is True
 
 
-def test_replayssm_captured_indices_remain_valid_after_ragged_batch(monkeypatch):
+def test_replayssm_captured_indices_remain_valid_after_ragged_batch():
     """A smaller FULL graph must not read stale indices from a ragged step."""
     config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE)
     config.cache_config.use_replayssm = True
@@ -293,7 +293,6 @@ def test_replayssm_captured_indices_remain_valid_after_ragged_batch(monkeypatch)
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=3
     )
-    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "flashinfer_replayssm")
     builder = GDNAttentionMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.bfloat16,)

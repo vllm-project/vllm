@@ -141,6 +141,16 @@ _GDN_REPLAYSSM_ARCHITECTURES = frozenset(
 )
 
 
+def _uses_gdn_replayssm(
+    cache_config: CacheConfig, model_config: "ModelConfig | None"
+) -> bool:
+    return bool(
+        cache_config.use_replayssm
+        and model_config is not None
+        and model_config.architecture in _GDN_REPLAYSSM_ARCHITECTURES
+    )
+
+
 @lru_cache
 def default_breakable_cudagraph_architectures() -> frozenset[str]:
     """Architectures defaulting to breakable CUDA graphs on this platform."""
@@ -650,8 +660,9 @@ class VllmConfig:
 
     @property
     def use_flashinfer_replayssm(self) -> bool:
+        """Whether a FlashInfer ReplaySSM kernel runs Mamba2 or GDN decode."""
         return self.cache_config.use_replayssm and (
-            VllmConfig.is_gdn_replayssm_enabled(self)
+            _uses_gdn_replayssm(self.cache_config, self.model_config)
             or self.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
 
@@ -3946,142 +3957,85 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_gdn_replayssm(self) -> "VllmConfig":
-        # Call the implementation on the class so this validator remains usable
-        # by focused tests that pass a config-shaped object rather than a full
-        # pydantic model.
-        use_gdn_replayssm = VllmConfig.is_gdn_replayssm_enabled(self)
-        is_gdn_replayssm_architecture = (
-            self.model_config is not None
-            and self.model_config.architecture in _GDN_REPLAYSSM_ARCHITECTURES
-        )
-        if (
-            envs.VLLM_GDN_DECODE_KERNEL == "flashinfer_replayssm"
-            and not self.cache_config.use_replayssm
-        ):
-            raise ValueError(
-                "VLLM_GDN_DECODE_KERNEL=flashinfer_replayssm requires --use-replayssm"
-            )
-        if (
-            envs.VLLM_GDN_DECODE_KERNEL == "flashinfer_replayssm"
-            and self.model_config is not None
-            and not use_gdn_replayssm
-        ):
-            raise ValueError(
-                "VLLM_GDN_DECODE_KERNEL=flashinfer_replayssm currently supports "
-                "only Qwen3.5 architectures"
-            )
-        if (
-            self.cache_config.use_replayssm
-            and is_gdn_replayssm_architecture
-            and envs.VLLM_GDN_DECODE_KERNEL != "flashinfer_replayssm"
-        ):
-            raise ValueError(
-                "--use-replayssm on Qwen3.5 requires "
-                "VLLM_GDN_DECODE_KERNEL=flashinfer_replayssm"
-            )
-        if not self.cache_config.use_replayssm:
-            self.cache_config.use_kda_recoverssm = False
+        if not _uses_gdn_replayssm(self.cache_config, self.model_config):
             return self
-
-        if use_gdn_replayssm:
+        cache_config = self.cache_config
+        if not 0 <= self.num_speculative_tokens <= 7:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM supports at most 7 speculative tokens"
+            )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification
+        ):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support adaptive verification; "
+                "set enable_adaptive_verification=False"
+            )
+        if cache_config.replayssm_buffer_len != 16:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM requires --replayssm-buffer-len=16"
+            )
+        if cache_config.mamba_cache_mode not in ("none", "align"):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM supports only the none and align "
+                "Mamba cache modes"
+            )
+        if (
+            cache_config.enable_prefix_caching
+            and cache_config.mamba_cache_mode != "align"
+        ):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM prefix caching requires "
+                "--mamba-cache-mode=align"
+            )
+        if self.model_config.dtype != torch.bfloat16:
+            raise ValueError("FlashInfer GDN ReplaySSM requires bfloat16 model dtype")
+        hf_config = self.model_config.hf_text_config
+        if (
+            getattr(hf_config, "linear_key_head_dim", None) != 128
+            or getattr(hf_config, "linear_value_head_dim", None) != 128
+        ):
+            raise ValueError("FlashInfer GDN ReplaySSM requires GDN K=V=128")
+        if cache_config.mamba_cache_dtype not in ("auto", "bfloat16"):
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM requires a bfloat16 convolution cache"
+            )
+        if cache_config.mamba_ssm_cache_dtype != "float16":
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM requires --mamba-ssm-cache-dtype float16"
+            )
+        if self.mamba_config.enable_stochastic_rounding:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support "
+                "--enable-mamba-cache-stochastic-rounding"
+            )
+        # Replay rings and cursors are not part of the pipeline, microbatch, or
+        # KV-connector state handoff.
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM currently requires pipeline_parallel_size=1"
+            )
+        if self.parallel_config.use_ubatching:
+            raise ValueError(
+                "FlashInfer GDN ReplaySSM does not support overlapping "
+                "microbatch execution"
+            )
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise ValueError(
+                "--use-replayssm is incompatible with KV connectors "
+                "(P/D disaggregation, KV cache offload)"
+            )
+        if cache_config.mamba_cache_mode == "align":
             from vllm.model_executor.layers.mamba.mamba_utils import (
-                gdn_replayssm_geometry,
+                configure_flashinfer_gdn_env,
             )
 
-            # Integration constraints: fixed verify widths and none/align caches.
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.enable_adaptive_verification
-            ):
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM does not support adaptive verification; "
-                    "set enable_adaptive_verification=False"
-                )
-            if self.cache_config.mamba_cache_mode not in ("none", "align"):
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM supports only none and align "
-                    "Mamba cache modes; Qwen3.5 does not support all mode"
-                )
-            if (
-                self.cache_config.enable_prefix_caching
-                and self.cache_config.mamba_cache_mode != "align"
-            ):
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM prefix caching requires "
-                    "--mamba-cache-mode=align"
-                )
-            # Selected provider constraints: history tile and launch widths.
-            if self.cache_config.replayssm_buffer_len != 16:
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM requires --replayssm-buffer-len=16"
-                )
-            gdn_replayssm_geometry(self.num_speculative_tokens)
-            # Both provider paths require BF16 activations and convolution state.
-            if self.model_config is not None:
-                if self.model_config.dtype != torch.bfloat16:
-                    raise ValueError(
-                        "FlashInfer GDN ReplaySSM requires bfloat16 model dtype"
-                    )
-                hf_config = self.model_config.hf_text_config
-                if (
-                    getattr(hf_config, "linear_key_head_dim", None) != 128
-                    or getattr(hf_config, "linear_value_head_dim", None) != 128
-                ):
-                    raise ValueError("FlashInfer GDN ReplaySSM requires GDN K=V=128")
-            if self.cache_config.mamba_cache_dtype not in ("auto", "bfloat16"):
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM requires a bfloat16 convolution cache"
-                )
-            if self.cache_config.mamba_ssm_cache_dtype not in (
-                "auto",
-                "bfloat16",
-                "float16",
-            ):
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM requires BF16 or FP16 recurrent state"
-                )
-            if self.cache_config.mamba_ssm_cache_dtype == "float16":
-                if self.mamba_config.enable_stochastic_rounding:
-                    raise ValueError(
-                        "FP16 GDN ReplaySSM does not support "
-                        "--enable-mamba-cache-stochastic-rounding"
-                    )
-                if (
-                    self.cache_config.mamba_cache_mode == "align"
-                    and os.environ.get("GDN_UCACHE_STATE_DTYPE") != "fp16"
-                ):
-                    raise ValueError(
-                        "FP16 GDN ReplaySSM prefix materialization requires "
-                        "GDN_UCACHE_STATE_DTYPE=fp16 before process startup"
-                    )
-            # These execution modes need additional tracker lifecycle support.
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM currently requires "
-                    "pipeline_parallel_size=1"
-                )
-            if self.parallel_config.use_ubatching:
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM does not support overlapping "
-                    "microbatch execution"
-                )
-            # The provider selects its strided-QKV specialization at import time.
-            if os.environ.get("SGLANG_GDN_WY_STRIDED_QKV") != "1":
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM requires "
-                    "SGLANG_GDN_WY_STRIDED_QKV=1 before process startup"
-                )
-            # This integration does not transfer replay rings and trackers.
-            if (
-                self.kv_transfer_config is not None
-                and self.kv_transfer_config.is_kv_transfer_instance
-            ):
-                raise ValueError(
-                    "--use-replayssm is incompatible with KV connectors "
-                    "(P/D disaggregation, KV cache offload)"
-                )
-            self.cache_config.use_kda_recoverssm = False
-            return self
+            configure_flashinfer_gdn_env()
+        cache_config.use_kda_recoverssm = False
         return self
 
     @model_validator(mode="after")
@@ -4089,8 +4043,8 @@ class VllmConfig:
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
             return self
-        # The preceding GDN validator owns its provider and lifecycle checks.
-        if VllmConfig.is_gdn_replayssm_enabled(self):
+        # validate_gdn_replayssm owns the GDN checks.
+        if _uses_gdn_replayssm(self.cache_config, self.model_config):
             return self
 
         kda_architectures = (
@@ -4189,13 +4143,8 @@ class VllmConfig:
         return self
 
     def is_gdn_replayssm_enabled(self) -> bool:
-        """Whether this config selects the FlashInfer GDN replay adapter."""
-        return bool(
-            self.cache_config.use_replayssm
-            and envs.VLLM_GDN_DECODE_KERNEL == "flashinfer_replayssm"
-            and self.model_config is not None
-            and self.model_config.architecture in _GDN_REPLAYSSM_ARCHITECTURES
-        )
+        """Whether --use-replayssm selects FlashInfer GDN ReplaySSM."""
+        return _uses_gdn_replayssm(self.cache_config, self.model_config)
 
 
 _current_vllm_config: VllmConfig | None = None

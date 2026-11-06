@@ -131,6 +131,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+    gdn_replayssm_prefill_rows,
 )
 from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
@@ -3726,12 +3727,14 @@ class GPUModelRunner(
         query: np.ndarray,
         draft: np.ndarray | None,
     ) -> bool:
-        # Match GDNAttentionMetadataBuilder's canonical-prefill classification.
-        decode_rows = query == 1
-        if draft is not None:
-            decode_rows |= (draft >= 0) & (query == draft + 1)
-        final_decode = (computed > 0) & (computed + query >= prompt) & decode_rows
-        return bool(((computed < prompt) & ~final_decode).any())
+        prefill_rows = gdn_replayssm_prefill_rows(
+            is_prefilling=computed < prompt,
+            is_last_prefill=computed + query >= prompt,
+            has_prior_state=computed > 0,
+            query_lens=query,
+            num_draft_tokens=draft,
+        )
+        return bool(prefill_rows.any())
 
     @staticmethod
     def _is_uniform_decode(
@@ -4242,14 +4245,19 @@ class GPUModelRunner(
                     ]
                     # Cache groups share the request split, but own distinct slots.
                     mamba_metadata = attn_metadata[mamba_group.layer_names[0]]
-                    if isinstance(mamba_metadata, GDNAttentionMetadata):
-                        replay_rows = mamba_metadata.spec_sequence_masks_cpu
-                        if replay_rows is not None:
-                            gdn_prefilling = ~replay_rows[:num_reqs]
-                        else:
-                            num_mamba_decodes = mamba_metadata.num_decodes
+                    replay_rows = (
+                        mamba_metadata.spec_sequence_masks_cpu
+                        if isinstance(mamba_metadata, GDNAttentionMetadata)
+                        else None
+                    )
+                    if replay_rows is not None:
+                        # GDN replay rows are the spec rows; all others prefilled.
+                        gdn_prefilling = ~replay_rows[:num_reqs]
                     else:
-                        assert isinstance(mamba_metadata, Mamba2AttentionMetadata)
+                        assert isinstance(
+                            mamba_metadata,
+                            (GDNAttentionMetadata, Mamba2AttentionMetadata),
+                        )
                         num_mamba_decodes = mamba_metadata.num_decodes
                 mamba_utils.stage_postprocess_inputs_to_gpu(
                     mamba_ctx,

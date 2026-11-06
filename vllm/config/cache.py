@@ -320,10 +320,9 @@ class CacheConfig:
     block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B. Mamba2 Triton uses B physical rows
-    and Mamba2 FlashInfer uses B+T, where T is the verification length. GDN
-    FlashInfer requires B=16 and uses a 16-row physical ring for native STP or
-    a 32-row ring for MTP. Kimi-K3 speculative decode does not use B. Default
-    16."""
+    and Mamba2 FlashInfer uses B+T, where T is the verification length. Qwen3.5
+    Gated DeltaNet requires B=16 and uses 32 physical rows. Kimi-K3 speculative
+    decode does not use B. Default 16."""
     use_replayssm: bool = False
     """Use a supported ReplaySSM decode kernel: cache recent recurrent inputs
     and skip the per-step full-state store, writing the checkpoint only on flush.

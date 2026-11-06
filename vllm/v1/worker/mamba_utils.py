@@ -1760,6 +1760,9 @@ def postprocess_mamba_gpu(
             is_prefilling=ctx.is_prefilling_buf.gpu,
             live_cols=live_cols,
             num_reqs=num_reqs,
+            # GDN materializes one layer per launch, so skip steps where no
+            # request can reach a block boundary. The kernel places boundaries
+            # from these same pre-step counts.
             may_materialize=(
                 not ctx.replayssm.materialize_prefixes
                 or ctx.replayssm.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
@@ -1792,8 +1795,11 @@ def stage_postprocess_inputs_to_gpu(
     """Stage the per-request decisions consumed after token acceptance.
 
     Generic Mamba uses scheduled, computed, and draft counts. ReplaySSM also
-    uses the final Mamba attention split to reset trackers after prefill.
+    uses the final Mamba attention split to reset trackers after prefill:
+    either ``num_decodes`` leading decode rows or an explicit ``is_prefilling``
+    mask (GDN, whose replay rows need not lead the batch).
     """
+    assert num_decodes is None or is_prefilling is None
     assert ctx.num_scheduled_tokens_buf is not None
     assert ctx.num_computed_tokens_buf is not None
     assert ctx.num_draft_tokens_buf is not None

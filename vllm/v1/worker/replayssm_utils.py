@@ -11,9 +11,10 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    _load_gdn_replayssm_materialize,
+from vllm.model_executor.layers.mamba.gdn.replayssm import (
+    load_gdn_replayssm_materializer,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import GDN_REPLAYSSM_RING_SLOTS
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -24,7 +25,11 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 def may_cross_mamba_block_boundary(
     computed: np.ndarray, scheduled: np.ndarray, block_size: int
 ) -> bool:
-    """Bound accepted progress using exact pre-step counts and scheduled lengths."""
+    """Whether any request could cross a Mamba block boundary this step.
+
+    A request accepts at most its scheduled tokens, so ``False`` means no prefix
+    snapshot can be due and postprocess may skip materialization.
+    """
     return bool(((computed + scheduled) // block_size > computed // block_size).any())
 
 
@@ -187,7 +192,6 @@ def _postprocess_replayssm_kernel(
     MATERIALIZE_PREFIXES: tl.constexpr,
     LIVE_COL_IS_ZERO: tl.constexpr,
     EXECUTED_QUERY_WIDTH: tl.constexpr,
-    GDN_STP: tl.constexpr,
 ) -> None:
     """Commit a completed step and prepare an optional prefix snapshot."""
     batch_idx = tl.program_id(0)
@@ -301,42 +305,28 @@ def _postprocess_replayssm_kernel(
     elif valid_live & valid_query:
         old_start = tl.load(tracker_start + live_slot)
         old_committed = tl.load(tracker_committed + live_slot)
-        if GDN_STP:
-            # FlashInfer's GDN STP fold absorbs the current token into the
-            # checkpoint at P == L - 1 and uses a flat 16-slot ring. Layer
-            # forwards mutate gathered cursor copies; publish the equivalent
-            # group-owned transition once here.
-            checkpointed = old_committed >= LOGICAL_WINDOW - 1
-            next_start = 0
-            next_committed = tl.where(checkpointed, 0, old_committed + 1)
-        else:
-            executed_query_len = query_len
-            if EXECUTED_QUERY_WIDTH > 0:
-                executed_query_len = EXECUTED_QUERY_WIDTH
-            checkpointed = old_committed + executed_query_len > LOGICAL_WINDOW
-            next_start = tl.where(
-                checkpointed,
-                (old_start + old_committed) % RING_BUFFER_LEN,
-                old_start,
-            )
-            next_committed = tl.where(checkpointed, accepted, old_committed + accepted)
+        # GDN launches pad every row to a fixed width, and its kernel decides
+        # whether to fold from that width rather than from this row's length.
+        executed_query_len = query_len
+        if EXECUTED_QUERY_WIDTH > 0:
+            executed_query_len = EXECUTED_QUERY_WIDTH
+        checkpointed = old_committed + executed_query_len > LOGICAL_WINDOW
+        next_start = tl.where(
+            checkpointed,
+            (old_start + old_committed) % RING_BUFFER_LEN,
+            old_start,
+        )
+        next_committed = tl.where(checkpointed, accepted, old_committed + accepted)
         tl.store(tracker_start + live_slot, next_start)
         tl.store(tracker_committed + live_slot, next_committed)
 
         if wants_materialize:
             tl.store(plan_ring_start + batch_idx, next_start, mask=writes_plan)
-            if GDN_STP:
-                # On a fold, state already contains the current token and an
-                # exact count=0 copy publishes the boundary. Otherwise replay
-                # the old history plus the one accepted STP token.
-                materialize_count = tl.where(
-                    checkpointed, 0, old_committed + accept_token_bias + 1
-                )
-            else:
-                materialize_count = (
-                    accept_token_bias + 1 + tl.where(checkpointed, 0, old_committed)
-                )
-            tl.store(plan_flush_count + batch_idx, materialize_count, mask=writes_plan)
+            tl.store(
+                plan_flush_count + batch_idx,
+                accept_token_bias + 1 + tl.where(checkpointed, 0, old_committed),
+                mask=writes_plan,
+            )
 
     # The published destination is canonical and therefore has no live replay.
     # When dst_slot aliases live_slot, these stores intentionally supersede the
@@ -415,7 +405,7 @@ class ReplaySSMModelContext:
     logical_window: int
     ring_buffer_len: int
     materialize_prefixes: bool
-    executed_query_width: int
+    executed_query_width: int  # GDN launch width; 0 uses each row's length.
     mamba_type: MambaAttentionBackendEnum
 
     @classmethod
@@ -445,44 +435,15 @@ class ReplaySSMModelContext:
         ), "FlashInfer ReplaySSM requires equal materialization geometry"
 
         device = first.kv_cache[1].device
-        logical_window = int(first.replayssm_buffer_len)
-        executed_query_width = int(
-            getattr(first, "replayssm_executed_query_width", 0) or 0
-        )
-        ring_buffer_len = first.kv_cache[2].size(2)
+        executed_query_width = 0
         if mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
-            if logical_window != 16 or executed_query_width not in (1, 4, 8):
+            # Every GDN layer derives its launch width from the same config.
+            executed_query_width = first.replayssm_executed_width
+            if first.kv_cache[2].size(2) != GDN_REPLAYSSM_RING_SLOTS:
                 raise ValueError(
-                    "FlashInfer GDN ReplaySSM requires logical window 16 and "
-                    "executed query width 1, 4, or 8; got "
-                    f"window={logical_window}, width={executed_query_width}"
+                    f"FlashInfer GDN ReplaySSM requires {GDN_REPLAYSSM_RING_SLOTS} "
+                    f"ring slots, got {first.kv_cache[2].size(2)}"
                 )
-            expected_ring_buffer_len = (
-                16
-                if executed_query_width == 1
-                and first.kv_cache[1].dtype == torch.bfloat16
-                else 32
-            )
-            if ring_buffer_len != expected_ring_buffer_len:
-                raise ValueError(
-                    "FlashInfer GDN ReplaySSM ring depth does not match its "
-                    f"executed width: width={executed_query_width} requires "
-                    f"{expected_ring_buffer_len} slots, got {ring_buffer_len}"
-                )
-            for mixer in mixers[1:]:
-                mixer_width = int(
-                    getattr(mixer, "replayssm_executed_query_width", 0) or 0
-                )
-                mixer_ring_len = mixer.kv_cache[2].size(2)
-                if (
-                    int(mixer.replayssm_buffer_len) != logical_window
-                    or mixer_width != executed_query_width
-                    or mixer_ring_len != ring_buffer_len
-                ):
-                    raise ValueError(
-                        "all GDN ReplaySSM layers in a cache group must share "
-                        "the same logical window, executed width, and ring depth"
-                    )
         block_tables = [table for _, _, table in grouped]
         src_slots = torch.full(
             (len(mixers), max_num_reqs),
@@ -563,11 +524,13 @@ class ReplaySSMModelContext:
         )
 
     def _materialize(self) -> None:
-        """Publish canonical prefix snapshots with the selected backend."""
+        """Publish canonical prefix snapshots.
+
+        Mamba2 publishes every layer in one FlashInfer call. FlashInfer's GDN
+        materializer takes one layer per call.
+        """
         if self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
-            self.materialize_gdn(
-                _load_gdn_replayssm_materialize(self.mixers[0].kv_cache[1].dtype)
-            )
+            self._materialize_gdn()
             return
         assert self.materialize_tables is not None
         first = self.mixers[0]
@@ -600,8 +563,8 @@ class ReplaySSMModelContext:
             philox_rounds=philox_rounds,
         )
 
-    def materialize_gdn(self, materialize_fn: Callable[..., None]) -> None:
-        """Publish one GDN recurrent-state snapshot per layer."""
+    def _materialize_gdn(self) -> None:
+        materialize_fn = load_gdn_replayssm_materializer()
         for layer_idx, mixer in enumerate(self.mixers):
             u_cache, k_cache, g_cache = mixer.kv_cache[2:5]
             materialize_fn(
@@ -684,11 +647,6 @@ class ReplaySSMModelContext:
             MATERIALIZE_PREFIXES=self.materialize_prefixes,
             LIVE_COL_IS_ZERO=live_cols is None,
             EXECUTED_QUERY_WIDTH=self.executed_query_width,
-            GDN_STP=(
-                self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
-                and self.executed_query_width == 1
-                and self.ring_buffer_len == 16
-            ),
         )
         if not self.materialize_prefixes or not may_materialize:
             return

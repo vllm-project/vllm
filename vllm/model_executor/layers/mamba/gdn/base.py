@@ -14,7 +14,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
-    gdn_replayssm_geometry,
+    gdn_replayssm_executed_width,
     mamba_state_alignment,
 )
 from vllm.model_executor.models.utils import extract_layer_index
@@ -48,28 +48,18 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.use_replayssm = vllm_config.is_gdn_replayssm_enabled()
+        # GDN ReplaySSM always runs on FlashInfer; MambaBase consumers read this.
         self.use_flashinfer_replayssm = self.use_replayssm
         self.state_alignment = mamba_state_alignment(vllm_config)
         self.replayssm_buffer_len = (
             self.cache_config.replayssm_buffer_len if self.use_replayssm else None
         )
-        self.replayssm_executed_query_width: int | None = None
-        self.replayssm_ring_slots: int | None = None
+        self.replayssm_executed_width: int | None = None
         if self.use_replayssm:
-            self.replayssm_executed_query_width, self.replayssm_ring_slots = (
-                gdn_replayssm_geometry(self.num_spec, self.get_state_dtype()[1])
-            )
-        if self.replayssm_executed_query_width is not None:
-            # BF16 STP accepts one real token and three zero input positions.
-            # These offsets pack token inputs; they are not replay-ring cursors.
-            packed_width = (
-                4
-                if self.replayssm_ring_slots == 16
-                else self.replayssm_executed_query_width
-            )
+            self.replayssm_executed_width = gdn_replayssm_executed_width(self.num_spec)
             self.register_buffer(
                 "_replayssm_offsets",
-                torch.arange(packed_width, dtype=torch.int32),
+                torch.arange(self.replayssm_executed_width, dtype=torch.int32),
                 persistent=False,
             )
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
@@ -78,6 +68,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.GDN_ATTN
+
+    @property
+    def replayssm_rings(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Bound ``(u, k, G)`` rings, stored after the conv and SSM states."""
+        u_cache, k_cache, g_cache = self.kv_cache[2:5]
+        return u_cache, k_cache, g_cache
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         dtypes: tuple[torch.dtype, ...] = (
