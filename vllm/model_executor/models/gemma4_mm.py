@@ -1467,11 +1467,7 @@ class Gemma4ForConditionalGeneration(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
-        if (
-            getattr(self, "use_data_parallel", False)
-            and not getattr(self, "_enable_mm_lora", False)
-            and get_tensor_model_parallel_world_size() > 1
-        ):
+        if self.use_data_parallel:
             raw_kwargs = {
                 "pixel_values": image_input["pixel_values"],
                 "pixel_position_ids": image_input["pixel_position_ids"],
@@ -1645,11 +1641,7 @@ class Gemma4ForConditionalGeneration(
         self,
         video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
-        if (
-            getattr(self, "use_data_parallel", False)
-            and not getattr(self, "_enable_mm_lora", False)
-            and get_tensor_model_parallel_world_size() > 1
-        ):
+        if self.use_data_parallel:
             raw_kwargs = {
                 "pixel_values_videos": video_input["pixel_values_videos"],
                 "pixel_position_ids_videos": video_input["pixel_position_ids_videos"],
