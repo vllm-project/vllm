@@ -51,9 +51,12 @@ class SleepModeBackend(ABC):
 
     @abstractmethod
     def suspend(self, discardable: Collection[int] = ()) -> None:
-        """Free GPU state, keeping it restorable in-process except for the
-        tensors at the ``discardable`` addresses, which the caller reloads from
-        the model source on resume. Level 2 sleep passes the ones it may drop.
+        """Free GPU state, so that ``resume`` restores it at the same addresses.
+
+        ``discardable`` holds the storage addresses of the tensors the caller
+        rewrites after ``resume``, so they need no backup: the parameters at
+        level 2, nothing at level 1. KV cache and workspace scratch are never
+        restored.
         """
         raise NotImplementedError
 
@@ -114,12 +117,9 @@ class SleepModeBackend(ABC):
 class CuMemBackend(SleepModeBackend):
     """Default backend.
 
-    Wraps the platform sleep-mode allocator exactly as the GPU worker did
-    before this abstraction existed, so behavior is identical to vLLM's current
-    sleep/wake-up. ``get_mem_allocator_instance()`` resolves to
-    ``CuMemAllocator`` on CUDA and ``XpuMemAllocator`` on XPU; suspend offloads
-    per-allocation between GPU and host, with NCCL buffers left untouched (they
-    are allocated outside the allocator pool).
+    Wraps the platform sleep-mode allocator, ``CuMemAllocator`` on CUDA and
+    ``XpuMemAllocator`` on XPU. Suspend offloads per allocation between GPU and
+    host, with NCCL buffers left untouched (they are outside the allocator pool).
     """
 
     def suspend(self, discardable: Collection[int] = ()) -> None:

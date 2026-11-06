@@ -289,13 +289,11 @@ class CuMemAllocator:
         discarded = discardable_allocations(self.allocator_and_pools, discardable)
 
         for ptr, data in self.pointer_to_data.items():
+            offload = data.tag in offload_tags and ptr not in discarded
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags and ptr not in discarded
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if offload != (data.cpu_backup_tensor is not None):
                     has_policy_conflict = True
                 continue
-            offload = data.tag in offload_tags and ptr not in discarded
             total_bytes += data.handle[1]
             if offload:
                 backup_bytes += data.handle[1]

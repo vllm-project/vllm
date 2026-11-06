@@ -305,16 +305,17 @@ class Worker(WorkerBase):
 
     def _discardable_parameters(self, model: nn.Module) -> set[int]:
         """Storage of the parameters the weight update rewrites."""
-        parameters = self._get_sleep_parameters(model)
-        preserved: set[str] = set()
+        storage = {
+            name: parameter.untyped_storage().data_ptr()
+            for name, parameter in self._get_sleep_parameters(model).items()
+        }
+        preserved: set[int] = set()
         for pattern in self.model_config.sleep_preserve_parameter_names:
-            matches = fnmatch_filter(parameters, pattern)
+            matches = fnmatch_filter(storage, pattern)
             if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            preserved.update(matches)
-        return {
-            parameter.untyped_storage().data_ptr() for parameter in parameters.values()
-        } - {parameters[name].untyped_storage().data_ptr() for name in preserved}
+            preserved.update(storage[name] for name in matches)
+        return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
