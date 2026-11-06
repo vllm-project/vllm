@@ -92,7 +92,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -2852,6 +2851,13 @@ class NixlBaseConnectorWorker:
             raise NotImplementedError(
                 "DCP region pulls require matching logical and physical block sizes"
             )
+        # DCP shards tokens across ranks at the logical block size, and reads
+        # pair blocks by logical position.
+        if (self.dcp_size > 1 or remote_dcp_size > 1) and (
+            self.block_size * self._physical_blocks_per_logical_kv_block
+            != nixl_agent_meta.block_size * remote_physical_per_logical
+        ):
+            raise NotImplementedError("DCP requires matching P/D logical block sizes")
         if (
             self._has_mamba
             and remote_physical_per_logical
@@ -3127,7 +3133,7 @@ class NixlBaseConnectorWorker:
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[int, list[int], int]],
+        block_ids_list: list[tuple[int, list[int], range]],
         convert: bool = True,
     ):
         """Post process device kv cache after receiving from remote.
@@ -3141,10 +3147,10 @@ class NixlBaseConnectorWorker:
 
         The transfer only covers ``covered_sub_blocks`` remote-sized
         sub-blocks of each request's local attention blocks; the rest was
-        clipped, either by remote-block pairing (block-size ratio) or by the
-        hetero-ppl front trim in ``_apply_prefix_caching``. Those blocks were
+        clipped when pairing local and remote blocks from the last token
+        (``_pair_blocks_by_last_token``). Those blocks were
         excluded from the scheduler's alloc-time KV zeroing (which would race
-        the RDMA write), so everything past the covered range is zeroed here.
+        the RDMA write), so everything outside the covered range is zeroed here.
         Stale bytes would otherwise surface as garbage or NaNs once decode
         grows into the untransferred tail.
         """
@@ -3182,12 +3188,16 @@ class NixlBaseConnectorWorker:
                 for name in self.kv_cache_config.transfer_groups[group].layer_names
             ]
             # Blocks the transfer didn't write: the token tail of the last
-            # partially covered block, then everything beyond it.
+            # partially covered block, then everything beyond it, and the token
+            # head of the first one, then everything before it.
             covered_blocks, sub_blocks_in_last = divmod(
-                covered_sub_blocks, block_size_ratio
+                covered_sub_blocks.stop, block_size_ratio
             )
             first_stale = covered_blocks + (1 if sub_blocks_in_last else 0)
-            has_stale = first_stale < len(block_ids)
+            head_blocks, sub_blocks_in_head = divmod(
+                covered_sub_blocks.start, block_size_ratio
+            )
+            has_stale = head_blocks > 0 or first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
                 indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
@@ -3211,9 +3221,14 @@ class NixlBaseConnectorWorker:
                     sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
                     cache[last_block_id, :, zero_from:].zero_()
+            if sub_blocks_in_head:
+                for cache in attn_caches:
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
+                    zero_to = sub_blocks_in_head * sub_block_tokens
+                    cache[block_ids[head_blocks], :, :zero_to].zero_()
             if has_stale:
                 assert indices is not None
-                stale_ids = indices[first_stale:]
+                stale_ids = torch.cat((indices[:head_blocks], indices[first_stale:]))
                 for cache in attn_caches:
                     cache.index_fill_(0, stale_ids, 0)
 
@@ -3358,11 +3373,8 @@ class NixlBaseConnectorWorker:
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
-            # transfer clipped. The latter happens either at remote-block
-            # granularity (block_size_ratio > 1) or at kernel-block
-            # granularity, when equal kernel pages meet differing logical
-            # block sizes and _apply_prefix_caching front-trims to the
-            # minimum count (hybrid heterogeneous TP).
+            # transfer clipped. _pair_blocks_by_last_token records the covered
+            # sub-block range per request in meta.covered_sub_blocks.
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
@@ -3375,24 +3387,17 @@ class NixlBaseConnectorWorker:
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
-                    # Number of remote-sized sub-blocks the transfer covered;
-                    # everything past this was clipped and must be zeroed.
-                    covered_end = len(meta.remote.block_ids[g])
-                    if (
-                        block_size_ratio > 1
-                        and meta.remote.num_tokens is not None
-                        and issubclass(self._group_spec_types[g], SlidingWindowSpec)
-                    ):
-                        # The window pairs by token position; sub-blocks before
-                        # it are never attended.
-                        covered_end += self._sliding_window_first_sub_block(
-                            len(local_group),
-                            covered_end,
-                            meta.remote.num_tokens,
-                            block_size_ratio,
+                    # Range of remote-sized sub-blocks the transfer covered;
+                    # everything outside it was clipped and must be zeroed.
+                    covered_sub_blocks = (
+                        meta.covered_sub_blocks[g]
+                        if meta.covered_sub_blocks is not None
+                        else range(
+                            min(
+                                len(local_group) * block_size_ratio,
+                                len(meta.remote.block_ids[g]),
+                            )
                         )
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio, covered_end
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
@@ -3690,9 +3695,12 @@ class NixlBaseConnectorWorker:
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         block_size_ratio: int,
-        num_tokens: int | None = None,
     ) -> tuple[BlockIds, BlockIds]:
         """Map attention-group block ids to remote-block granularity.
+
+        Positional pairing, only valid when both lists start at the same
+        token (push, and DCP pulls, which require equal logical block sizes).
+        Other pulls pair from the last token in ``_pair_blocks_by_last_token``.
 
         Each local attention block is split into ``block_size_ratio``
         sub-blocks paired 1:1 with remote blocks. Sub-blocks beyond the
@@ -3704,9 +3712,6 @@ class NixlBaseConnectorWorker:
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         Local (decode) block ids with block_size 16: [1, 2, 3] expand to
         [4, 5, ..., 15], then clip to the first 10 to pair 1:1 with remote.
-
-        Sliding-window lists hold only the window, so given the transferred
-        ``num_tokens`` they pair by token position instead.
         """
         mapped_local: list[list[int]] = []
         mapped_remote: list[list[int]] = []
@@ -3719,16 +3724,6 @@ class NixlBaseConnectorWorker:
             mapped = self.get_mapped_blocks(
                 np.asarray(local_group), block_size_ratio
             ).tolist()
-            if num_tokens is not None and issubclass(
-                self._group_spec_types[i], SlidingWindowSpec
-            ):
-                start = self._sliding_window_first_sub_block(
-                    len(local_group), len(remote_group), num_tokens, block_size_ratio
-                )
-                lo, hi = max(start, 0), min(start + len(remote_group), len(mapped))
-                mapped_local.append(mapped[lo:hi])
-                mapped_remote.append(list(remote_group[lo - start : hi - start]))
-                continue
             if len(mapped) > len(remote_group):
                 mapped = mapped[: len(remote_group)]
             mapped_local.append(mapped)
@@ -3738,22 +3733,51 @@ class NixlBaseConnectorWorker:
             return [], mapped_remote
         return mapped_local, mapped_remote
 
-    def _sliding_window_first_sub_block(
+    def _pair_blocks_by_last_token(
         self,
-        num_local_blocks: int,
-        num_remote_blocks: int,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
         num_tokens: int,
         block_size_ratio: int,
-    ) -> int:
-        """Index of a sliding-window group's first remote block among its local
-        blocks split into remote-sized sub-blocks; negative when the remote list
-        starts earlier. Both lists end at the block holding the last transferred
-        token (see ``get_exchange_clipped_blocks``)."""
-        last_token = num_tokens - 1
-        first_local = last_token // self.block_size - num_local_blocks + 1
-        remote_block_size = self.block_size // block_size_ratio
-        first_remote = last_token // remote_block_size - num_remote_blocks + 1
-        return first_remote - first_local * block_size_ratio
+        remote_physical_per_logical: int,
+    ) -> tuple[BlockIds, BlockIds, list[range]]:
+        """Pair kernel blocks holding the same tokens across P/D block sizes.
+
+        Local blocks are split into remote-sized sub-blocks. Each side
+        allocates whole logical blocks up to the last of ``num_tokens``, while
+        a local prefix hit or sliding-window clipping can start the lists at
+        different tokens. So drop each side's sub-blocks past that last token
+        and pair the lists from their ends. SSM groups pass through unpaired.
+
+        Returns the paired lists and, per group, the range of local sub-blocks
+        the read covers.
+        """
+        local_per_logical = (
+            self._physical_blocks_per_logical_kv_block * block_size_ratio
+        )
+        paired_local: list[list[int]] = []
+        paired_remote: list[list[int]] = []
+        covered: list[range] = []
+        for g, (local, remote) in enumerate(
+            zip(local_block_ids, remote_block_ids, strict=True)
+        ):
+            if _is_ssm_spec(self._group_spec_types[g]):
+                paired_local.append(list(local))
+                paired_remote.append(list(remote))
+                covered.append(range(len(local)))
+                continue
+            spec = self.kv_cache_config.transfer_groups[g].kv_cache_spec
+            num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_logical)
+            local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
+            local_padding = -num_sub_blocks % local_per_logical
+            remote_padding = -num_sub_blocks % remote_physical_per_logical
+            local = local[: len(local) - local_padding]
+            remote = list(remote)[: len(remote) - remote_padding]
+            num_pairs = min(len(local), len(remote))
+            paired_local.append(local[len(local) - num_pairs :])
+            paired_remote.append(remote[len(remote) - num_pairs :])
+            covered.append(range(len(local) - num_pairs, len(local)))
+        return paired_local, paired_remote, covered
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds, ratio: int) -> BlockIds:
         """Convert block ids to kernel physical block ids.

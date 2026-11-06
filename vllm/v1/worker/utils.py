@@ -694,8 +694,9 @@ def layer_kernel_block_size(
 
 
 def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
-    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
-    # are created lazily on the first qualifying GEMM. Force that now, before
+    # wvSplitKrc's process-lifetime static workspaces
+    # (csrc/rocm/skinny_gemms_wvsplitkrc.cu) are created lazily on the first
+    # qualifying GEMM. Force that now, before
     # the giant backing allocation below: if one landed in this segment's
     # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
