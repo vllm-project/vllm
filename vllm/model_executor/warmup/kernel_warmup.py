@@ -430,7 +430,7 @@ def _run_flashinfer_autotune_dummy_runs(
         # The drafter may use more tokens than this pass in the same dummy run.
         # Include its max M when building the autotune buckets.
         max_tuning_tokens = num_tokens
-        speculator = getattr(runner, "speculator", None)
+        speculator = runner.speculator
         if speculator is not None:
             num_query_per_req = speculator.num_query_per_req
             num_draft_reqs = min(

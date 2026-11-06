@@ -363,7 +363,7 @@ class CpuPlatform(Platform):
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
-        # Note: workaround for v1 gpu_model_runner
+        # CPU doesn't capture CUDA graphs. compile_sizes can expand these sizes.
         from vllm.config import CompilationMode
 
         vllm_config.compilation_config.cudagraph_capture_sizes = []

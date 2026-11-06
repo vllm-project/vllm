@@ -59,6 +59,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
         ),
         _dummy_run=Mock(),
+        speculator=None,
     )
 
 

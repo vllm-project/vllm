@@ -466,8 +466,8 @@ class ElasticEPScalingExecutor:
         platform_cls._global_graph_pool = new_pool
 
         model_runner = self.worker.model_runner
-        manager = getattr(model_runner, "cudagraph_manager", None)
-        speculator = getattr(model_runner, "speculator", None)
+        manager = model_runner.cudagraph_manager
+        speculator = model_runner.speculator
         managers = [manager] + [
             attr
             for attr in (vars(speculator).values() if speculator else ())
