@@ -249,6 +249,16 @@ class TestGenerateBudgets:
         assert {8, 16, 32, 64} <= set(result)
 
 
+def test_item_multiple_budgets_fit_fixed_size_items():
+    """Paths with fixed-size items get budgets that hold N items exactly."""
+    budgets = EncoderCudaGraphManager._item_multiple_budgets(169, 2560)
+    assert budgets == [169 * n for n in range(1, 16)]
+    budgets = EncoderCudaGraphManager._item_multiple_budgets(81, 2560)
+    assert all(b % 81 == 0 for b in budgets)
+    assert budgets[:16] == [81 * n for n in range(1, 17)]
+    assert budgets[-1] == 81 * (2560 // 81)
+
+
 # ---------------------------------------------------------------------------
 # _find_smallest_fitting_budget_given_tokens
 # ---------------------------------------------------------------------------

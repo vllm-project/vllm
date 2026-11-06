@@ -216,10 +216,10 @@ class EncoderCudaGraphManager:
                         f"Invalid minimum budget {min_path_budget} for encoder "
                         f"CUDA graph path {path!r}; max budget is {max_budget}"
                     )
-                budgets = self._generate_budgets(
-                    min_path_budget,
-                    max_budget,
-                )
+                # Paths with a declared min budget have fixed-size items
+                # (e.g. DeepSeek-OCR's global path), so budget by exact
+                # item multiples instead of the subdivided grid.
+                budgets = self._item_multiple_budgets(min_path_budget, max_budget)
             if path_config.allow_zero_tokens:
                 budgets.insert(0, 0)
             self.path_token_budgets[path] = budgets
@@ -259,6 +259,21 @@ class EncoderCudaGraphManager:
                     points.add(point)
             base *= 2
         return sorted(points)
+
+    @staticmethod
+    def _item_multiple_budgets(item_tokens: int, max_budget: int) -> list[int]:
+        """Budgets for a path whose items all have item_tokens tokens.
+
+        Every item count up to 16, then 1/8-octave steps, so batches of up to
+        16 items fit their budget exactly.
+        """
+        max_items = max_budget // item_tokens
+        counts = {c for c in range(1, 17) if c <= max_items} | {max_items}
+        count = 16
+        while count < max_items:
+            count = math.ceil(count * 2 ** (1 / 8))
+            counts.add(min(count, max_items))
+        return [c * item_tokens for c in sorted(counts)]
 
     def supports_modality(self, modality: str) -> bool:
         """Check if a modality is supported by this manager."""
