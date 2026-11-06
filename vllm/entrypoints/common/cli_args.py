@@ -379,6 +379,11 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_prompt_token_ids: bool = False
+    """Whether to honor `kv_transfer_params.prompt_token_ids` without a KV
+    transfer connector. Disabled by default, so aggregated servers render
+    `messages` instead. Only enable this for callers trusted to supply ids
+    matching the model tokenizer and rendered prompt."""
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance.

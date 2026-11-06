@@ -327,12 +327,6 @@ class ModelConfig:
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
-    enable_prompt_token_ids: bool = False
-    """Allow `kv_transfer_params.prompt_token_ids` to bypass chat rendering and
-    tokenization when no KV transfer connector is configured. Disabled by
-    default, so aggregated servers render `messages` instead. Only enable this
-    for callers trusted to supply ids matching the model tokenizer and rendered
-    prompt."""
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
     `prompt_embeds` key.

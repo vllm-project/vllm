@@ -592,7 +592,10 @@ def _build_renderer(model_config: MockModelConfig):
 
 
 def _build_online_renderer(
-    engine, model_registry: OpenAIModelRegistry
+    engine,
+    model_registry: OpenAIModelRegistry,
+    *,
+    enable_prompt_token_ids: bool = False,
 ) -> OnlineRenderer:
     return OnlineRenderer(
         model_config=engine.model_config,
@@ -600,6 +603,7 @@ def _build_online_renderer(
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
+        enable_prompt_token_ids=enable_prompt_token_ids,
     )
 
 
@@ -618,12 +622,17 @@ def _build_serving_chat(
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_auto_tools: bool = False,
+    enable_prompt_token_ids: bool = False,
 ) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    online_renderer = _build_online_renderer(engine, models.registry)
+    online_renderer = _build_online_renderer(
+        engine,
+        models.registry,
+        enable_prompt_token_ids=enable_prompt_token_ids,
+    )
 
     serving_chat = OpenAIServingChat(
         engine,
@@ -3263,8 +3272,7 @@ async def test_chat_kv_transfer_prompt_token_ids_ignored_without_kv_connector():
 async def test_chat_kv_transfer_prompt_token_ids_opt_in_without_kv_connector():
     """An explicit server opt-in preserves direct token-id reuse."""
     mock_engine = _build_mock_engine()
-    mock_engine.model_config.enable_prompt_token_ids = True
-    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat = _build_serving_chat(mock_engine, enable_prompt_token_ids=True)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,

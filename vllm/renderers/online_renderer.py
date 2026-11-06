@@ -111,7 +111,11 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 def _reused_prompt_token_ids(
-    request: Any, renderer: BaseRenderer, messages: list[Any] | None = None
+    request: Any,
+    renderer: BaseRenderer,
+    messages: list[Any] | None = None,
+    *,
+    enable_prompt_token_ids: bool = False,
 ) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
@@ -149,8 +153,8 @@ def _reused_prompt_token_ids(
     # truncate_prompt_tokens, and tokenization on any client-supplied text.
     # Render messages by default so aggregated routers keep working; an explicit
     # server opt-in preserves direct reuse for trusted pre-rendered requests.
-    if getattr(renderer.config, "kv_transfer_config", None) is None and not getattr(
-        renderer.config.model_config, "enable_prompt_token_ids", False
+    if getattr(renderer.config, "kv_transfer_config", None) is None and not (
+        enable_prompt_token_ids
     ):
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
@@ -185,6 +189,7 @@ class OnlineRenderer:
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         trust_request_mm_kwargs: bool = False,
+        enable_prompt_token_ids: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -221,6 +226,7 @@ class OnlineRenderer:
         self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
         self.trust_request_mm_kwargs = trust_request_mm_kwargs
+        self.enable_prompt_token_ids = enable_prompt_token_ids
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
@@ -573,7 +579,11 @@ class OnlineRenderer:
         should_include_tools: bool = True,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
-        reuse_ids = _reused_prompt_token_ids(request, self.renderer)
+        reuse_ids = _reused_prompt_token_ids(
+            request,
+            self.renderer,
+            enable_prompt_token_ids=self.enable_prompt_token_ids,
+        )
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
@@ -836,7 +846,12 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
+        reuse_ids = _reused_prompt_token_ids(
+            request,
+            renderer,
+            messages,
+            enable_prompt_token_ids=self.enable_prompt_token_ids,
+        )
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
