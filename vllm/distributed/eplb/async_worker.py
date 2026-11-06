@@ -40,7 +40,7 @@ def start_async_worker(
                 is_profile=is_profile,
             )
         except Exception as exc:
-            state.async_worker_error = exc
+            state.async_worker_error = (state.ft_reset_epoch, exc)
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
     thread = threading.Thread(target=thread_target, daemon=True)
@@ -96,13 +96,7 @@ def transfer_run_periodically(
                 raise
             # Report the failure so step() raises on every rank and FT takes
             # over; keep the thread alive so EPLB can resume after a retry.
-            # A failure from a cycle that an FT reset abandoned is stale.
-            # Re-check after the write: a reset can land in between, and this
-            # thread is the only writer.
-            if state.ft_reset_epoch == reset_epoch:
-                state.async_worker_error = exc
-                if state.ft_reset_epoch != reset_epoch:
-                    state.async_worker_error = None
+            state.async_worker_error = (reset_epoch, exc)
             logger.exception(
                 "async loop error (Rank %d); continuing under fault tolerance",
                 rank,

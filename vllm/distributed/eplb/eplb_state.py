@@ -306,10 +306,12 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
-        self.async_worker_error: Exception | None = None
+        self.async_worker_error: tuple[int, Exception] | None = None
         """
-        Exception raised by the async worker, if any. Under fault tolerance
-        the thread keeps running and FT recovery clears it.
+        ``(epoch, exception)`` for the last async worker failure, where
+        ``epoch`` is the ``ft_reset_epoch`` of the failed cycle. A failure
+        from an earlier epoch is stale and ignored. Under fault tolerance the
+        thread keeps running.
         """
         self.device_index: int | None = None
         """
@@ -1091,9 +1093,12 @@ class EplbState:
                 )
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
+        error = self.async_worker_error
+        if error is not None and error[0] != self.ft_reset_epoch:
+            error = None
         flags = torch.tensor(
             (
-                int(self.async_worker_error is not None),
+                int(error is not None),
                 int(model_state.pending_result is None),
             ),
             dtype=torch.int32,
@@ -1105,7 +1110,7 @@ class EplbState:
         if num_failed:
             raise RuntimeError(
                 "Async EPLB worker failed on at least one rank; see the worker logs."
-            ) from self.async_worker_error
+            ) from (error[1] if error is not None else None)
         return num_pending == 0
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:

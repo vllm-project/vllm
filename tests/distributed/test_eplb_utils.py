@@ -301,7 +301,9 @@ def test_async_worker_failure_raises_under_fault_tolerance(eplb_dist_init, monke
 
 
 def test_fault_tolerance_reset_rearms_async_eplb(eplb_dist_init, monkeypatch):
-    """After an FT reset, the surviving worker runs the next rearrangement."""
+    """After an FT reset, the old failure is ignored and the surviving worker
+    runs the next rearrangement.
+    """
     state, model_state, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
     assert _step_until_raise(state) is not None
 
@@ -336,8 +338,7 @@ def test_fault_tolerance_drops_failure_from_abandoned_cycle(
             break
 
     assert failures, "the injected transfer failure never ran"
-    assert state.async_worker_error is None
-    state.step()
+    assert _step_until_raise(state, max_steps=20) is None
 
 
 def test_fault_tolerance_drops_rearrangement_signalled_before_reset(
