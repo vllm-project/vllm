@@ -133,13 +133,16 @@ def layer():
 
 def _lengths(context, num_reqs, query_len, generator):
     """Request lengths: ``short`` cycles through one page and the 15- and
-    16-history-page edges; ``long`` draws a few thousand pages, with a query
-    window straddling two pages and a zero-length padding request last."""
+    16-history-page edges; ``medium`` draws 40-250 pages (rows ranked across
+    the CTA's warps, one pair a thread) and ``long`` a few thousand (32 pairs
+    a thread), both with a query window straddling two pages and a
+    zero-length padding request last."""
     if context == "short":
         edges = (query_len, 100, 15 * PAGE + 64, 16 * PAGE + 64)
         return [edges[i % 4] for i in range(num_reqs)]
+    low, high = (40, 250) if context == "medium" else (1000, 3000)
     lengths = (
-        torch.randint(1000 * PAGE, 3000 * PAGE, (num_reqs,), generator=generator)
+        torch.randint(low * PAGE, high * PAGE, (num_reqs,), generator=generator)
         .add_(1)
         .tolist()
     )
@@ -291,13 +294,14 @@ def _run(low_batch, inputs):
     return low_batch.run(step, inputs["q"], inputs["iq"], inputs["kv"], inputs["index"])
 
 
-@pytest.mark.parametrize("context", ["short", "long"])
+@pytest.mark.parametrize("context", ["short", "medium", "long"])
 @pytest.mark.parametrize(
     "num_reqs,query_len", [(1, 1), (4, 1), (32, 1), (1, 8), (4, 8)]
 )
 def test_low_batch_attention_matches_stock(layer, num_reqs, query_len, context):
     """Eager calls at each request count and query length the decode steps
-    take, short contexts (every history page selected) and long ones."""
+    take, short contexts (every history page selected), medium ones (pages
+    ranked across warps) and long ones."""
     from vllm.config import set_current_vllm_config
     from vllm.forward_context import set_forward_context
 

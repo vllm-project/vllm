@@ -26,6 +26,12 @@ head the maximum, the sum and the unnormalized output) to a scratch buffer;
 the row's last CTA to finish (a counter per row, reset by that CTA) merges
 the partials, and four of its threads quantize each 32-value MXFP8 block.
 Rows of padding requests (seq_len 0) attend nothing and write zeros.
+
+o_proj's launch: up to eight rows, a CTA whose row ranks at most 256 pages
+triggers it once its pages are known, any other CTA once its row's record is
+loaded; past eight rows every CTA triggers it before its grid wait and
+prefetches its share of o_proj's weights into L2 once its page loads are
+done.
 """
 
 import math

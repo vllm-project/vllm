@@ -14,11 +14,13 @@ quantization and GEMM:
 2. ``sparse_cute.SparseAttention``: each row's top-15 pages and local page,
    the attention over them, o_proj's MXFP8 input;
 3. ``o_proj``: FlashInfer's low-latency MXFP8 GEMM (only its activation
-   loads wait for the attention; its weight loads do not).
+   loads wait for the attention; its weight loads do not, and past eight
+   rows the attention prefetches them into L2).
 
-Every launch is sized from the step's request and query counts; the context
-lengths and pages come from the device seq_lens and block table only, so a
-CUDA graph captured once serves every later context length up to 8192 pages.
+Every launch is sized from the SM count and the step's request and query
+counts; the context lengths and pages come from the device seq_lens and block
+table only, so a CUDA graph captured once serves every later context length
+up to 8192 pages.
 """
 
 import math
