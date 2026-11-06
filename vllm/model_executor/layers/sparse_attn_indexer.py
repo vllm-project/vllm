@@ -1676,9 +1676,11 @@ def init_indexer_wk_weights_proj(
     del fused.weight
     fused.weight = weight  # a plain attribute: loaders and reloads skip it
     indexer.wk_weights_proj = fused
-    # No separate storage: weights_proj loads into the fused rows, and wk (FP8
-    # or BF16, as loaded) at the start of the fused storage, whose BF16 rows
-    # it fills once dequantized (direct reload views it back to FP8 there).
+    # wk and weights_proj own no storage: their weights are views of the fused
+    # one. weights_proj's is its rows after wk's. wk's starts at offset 0 in
+    # the dtype it loads: FP8 bytes occupy the first half of wk's rows until
+    # post-load processing dequantizes them (through a temporary) into those
+    # rows; a direct reload views them back to FP8 at the same address.
     indexer.weights_proj.weight.data = weight[indexer.head_dim :]
     wk_weight = indexer.wk.weight
     indexer.wk.weight.data = storage_view(

@@ -529,7 +529,7 @@ class Fp8DequantLinearMethod(LinearMethodBase):
                     rows * s[:, : rows.shape[1]]
                 )
             _into_own_storage(layer, weight)
-        for name, param in layer.named_parameters(recurse=False):
+        for name, _ in layer.named_parameters(recurse=False):
             if name not in ("weight", "bias"):
                 retire_parameter(layer, name)
         self.bf16_method.process_weights_after_loading(layer)
@@ -543,21 +543,26 @@ class Fp8DequantLinearMethod(LinearMethodBase):
         return self.bf16_method.apply(layer, x, bias)
 
 
-def _into_own_storage(layer: torch.nn.Module, weight: torch.Tensor) -> None:
-    """Make ``weight`` (dequantized into a temporary) the layer's weight, in the
-    loaded weight's storage when it fits (it was allocated BF16-sized), so the
-    FP8 bytes and the BF16 result share one allocation in every load mode."""
-    param = layer.weight
+def _view_as(param: torch.Tensor, dtype: torch.dtype) -> torch.Tensor | None:
+    """``param``'s storage viewed in ``dtype`` with its shape, if it fits."""
     storage = param.untyped_storage()
     if (
         param.is_contiguous()
         and param.storage_offset() == 0
-        and storage.nbytes() >= weight.nbytes
+        and storage.nbytes() >= param.numel() * dtype.itemsize
     ):
-        view = storage_view(storage, 0, weight.shape, weight.stride(), weight.dtype)
-        param.data = view.copy_(weight)
-    else:
+        return storage_view(storage, 0, param.shape, param.stride(), dtype)
+    return None
+
+
+def _into_own_storage(layer: torch.nn.Module, weight: torch.Tensor) -> None:
+    """Make the dequantized ``weight`` the layer's weight, in the loaded FP8
+    weight's storage (allocated BF16-sized): one allocation in every mode."""
+    view = _view_as(layer.weight, weight.dtype)
+    if view is None:
         replace_parameter(layer, "weight", weight)
+    else:
+        layer.weight.data = view.copy_(weight)
 
 
 def _load_weight_in_sent_dtype(layer: torch.nn.Module) -> None:
@@ -570,8 +575,8 @@ def _load_weight_in_sent_dtype(layer: torch.nn.Module) -> None:
     param.data = storage_view(
         bf16.untyped_storage(), 0, param.shape, param.stride(), param.dtype
     )
-    layer.checkpoint_weight_loader = layer.weight.weight_loader
-    layer.weight.weight_loader = MethodType(_weight_loader_in_sent_dtype, layer)
+    layer.checkpoint_weight_loader = param.weight_loader
+    param.weight_loader = MethodType(_weight_loader_in_sent_dtype, layer)
 
 
 def _weight_loader_in_sent_dtype(
@@ -581,21 +586,12 @@ def _weight_loader_in_sent_dtype(
     *args,
     **kwargs,
 ):
-    """The parameter is viewed in the sent dtype on its storage when it fits
-    (after a cold start it holds BF16), else it gets new storage."""
+    """View the parameter in the sent dtype (on its storage when it fits)."""
     fp8 = loaded_weight.dtype == torch.float8_e4m3fn
     dtype = torch.float8_e4m3fn if fp8 else layer.params_dtype
     if param.dtype != dtype:
-        storage = param.untyped_storage()
-        if (
-            param.is_contiguous()
-            and param.storage_offset() == 0
-            and storage.nbytes() >= param.numel() * dtype.itemsize
-        ):
-            shape, stride = param.shape, param.stride()
-            param.data = storage_view(storage, 0, shape, stride, dtype)
-        else:
-            param.data = torch.empty_like(param, dtype=dtype)
+        view = _view_as(param, dtype)
+        param.data = torch.empty_like(param, dtype=dtype) if view is None else view
     return layer.checkpoint_weight_loader(param, loaded_weight, *args, **kwargs)
 
 

@@ -149,11 +149,14 @@ def _as_bf16(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
 
 def _mla_cold_start(ckpt, model_config, scales_first=True) -> _MlaModel:
     model = _MlaModel()
+    ptrs = _ptrs(model)
     record_metadata_for_reloading(model)
     items = list(ckpt.items())
     for item in items if scales_first else reversed(items):
         model.load_weights([item])
     process_weights_after_loading(model, model_config, _DEVICE)
+    # dequantized in the loaded (BF16-sized) storage: no second allocation
+    assert _ptrs(model) == ptrs
     return model
 
 
@@ -296,6 +299,22 @@ def _indexer_checkpoint(seed: int, layout: str):
     return ckpt, torch.cat([wk, wp])
 
 
+def _assert_parts_in_fused(indexer: torch.nn.Module) -> None:
+    """Wk and weights_proj are views of the fused weight's rows, so filling
+    it copies nothing."""
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        fuse_indexer_wk_weights_proj,
+    )
+    from vllm.model_executor.model_loader.reload.meta import CopyCounter
+
+    fused = indexer.wk_weights_proj.weight
+    assert indexer.wk.weight.data_ptr() == fused.data_ptr()
+    assert indexer.weights_proj.weight.data_ptr() == fused[_WK:].data_ptr()
+    with CopyCounter() as counter:
+        fuse_indexer_wk_weights_proj(indexer)
+    assert counter.copied_numel == 0
+
+
 def _indexer_cold_start(ckpt, layout, model_config, scales_first=True):
     model = _IndexerModel(layout)
     record_metadata_for_reloading(model)
@@ -316,17 +335,18 @@ def test_indexer_fused_weight(model_config, layout, scales_first):
     fused = model.indexer.wk_weights_proj
     torch.testing.assert_close(fused.weight, expected, rtol=0, atol=0)
     assert "weight" not in fused._parameters  # derived, not loaded
+    _assert_parts_in_fused(model.indexer)
     x = torch.randn(3, _HIDDEN, dtype=torch.bfloat16, device=_DEVICE)
     torch.testing.assert_close(fused(x)[0], x @ expected.t())
 
 
-@pytest.mark.parametrize("layout", _LAYOUTS[1:])
+@pytest.mark.parametrize("layout", _LAYOUTS)
 @pytest.mark.parametrize("cold", ["fp8", "bf16"])
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
 def test_indexer_reload_fp8_or_bf16(monkeypatch, model_config, layout, cold, mode):
     """Each load sends ``wk`` whole, either in the checkpoint's FP8 layout or
     in BF16 without a scale (as RL trainers do). Every reload ends with the
-    dequantized weight at the cold-start addresses."""
+    dequantized weight in the fused rows, at the cold-start addresses."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     sent = [layout, "bf16", layout] if cold == "fp8" else ["bf16", layout, "bf16"]
     old, _ = _indexer_checkpoint(11, sent[0])
@@ -340,6 +360,7 @@ def test_indexer_reload_fp8_or_bf16(monkeypatch, model_config, layout, cold, mod
         torch.testing.assert_close(fused, expected, rtol=0, atol=0)
         assert fused.data_ptr() == fused_ptr
         assert _ptrs(model) == ptrs
+        _assert_parts_in_fused(model.indexer)
 
 
 def _glm5_mla_params() -> dict:
@@ -438,46 +459,3 @@ def test_layerwise_metadata_does_not_keep_layers_alive(model_config):
     del model
     gc.collect()
     assert wk() is None
-
-
-@pytest.mark.parametrize("layout", _LAYOUTS)
-@pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_indexer_parts_live_in_fused_weight(monkeypatch, model_config, layout, mode):
-    """Wk and weights_proj hold no storage of their own: after a cold start and
-    after FP8 / BF16 reloads they are views of the fused weight's rows, and
-    filling the fused weight then copies nothing."""
-    from vllm.model_executor.layers.sparse_attn_indexer import (
-        fuse_indexer_wk_weights_proj,
-    )
-    from vllm.model_executor.model_loader.reload.meta import CopyCounter
-
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    model = _indexer_cold_start(
-        _indexer_checkpoint(10, layout)[0], layout, model_config
-    )
-    for seed, sent in ((11, "bf16"), (12, layout), (None, None)):
-        indexer = model.indexer
-        fused = indexer.wk_weights_proj.weight
-        assert indexer.wk.weight.data_ptr() == fused.data_ptr()
-        assert indexer.weights_proj.weight.data_ptr() == fused[_WK:].data_ptr()
-        with CopyCounter() as counter:
-            fuse_indexer_wk_weights_proj(indexer)
-        assert counter.copied_numel == 0
-        if seed is not None:
-            new, expected = _indexer_checkpoint(seed, sent)
-            _reload(model, new, mode, model_config, monkeypatch)
-            torch.testing.assert_close(fused, expected, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_mla_dequantizes_in_loaded_storage(monkeypatch, model_config, mode):
-    """The FP8 weight's storage is BF16-sized, so the dequantized weight takes
-    no second allocation, in either load mode."""
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    model = _MlaModel()
-    before = _ptrs(model)
-    record_metadata_for_reloading(model)
-    for item in _mla_checkpoint(0).items():
-        model.load_weights([item])
-    process_weights_after_loading(model, model_config, _DEVICE)
-    assert _ptrs(model) == before
