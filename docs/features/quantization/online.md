@@ -1,9 +1,10 @@
 # Online Quantization
 
 Online quantization lets you take a BF16/FP16 model and quantize its Linear
-and MoE weights to lower precision (such as FP8) at load time, without needing
-a pre-quantized checkpoint or calibration data. Weights are converted during
-model loading and activations are dynamically scaled during each forward pass.
+and MoE weights, and optionally its lm_head, to lower precision (such as FP8)
+at load time, without needing a pre-quantized checkpoint or calibration data.
+Weights are converted during model loading and activations are dynamically
+scaled during each forward pass.
 
 ## Quick Start
 
@@ -307,5 +308,12 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
+    - The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer. It is
+      quantized only when a `targets` pattern contains its module name (`"re:.*"`
+      does not select it), for example weight-only FP8:
+      `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
+      A tied lm_head, or one the checkpoint already quantizes, raises an error. This quantizes the target model's own head; it is
+      unrelated to `draft_lm_head_quantization`, which gives a speculative-decoding
+      drafter a private quantized copy of the head and leaves the target unchanged.
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.

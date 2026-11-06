@@ -18,6 +18,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
+    init_wfp8_a16_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
@@ -138,6 +139,12 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
         super().__init__()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
+        raise ValueError(
+            "Online quantization of a tied lm_head is not supported; remove "
+            "the lm_head from quantization_config.targets."
+        )
 
     def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
         if self.requantization_source is None:
@@ -418,10 +425,32 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
     Per-output-channel weight scale + dynamic per-token activation scale. The
     layout matches the llmcompressor's FP8_DYNAMIC recipe, so accuracy
     is comparable but no pre-quantized checkpoint is required.
+
+    `activation: null` requests weight-only (W8A16) instead: the weights are
+    the same and the activations keep the model dtype.
     """
 
     weight_quant_key = kFp8StaticChannelSym
-    activation_quant_key = kFp8DynamicTokenSym
+    activation_quant_key: QuantKey | None = kFp8DynamicTokenSym
+    accepts_activation_override = True
+
+    def __init__(self, activation_quant_key: QuantKey | None = kFp8DynamicTokenSym):
+        super().__init__()
+        self.activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=True
+        )
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        key = super().resolve_activation_quant_key(activation_quant_key, explicit)
+        if key not in (None, kFp8DynamicTokenSym):
+            raise NotImplementedError(
+                f"activation override for online {cls.__name__} supports only "
+                f"{kFp8DynamicTokenSym} or null, got {key}"
+            )
+        return key
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
@@ -449,26 +478,38 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             **extra_weight_attrs,
         )
 
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=self.activation_quant_key,
-            weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
-        )
-        # PTPC requires per-token activation FP8; Marlin and Humming FP8 are
-        # W8A16 and would silently produce a weight-only fp8 model.
-        if isinstance(
-            self.fp8_linear,
-            (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
-        ):
-            raise ValueError(
-                "FP8 PTPC online quant requires a kernel that honors "
-                "per-token activation quantization; "
-                f"{type(self.fp8_linear).__name__} is W8A16 weight-only. "
-                "Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
-                "for rowwise scaled_mm."
+        if self.activation_quant_key is not None:
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
+            )
+            # PTPC requires per-token activation FP8; Marlin and Humming FP8
+            # are W8A16 and would silently produce a weight-only fp8 model.
+            if isinstance(
+                self.fp8_linear,
+                (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
+            ):
+                raise ValueError(
+                    "FP8 PTPC online quant requires a kernel that honors "
+                    "per-token activation quantization; "
+                    f"{type(self.fp8_linear).__name__} is W8A16 weight-only. "
+                    "Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
+                    "for rowwise scaled_mm."
+                )
+        else:
+            # Weight-only (`activation: null`): the kernel table only holds
+            # W8A16 kernels, so the activation key is a placeholder.
+            self.fp8_linear = init_wfp8_a16_linear_kernel(
+                weight_quant_key=self.weight_quant_key,
+                activation_quant_key=kFp8DynamicTensorSym,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:

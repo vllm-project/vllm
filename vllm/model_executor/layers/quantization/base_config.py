@@ -334,8 +334,8 @@ def resolve_quant_method(
     )
 
     online_config = quant_config.online_quantization_config
-    # Online quantization supports LinearBase, RoutedExperts and (through
-    # `quantization_config.lm_head`) ParallelLMHead. Input embeddings retain
+    # Online quantization supports LinearBase, RoutedExperts, and a
+    # ParallelLMHead selected by quantization_config.targets. Embeddings keep
     # their checkpoint quantization method.
     is_online_supported_layer = isinstance(
         layer, (LinearBase, RoutedExperts, ParallelLMHead)
@@ -368,7 +368,6 @@ def resolve_quant_method(
         # No online configuration: retain the checkpoint method.
         return base_quant_method
     if not is_online_supported_layer:
-        # Online quantization only supports linear and routed MoE layers.
         return base_quant_method
 
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
@@ -379,6 +378,21 @@ def resolve_quant_method(
             UnquantizedEmbeddingMethod,
         ),
     )
+
+    if isinstance(layer, ParallelLMHead) and online_target is not None:
+        unquantized = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        if base_quant_method is not None and not isinstance(
+            base_quant_method, unquantized
+        ):
+            # TODO: online re-quantization of a checkpoint-quantized lm_head,
+            # like the linear layers in #59062.
+            raise NotImplementedError(
+                f"{prefix} is already quantized in the checkpoint "
+                f"({type(base_quant_method).__name__}); online re-quantization "
+                "of the lm_head is not supported, remove it from "
+                "quantization_config.targets."
+            )
+        return online_config.get_quant_method(layer, prefix)
 
     if checkpoint_is_quantized:
         if online_target is None:

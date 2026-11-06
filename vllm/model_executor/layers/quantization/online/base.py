@@ -442,6 +442,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         matches = _find_matching_targets(
             prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
         )
+        if issubclass(layer_cls, ParallelLMHead):
+            # Broad patterns keep meaning linear and MoE layers: a target
+            # selects the lm_head only by naming it.
+            head_name = prefix.rsplit(".", 1)[-1]
+            matches = [pattern for pattern in matches if head_name in pattern]
         if ignored and matches:
             raise ValueError(
                 f"Layer {prefix} matches both quantization_config.ignore "
@@ -462,12 +467,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
             shorthand = _ONLINE_SHORTHANDS[target]
             quant_key_str = target
             quant_spec = (
-                shorthand.linear if issubclass(layer_cls, LinearBase) else shorthand.moe
+                shorthand.linear
+                if issubclass(layer_cls, (LinearBase, ParallelLMHead))
+                else shorthand.moe
             )
         else:
             quant_spec = target
             quant_key_str = str(quant_spec)
-        if issubclass(layer_cls, LinearBase):
+        if issubclass(layer_cls, (LinearBase, ParallelLMHead)):
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
             table = _ONLINE_MOE_METHODS
