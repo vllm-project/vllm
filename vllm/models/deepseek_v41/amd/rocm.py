@@ -12,6 +12,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    kv_connector_may_load_foreign_kv,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -81,24 +84,6 @@ def _trust_dsv4_extra_cache_nan_free(
         and not has_foreign_kv_writer
         and has_extra_cache
     )
-
-
-def _has_foreign_kv_writer(vllm_config: VllmConfig) -> bool:
-    """Whether a KV connector may load bytes the canonical writer did not.
-
-    The NaN-free and aiter sparse MLA paths below rely on that; connectors
-    that only restore whole blocks written by this cache layout (e.g. UMBP)
-    keep them on ROCm.
-    """
-    kv_transfer_config = vllm_config.kv_transfer_config
-    if kv_transfer_config is None:
-        return False
-    from vllm.distributed.kv_transfer.kv_connector.factory import (
-        KVConnectorFactory,
-    )
-
-    connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-    return not connector_cls.only_restores_canonical_kv(kv_transfer_config)
 
 
 def _aiter_sparse_mla_enabled(has_foreign_kv_writer: bool) -> bool:
@@ -389,7 +374,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             device=self.device,
         )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            _has_foreign_kv_writer(self.vllm_config)
+            kv_connector_may_load_foreign_kv(self.vllm_config)
         )
 
     def build(
@@ -585,7 +570,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # so retain the ordinary MXFP8 linear kernel for post-load processing
         # instead of asking for the CUDA-only BMM kernel.
         self.wo_a.is_bmm = False
-        self._has_foreign_kv_writer = _has_foreign_kv_writer(vllm_config)
+        # Connectors that restore only whole canonical blocks (e.g. UMBP) keep
+        # the NaN-free and aiter sparse MLA fast paths on ROCm.
+        self._has_foreign_kv_writer = kv_connector_may_load_foreign_kv(vllm_config)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
