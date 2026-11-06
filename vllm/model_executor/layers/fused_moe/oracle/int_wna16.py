@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -102,10 +106,10 @@ def backend_to_kernel_cls(
         return [CPUExpertsInt4]
     elif backend == WNA16MoEBackend.ZEN_CPU:
         from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-            ZentorchExpertsInt4,
+            ZentorchExpertsWNA16,
         )
 
-        return [ZentorchExpertsInt4]
+        return [ZentorchExpertsWNA16]
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
             Int4EmulationTritonExperts,
@@ -142,6 +146,26 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     return prioritize_humming(backends)
 
 
+# int4 runs as DA8W4 and int8 as DA8W8. The op infers which from the pack factor
+# K // weight.size(-1), so the decode below has to land on the exact layout.
+_ZEN_CPU_NUM_BITS = (4, 8)
+
+
+def _zen_cpu_num_bits(
+    quant_config: QuantizationConfig | QuantizationArgs,
+) -> int | None:
+    """Weight bit width for the Zen CPU path, or None for a checkpoint format
+    it cannot read one from; AWQ and GPTQ call it weight_bits."""
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    if isinstance(quant_config, AutoAWQConfig | AutoGPTQConfig):
+        return quant_config.weight_bits
+    if isinstance(quant_config, QuantizationArgs):
+        return quant_config.num_bits
+    return None
+
+
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
@@ -171,7 +195,7 @@ def _backend_incompatibility_reason(
 
     if backend == WNA16MoEBackend.ZEN_CPU:
         if not envs.VLLM_CPU_INT4_W4A8:
-            return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
+            return "VLLM_CPU_INT4_W4A8=0 disables the dynamic-activation path"
         if may_have_zp:
             return "zero points are not supported"
         if isinstance(quant_config, MoeWNA16Config):
@@ -183,9 +207,14 @@ def _backend_incompatibility_reason(
             and quant_config.actorder == "group"
         ):
             return "group activation ordering is not supported"
+        num_bits = _zen_cpu_num_bits(quant_config)
+        if num_bits is None:
+            return f"cannot read a weight width from {type(quant_config).__name__}"
+        if num_bits not in _ZEN_CPU_NUM_BITS:
+            return f"unsupported weight width W{num_bits}A16"
         group_size = getattr(quant_config, "group_size", None)
         if group_size is None or group_size <= 0:
-            return "DA8W4 requires group-quantized weights"
+            return "the dynamic-quant path requires group-quantized weights"
         # AOCL sym_quant requires the group size to be a multiple of 4.
         if group_size % 4 != 0:
             return f"group size {group_size} is not a multiple of 4"
@@ -252,6 +281,17 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     )
 
 
+class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
+    """WNA16 MoE backend selection for one deployment configuration."""
+
+    name = "WNA16"
+
+    def backend_to_kernel_cls(
+        self, backend: WNA16MoEBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
@@ -276,42 +316,8 @@ def select_wna16_moe_backend(
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
 
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: WNA16MoEBackend):
-        return f"Using '{backend.value}' WNA16 MoE backend."
-
-    def _make_log_unsupported(backend: WNA16MoEBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"WNA16 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"WNA16 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: WNA16MoEBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    # WNA16 MoE always runs BF16 activations.
+    oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -326,10 +332,8 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            raise ValueError(_make_log_unsupported(requested_backend, reason))
-        return _return_or_raise(
-            requested_backend, config, weight_key, None, activation_format
-        )
+            raise ValueError(oracle.make_log_unsupported(requested_backend, reason))
+        return oracle.return_or_raise(requested_backend)
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
@@ -344,18 +348,12 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+            logger.debug_once(oracle.make_log_unsupported(backend, reason))
             continue
-        activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend))
+            return backend, kernel_cls
 
     raise NotImplementedError(
         "No WNA16 MoE backend supports the deployment configuration."
@@ -412,9 +410,6 @@ def make_wna16_moe_kernel(
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
-    )
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
     )
@@ -428,12 +423,12 @@ def make_wna16_moe_kernel(
         XPUExpertsWNA16,
     )
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
-    # ZentorchExpertsInt4, the Humming grouped/indexed experts, and
+    # ZentorchExpertsWNA16, the Humming grouped/indexed experts, and
     # Int4EmulationTritonExperts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
@@ -442,7 +437,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
     )
@@ -450,36 +445,12 @@ def make_wna16_moe_kernel(
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
     assert experts_cls in allowed_experts
 
-    is_monolithic = experts_cls.is_monolithic()
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
-    logger.info_once("Using %s", experts_cls.__name__, scope="local")
-
-    extra_args: dict[str, Any] = {}
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        extra_args["max_num_tokens"] = max_num_tokens
-        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-        **extra_args,
-    )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_log="Using %s",
     )
 
 
@@ -979,8 +950,12 @@ def _process_weights_cpu(
     )
 
 
-def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
-    """Repack CT int4 ``[E, N, K//8]`` into zentorch s4 ``[E, N, K//8]``."""
+def _zen_decode_weight(
+    packed: torch.Tensor, in_features: int, num_bits: int
+) -> torch.Tensor:
+    """Decode a CT ``[E, N, K//pack_factor]`` weight into the layout the op
+    reads: packed s4 ``[E, N, K//8]`` for int4, plain s8 ``[E, N, K]`` for
+    int8. The trailing dim is what makes the op pick DA8W4 over DA8W8."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
     )
@@ -989,11 +964,13 @@ def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
     # packed_dim indexes the 2D expert slice, which is N-first, so K is dim 1.
     unpacked = _import_unpack_from_int32()(
         packed,
-        4,
+        num_bits,
         torch.Size([num_experts, out_features, in_features]),
         packed_dim=1,
     )
     # CT is already N-first, which is what the repack consumes.
+    if num_bits == 8:
+        return unpacked.to(torch.int8).contiguous()
     repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
     return torch.stack([repack_op(w) for w in unpacked])
 
@@ -1005,6 +982,7 @@ def _process_weights_zen_cpu(
     w2_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    num_bits: int = 4,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -1015,15 +993,15 @@ def _process_weights_zen_cpu(
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
-    """Zen CPU INT4 DA8W4 (W4A8) weight post-processing."""
+    """Zen CPU DA8W4 (W4A8) / DA8W8 (W8A8) weight post-processing."""
     # CT WNA16 buffers are N-first, so the scales are [E, N, G].
     hidden_size = w2_scale.shape[1]
     intermediate_size = w13_scale.shape[1] // 2
 
     # The kernel reads per-group scales as [E, G, N], so N-first needs a swap.
     return (
-        _zen_repack_s4(w13.data, hidden_size),
-        _zen_repack_s4(w2.data, intermediate_size),
+        _zen_decode_weight(w13.data, hidden_size, num_bits),
+        _zen_decode_weight(w2.data, intermediate_size, num_bits),
         w13_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         w2_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         None,  # w13_qzeros (symmetric)
@@ -1574,6 +1552,15 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.ZEN_CPU:
+        # Backend selection already rejected widths outside _ZEN_CPU_NUM_BITS.
+        zen_num_bits = _zen_cpu_num_bits(quant_config)
+        assert zen_num_bits is not None
+        # Names the width, since VLLM_CPU_INT4_W4A8 reads as int4-only.
+        logger.info_once(
+            "[zen_cpu] Using zentorch_fused_moe for DA8W%d MoE (W%dA16 checkpoint)",
+            zen_num_bits,
+            zen_num_bits,
+        )
         return _process_weights_zen_cpu(
             w13,
             w2,
@@ -1581,6 +1568,7 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_bias,
             w2_bias,
+            num_bits=zen_num_bits,
         )
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(
