@@ -344,12 +344,16 @@ class FreeKVCacheBlockQueue:
         """Pop the first n free blocks and reduce num_free_blocks by n.
 
         Args:
-            n: The number of blocks to pop.
+            n: The number of blocks to pop. Must be non-negative.
 
         Returns:
             A list of n free blocks.
 
         """
+        # A negative n would grow num_free_blocks instead of shrinking it, while
+        # the loop below pops nothing, leaving the counter above the list length.
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
         if n == 0:
             return []
         assert self.num_free_blocks >= n
