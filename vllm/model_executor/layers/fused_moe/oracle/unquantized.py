@@ -12,14 +12,14 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
@@ -225,54 +225,6 @@ def select_unquantized_moe_backend(
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
-    def _make_log_backend(
-        backend: UnquantizedMoeBackend,
-        available_backends: list[UnquantizedMoeBackend],
-        is_lora: bool = False,
-    ) -> str:
-        available_strs = [b.value for b in available_backends]
-        lora = "" if not is_lora else "LoRA "
-        return (
-            f"Using {backend.value} Unquantized MoE {lora}backend out "
-            f"of potential backends: {available_strs}."
-        )
-
-    def _make_log_unsupported(
-        backend: UnquantizedMoeBackend,
-        reason: str | None,
-        is_lora: bool = False,
-    ) -> str:
-        lora = "" if not is_lora else "LoRA "
-        if reason:
-            return (
-                f"Unquantized MoE {lora}backend {backend.value} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Unquantized MoE {lora}backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: UnquantizedMoeBackend,
-        config: FusedMoEConfig,
-        activation_format: mk.FusedMoEActivationFormat,
-        available_backends: list[UnquantizedMoeBackend],
-        is_lora: bool = False,
-    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        reason = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, None, None, activation_format
-            )
-            if supported:
-                logger.info_once(
-                    _make_log_backend(backend, available_backends, is_lora)
-                )
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason, is_lora))
-
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
@@ -306,10 +258,8 @@ def select_unquantized_moe_backend(
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
 
-        return _return_or_raise(
+        return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
             UnquantizedMoeBackend.TRITON,
-            moe_config,
-            mk.FusedMoEActivationFormat.Standard,
             [UnquantizedMoeBackend.TRITON],
             is_lora=True,
         )
@@ -320,17 +270,12 @@ def select_unquantized_moe_backend(
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = moe_config.activation_format
+    oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
 
     # MoonEP owns the expert layout (expert-grouped [NvS, H] + cu_seqlens),
     # so it is not interchangeable with the token-major experts backends.
     if moe_config.moe_parallel_config.use_moonep_kernels:
-        return _return_or_raise(
-            UnquantizedMoeBackend.MOONEP,
-            moe_config,
-            activation_format,
-            AVAILABLE_BACKENDS,
-        )
+        return oracle.return_or_raise(UnquantizedMoeBackend.MOONEP, AVAILABLE_BACKENDS)
 
     runner_backend = moe_config.moe_backend
     # 'humming' and 'marlin' are quantization-only; an unquantized layer (e.g.
@@ -339,14 +284,12 @@ def select_unquantized_moe_backend(
     if runner_backend not in ["auto", "humming", "marlin"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
-            activation_format.is_batched
+            moe_config.activation_format.is_batched
             and requested_backend == UnquantizedMoeBackend.TRITON
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
 
-        return _return_or_raise(
-            requested_backend, moe_config, activation_format, AVAILABLE_BACKENDS
-        )
+        return oracle.return_or_raise(requested_backend, AVAILABLE_BACKENDS)
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -360,14 +303,10 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            reason = None
-            for k_cls in backend_to_kernel_cls(backend):
-                supported, reason = k_cls.is_supported_config(
-                    k_cls, moe_config, None, None, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend, AVAILABLE_BACKENDS))
-                    return backend, k_cls
+            kernel_cls, rejected = oracle.try_backend(backend)
+            if kernel_cls is not None:
+                logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+                return backend, kernel_cls
             # AITER was explicitly requested but does not support this
             # deployment configuration (e.g. a non-gated MoE activation,
             # which AiterExperts._supports_no_act_and_mul() rejects
@@ -378,7 +317,9 @@ def select_unquantized_moe_backend(
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s "
                 "Falling back to try the remaining available MoE backends: %s.",
-                _make_log_unsupported(backend, reason),
+                oracle.make_log_unsupported(
+                    backend, rejected[-1][1] if rejected else None
+                ),
                 ", ".join(
                     b.value
                     for b in AVAILABLE_BACKENDS
@@ -389,15 +330,10 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
 
     for backend in AVAILABLE_BACKENDS:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, moe_config, None, None, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend, AVAILABLE_BACKENDS))
-                return backend, k_cls
-
-            logger.debug_once(_make_log_unsupported(backend, reason))
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            return backend, kernel_cls
 
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."
@@ -547,42 +483,13 @@ def make_unquantized_moe_kernel(
     # Warn against the selected backend, not each probed candidate.
     warn_if_moe_use_td_ineffective(backend.value, is_quantized=False)
 
-    # Create Prepare/Finalize
-    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
+    return make_moe_kernel(
+        quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_log="Using %s MoE backend",
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-    logger.info_once("Using %s MoE backend", experts_cls.__name__)
-
-    # Create Experts
-    if prepare_finalize.activation_format.is_batched:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +507,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     the standalone functions. Follow-up PRs may move logic from the
     module-level functions into these methods.
     """
+
+    name = "Unquantized"
 
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend

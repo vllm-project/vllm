@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.utils import hash_config
 from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -1524,8 +1525,8 @@ class EngineCoreProc(EngineCore):
             }
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+                ready_msg["parallel_config_hash"] = hash_config(
+                    vllm_config.parallel_config
                 )
             if vllm_config.parallel_config.enable_elastic_ep:
                 ready_msg["coord_store_port"] = (
@@ -2057,11 +2058,11 @@ class EngineCoreProc(EngineCore):
             )
 
     def _config_hash(self) -> str | None:
-        """`compute_hash()` of the initialized config, the hash part of a
+        """`hash_config()` of the initialized config, the hash part of a
         frontend's `system_fingerprint`. Like the frontend, never fail startup
         over the fingerprint."""
         try:
-            return self.vllm_config.compute_hash()
+            return hash_config(self.vllm_config)
         except Exception:
             return None
 
