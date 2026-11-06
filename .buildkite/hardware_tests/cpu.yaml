@@ -110,6 +110,22 @@ steps:
       unset VLLM_CPU_CI_ENV
       pytest -x -v -s tests/v1/e2e/test_cpu_spec_decode.py"
 
+# The EP weight filter's loader test builds its EP group on gloo and skips off CPU.
+- label: CPU-EP Weight Filter Tests
+  key: cpu-ep-weight-filter-tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/fused_moe/routed_experts.py
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - tests/model_executor/model_loader/test_ep_weight_filter.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 10m "
+      pytest -x -v -s tests/model_executor/model_loader/test_ep_weight_filter.py"
+
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
 #   depends_on: []
