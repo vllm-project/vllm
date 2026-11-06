@@ -7,6 +7,7 @@ import concurrent.futures
 import fnmatch
 import glob
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
+from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
@@ -204,6 +206,8 @@ def get_quant_config(
     from vllm.config.quantization import (
         _ONLINE_SHORTHANDS,
         QuantizationConfigArgs,
+        QuantSpec,
+        merge_quantization_config,
         resolve_quantization_config,
     )
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -324,6 +328,16 @@ def get_quant_config(
     # is not set yet.
     if quant_cls is OnlineQuantizationConfig and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
+        # Activation-only overrides apply to pre-quantized checkpoints; without
+        # a weight key, standalone online quantization would silently no-op.
+        specs = [(kind, getattr(online_args, kind)) for kind in ("linear", "moe")]
+        specs += [(f"targets[{p}]", t) for p, t in (online_args.targets or {}).items()]
+        for name, spec in specs:
+            if isinstance(spec, QuantSpec) and "weight" not in spec.fields_set:
+                raise ValueError(
+                    f"quantization_config.{name} = {spec} does not set a weight "
+                    "quantization key, which online quantization requires."
+                )
         return OnlineQuantizationConfig(args=online_args)
 
     model_name_or_path = (
@@ -363,8 +377,10 @@ def get_quant_config(
             assert fp8_args is not None
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -375,8 +391,10 @@ def get_quant_config(
     ]
     if len(quant_config_files) == 0:
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
@@ -1273,10 +1291,13 @@ def runai_safetensors_weights_iterator(
             else "cpu"
         )
 
+        # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
+        owned = "owned" in inspect.signature(streamer.stream_files).parameters
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            **({"owned": True} if owned else {}),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1293,7 +1314,7 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+            yield name, tensor if owned else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(
@@ -1506,6 +1527,45 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
+def finalize_model_weights(
+    model: torch.nn.Module, target_device: torch.device | None = None
+) -> None:
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
+
+    Quantization methods and the submodules of quantized layers are skipped:
+    their quant method processes them, in the loader's per-layer pass.
+    """
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.utils import device_loading_context
+
+    seen: set[torch.nn.Module] = set()
+
+    def children_first(module: torch.nn.Module) -> Iterable[torch.nn.Module]:
+        quantized = isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        )
+        # a module shared by several parents runs once, before all of them
+        for child in [] if quantized else module.children():
+            if child not in seen:
+                seen.add(child)
+                yield from children_first(child)
+        yield module
+
+    for module in children_first(model):
+        if isinstance(module, QuantizeMethodBase):
+            continue
+        hook = getattr(module, "process_weights_after_loading", None)
+        if callable(hook):
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:
@@ -1513,14 +1573,14 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
             # reshape to match before copying
-            param.data.copy_(loaded_weight.view(param.shape))
+            copy_weight_(param.data, loaded_weight.view(param.shape))
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
                 f"into parameter ({param.size()})"
             )
 
-            param.data.copy_(loaded_weight)
+            copy_weight_(param.data, loaded_weight)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.

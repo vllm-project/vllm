@@ -394,7 +394,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
         else:
             fake_mode_ctx = contextlib.nullcontext()
 
-        with pregrad_ctx, fake_mode_ctx, set_functorch_config(self.use_aot_compile):
+        with (
+            pregrad_ctx,
+            fake_mode_ctx,
+            set_functorch_config(self.use_aot_compile),
+            set_compile_on_one_rank(),
+        ):
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if not self.use_aot_compile:
@@ -576,6 +581,7 @@ class InductorAdaptor(CompilerInterface):
 
         with ExitStack() as stack:
             stack.enter_context(set_functorch_config(self.use_aot_compile))
+            stack.enter_context(set_compile_on_one_rank())
             # for hijacking the hash of the compiled graph
             stack.enter_context(
                 patch(
@@ -787,6 +793,20 @@ def set_functorch_config(use_aot_compile: bool) -> Generator[None, None, None]:
     else:
         with torch._functorch.config.patch(overrides):
             yield
+
+
+@contextlib.contextmanager
+def set_compile_on_one_rank() -> Generator[None, None, None]:
+    # Resolve the device at run time so the cached code runs on any device
+    # index (--device-ids). Follow VLLM_COMPILE_ON_ONE_RANK, which is part of
+    # the cache key, rather than torch's own setting.
+    from torch.compiler import config as compiler_config
+
+    if not is_torch_equal_or_newer("2.14.0.dev"):
+        yield
+        return
+    with compiler_config.patch(compile_on_one_rank=envs.VLLM_COMPILE_ON_ONE_RANK):
+        yield
 
 
 def trigger_inductor_lazy_init(device: torch.device | None = None) -> None:
