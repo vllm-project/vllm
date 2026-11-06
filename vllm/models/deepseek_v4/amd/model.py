@@ -75,7 +75,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
@@ -168,7 +172,10 @@ class DeepseekV4MLP(nn.Module):
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
         # Skip when the linear kernel already B-preshuffled this weight.
-        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+        if not (
+            getattr(self.gate_up_proj, "aiter_bpreshuffled", False)
+            or is_weights_pre_processed()
+        ):
             replace_parameter(
                 self.gate_up_proj,
                 "weight",
