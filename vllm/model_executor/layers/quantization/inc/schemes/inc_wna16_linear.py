@@ -14,7 +14,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -417,12 +417,12 @@ class INCARKLinearMethod(INCXPULinearBase):
             if self.is_awq_packed:
                 # ARK consumes GPTQ-style packed nibbles; convert AWQ losslessly.
                 qweight_src = self._convert_awq_qweight_to_gptq(qweight_src)
-            ark_linear.qweight.copy_(qweight_src)
+            ark_linear.qweight = qweight_src.contiguous()
             if hasattr(layer, "qzeros") and layer.qzeros is not None:
-                ark_linear.qzeros.copy_(layer.qzeros.detach())
+                ark_linear.qzeros = layer.qzeros.detach()
             else:
                 ark_linear.qzeros = None
-            ark_linear.scales.copy_(layer.scales.detach())
+            ark_linear.scales = layer.scales.detach().to(layer.params_dtype)
             if hasattr(layer, "bias") and layer.bias is not None:
                 ark_linear.bias.copy_(layer.bias.detach())
 
@@ -434,9 +434,10 @@ class INCARKLinearMethod(INCXPULinearBase):
         layer.ark_weight_type = ark_linear.wdt
         layer.ark_scale_type = ark_linear.sdt
 
-        if hasattr(layer, "qzeros"):
-            del layer.qzeros
-        del layer.scales
+        # ARK holds its own qzeros/scales; the loaded params keep their data.
+        if getattr(layer, "qzeros", None) is not None:
+            retire_parameter(layer, "qzeros")
+        retire_parameter(layer, "scales")
 
     def apply_weights(
         self,

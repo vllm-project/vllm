@@ -23,6 +23,7 @@ use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
@@ -50,6 +51,7 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
         object: "list".to_string(),
         data: state
             .served_model_names
+            .names()
             .iter()
             .map(|model| ModelObject {
                 id: model.clone(),
@@ -74,8 +76,7 @@ fn model_resolution(state: &RenderState) -> LoraModelResolution {
 fn response_model(state: &RenderState, requested_model: Option<&str>) -> String {
     requested_model
         .filter(|model| !model.is_empty())
-        .or_else(|| state.served_model_names.first().map(String::as_str))
-        .unwrap_or_default()
+        .unwrap_or(state.served_model_names.primary())
         .to_string()
 }
 
@@ -85,6 +86,7 @@ fn lower_render_request(
     model: String,
     stream: bool,
     stream_options: Option<StreamOptions>,
+    return_token_ids: Option<bool>,
 ) -> Result<GenerateRequest, ApiError> {
     let prepared = state
         .text
@@ -114,7 +116,7 @@ fn lower_render_request(
         kv_transfer_params,
         ec_transfer_params,
         content_parts: None,
-        return_token_ids: None,
+        return_token_ids,
         output_mode: None,
         // Carry what the chat route would pass to the engine, so the engine
         // gates structured outputs the same way on `/inference/v1/generate`.
@@ -160,19 +162,27 @@ async fn render_chat(
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
+    let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
-    let (text_request, _) = state
+    validate_max_output_tokens(
+        "max_completion_tokens",
+        chat_request.sampling_params.max_tokens,
+        state.text.max_model_len(),
+    )?;
+    let text_request = state
         .chat
         .prepare(chat_request, &state.text)
         .await
-        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
+        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
+        .text_request;
     Ok(Json(lower_render_request(
         &state,
         text_request,
         model,
         stream,
         stream_options,
+        return_token_ids,
     )?))
 }
 
@@ -184,6 +194,7 @@ async fn render_completion(
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
+    let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let tokenizer = state.text.tokenizer();
     let text_request = lower_completion_request(
@@ -192,11 +203,17 @@ async fn render_completion(
         request_context,
         tokenizer.as_ref(),
     )?;
+    validate_max_output_tokens(
+        "max_tokens",
+        text_request.sampling_params.max_tokens,
+        state.text.max_model_len(),
+    )?;
     Ok(Json(vec![lower_render_request(
         &state,
         text_request,
         model,
         stream,
         stream_options,
+        return_token_ids,
     )?]))
 }

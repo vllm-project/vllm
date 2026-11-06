@@ -71,7 +71,7 @@ MODELS = [
         id="auto_round:auto_gptq_int2_tp2",
     ),
     pytest.param(
-        "INC4AI/Qwen3-8B-MXFP8-AR",
+        "vllm-project/Qwen3-8B-MXFP8-AR",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda() or current_platform.is_xpu()),
             reason="MXFP8 AutoRound model only supports CUDA/XPU backend for now.",
@@ -79,7 +79,7 @@ MODELS = [
         id="auto_round:llm_compressor_mxfp8",
     ),
     pytest.param(
-        "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
+        "vllm-project/Qwen3-8B-fp-w8g128x128-for-ut",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda()),
             reason="Block-wise AutoRound model only supports CUDA backend for now.",
@@ -132,12 +132,12 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Qwen3-8B-MXFP8-AR": {
+    "vllm-project/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut": {
+    "vllm-project/Qwen3-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
@@ -1053,7 +1053,7 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     method.process_weights_after_loading(layer)
 
     assert layer.weight.data.data_ptr() == packed_data.data_ptr()
-    assert not hasattr(layer, "weight_packed")
+    assert layer.weight_packed is layer.weight
     assert captured["processed_layer"] is layer
 
 
@@ -1076,7 +1076,8 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=lambda layer: captured.update(
                 {"processed_layer": layer}
-            )
+            ),
+            keep_constants=lambda layer: None,
         )
     )
     expected_experts_cls = object()
@@ -1141,8 +1142,8 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
 
     assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
     assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
-    assert not hasattr(layer, "w13_weight_packed")
-    assert not hasattr(layer, "w2_weight_packed")
+    assert layer.w13_weight_packed is layer.w13_weight
+    assert layer.w2_weight_packed is layer.w2_weight
     assert captured["quant_config_kwargs"]["w1_scale"] is layer.w13_weight_scale
     assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
     assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config

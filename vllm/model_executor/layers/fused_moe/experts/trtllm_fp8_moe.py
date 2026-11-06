@@ -66,6 +66,15 @@ class TrtLlmFp8ExpertsBase:
     interfaces.
     """
 
+    kept_constants: tuple[str, ...] = (
+        "_g1_alphas",
+        "_g2_alphas",
+        "_g1_scale_c",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "gemm1_clamp_limit",
+    )
+
     @staticmethod
     def is_supported_config(
         cls: type[mk.FusedMoEExperts],
@@ -417,7 +426,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.SigmoidRenorm,
                 RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
-                RoutingMethodType.Simulated,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
             # NOTE(dbari): as above, potentially allow others here.
@@ -429,7 +437,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.SigmoidRenorm,
                 RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
-                RoutingMethodType.Simulated,
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")

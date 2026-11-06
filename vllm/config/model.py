@@ -89,6 +89,8 @@ ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
     "auto",
     "hf",
+    "glm5_next",
+    "alpamayo2_super",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -175,12 +177,19 @@ class ModelConfig:
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
       if available, otherwise it will use the "hf" tokenizer.
     - "hf" will use the fast tokenizer if available.
+    - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
+      trajectory and special tokens added; selected automatically for
+      `nvidia/Alpamayo2-Super`.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
+      the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
+      and selects this under "auto" for the `glm5_next` model type
+      (GLM-5.3-Flash).
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -203,8 +212,10 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.
     - "float" is shorthand for FP32 precision.
     - "float32" for FP32 precision."""
-    seed: int = 0
+    seed: int = Field(default=0, ge=0, le=2**32 - 1)
     """Random seed for reproducibility.
+
+    The seed must be in the range [0, 2**32 - 1].
 
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
@@ -384,6 +395,10 @@ class ModelConfig:
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
     (the default) sleep still releases weights/KV-cache memory as before."""
+    checkpoint_prepare_on_startup: bool = False
+    """Prepare each engine for a process checkpoint once it starts, as
+    `/checkpoint/prepare` does. It serves only after `/checkpoint/restore`.
+    Requires sleep mode."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -496,6 +511,7 @@ class ModelConfig:
             "interleave_mm_strings",
             "skip_mm_profiling",
             "mm_ipc_gpu_memory_gb",
+            "checkpoint_prepare_on_startup",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -511,6 +527,13 @@ class ModelConfig:
             factors["video_pruning"] = (
                 self.multimodal_config.is_multimodal_pruning_enabled()
             )
+            # Adding modality into the hashing method to take multimodal
+            # cache into consideration.
+            factors["mm_limit_per_prompt"] = {
+                modality: (opts if isinstance(opts, int) else opts.count)
+                for modality, opts in self.multimodal_config.limit_per_prompt.items()
+            }
+            factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return hash_factors(factors)
 
     def _update_nested(
@@ -652,6 +675,8 @@ class ModelConfig:
                 self.hf_token,
             )
 
+        if self.checkpoint_prepare_on_startup and not self.enable_sleep_mode:
+            raise ValueError("checkpoint_prepare_on_startup requires enable_sleep_mode")
         if self.enable_sleep_mode:
             if not current_platform.is_sleep_mode_available():
                 raise ValueError("Sleep mode is not supported on current platform.")
@@ -736,6 +761,8 @@ class ModelConfig:
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
                 self.tokenizer_mode = "terratorch"
+            elif arch == "Alpamayo2Super":
+                self.tokenizer_mode = "alpamayo2_super"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "KimiK3ForConditionalGeneration":
@@ -1875,6 +1902,7 @@ class ModelConfig:
             "top_p",
             "min_p",
             "max_new_tokens",
+            "skip_special_tokens",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
@@ -2045,6 +2073,18 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
+
+    @property
+    def speculator_config_class(self) -> str | None:
+        """For a speculative decoding draft model, the config class of the
+        speculator it's for, if it declares one (see `SpeculativeDraftModel`)."""
+        return self._model_info.speculator_config_class
+
+    @property
+    def may_use_target_embed(self) -> bool:
+        """For a speculative decoding draft model, whether it may reuse the
+        target's input embedding under pipeline parallelism."""
+        return self._model_info.may_use_target_embed
 
     @property
     def supports_replayssm(self) -> bool:

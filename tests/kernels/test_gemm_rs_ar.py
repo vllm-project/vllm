@@ -165,6 +165,31 @@ def _run_mode(
         torch.accelerator.synchronize(device)
         _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
 
+        if quant_config is not None:
+            # Producers that already emit MXFP8 (e.g. MiniMax-M3's fused dense
+            # GEMM1) hand in a QuantizedActivation, which skips re-quantization.
+            from vllm.model_executor.layers.fusion.quant_activation import (
+                QuantizedActivation,
+            )
+            from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+                mxfp8_e4m3_quantize,
+            )
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                kMxfp8Dynamic,
+            )
+
+            x_q, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
+            x_qa = QuantizedActivation(
+                data=x_q,
+                scale=x_sf,
+                orig_dtype=x.dtype,
+                orig_shape=x.shape,
+                quant_key=kMxfp8Dynamic,
+            )
+            actual = gemm_rs_ar.apply(x_qa, projections[K])
+            torch.accelerator.synchronize(device)
+            _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
+
     if all_reduce:
         # AR outputs must remain valid after the symmetric workspace is reused.
         lifetime_M, lifetime_K = 257, 768

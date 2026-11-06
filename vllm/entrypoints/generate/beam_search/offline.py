@@ -136,7 +136,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             self.llm_engine.input_processor.generation_config_fields,
             tokenizer.eos_token_id,
         )
-        sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
+        sort_beams_key = create_sort_beams_key_function(length_penalty)
         instances: list[BeamSearchInstance] = []
 
         for lora_req, prompt, prompt_priority in zip(
@@ -374,7 +374,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 key=sort_beams_key,
                 reverse=True,
             )
-            instance.beams = sorted_beams[:beam_width]
+            instance.beams = []
+            for beam in sorted_beams[:beam_width]:
+                if len(beam.tokens) >= self.model_config.max_model_len:
+                    beam.finish_reason = "length"
+                    instance.completed.append(beam)
+                else:
+                    instance.beams.append(beam)
 
         return False
 

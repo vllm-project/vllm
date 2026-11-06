@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_engine_core_client::protocol::output::{
@@ -8,7 +9,7 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_metrics::{
-    EngineLabels, Family, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
+    EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
     U64Counter,
 };
 
@@ -41,7 +42,7 @@ pub struct RequestTimestamps {
 #[derive(Clone)]
 pub(crate) struct RequestMetricsTracker {
     /// Cached request metric handles for this request's model and engine index.
-    handles: RequestMetricHandles,
+    handles: Arc<RequestMetricHandles>,
 
     arrival_time: f64,
     prompt_len: u32,
@@ -60,10 +61,11 @@ pub(crate) struct RequestMetricsTracker {
 }
 
 /// Cached request metric handles for one model and engine index.
-#[derive(Clone)]
-struct RequestMetricHandles {
-    labels: EngineLabels,
-
+///
+/// Resolved once per engine when the frontend starts, so every series exists
+/// with zero values before the first request, like the Python frontend's
+/// `PrometheusStatLogger`.
+pub(crate) struct RequestMetricHandles {
     // Request-derived counters.
     prompt_tokens: U64Counter,
     prompt_tokens_local_compute: U64Counter,
@@ -74,7 +76,7 @@ struct RequestMetricHandles {
     corrupted_requests: U64Counter,
 
     // Request lifecycle counters and histograms.
-    request_success: Family<FinishedReasonLabels, U64Counter>,
+    request_success: RequestSuccessCounters,
     request_prompt_tokens: HistogramMetric,
     request_generation_tokens: HistogramMetric,
     request_max_num_generation_tokens: HistogramMetric,
@@ -91,10 +93,50 @@ struct RequestMetricHandles {
     events: Option<EventMetricHandles>,
 }
 
+/// `vllm:request_success` counters, one per finish reason.
+struct RequestSuccessCounters {
+    stop: U64Counter,
+    length: U64Counter,
+    abort: U64Counter,
+    error: U64Counter,
+    repetition: U64Counter,
+}
+
+impl RequestSuccessCounters {
+    /// Create the series for every finish reason, like Python's
+    /// `for reason in FinishReason` loop.
+    fn resolve(model_name: &str, engine: u32) -> Self {
+        let counter = |finished_reason| {
+            METRICS.request.request_success.get_or_create_owned(&FinishedReasonLabels {
+                model_name: model_name.to_string(),
+                engine,
+                finished_reason,
+            })
+        };
+        Self {
+            stop: counter(FinishReason::Stop(None).as_str()),
+            length: counter(FinishReason::Length.as_str()),
+            abort: counter(FinishReason::Abort.as_str()),
+            error: counter(FinishReason::Error(None).as_str()),
+            repetition: counter(FinishReason::Repetition(None).as_str()),
+        }
+    }
+
+    /// Counter for a terminal finish reason.
+    fn get(&self, finish_reason: &FinishReason) -> &U64Counter {
+        match finish_reason {
+            FinishReason::Stop(_) => &self.stop,
+            FinishReason::Length => &self.length,
+            FinishReason::Abort => &self.abort,
+            FinishReason::Error(_) => &self.error,
+            FinishReason::Repetition(_) => &self.repetition,
+        }
+    }
+}
+
 /// Cached handles for request metrics derived from engine-core lifecycle
 /// events (`QUEUED`, `SCHEDULED`, `PREEMPTED`), which engines only emit when
 /// they record stats.
-#[derive(Clone)]
 struct EventMetricHandles {
     num_preemptions: U64Counter,
     request_num_preemptions: HistogramMetric,
@@ -105,22 +147,16 @@ struct EventMetricHandles {
 
 impl RequestMetricsTracker {
     /// Create the per-request tracker from the normalized `llm`-layer request
-    /// context.
+    /// context and the cached handles of the engine serving it.
     pub(crate) fn new(
-        model_name: String,
-        engine_index: u32,
+        handles: Arc<RequestMetricHandles>,
         arrival_time: f64,
         prompt_len: u32,
         max_tokens_param: Option<u32>,
         n_param: u32,
-        engine_stats_enabled: bool,
     ) -> Self {
         Self {
-            handles: resolve_request_metric_handles(
-                &model_name,
-                engine_index,
-                engine_stats_enabled,
-            ),
+            handles,
             arrival_time,
             prompt_len,
             max_tokens_param,
@@ -199,7 +235,7 @@ impl RequestMetricsTracker {
             0.0
         };
 
-        self.record_request_success(finish_reason);
+        self.handles.request_success.get(&finish_reason).inc();
         if self.is_corrupted {
             self.handles.corrupted_requests.inc();
         }
@@ -280,22 +316,11 @@ impl RequestMetricsTracker {
             }
         }
     }
-
-    /// Increment the request-success counter for the terminal finish reason.
-    fn record_request_success(&self, finish_reason: FinishReason) {
-        self.handles
-            .request_success
-            .get_or_create(&FinishedReasonLabels {
-                model_name: self.handles.labels.model_name.clone(),
-                engine: self.handles.labels.engine,
-                finished_reason: finish_reason.as_str(),
-            })
-            .inc();
-    }
 }
 
-/// Resolve fixed request metric handles for one model and engine index.
-fn resolve_request_metric_handles(
+/// Resolve fixed request metric handles for one model and engine index,
+/// creating every series they cover.
+pub(crate) fn resolve_request_metric_handles(
     model_name: &str,
     engine: u32,
     engine_stats_enabled: bool,
@@ -324,7 +349,7 @@ fn resolve_request_metric_handles(
         prompt_tokens_cached: metrics.prompt_tokens_cached.get_or_create_owned(&labels),
         generation_tokens: metrics.generation_tokens.get_or_create_owned(&labels),
         corrupted_requests: metrics.corrupted_requests.get_or_create_owned(&labels),
-        request_success: metrics.request_success.clone(),
+        request_success: RequestSuccessCounters::resolve(model_name, engine),
         request_prompt_tokens: metrics.request_prompt_tokens.get_or_create_owned(&labels),
         request_generation_tokens: metrics.request_generation_tokens.get_or_create_owned(&labels),
         request_max_num_generation_tokens: metrics
@@ -363,7 +388,6 @@ fn resolve_request_metric_handles(
                 .request_inference_time_seconds
                 .get_or_create_owned(&labels),
         }),
-        labels,
     }
 }
 
@@ -408,13 +432,17 @@ mod tests {
     use vllm_engine_core_client::protocol::stats::PrefillStats;
     use vllm_metrics::METRICS;
 
-    use super::{RequestMetricsTracker, RequestTimestamps, diff_or_zero};
+    use std::sync::Arc;
+
+    use super::{
+        RequestMetricsTracker, RequestTimestamps, diff_or_zero, resolve_request_metric_handles,
+    };
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
         METRICS.request.set_max_model_len(4096);
-        let mut tracker =
-            RequestMetricsTracker::new("model".to_string(), 2, 100.0, 64, Some(128), 1, true);
+        let handles = Arc::new(resolve_request_metric_handles("model", 2, true));
+        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 64, Some(128), 1);
 
         tracker.observe_output(
             10.0,
@@ -460,7 +488,6 @@ mod tests {
         );
 
         assert!(!tracker.is_prefilling);
-        assert_eq!(tracker.handles.labels.engine, 2);
         assert_eq!(tracker.num_generation_tokens, 3);
         assert_eq!(tracker.queued_ts, 8.0);
         assert_eq!(tracker.scheduled_ts, 9.0);

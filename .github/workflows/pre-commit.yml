@@ -49,14 +49,18 @@ jobs:
     if: github.repository_owner == 'vllm-project' && always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       with:
         python-version: "3.12"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+    # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        extra_args: --all-files --hook-stage manual
+        path: ~/.cache/pre-commit
+        key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
+    - run: >-
+        uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual

@@ -5,6 +5,7 @@
 import pytest
 
 import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -17,8 +18,13 @@ MAMBA2_FLASHINFER_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
+requires_flashinfer = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FlashInfer Mamba SSU is CUDA-only"
+)
 FLASHINFER_MODELS = [
-    pytest.param(MAMBA2_FLASHINFER_MODEL, marks=large_gpu_mark(min_gb=40)),
+    pytest.param(
+        MAMBA2_FLASHINFER_MODEL, marks=[large_gpu_mark(min_gb=40), requires_flashinfer]
+    ),
 ]
 
 PROMPTS = [
@@ -35,11 +41,21 @@ FLASHINFER_PROMPTS = [
 
 @pytest.fixture(autouse=True)
 def _use_v1_model_runner_by_default(monkeypatch):
-    # Triton ReplaySSM is V1-only. FlashInfer V2 tests override this locally.
+    # Tests not parametrized over the model runner use V1; the others
+    # override this locally.
     with monkeypatch.context() as patch:
         patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
         envs.disable_envs_cache()
         yield
+    envs.disable_envs_cache()
+
+
+@pytest.fixture(params=[False, True], ids=["v1", "v2"])
+def v2_runner(request, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(request.param)))
+        envs.disable_envs_cache()
+        yield request.param
     envs.disable_envs_cache()
 
 
@@ -86,8 +102,8 @@ def _check_replayssm_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_parity(vllm_runner, model_name)
+def test_replayssm_decode_matches_baseline(vllm_runner, model_name, v2_runner):
+    _check_replayssm_parity(vllm_runner, model_name, expected_v2=v2_runner)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -174,6 +190,7 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(
 
 @multi_gpu_test(num_gpus=2)
 @large_gpu_mark(min_gb=40)
+@requires_flashinfer
 @pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner):
     common = dict(
@@ -238,7 +255,11 @@ def _prefix_cache_hits(llm) -> int:
 
 
 def _check_replayssm_prefix_caching_parity(
-    vllm_runner, model_name, *, tensor_parallel_size=1
+    vllm_runner,
+    model_name,
+    *,
+    tensor_parallel_size=1,
+    expected_v2: bool | None = None,
 ):
     # align mode materializes the exact SSM state at each block boundary, so
     # ReplaySSM's cached prefixes must match the always-materialized baseline.
@@ -257,6 +278,8 @@ def _check_replayssm_prefix_caching_parity(
     with vllm_runner(
         model_name, use_replayssm=True, replayssm_buffer_len=16, **common
     ) as llm:
+        if expected_v2 is not None:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
         # Prime the cache, then measure, so cache hits are deterministic.
         llm.generate_greedy_logprobs(
             PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
@@ -280,8 +303,10 @@ def _check_replayssm_prefix_caching_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_prefix_caching_parity(vllm_runner, model_name)
+def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name, v2_runner):
+    _check_replayssm_prefix_caching_parity(
+        vllm_runner, model_name, expected_v2=v2_runner
+    )
 
 
 @multi_gpu_test(num_gpus=2)
