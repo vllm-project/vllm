@@ -27,8 +27,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicContentBlock,
     AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+    AnthropicUsage,
 )
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
@@ -404,6 +408,37 @@ class TestToolResultContent:
             "data:image/png;base64,IMG1",
             "https://example.com/img2.jpg",
         ]
+
+    def test_tool_result_with_tool_references(self):
+        """A tool_result with tool_reference items stays one tool message, with
+        the references first, so templates pair one result with one call."""
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "2 tools found"},
+                {"type": "tool_reference", "tool_name": "get_weather"},
+                {"type": "tool_reference", "tool_name": "get_time"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["assistant", "tool", "user"]
+        assert result.messages[1] == {
+            "role": "tool",
+            "tool_call_id": "call_001",
+            "content": [
+                {"type": "tool_reference", "name": "get_weather"},
+                {"type": "tool_reference", "name": "get_time"},
+                {"type": "text", "text": "2 tools found"},
+            ],
+        }
 
     def test_tool_result_none_content(self):
         request = self._make_tool_result_request(None)
@@ -1960,6 +1995,44 @@ class TestClientErrorResponses:
 
 
 # ======================================================================
+# tool definitions
+# ======================================================================
+
+
+class TestToolDefinitions:
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+            {"type": "bash_20250124", "name": "bash"},
+        ],
+    )
+    def test_anthropic_defined_tool_is_rejected_by_type(self, tool):
+        with pytest.raises(ValidationError) as exc_info:
+            _make_request([{"role": "user", "content": "Hi"}], tools=[tool])
+
+        errors = exc_info.value.errors()
+        assert len(errors) == 1
+        assert f"{tool['type']!r} is not supported" in errors[0]["msg"]
+
+    @pytest.mark.parametrize("extra", [{}, {"type": "custom"}])
+    def test_custom_tool_is_accepted(self, extra):
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"name": "get_weather", "input_schema": {}, **extra}],
+        )
+        assert request.tools is not None
+        assert request.tools[0].input_schema == {"type": "object"}
+
+    def test_custom_tool_still_requires_input_schema(self):
+        with pytest.raises(ValidationError, match="input_schema"):
+            _make_request(
+                [{"role": "user", "content": "Hi"}],
+                tools=[{"type": "custom", "name": "get_weather"}],
+            )
+
+
+# ======================================================================
 # thinking configuration pass-through
 # ======================================================================
 
@@ -2068,6 +2141,30 @@ class TestThinkingConfig:
         assert result.reasoning_effort == "low"
         assert result.thinking_token_budget is None
 
+    def test_between_tools_disables_upfront_thinking(self):
+        """`between_tools` disables upfront thinking even with an effort cap."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "low"},
+            thinking={"type": "between_tools"},
+        )
+
+        result = _convert(request, disabled_thinking_effort="none")
+        assert result.reasoning_effort == "none"
+        assert result.thinking_token_budget is None
+        assert result.include_reasoning is True
+
+    def test_between_tools_uses_disabled_effort_fallback(self):
+        """Models that cannot honor `none` use the configured fallback effort."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "between_tools"},
+        )
+
+        result = _convert(request, disabled_thinking_effort="low")
+        assert result.reasoning_effort == "low"
+        assert result.thinking_token_budget is None
+
     def test_disabled_uses_configured_effort(self):
         """Models that always think (GLM-5.3) or reject "none" (Harmony) are
         served with a low effort instead."""
@@ -2114,6 +2211,10 @@ class TestThinkingConfig:
                 {"thinking": {"type": "enabled", "budget_tokens": 2048}},
                 id="enabled",
             ),
+            pytest.param(
+                {"thinking": {"type": "between_tools"}},
+                id="between_tools",
+            ),
         ],
     )
     def test_count_tokens_matches_messages(self, config):
@@ -2130,6 +2231,151 @@ class TestThinkingConfig:
         )
         assert result.reasoning_effort == expected.reasoning_effort
         assert result.thinking_token_budget == expected.thinking_token_budget
+
+    def test_between_tools_tool_round_trip_keeps_history_and_settings(self):
+        """Echoed thinking + tool_use and the tool_result must survive conversion
+        while between_tools disables upfront thinking."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "I should call get_weather.",
+                            "signature": "sig_1",
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "get_weather",
+                            "input": {"city": "Paris"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "18C and cloudy",
+                        }
+                    ],
+                },
+            ],
+            output_config={"effort": "low"},
+            thinking={"type": "between_tools"},
+            tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Get the weather.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+        )
+
+        result = _convert(request)
+
+        assert result.reasoning_effort == "none"
+        assert result.thinking_token_budget is None
+        asst = [m for m in result.messages if m.get("role") == "assistant"]
+        assert len(asst) == 1
+        assert asst[0].get("reasoning") == "I should call get_weather."
+        tool_calls = asst[0].get("tool_calls")
+        assert isinstance(tool_calls, list)
+        assert tool_calls[0]["function"]["name"] == "get_weather"
+        tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+        assert tool_msgs and "18C and cloudy" in tool_msgs[0]["content"]
+
+    def test_between_tools_streaming_matches_non_streaming_settings(self):
+        """Streaming preserves the disabled-thinking mapping."""
+        messages = [{"role": "user", "content": "Hello"}]
+        streaming = _convert(
+            _make_request(
+                messages,
+                output_config={"effort": "high"},
+                thinking={"type": "between_tools"},
+                stream=True,
+            )
+        )
+        non_streaming = _convert(
+            _make_request(
+                messages,
+                output_config={"effort": "high"},
+                thinking={"type": "between_tools"},
+            )
+        )
+
+        assert streaming.stream is True
+        assert streaming.reasoning_effort == non_streaming.reasoning_effort == "none"
+        assert streaming.thinking_token_budget is None
+        assert non_streaming.thinking_token_budget is None
+
+
+class TestBetweenToolsEntryPoint:
+    """``thinking.type=between_tools`` must be accepted by the native Messages
+    routes instead of failing the request model's union with 400."""
+
+    @staticmethod
+    def _response() -> AnthropicMessagesResponse:
+        return AnthropicMessagesResponse(
+            id="msg_between_tools",
+            content=[AnthropicContentBlock(type="text", text="ok")],
+            model="test-model",
+            stop_reason="end_turn",
+            usage=AnthropicUsage(input_tokens=5, output_tokens=1),
+        )
+
+    def test_messages_accepts_between_tools(self):
+        handler = MagicMock(spec=AnthropicServingMessages)
+
+        async def create_messages(request, raw_request):
+            converted = _convert(request)
+            assert converted.reasoning_effort == "none"
+            return self._response()
+
+        handler.create_messages.side_effect = create_messages
+
+        app = TestClientErrorResponses._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "Reply with ok."}],
+                    "output_config": {"effort": "high"},
+                    "thinking": {"type": "between_tools"},
+                },
+            )
+
+        assert response.status_code == HTTPStatus.OK, response.text
+        handler.create_messages.assert_awaited_once()
+        sent = handler.create_messages.await_args.args[0]
+        assert sent.thinking.type == "between_tools"
+
+    def test_count_tokens_accepts_between_tools(self):
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.count_tokens.return_value = AnthropicCountTokensResponse(input_tokens=5)
+
+        app = TestClientErrorResponses._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages/count_tokens",
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "Reply with ok."}],
+                    "thinking": {"type": "between_tools"},
+                },
+            )
+
+        assert response.status_code == HTTPStatus.OK, response.text
+        handler.count_tokens.assert_awaited_once()
 
 
 class TestProbeDisabledThinkingEffort:
@@ -2178,6 +2424,25 @@ class TestProbeDisabledThinkingEffort:
             assert await resolver.resolve_for(request) == expected_effort
             calls.append(renderer.render_chat.await_count)
         assert calls[0] == calls[1] > 0
+
+    @pytest.mark.asyncio
+    async def test_between_tools_uses_disabled_effort_resolution(self):
+        renderer = MagicMock()
+
+        def render(request):
+            if request.reasoning_effort == "none":
+                raise ValueError("unsupported none")
+            return [], [{"prompt_token_ids": [1]}]
+
+        renderer.render_chat = AsyncMock(side_effect=render)
+        resolver = DisabledThinkingEffortResolver(renderer)
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "between_tools"},
+        )
+
+        assert await resolver.resolve_for(request) == "low"
+        renderer.render_chat.assert_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])

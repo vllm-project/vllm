@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.model_executor.utils import move_parameter
+from vllm.model_executor.utils import move_parameter, refill_derived
 
 logger = init_logger(__name__)
 
@@ -207,6 +207,18 @@ def select_nvfp4_moe_backend(
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        is_requantization_source,
+    )
+
+    # TODO: remove and let the oracles have an option to skip init.
+    if is_requantization_source():
+        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
     # the upstream CUTLASS SM121 MMA op guard is resolved; use
@@ -240,12 +252,7 @@ def select_nvfp4_moe_backend(
             b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
         ]
 
-    use_batched = config.moe_parallel_config.use_batched_activation_format
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if use_batched
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(backend: NvFp4MoeBackend):
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
@@ -291,7 +298,7 @@ def select_nvfp4_moe_backend(
             activation_key = None
         # For batched activation format, use batched variant if available.
         if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            activation_format.is_batched
             and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         ):
             requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
@@ -591,6 +598,12 @@ def make_nvfp4_moe_quant_config(
         w13_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w13_scale)
         w2_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w2_scale)
 
+    a1_gscale = 1.0 / a13_scale
+    a2_gscale = 1.0 / a2_scale
+    if layer is not None:
+        a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
+        a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
+
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
@@ -598,8 +611,8 @@ def make_nvfp4_moe_quant_config(
     return nvfp4_moe_quant_config(
         g1_alphas=w13_scale_2,
         g2_alphas=w2_scale_2,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels
@@ -657,7 +670,7 @@ def make_nvfp4_moe_kernel(
         extra_kwargs["per_token_activation"] = True
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(
