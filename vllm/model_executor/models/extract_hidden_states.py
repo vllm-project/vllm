@@ -363,8 +363,8 @@ class ExtractHiddenStatesModel(nn.Module):
             hidden_states: Hidden states from target model
                           shape: [num_tokens, num_hidden_states, hidden_size]
 
-        Returns:
-            Tuple of (dummy_output, dummy_output) - both unused
+        The hidden states are inserted into the cache as a side effect, so the
+        method returns nothing.
 
         """
         # Call dummy attention layer to cache hidden states
