@@ -142,7 +142,7 @@ ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
 
-# Remove NVIDIA-only dependencies and accept the runtime's NumPy version.
+# Remove NVIDIA-only dependencies and align NumPy and OpenTelemetry with the runtime.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
         "${LMCACHE_REPO}" /app/lmcache \
@@ -151,9 +151,15 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
     && test "$(grep -Fxc 'numpy<=2.2.6' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && test "$(grep -Fxc 'opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
         -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e '/^opentelemetry-api /s/<= 1\.40\.0$/<= 1.45.2/' \
+        -e '/^opentelemetry-exporter-prometheus /s/<= 0\.61b0$/<= 0.66b2/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
