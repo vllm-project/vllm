@@ -2205,34 +2205,31 @@ def test_decode_index_score_cutedsl_correctness(
     reason="Sharded index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    "world,decode_query_len,max_decode_query_len,split_k,score_columns",
+    "world,decode_query_len,max_decode_query_len,score_columns",
     [
-        (world, q, max_q, 128, 8192)
+        (world, q, max_q, 8192)
         for world in (2, 4)
         for q, max_q in ((1, 1), (1, 8), (3, 8), (8, 8))
     ]
-    + [(2, q, 8, 1, 8192) for q in (1, 3, 8)]
-    + [(world, 4, 4, 128, cols) for world in (2, 4) for cols in (36, 40)],
+    + [(world, 4, 4, cols) for world in (2, 4) for cols in (36, 40)],
 )
 @pytest.mark.parametrize("candidate_source", ["reference", "native_publish"])
-@pytest.mark.parametrize("pdl_mode", ["off", "wait", "prefetch"])
+@pytest.mark.parametrize("enable_pdl", [False, True])
 def test_sharded_decode_index_score_matches_reference(
     world,
     decode_query_len,
     max_decode_query_len,
-    split_k,
     score_columns,
     candidate_source,
-    pdl_mode,
+    enable_pdl,
 ):
     pytest.importorskip("cutlass")
-    from vllm.third_party.fmha_sm100.api import sparse_topk_select
-
-    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
-        minimax_m3_index_decode_score_sharded_cutedsl,
-        minimax_m3_index_merge_candidates,
-        minimax_m3_index_select_publish_candidates,
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        decode_index_score_sharded,
+        merge_candidates,
+        topk_select_publish,
     )
+    from vllm.third_party.fmha_sm100.api import sparse_topk_select
 
     torch.manual_seed(0)
     heads, head_dim = 4, HEAD_DIM
@@ -2279,35 +2276,35 @@ def test_sharded_decode_index_score_matches_reference(
         all_scores.fill_(-float("inf"))
         for rank in range(world):
             scores.fill_(-float("inf"))
-            minimax_m3_index_decode_score_sharded_cutedsl(
+            decode_index_score_sharded(
                 q,
                 kv[:, rank::world].contiguous(),
                 block_table,
                 seq_lens,
-                rank,
-                decode_query_len,
-                max_decode_query_len,
                 scores,
-                split_k=split_k,
-                use_pdl=pdl_mode != "off",
-                prefetch_history=pdl_mode == "prefetch",
+                rank=rank,
+                world_size=world,
+                page_size=BLOCK_SIZE,
+                decode_query_len=decode_query_len,
+                max_decode_query_len=max_decode_query_len,
+                enable_pdl=enable_pdl,
             )
             torch.maximum(all_scores, scores, out=all_scores)
             if candidate_source == "native_publish":
-                minimax_m3_index_select_publish_candidates(
+                topk_select_publish(
                     scores,
                     valid,
                     bases,
-                    1,
-                    rank,
-                    total_q,
                     errors,
+                    slot=1,
+                    rank=rank,
+                    capacity=total_q,
                     world_size=world,
                     heads_per_rank=heads_per_rank,
-                    init_blocks=1,
-                    local_blocks=1,
+                    force_begin_blocks=1,
+                    force_end_blocks=1,
                     spin_limit=1 << 20,
-                    use_pdl=pdl_mode != "off",
+                    enable_pdl=enable_pdl,
                 )
             else:
                 sparse_topk_select(
@@ -2337,7 +2334,7 @@ def test_sharded_decode_index_score_matches_reference(
                     row[..., 32].fill_(1)
         for owner, r in enumerate(recv):
             head = owner * heads_per_rank
-            minimax_m3_index_merge_candidates(
+            merge_candidates(
                 r[1],
                 valid,
                 actual[:, head : head + heads_per_rank],
@@ -2345,7 +2342,7 @@ def test_sharded_decode_index_score_matches_reference(
                 init_blocks=1,
                 local_blocks=1,
                 spin_limit=1 << 20,
-                use_pdl=pdl_mode != "off",
+                enable_pdl=enable_pdl,
             )
         torch.testing.assert_close(all_scores.transpose(0, 1), expected)
         _assert_sharded_topk(actual, all_scores, valid, 1, 1)
@@ -2362,10 +2359,13 @@ def test_sharded_decode_index_score_matches_reference(
 @pytest.mark.parametrize("world", [2, 4])
 def test_sharded_decode_prefetch_waits_for_current_qk(world):
     """An early-triggered producer may still be writing Q and the tail K page."""
-    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
-        MAX_K_TILES,
-        minimax_m3_index_decode_score_sharded_cutedsl,
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        MAX_BLOCKS as MAX_K_TILES,
     )
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        decode_index_score_sharded,
+    )
+
     from vllm.triton_utils import tl, triton
 
     @triton.jit
@@ -2402,18 +2402,18 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
         delayed_writer[(1,)](
             q, shard[-1], q.numel(), qlen // world * 128, launch_pdl=False
         )
-        minimax_m3_index_decode_score_sharded_cutedsl(
+        decode_index_score_sharded(
             q,
             shard,
             table,
             lengths,
-            0,
-            qlen,
-            8,
             scores,
-            split_k=1,
-            use_pdl=True,
-            prefetch_history=True,
+            rank=0,
+            world_size=world,
+            page_size=128,
+            decode_query_len=qlen,
+            max_decode_query_len=8,
+            enable_pdl=True,
         )
 
     launch()
@@ -2433,20 +2433,16 @@ def test_sharded_decode_prefetch_waits_for_current_qk(world):
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 1), (3, 4)])
 @pytest.mark.parametrize("tagged", [False, True])
 def test_sharded_select_publish_reuses_slots_with_ties(
-    world, init_blocks, local_blocks, tagged, monkeypatch
+    world, init_blocks, local_blocks, tagged
 ):
-    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
-        MAX_K_TILES,
-        minimax_m3_index_merge_candidates,
-        minimax_m3_index_select_publish_candidates,
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        MAX_BLOCKS as MAX_K_TILES,
+    )
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        merge_candidates,
+        topk_select_publish,
     )
 
-    if tagged and world == 2:
-        # Force persistent tile reuse and a masked final tile on every GPU.
-        monkeypatch.setattr(
-            "vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded.num_compute_units",
-            lambda _: 2,
-        )
     torch.manual_seed(17)
     valid = torch.tensor(
         [0, 1, 15, 16, 17, 33, 1279, 1280, 1535, 1536, 1537, 8192],
@@ -2482,24 +2478,24 @@ def test_sharded_select_publish_reuses_slots_with_ties(
     def launch():
         for slot in range(3):
             for rank in range(world):
-                minimax_m3_index_select_publish_candidates(
+                topk_select_publish(
                     scores[rank],
                     valid,
                     bases,
-                    slot,
-                    rank,
-                    capacity,
                     errors,
+                    slot=slot,
+                    rank=rank,
+                    capacity=capacity,
                     world_size=world,
                     heads_per_rank=hpr,
-                    init_blocks=init_blocks,
-                    local_blocks=local_blocks,
+                    force_begin_blocks=init_blocks,
+                    force_end_blocks=local_blocks,
                     spin_limit=1 << 20,
-                    use_pdl=True,
+                    enable_pdl=True,
                     generations=publish_generations[rank] if tagged else None,
                 )
             for owner, r in enumerate(recv):
-                minimax_m3_index_merge_candidates(
+                merge_candidates(
                     r[slot],
                     valid,
                     output[:, owner * hpr : (owner + 1) * hpr],
@@ -2507,7 +2503,7 @@ def test_sharded_select_publish_reuses_slots_with_ties(
                     init_blocks=init_blocks,
                     local_blocks=local_blocks,
                     spin_limit=1 << 20,
-                    use_pdl=True,
+                    enable_pdl=True,
                     expected_generations=(
                         expected_generations[owner][slot] if tagged else None
                     ),
@@ -2592,8 +2588,8 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     init_blocks, local_blocks, world, prefill
 ):
     pytest.importorskip("cutlass")
-    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
-        minimax_m3_index_merge_candidates,
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        merge_candidates,
     )
 
     valid = [48, 48, 48, 3, 0, 1, 15, 16, 17]
@@ -2634,15 +2630,16 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     if prefill:
         # NCCL completion orders the payload; ready words are not a handshake.
         recv[..., 32] = -7
-    recv = recv.cuda()
+    hpr = 4 // world
+    recv = recv.expand(-1, -1, hpr, -1, -1).contiguous().cuda()
     before = recv.clone()
     output_storage = torch.full(
-        (len(valid) + 2, 1, 16), -9, dtype=torch.int32, device="cuda"
+        (len(valid) + 2, hpr, 16), -9, dtype=torch.int32, device="cuda"
     )
     actual = output_storage[1:-1]
     errors = torch.zeros(1, dtype=torch.int32, device="cuda")
     counts = torch.tensor(valid, dtype=torch.int32, device="cuda")
-    minimax_m3_index_merge_candidates(
+    merge_candidates(
         recv[1],
         counts,
         actual,
@@ -2655,15 +2652,15 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
     nonempty = (counts > 0).cpu()
     _assert_sharded_topk(
         actual[nonempty],
-        scores.max(dim=0).values[nonempty].unsqueeze(1),
+        scores.max(dim=0).values[nonempty, None].expand(-1, hpr, -1),
         counts[nonempty],
         init_blocks,
         local_blocks,
     )
     empty = [0] + [-1] * 15 if prefill else [-1] * 16
-    assert actual[~nonempty, 0].tolist() == [empty]
+    assert actual[~nonempty].tolist() == [[empty] * hpr]
     tie_ids = list(range(1 - init_blocks, 16 - init_blocks)) + [47]
-    assert actual[2, 0].tolist() == tie_ids
+    assert actual[2].tolist() == [tie_ids] * hpr
     assert errors.item() == 0
     assert torch.all(output_storage[[0, -1]] == -9).item()
     if prefill:
@@ -2679,7 +2676,9 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
 )
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 1), (3, 4)])
 def test_prefill_topk_emits_original_score_bits(init_blocks, local_blocks):
-    from vllm.third_party.fmha_sm100.api import sparse_topk_select_prefill
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        topk_select_prefill,
+    )
 
     valid = torch.tensor(
         [0, 1, 15, 16, 17, 33, 48, 3, 16], device="cuda", dtype=torch.int32
@@ -2703,7 +2702,7 @@ def test_prefill_topk_emits_original_score_bits(init_blocks, local_blocks):
     written[1 : 2 * tokens + 1 : 2] = True
 
     def launch():
-        sparse_topk_select_prefill(
+        topk_select_prefill(
             scores,
             valid,
             carrier,

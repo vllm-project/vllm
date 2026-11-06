@@ -25,9 +25,9 @@ requires_sm100 = pytest.mark.skipif(
 
 
 def _make_case(query_lens, prefixes, device_plan=False):
-    from vllm.third_party.fmha_sm100.api import (
-        fmha_index_score_sharded_plan,
-        fmha_index_score_sharded_plan_device,
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        index_score_sharded_plan,
+        index_score_sharded_plan_device,
     )
 
     from vllm.models.minimax_m3.nvidia.ops.index_prefill import prepare_prefill_window
@@ -48,7 +48,7 @@ def _make_case(query_lens, prefixes, device_plan=False):
     cache = torch.randint(-2, 3, (blocks, 128, 128), device="cuda").to(
         torch.float8_e4m3fn
     )
-    plan = fmha_index_score_sharded_plan(
+    plan = index_score_sharded_plan(
         torch.tensor(query_lens, dtype=torch.int32),
         torch.tensor(lengths, dtype=torch.int32),
         heads,
@@ -64,7 +64,7 @@ def _make_case(query_lens, prefixes, device_plan=False):
         seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
         metadata = torch.empty((5, len(lengths) + 1), device="cuda", dtype=torch.int32)
         prepare_prefill_window(cu_q, seq_lens, 0, total_q, metadata)
-        plan = fmha_index_score_sharded_plan_device(
+        plan = index_score_sharded_plan_device(
             metadata[1, :-1],
             metadata[2, :-1],
             metadata[0],
@@ -118,7 +118,9 @@ def _reference(query, cache, table, rank, query_lens, prefixes, like, tp=2):
 @pytest.mark.parametrize("tp", [2, 4])
 @torch.inference_mode()
 def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
-    from vllm.third_party.fmha_sm100.api import fmha_index_score_sharded
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        index_score_sharded,
+    )
 
     lengths, table, query, cache, plan, scores, _ = _make_case(
         query_lens, prefixes, device_plan
@@ -135,7 +137,7 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
             cache[page, tail:, 0] = -256 if iteration == 0 else 256
         for rank in range(tp):
             scores.fill_(float("nan"))
-            fmha_index_score_sharded(
+            index_score_sharded(
                 query,
                 cache[:, rank::tp].contiguous(),
                 table,
@@ -158,9 +160,9 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
 def test_fmha_prefill_shard_scores_uninitialized(query_lens, prefixes, poison):
     """Without the -inf fill, every query's causal page prefix is still written,
     so the prefill top-k is unchanged even over a poisoned score buffer."""
-    from vllm.third_party.fmha_sm100.api import (
-        fmha_index_score_sharded,
-        sparse_topk_select_prefill,
+    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
+        index_score_sharded,
+        topk_select_prefill,
     )
 
     _, table, query, cache, plan, scores, positions = _make_case(query_lens, prefixes)
@@ -169,16 +171,16 @@ def test_fmha_prefill_shard_scores_uninitialized(query_lens, prefixes, poison):
     total_q = query.shape[0]
     for rank in range(2):
         shard = cache[:, rank::2].contiguous()
-        fmha_index_score_sharded(
+        index_score_sharded(
             query, shard, table, plan, rank=rank, max_score=scores, sm_scale=1.0
         )
         expected = torch.empty((heads, total_q, 33), dtype=torch.int32, device="cuda")
-        sparse_topk_select_prefill(
+        topk_select_prefill(
             scores, valid_pages, expected, force_begin_blocks=1, force_end_blocks=2
         )
 
         scores.fill_(poison)
-        fmha_index_score_sharded(
+        index_score_sharded(
             query,
             shard,
             table,
@@ -197,7 +199,7 @@ def test_fmha_prefill_shard_scores_uninitialized(query_lens, prefixes, poison):
             scores[in_prefix], reference[in_prefix], rtol=0, atol=0
         )
         actual = torch.empty_like(expected)
-        sparse_topk_select_prefill(
+        topk_select_prefill(
             scores, valid_pages, actual, force_begin_blocks=1, force_end_blocks=2
         )
         torch.testing.assert_close(

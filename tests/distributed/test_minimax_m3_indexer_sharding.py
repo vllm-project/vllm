@@ -28,8 +28,7 @@ from vllm.platforms import current_platform
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
 
-PREFILL_CHUNK_SIZE = 1024
-PREFILL_SCORE_BYTES = 32 << 20
+PREFILL_CHUNK_SIZE = 8192
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -39,20 +38,21 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
 
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        m.setattr(msa, "PREFILL_FMHA_CHUNK_SIZE", PREFILL_CHUNK_SIZE)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         config = create_vllm_config(
             model_name="Qwen/Qwen3-0.6B",
             tensor_parallel_size=tp_size,
             block_size=128,
-            max_model_len=4096,
+            max_model_len=16384,
             max_num_seqs=4,
-            max_num_batched_tokens=1536,
+            max_num_batched_tokens=8400,
             hf_config_override={
                 "sparse_attention_config": {
                     "sparse_num_index_heads": 4,
                     "sparse_index_dim": 128,
+                    "sparse_init_block": 1,
+                    "sparse_local_block": 1,
                 }
             },
         )
@@ -71,7 +71,7 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             assert msa.resolve_index_k_shard(config, 4, "fp8", 16) == tp_size
             comm = msa.get_comm()
             assert comm is not None
-            assert comm.scores.shape == (comm.max_decode_tokens, 4, 32)
+            assert comm.scores.shape == (comm.max_decode_tokens, 4, 128)
             _check_indexer_forwards(config, device, rank, comm)
             _check_sharding_policy(config, comm)
         get_tp_group().barrier()
@@ -219,7 +219,7 @@ def _check_indexer_forwards(config, device, rank, comm):
                     indexer_kv_dtype="fp8",
                     index_k_shard=world if sharded else 1,
                     topk_indices_buffer=torch.empty(
-                        (1536, local_heads, 16), dtype=torch.int32, device=device
+                        (8400, local_heads, 16), dtype=torch.int32, device=device
                     ),
                 )
                 for layer in range(5)
@@ -246,7 +246,7 @@ def _check_indexer_forwards(config, device, rank, comm):
     assert all(builder.unified_scores_buffer is None for builder in builders[2:])
     prefill_storage = [
         (
-            builder.prefill_scores_buffer.data_ptr(),
+            builder.prefill_candidate_pool.data_ptr(),
             builder.prefill_candidates_buffer.data_ptr(),
         )
         for builder in builders[2:]
@@ -327,8 +327,8 @@ def _check_indexer_forwards(config, device, rank, comm):
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
         BatchSpec(seq_lens=[128, 2306], query_lens=[4, 4]),
         BatchSpec(seq_lens=[128, 2307], query_lens=[8, 8]),
-        BatchSpec(seq_lens=[2305, 2561, 2691, 2720], query_lens=[1, 1, 1027, 127]),
-        BatchSpec(seq_lens=[2308, 2564, 2691, 2720], query_lens=[4, 4, 1027, 127]),
+        BatchSpec(seq_lens=[2305, 2561, 10371, 2720], query_lens=[1, 1, 8193, 127]),
+        BatchSpec(seq_lens=[2308, 2564, 10371, 2720], query_lens=[4, 4, 8193, 127]),
         BatchSpec(seq_lens=[2305, 2562, 2691, 2720], query_lens=[1, 2, 3, 4]),
         BatchSpec(seq_lens=[2691], query_lens=[1027]),
         BatchSpec(seq_lens=[129, 2305], query_lens=[1, 1]),
@@ -386,12 +386,12 @@ def _check_indexer_forwards(config, device, rank, comm):
             if md.prefill_msa is not None:
                 prefill = md.prefill_msa
                 assert (
-                    prefill.local_scores.untyped_storage().data_ptr(),
+                    prefill.candidate_pool.untyped_storage().data_ptr(),
                     prefill.candidate_buffers.untyped_storage().data_ptr(),
                 ) == storage
                 assert all(arm.is_contiguous() for arm in prefill.candidate_buffers)
         expected_decode = {
-            (4, 4, 1027, 127): (2, 8),
+            (4, 4, 8193, 127): (2, 8),
             (1, 2, 3, 4): (1, 1),
         }.get(tuple(batch.query_lens))
         if expected_decode is not None:
@@ -427,9 +427,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             for local_metadata in metadata[2:]:
                 metadata[1] = local_metadata
                 prefill = local_metadata.prefill_msa
-                scratch = prefill.local_scores
-                assert scratch.shape[0] <= PREFILL_CHUNK_SIZE
-                assert scratch.numel() * scratch.element_size() <= PREFILL_SCORE_BYTES
+                assert prefill.candidate_pool.dtype == torch.uint8
                 chunks = prefill.local_chunks
                 assert chunks[0].start == 0
                 assert chunks[-1].end == prefill.candidate_buffers.shape[2]
@@ -450,6 +448,17 @@ def _check_indexer_forwards(config, device, rank, comm):
                     3 * active_layers
                 )
                 check(metadata, queries, num_tokens)
+                if active_layers == 1:
+                    builder = builders[3 if prefill.unified else 2]
+                    graphs = builder.prefill_graphs
+                    before = graphs.stats["replayed_layers"]
+                    for _ in range(3):
+                        for query in queries:
+                            query.copy_((-query.float()).to(query.dtype))
+                        metadata[1] = builder.build(0, common)
+                        run(True, metadata, queries)
+                        check(metadata, queries, num_tokens)
+                    assert graphs.stats["replayed_layers"] > before
             pages = torch.tensor([num_pages - 1, 0, 7, 0], device=device)
             gathered = [
                 msa.gather_prefill_pages(impl.index_cache.kv_cache, pages, comm)

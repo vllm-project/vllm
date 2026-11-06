@@ -530,6 +530,11 @@ Set `indexer_prefill_cp` to `gather` for the comparison path on the same cache l
 The experimental `local_score_unified` mode also includes decode queries in the
 local-score exchange during mixed batches; pure decode keeps its existing path.
 All modes preserve logical 128-token block IDs and main attention.
-Local prefill scores bounded query chunks and accumulates candidates
-in reusable buffers for one NCCL exchange per layer.
+P128 CP uses FlashInfer's CAKE MSA ICP kernels for prefill and decode;
+it does not require a custom MSA build. Install a FlashInfer build containing
+[the fused prefill APIs](https://github.com/flashinfer-ai/flashinfer/pull/8502).
+If those APIs are unavailable, index K stays replicated with a warning.
+Local prefill fuses scoring and Top16, reuses a bounded candidate workspace,
+and exchanges once per layer. Per-layer CUDA graphs reduce launch overhead;
+short windows use CAKE's materialized fallback.
 There is no automatic path selection; compare full-model performance for your workload.
