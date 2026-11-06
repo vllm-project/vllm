@@ -89,6 +89,12 @@ class FusedMoERouter(ABC):
             topk_indices_dtype=topk_indices_dtype,
             input_ids=input_ids,
         )
+        # MoE kernels read routing tensors as dense buffers and ignore strides
+        if not (topk_weights.is_contiguous() and topk_ids.is_contiguous()):
+            raise ValueError(
+                f"{type(self).__name__} returned non-contiguous topk_weights "
+                "or topk_ids"
+            )
 
         # Write routing data for non-monolithic path (Triton, etc.)
         # (set by bind_routing_capture_to_model during capturer init)

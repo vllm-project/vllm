@@ -7,13 +7,27 @@ Note: these tests will only pass on B200
 
 import os
 from typing import List
+from unittest.mock import Mock
 
 import pytest
 from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
+from vllm.model_executor.kernels.linear import HummingHadamardNvFp4LinearKernel
 
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsW4A4Fp4,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
+    CompressedTensorsLinearTransformMethod,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes import (  # noqa: E501
+    linear_humming_nvfp4,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_humming_nvfp4 import (  # noqa: E501
+    HummingNvFP4HadamardLinearMethod,
+)
 from vllm.platforms import current_platform
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
@@ -153,3 +167,71 @@ def test_nvfp4_moe(vllm_runner, model, backend):
         hf_overrides={"num_hidden_layers": 2},
     ) as llm:
         _ = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="FP4 activations with a Hadamard input transform need SM100+.",
+)
+def test_quip_nvfp4_runs_checkpoint_activation_through_humming(
+    vllm_runner, monkeypatch
+):
+    """A checkpoint declaring FP4 activations keeps them, compiled, end to end.
+
+    The Hadamard must also see the raw activation: a fused producer that hands
+    this layer a pre-quantized input would fail in torch.compile.
+    """
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def check_model(model):
+        down_proj = model.model.layers[0].mlp.down_proj
+        assert isinstance(down_proj.scheme.kernel, HummingHadamardNvFp4LinearKernel)
+        assert down_proj.requires_unquantized_input
+        assert down_proj.weight_schema.hadamard_block_size == 16
+        assert down_proj.scheme.kernel.layer_config.input_quant_mode.should_quantize
+
+    with vllm_runner("nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4") as llm:
+        llm.apply_model(check_model)
+        perplexity = llm.generate_prompt_perplexity(
+            ["Flat is better than nested.\nSparse is better than dense."]
+        )[0]
+    assert perplexity <= 150.0
+
+
+def _transform_tuple(head_dim=16, scheme_type="hadamard"):
+    return Mock(scheme=Mock(head_dim=head_dim, type=scheme_type))
+
+
+@pytest.mark.parametrize(
+    "use_a16,input_tfm,output_tfms,linear_backend,expect_humming",
+    [
+        (False, _transform_tuple(), {}, "auto", True),
+        (False, _transform_tuple(128), {}, "humming", True),
+        (True, _transform_tuple(), {}, "auto", False),
+        (False, _transform_tuple(scheme_type="random-matrix"), {}, "auto", False),
+        (False, _transform_tuple(head_dim=8), {}, "auto", False),
+        (False, _transform_tuple(), {0: _transform_tuple()}, "auto", False),
+        (False, _transform_tuple(), {}, "flashinfer_cutedsl", False),
+    ],
+    ids=["auto", "humming", "a16", "dense", "small", "output", "other_backend"],
+)
+def test_hadamard_fp4_routing(
+    monkeypatch, use_a16, input_tfm, output_tfms, linear_backend, expect_humming
+):
+    """Only the transforms Humming computes natively may skip the checkpoint matrix."""
+    monkeypatch.setattr(
+        HummingHadamardNvFp4LinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    monkeypatch.setattr(
+        linear_humming_nvfp4,
+        "_get_linear_backend",
+        lambda quantization: linear_backend,
+    )
+    scheme = Mock(spec=CompressedTensorsW4A4Fp4, use_a16=use_a16)
+    method = CompressedTensorsLinearTransformMethod.from_schemes(
+        Mock(), scheme, {0: input_tfm}, output_tfms
+    )
+    assert isinstance(method, HummingNvFP4HadamardLinearMethod) is expect_humming

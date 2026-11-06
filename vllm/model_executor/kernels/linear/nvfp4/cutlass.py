@@ -20,12 +20,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
+
+    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
+        super().__init__(config)
+        # The SM120 GEMM can add the bias in its epilogue.
+        self.bias_epilogue = current_platform.is_device_capability_family(120)
 
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic
@@ -60,6 +66,12 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         qa = self.prepare_input(layer, x, padded_n=layer.weight.shape[1] * 2)
 
+        # A padded N leaves the bias shorter than the GEMM output.
+        fuse_bias = (
+            bias is not None
+            and self.bias_epilogue
+            and layer.weight.shape[0] == output_size
+        )
         out = cutlass_scaled_fp4_mm(
             qa.data,
             layer.weight,
@@ -67,10 +79,11 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight_scale,
             layer.alpha,
             qa.orig_dtype,
+            bias=bias if fuse_bias else None,
         )
 
         out = slice_nvfp4_output(out, output_size)
 
-        if bias is not None:
+        if bias is not None and not fuse_bias:
             out = out + bias
         return out.view(*qa.orig_shape[:-1], output_size)

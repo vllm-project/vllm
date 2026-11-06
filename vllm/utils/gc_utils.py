@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import gc
 import json
 import time
 from collections import Counter
+from collections.abc import Iterable
 from contextlib import contextmanager, suppress
-from typing import Any
+from typing import Any, TypeVar
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -129,6 +131,46 @@ def freeze_gc_heap() -> None:
     gc.collect(2)
     # Freeze all GC tracked objects
     gc.freeze()
+
+
+_T = TypeVar("_T")
+
+# PyDLL call: holds the GIL. CPython never re-tracks an untracked list.
+_PyObject_GC_UnTrack = ctypes.pythonapi.PyObject_GC_UnTrack
+_PyObject_GC_UnTrack.argtypes = [ctypes.py_object]
+_PyObject_GC_UnTrack.restype = None
+
+
+def gc_untrack(obj: _T) -> _T:
+    """Hide a container from the cyclic GC, so that collections skip its
+    elements. Reference counting still frees it.
+
+    Only for containers that can never be part of a reference cycle (e.g. a
+    list of atomic values, or of objects that never refer back to it): a cycle
+    through an untracked container is never collected. Dicts re-track
+    themselves when a tracked value is inserted, so this suits lists.
+    A no-op for objects the GC does not track (e.g. arrays, empty tuples).
+    """
+    if gc.is_tracked(obj):
+        _PyObject_GC_UnTrack(obj)
+    return obj
+
+
+def untracked_list() -> list:
+    """An empty list that the cyclic GC never traverses (see `gc_untrack`)."""
+    return gc_untrack([])
+
+
+def untrack_long_lists(lists: Iterable[list | None], min_len: int = 256) -> None:
+    """`gc_untrack` the lists with at least `min_len` elements, skipping None.
+
+    For short-lived lists, which a young GC pass would scan at most once or
+    twice: untracking costs ~0.2us per call against ~20ns per element scanned,
+    so it only pays off for long ones.
+    """
+    for lst in lists:
+        if lst is not None and len(lst) >= min_len:
+            gc_untrack(lst)
 
 
 def maybe_attach_gc_debug_callback() -> None:
