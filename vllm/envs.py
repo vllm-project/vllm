@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1492,6 +1493,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # Enable parallel decode top-16 selection for the MiniMax-M3.1 NVFP4
+    # indexer on ROCm gfx950 (MI355X). Set to 1 to enable; disabled by default.
+    # Uses runtime shape metadata for mixed batches. FP8 indexers (including
+    # mono decode) bypass this path. Requires an image containing this kernel;
+    # select the recipe's parallel_topk feature or set this variable explicitly.
+    "VLLM_ROCM_PARALLEL_INDEX_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0") == "1"
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(

@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-10-30
+  date_updated: 2026-11-02
   tasks:
     - text
     - multimodal
@@ -122,6 +122,24 @@ features:
         hardware:
           hopper: unsupported
           blackwell: unsupported
+  parallel_topk:
+    label: "Parallel index top-k"
+    description: "AMD MI355X: parallel decode top-16 selection for the NVFP4 indexer. Disabled by default; requires an image containing VLLM_ROCM_PARALLEL_INDEX_TOPK. FP8 indexers, including mono decode, bypass this path. Benchmark/CI jobs must explicitly enable this feature or set the environment variable to 1."
+    strategies: [single_node_tp]
+    modes:
+      nvfp4:
+        variants: [default, mxfp4]
+        args: []
+        env:
+          VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
+        hardware:
+          hopper: unsupported
+          blackwell: unsupported
+          mi300x: unsupported
+          mi325x: unsupported
+      none:
+        variants: [fp8]
+        args: []
   mono_decode:
     label: "Mono decode"
     description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
@@ -163,6 +181,7 @@ opt_in_features:
   - text_only
   - prefill_dbo_sp
   - mono_decode
+  - parallel_topk
 
 variants:
   default:
@@ -1532,6 +1551,15 @@ guide: |
     by context instead of by index head.
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
+
+  ### Parallel index top-k (AMD MI355X)
+
+  `parallel_topk` enables parallel decode top-16 selection for the NVFP4
+  indexer. It is disabled by default. Use a build containing the selector and
+  set `VLLM_ROCM_PARALLEL_INDEX_TOPK=1`, or enable the recipe feature.
+  FP8 indexers, including mono decode, bypass this path. Benchmark and CI
+  lanes must explicitly enable it in an image containing the patch; adding
+  the kernel or running correctness CI alone does not enable it for serving.
 
   ### DBO and SP prefill (TP4, AMD MI355X)
 
