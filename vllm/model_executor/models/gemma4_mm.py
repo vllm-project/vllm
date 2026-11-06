@@ -1331,9 +1331,16 @@ class Gemma4ForConditionalGeneration(
         pixel_values = self.vision_input_norm(
             pixel_values.reshape(-1, num_channels), self.model_dtype
         ).view(pixel_values.shape)
-        return self.vision_tower.patch_embedder(
-            pixel_values, pixel_position_ids, padding_positions
-        ).to(self.model_dtype)
+        # Inline `Gemma4VisionPatchEmbedder.forward` with the pixel values in
+        # the model dtype. Transformers casts them to `input_proj.weight.dtype`,
+        # which is the storage dtype (e.g. FP8) once `input_proj` is quantized.
+        embedder = self.vision_tower.patch_embedder
+        pixel_values = (2 * (pixel_values - 0.5)).to(self.model_dtype)
+        hidden_states = embedder.input_proj(pixel_values)
+        position_embeddings = embedder._position_embeddings(
+            pixel_position_ids, padding_positions
+        )
+        return (hidden_states + position_embeddings).to(self.model_dtype)
 
     # ------------------------------------------------------------------ #
     # Data-parallel ViT execution
@@ -2247,11 +2254,7 @@ class Gemma4ForConditionalGeneration(
             pooled_states = (pooled_states - vt.std_bias) * vt.std_scale
 
         flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
-        gathered_states = flat_pooled[gather_indices]
-
-        # Cast to the projection layer's dtype to resolve mixed-precision crash
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-        gathered_states = gathered_states.to(target_dtype)
+        gathered_states = flat_pooled[gather_indices].to(self.model_dtype)
 
         flat_proj_embs = self.embed_vision(
             inputs_embeds=gathered_states.unsqueeze(0)
