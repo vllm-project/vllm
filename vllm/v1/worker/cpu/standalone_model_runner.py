@@ -639,7 +639,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
             # Streaming input update: request already exists from a prior

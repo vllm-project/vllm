@@ -33,7 +33,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -43,20 +43,6 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-
-def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
-    """Tokens this prefill will compute KV for.
-
-    Resumed-from-preemption requests appear in ``scheduled_new_reqs`` with
-    ``prefill_token_ids`` set to the request's full token list (prompt +
-    previously-generated). For all other cases this falls back to the original
-    prompt.
-    """
-    if request.prefill_token_ids is not None:
-        return request.prefill_token_ids
-    assert request.prompt_token_ids is not None
-    return request.prompt_token_ids
 
 
 def _partial_tail_non_mamba_puts(
@@ -373,7 +359,7 @@ class MooncakeStoreScheduler:
                 request.block_ids[group_id].copy() for group_id in self._store_group_ids
             )
 
-            prefill_tokens = _new_req_prefill_tokens(request)
+            prefill_tokens = request.prefill_token_ids
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,

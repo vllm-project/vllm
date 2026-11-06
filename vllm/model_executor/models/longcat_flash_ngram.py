@@ -301,14 +301,13 @@ class LongcatNgramModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)  # rope positions
         # Fresh request -> no left-context (-1 fill). On resume, seed from the
         # already-processed token tail. Use prefill_token_ids (full processed
-        # sequence incl. generated tokens on v2 resume), like DefaultModelState;
+        # sequence incl. generated tokens on resume), like DefaultModelState;
         # the prompt alone would be too short when resuming after decode.
         ctx = [-1] * self.ctx_len
         ncomp = new_req_data.num_computed_tokens
-        toks_src = new_req_data.prefill_token_ids or new_req_data.prompt_token_ids
-        if ncomp > 0 and toks_src is not None:
+        if ncomp > 0:
             lo = max(0, ncomp - self.ctx_len)
-            toks = self._neg_eos(list(toks_src[lo:ncomp]))
+            toks = self._neg_eos(list(new_req_data.prefill_token_ids[lo:ncomp]))
             ctx[self.ctx_len - len(toks) :] = toks
         self.token_context[req_index] = torch.tensor(
             ctx, dtype=torch.int32, device=self.token_context.device
