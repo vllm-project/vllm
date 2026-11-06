@@ -1215,7 +1215,8 @@ def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
     runner.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(multimodal_config=None)
+        model_config=SimpleNamespace(multimodal_config=None),
+        kernel_config=SimpleNamespace(enable_jit_warmup=False),
     )
     runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
     runner.sampler = Mock(return_value="sampler_output")
@@ -1240,6 +1241,54 @@ def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     assert not all_greedy_metadata.all_random
     assert all_greedy_metadata.temperature is None
     synchronize.assert_called_once_with()
+
+
+def test_dummy_sampler_run_warms_grammar_bitmask(monkeypatch):
+    """The V1 dummy sampler run must warm the xgrammar bitmask kernel
+    when JIT warmup is enabled: structured-output requests otherwise
+    compile it on the first constrained request."""
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        kernel_config=SimpleNamespace(enable_jit_warmup=True),
+    )
+    logits = torch.randn(2, 8)
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=logits))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "processed_logprobs"
+    runner.speculative_config = None
+    runner.num_spec_tokens = 0
+    warmup_calls: list[tuple[torch.Tensor, int]] = []
+
+    def grammar_bitmask_warmup_stub(logits_: torch.Tensor, max_num_rows: int) -> None:
+        warmup_calls.append((logits_, max_num_rows))
+
+    monkeypatch.setattr(
+        gpu_model_runner_module, "grammar_bitmask_warmup", grammar_bitmask_warmup_stub
+    )
+
+    output = GPUModelRunner._dummy_sampler_run(runner, torch.randn(2, 4))
+
+    assert output == "sampler_output"
+    assert warmup_calls == [(logits, 2)]
+
+
+def test_dummy_sampler_run_skips_grammar_bitmask_when_warmup_disabled():
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        kernel_config=SimpleNamespace(enable_jit_warmup=False),
+    )
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(2, 8)))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "processed_logprobs"
+    runner.speculative_config = None
+
+    output = GPUModelRunner._dummy_sampler_run(runner, torch.randn(2, 4))
+
+    assert output == "sampler_output"
 
 
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():

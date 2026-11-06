@@ -89,6 +89,7 @@ from vllm.model_executor.offloader import (
     get_offloader,
     set_offloader,
 )
+from vllm.model_executor.warmup.grammar_bitmask_warmup import grammar_bitmask_warmup
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -6030,6 +6031,8 @@ class GPUModelRunner(
                 ) from e
             else:
                 raise e
+        if self.vllm_config.kernel_config.enable_jit_warmup:
+            grammar_bitmask_warmup(logits, num_reqs * (1 + self.num_spec_tokens))
         if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(

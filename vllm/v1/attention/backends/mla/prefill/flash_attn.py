@@ -3,7 +3,7 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +55,13 @@ FA4_MLA_PREFILL_LONG_K_BLOCKS = 32
 FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS = 64
 FA4_MLA_PREFILL_CAUSAL_OPTIONS = (False, True)
 FA4_MLA_PREFILL_LSE_OPTIONS = (False, True)
+
+
+@dataclass(frozen=True)
+class FA4MLALayerConfig:
+    num_heads: int
+    mla_dims: "MLADims"
+    window_size: tuple[int, int] | None
 
 
 class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
@@ -163,10 +170,13 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         is_sm90: bool,
         qk_head_dim: int,
         effective_v_head_dim: int,
+        causal: bool,
+        window_size: tuple[int, int] | None,
     ) -> bool:
         long_k = FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE
         very_long_k = FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE
-        return (
+        # Sliding-window prefill is always causal.
+        return (window_size is None or causal) and (
             max_seqlen_k < long_k
             or (num_splits != 1 and max_seqlen_k == long_k)
             or (
@@ -177,7 +187,20 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             )
         )
 
-    def get_warmup_keys(self, vllm_config: "VllmConfig") -> list[CompileKey]:
+    def get_warmup_keys(
+        self,
+        vllm_config: "VllmConfig",
+        layer_configs: "Sequence[FA4MLALayerConfig] | None" = None,
+    ) -> list[CompileKey]:
+        """Compile keys for the model's MLA prefill.
+
+        Args:
+            vllm_config: Config of the model being warmed.
+            layer_configs: Distinct per-layer attention configs (e.g. sliding
+                window layers or a drafter with its own head count). Defaults
+                to the target model's full-attention config.
+
+        """
         from vllm.model_executor.layers.attention.mla_attention import (
             get_mla_dims,
         )
@@ -202,15 +225,27 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         if is_sm120 and num_splits != 1:
             return []
 
-        num_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
-        if num_heads <= 0:
-            return []
+        if layer_configs is None:
+            num_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            if num_heads <= 0:
+                return []
+            layer_configs = [FA4MLALayerConfig(num_heads, mla_dims, None)]
 
         requires_v_padding = False
-        effective_v_head_dim = (
-            qk_head_dim if requires_v_padding else mla_dims.v_head_dim
+        layer_rows = zip_inputs(
+            *(
+                dict(
+                    num_heads=config.num_heads,
+                    mla_dims=config.mla_dims,
+                    window_size=config.window_size,
+                    qk_head_dim=config.mla_dims.qk_nope_head_dim
+                    + config.mla_dims.qk_rope_head_dim,
+                    effective_v_head_dim=config.mla_dims.v_head_dim,
+                )
+                for config in layer_configs
+            )
         )
         shape_probes = (
             dict(max_seqlen_q=1, max_seqlen_k=FA4_MLA_PREFILL_K_TILE),
@@ -240,20 +275,29 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
 
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(*shape_probes),
+            layer_rows,
             batch_size=FA4_MLA_PREFILL_COMPILE_BATCH_SIZE,
             dtype=dtype,
-            num_heads=num_heads,
-            mla_dims=mla_dims,
             requires_v_padding=requires_v_padding,
             is_sm90=is_sm90,
-            qk_head_dim=qk_head_dim,
-            effective_v_head_dim=effective_v_head_dim,
             causal=FA4_MLA_PREFILL_CAUSAL_OPTIONS,
             return_lse=FA4_MLA_PREFILL_LSE_OPTIONS,
             num_splits=num_splits,
             fa_version=fa_version,
             _when=self._is_valid_warmup_shape_probe,
         )
+
+    def compile_many(self, compile_keys: Iterable[CompileKey]) -> None:
+        # The compile-only forward entry returns before FA4's transitive
+        # split-KV combine; compile it from the same key set, whether the
+        # keys come from the registry warmup or a per-layer sweep.
+        from vllm.model_executor.warmup.fa4_combine_warmup import (
+            warm_split_kv_combine,
+        )
+
+        keys = list(compile_keys)
+        warm_split_kv_combine(keys)
+        super().compile_many(keys)
 
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
