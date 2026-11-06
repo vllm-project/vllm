@@ -477,6 +477,152 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
     _routing.sort_tokens = _sort_tokens_pow2
 
 
+def _patch_legacy_bitmatrix_strides() -> None:
+    """Backport triton-lang/triton#10875 to the legacy (v3.5.1) triton_kernels.
+
+    v3.5.1's ``_topk_forward`` and ``_sum_bitmatrix_rows`` declare the bitmatrix
+    strides ``tl.constexpr``, and one of them is ``cdiv(n_tokens, 32) * 32``,
+    so batches that run outside the captured CUDA graphs recompile both kernels
+    for every new 32-token bucket. Install copies that take the strides as
+    runtime arguments; the kernel bodies are unchanged.
+    """
+    import triton
+    import triton.language as tl
+
+    try:
+        import triton_kernels.topk as _topk
+        from triton_kernels.reduction_details import reduce_bitmatrix as _rb
+        from triton_kernels.topk_details._topk_forward import streaming_topk
+    except ImportError:
+        return
+
+    vpopc = _rb.vpopc
+
+    @triton.jit
+    def _topk_forward(
+        X,
+        stride_xm,
+        Yv,
+        Yi,
+        stride_ym,
+        USE_PROVIDED_INDX: tl.constexpr,
+        Bits,
+        stride_rm,
+        stride_rn,
+        n_rows,
+        n_expts_tot,
+        S,
+        BLOCK_S: tl.constexpr,
+        s_blocks,
+        APPLY_SOFTMAX: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        N_EXPTS_PAD: tl.constexpr,
+        N_EXPTS_ACT: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        if isinstance(n_rows, tl.tensor) and n_rows.dtype.is_ptr():
+            n_rows = tl.load(n_rows)
+
+        if pid < s_blocks:
+            tl.store(
+                S + BLOCK_S * pid + tl.arange(0, BLOCK_S), tl.zeros([BLOCK_S], tl.int32)
+            )
+
+        if pid * BLOCK_M >= n_rows:
+            return
+
+        tl.static_assert(BLOCK_N % 32 == 0)
+        tl.static_assert(N_EXPTS_PAD % BLOCK_N == 0)
+        x_dtype: tl.constexpr = X.dtype.element_ty
+
+        offs_m = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_y_n = tl.arange(0, N_EXPTS_ACT)
+        mask_m = offs_m[:, None] < n_rows
+        if USE_PROVIDED_INDX:
+            Yi_ptrs = Yi + offs_m[:, None] * stride_ym + offs_y_n[None, :]
+            y_indices = tl.load(Yi_ptrs, mask=mask_m)
+            Xv_ptrs = X + offs_m[:, None] * stride_xm + y_indices
+            y_values = tl.load(Xv_ptrs, mask=mask_m)
+        else:
+            y_values, y_indices = streaming_topk(
+                X,
+                stride_xm,
+                n_expts_tot,
+                offs_m,
+                mask_m,
+                N_EXPTS_PAD,
+                N_EXPTS_ACT,
+                BLOCK_N,
+            )
+
+        if APPLY_SOFTMAX:
+            y_values = tl.softmax(y_values.to(tl.float32), dim=1, keep_dims=True).to(
+                x_dtype
+            )
+
+        Yv_ptrs = Yv + offs_m[:, None] * stride_ym + offs_y_n[None, :]
+        tl.store(Yv_ptrs, y_values, mask=mask_m)
+        if not USE_PROVIDED_INDX:
+            Yi_ptrs = Yi + offs_m[:, None] * stride_ym + offs_y_n[None, :]
+            tl.store(Yi_ptrs, y_indices, mask=mask_m)
+
+        y_div = y_indices // 32
+        y_rem = y_indices % 32
+        loop_iterations = N_EXPTS_PAD // BLOCK_N
+        for i in range(loop_iterations):
+            offs_r_n = tl.arange(0, BLOCK_N // 32) + i * (BLOCK_N // 32)
+            y2 = tl.where(
+                y_div[:, :, None] == offs_r_n[None, None, :],
+                (1 << y_rem)[:, :, None],
+                0,
+            )
+            r = tl.reduce_or(y2, axis=1)
+            BitsPtrs = (
+                Bits + offs_m[:, None] * stride_rm + offs_r_n[None, :] * stride_rn
+            )
+            tl.store(BitsPtrs, r, mask=mask_m)
+
+    @triton.jit
+    def _sum_bitmatrix_rows(
+        B,
+        shape_bm,
+        stride_bm,
+        stride_bn,
+        Ret,
+        Partials,
+        stride_pm: tl.constexpr,
+        stride_pn,
+        shape_pn,
+        BLOCK_MM: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+    ):
+        tl.static_assert(BLOCK_MM % BLOCK_M == 0)
+        TILE_SIZE: tl.constexpr = BLOCK_MM // BLOCK_M
+        if isinstance(shape_bm, tl.tensor) and shape_bm.dtype.is_ptr():
+            shape_bm = tl.load(shape_bm)
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        offs_m = pid_m * BLOCK_MM + tl.arange(0, BLOCK_MM)
+        offs_n = pid_n * 32 + tl.arange(0, 32)
+        n_rows = shape_bm
+        bits = tl.load(
+            B + pid_n * stride_bn + offs_m * stride_bm, mask=offs_m < n_rows, other=0
+        )
+        bits = tl.reshape(bits, [TILE_SIZE, BLOCK_M])
+        ret = vpopc(bits)
+        offs_t = pid_m * TILE_SIZE + tl.arange(0, TILE_SIZE)
+        tl.atomic_add(Ret + offs_n, tl.sum(ret, 0), sem="relaxed")
+        tl.store(
+            Partials + offs_t[:, None] * stride_pm + offs_n[None, :] * stride_pn, ret
+        )
+
+    # `topk_forward` and `sum_bitmatrix_rows` look their kernels up as module
+    # globals at launch time.
+    _topk._topk_forward = _topk_forward
+    _rb._sum_bitmatrix_rows = _sum_bitmatrix_rows
+
+
 triton_kernels_version = get_triton_kernels_version()
 
 if triton_kernels_version is not None:
@@ -531,6 +677,7 @@ if triton_kernels_version is not None:
             _patch_make_bitmatrix_metadata()
         elif triton_kernels_version == "3.5.1":
             _patch_legacy_routing_for_nonpow2_topk()
+            _patch_legacy_bitmatrix_strides()
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "

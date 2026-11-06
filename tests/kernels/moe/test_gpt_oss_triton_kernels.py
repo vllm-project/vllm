@@ -540,3 +540,38 @@ def test_make_routing_data_tk38_matches_reference(n_tokens, n_experts, topk):
     assert torch.equal(routing.gate_scal, weights[order])
     assert routing.n_expts_act == topk
     assert routing.n_valid == flat.numel()
+
+
+def test_legacy_routing_compiles_once_across_batch_sizes():
+    """Batches outside the captured CUDA graphs reach routing with their exact
+    token count; the legacy kernels must not compile once per 32-token bucket."""
+    from triton import knobs
+
+    from vllm.model_executor.layers.fused_moe.experts import (
+        gpt_oss_triton_kernels_moe as gptoss_moe,
+    )
+
+    if gptoss_moe.triton_kernels_version != "3.5.1":
+        pytest.skip("legacy routing path requires triton_kernels v3.5.1")
+
+    from triton_kernels.routing import routing
+
+    compiled = []
+    prev_hook = knobs.runtime.jit_post_compile_hook
+
+    def record(**kwargs):
+        # Patched kernels are reported under their qualified name.
+        compiled.append(getattr(kwargs.get("fn"), "name", "").rsplit(".", 1)[-1])
+        return prev_hook(**kwargs) if prev_hook is not None else None
+
+    torch.manual_seed(0)
+    knobs.runtime.jit_post_compile_hook = record
+    try:
+        for n_tokens in (1025, 1057, 1089, 1121, 1153):
+            logits = torch.randn(n_tokens, 128, dtype=torch.bfloat16, device="cuda")
+            routing(logits, 4)
+    finally:
+        knobs.runtime.jit_post_compile_hook = prev_hook
+
+    assert compiled.count("_topk_forward") <= 1, compiled
+    assert compiled.count("_sum_bitmatrix_rows") <= 1, compiled
