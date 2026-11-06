@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
+from vllm.platforms import current_platform
 
 
 def _attention_class_names(model):
@@ -335,3 +336,13 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
                 atol=0.5,
                 rtol=0,
             )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+@pytest.mark.parametrize("graph_mode", ["eager", "decode"])
+def test_unlimited_ocr2_rocm_aiter_ck(vllm_runner, graph_mode, monkeypatch):
+    """The ROCm DASH path preserves real page content and sampling constraints."""
+    test_unlimited_ocr2_batched_pages(
+        vllm_runner, graph_mode, "ROCM_AITER_FA", False, monkeypatch
+    )

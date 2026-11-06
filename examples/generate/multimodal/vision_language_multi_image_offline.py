@@ -1264,7 +1264,6 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 def load_unlimited_ocr2(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model="baidu/Unlimited-OCR-2",
-        attention_config={"backend": "FLASH_ATTN"},
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
         max_model_len=32768,

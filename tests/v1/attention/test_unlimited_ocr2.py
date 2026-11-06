@@ -10,6 +10,7 @@ from vllm.model_executor.layers.dash_attention import (
     page_coordinates,
     route_blocks,
 )
+from vllm.platforms import current_platform
 
 
 def test_page_coordinates_continue_across_prompt_and_response():
@@ -760,3 +761,88 @@ def test_dash_mixed_forward_does_not_read_cuda_metadata(dist_init):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
         assert metadata.requests == ((0, 0, 1, 3), (1, 1, 6, 5))
         assert builder.build_for_cudagraph_capture(common).requests == ()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kv_heads", [1, 2])
+@pytest.mark.parametrize("bs,local", [(8, 16), (32, 128)])
+def test_rocm_aiter_ck_segments_preserve_gqa_priors_and_masked_padding(
+    dtype, kv_heads, bs, local
+):
+    """DASH merges live segments with their priors, ignoring poisoned padding."""
+    from vllm.v1.attention.ops.dash_attention import flash_dash_attention
+
+    torch.manual_seed(317)
+    n, heads, dim, topk = 3, 4, 128, 2
+    span = topk * bs + local
+    q = torch.randn(n, heads, dim, device="cuda", dtype=dtype) * 0.3
+    k = torch.randn(n, span, kv_heads, dim, device="cuda", dtype=dtype) * 0.3
+    v = torch.randn_like(k)
+    used = torch.tensor(
+        [[bs, 0, local - 3], [1, bs - 1, 0], [0, 0, 0]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    bias = torch.tensor([[0.7, -0.3], [-1.2, 0.4], [0.0, 0.0]], device="cuda")
+    expected = torch.zeros_like(q)
+    for row in range(n):
+        keys, values, priors = [], [], []
+        for segment in range(topk + 1):
+            start = segment * bs
+            count = int(used[row, segment])
+            if count:
+                keys.append(
+                    k[row, start : start + count]
+                    .float()
+                    .repeat_interleave(heads // kv_heads, 1)
+                )
+                values.append(
+                    v[row, start : start + count]
+                    .float()
+                    .repeat_interleave(heads // kv_heads, 1)
+                )
+                prior = bias[row, segment] if segment < topk else 0.0
+                priors.append(torch.ones(count, device="cuda") * prior)
+            end = start + (bs if segment < topk else local)
+            k[row, start + count : end] = float("nan")
+            v[row, start + count : end] = float("nan")
+        if keys:
+            scores = (
+                torch.einsum("hd,shd->hs", q[row].float(), torch.cat(keys)) * dim**-0.5
+            )
+            scores += torch.cat(priors)
+            expected[row] = torch.einsum(
+                "hs,shd->hd", scores.softmax(-1), torch.cat(values)
+            ).to(dtype)
+    actual = flash_dash_attention(
+        q,
+        k.flatten(0, 1),
+        v.flatten(0, 1),
+        used.flatten(),
+        bias,
+        "ROCM_AITER_FA",
+        bs,
+        local,
+    )
+    torch.testing.assert_close(
+        actual, expected, atol=0.002 if dtype == torch.bfloat16 else 0.0003, rtol=0.01
+    )
+    assert torch.isfinite(actual).all()
+    assert torch.count_nonzero(actual[2]) == 0
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+@pytest.mark.parametrize("block_size", [16, 32])
+@pytest.mark.parametrize("rswa", [False, True])
+def test_rocm_aiter_ck_decode_graph_tracks_pages(block_size, rswa):
+    _check_paged_decode_graph(
+        torch.bfloat16, "ROCM_AITER_FA", block_size, rswa, high_cache=False
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+def test_rocm_aiter_ck_chunked_prefill_preserves_pages():
+    test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(
+        "ROCM_AITER_FA"
+    )

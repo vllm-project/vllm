@@ -11,6 +11,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.platforms import current_platform
 from vllm.transformers_utils.processors.deepseek_ocr import calculate_aspect_ratios
 
 
@@ -292,3 +293,21 @@ def test_v2_preprocessed_features_validate_page_layout_at_admission():
                 )
     finally:
         renderer.shutdown()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm AITER CK")
+def test_v2_rocm_defaults_select_ck_and_sdpa():
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    config = EngineArgs(
+        model="baidu/Unlimited-OCR-2", enforce_eager=True
+    ).create_engine_config()
+    assert (
+        config.model_config.hf_text_config.unlimited_ocr2_attention_backend
+        == "ROCM_AITER_FA"
+    )
+    assert config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+    mm_config = config.model_config.multimodal_config
+    assert mm_config is not None
+    assert mm_config.mm_encoder_attn_backend == AttentionBackendEnum.TORCH_SDPA
