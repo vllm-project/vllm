@@ -502,6 +502,9 @@ class NixlBaseConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
+                local_fastpath=bool(
+                    req.kv_transfer_params.get("_nixl_local_fastpath_selected")
+                ),
             )
 
         if self.use_host_buffer:

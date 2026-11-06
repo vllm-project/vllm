@@ -11,6 +11,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
 )
 from vllm.logger import init_logger
 
+from .local_fastpath import get_boot_id
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -30,6 +32,23 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        self.local_fastpath_enabled = transfer.get_from_extra_config(
+            "enable_local_fastpath", False
+        )
+        if self.local_fastpath_enabled and transfer.kv_buffer_device != "cuda":
+            raise ValueError("NIXL local fast path requires kv_buffer_device='cuda'")
+        self.local_boot_id = get_boot_id() if self.local_fastpath_enabled else None
+
+    def _uses_local_fastpath(self, params: dict[str, Any]) -> bool:
+        marker = params.get("nixl_local_fastpath")
+        return bool(
+            self.local_fastpath_enabled
+            and isinstance(marker, dict)
+            and marker.get("version") == 1
+            and marker.get("boot_id") == self.local_boot_id
+        )
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -62,7 +81,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
-                return count, True
+                return count, not self._uses_local_fastpath(params)
 
         if (
             params is not None
@@ -170,13 +189,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
+                    local_fastpath = self._uses_local_fastpath(params)
+                    params["_nixl_local_fastpath_selected"] = local_fastpath
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
                         local_num_computed_blocks,
                         # Parked in WAITING_FOR_REMOTE_KVS only when there is
                         # something to pull; a full local hit stays RUNNING.
-                        num_external_tokens > 0,
+                        num_external_tokens > 0 and not local_fastpath,
                     )
 
                 else:
@@ -278,7 +299,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
             remote_num_tokens = request.num_computed_tokens
 
-        return delay_free_blocks, dict(
+        result: dict[str, Any] = dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
@@ -294,3 +315,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )
+        if is_p_node and self.local_fastpath_enabled:
+            result["nixl_local_fastpath"] = {
+                "version": 1,
+                "boot_id": self.local_boot_id,
+            }
+        return delay_free_blocks, result

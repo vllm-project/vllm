@@ -191,7 +191,9 @@ class Scheduler(SchedulerInterface):
             # Connector can reallocate and fill those blocks via a load that
             # isn't ordered against that write, so defer freeing them.
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
-            if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
+            if kv_transfer_config.is_kv_consumer and (
+                multiple_inflight_batches or self.connector.supports_stream_ordered_load
+            ):
                 self.defer_block_free = True
             # HiSparse keeps reading a released page until the pool reuses it,
             # so a load into a reused page must also wait for in-flight steps.
@@ -1507,7 +1509,12 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
+                    delay_cache_blocks=load_kv_async
+                    or (
+                        num_external_computed_tokens > 0
+                        and self.connector is not None
+                        and self.connector.supports_stream_ordered_load
+                    ),
                     skip_zeroing_group_ids=(
                         self.connector.get_loaded_kv_cache_group_ids(request)
                         if load_kv_async and self.connector is not None

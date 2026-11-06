@@ -363,6 +363,11 @@ class NixlPullConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+        self.supports_stream_ordered_load = (
+            self.kv_transfer_config.get_from_extra_config(
+                "enable_local_fastpath", False
+            )
+        )
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = NixlPullConnectorScheduler(
                 vllm_config, self.engine_id, kv_cache_config
@@ -391,7 +396,19 @@ class NixlPullConnector(NixlBaseConnector):
         assert self.connector_worker is not None
         assert isinstance(self.connector_worker, NixlPullConnectorWorker)
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        if self.connector_worker.local_fastpath_early_started:
+            self.connector_worker.local_fastpath_early_started = False
+            return
         self.connector_worker.start_load_kv(self._connector_metadata)
+        self.connector_worker.wait_for_local_fastpath_load()
+
+    def start_load_kv_early(self) -> None:
+        assert self.connector_worker is not None
+        assert isinstance(self.connector_worker, NixlPullConnectorWorker)
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.start_load_kv(self._connector_metadata)
+        self.connector_worker.wait_for_local_fastpath_load()
+        self.connector_worker.local_fastpath_early_started = True
 
 
 class NixlPushConnector(NixlBaseConnector):

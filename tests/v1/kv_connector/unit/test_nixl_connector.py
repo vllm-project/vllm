@@ -4748,6 +4748,44 @@ def test_scheduler_advertises_transfer_topology(
         scheduler.shutdown()
 
 
+@pytest.mark.cpu_test
+def test_local_fastpath_is_selected_only_for_same_boot():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    config = create_vllm_config(
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"enable_local_fastpath": True},
+    )
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_buffer_device = "cuda"
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler.get_boot_id",
+        return_value="boot",
+    ):
+        scheduler = NixlPullConnectorScheduler(
+            config, "decoder", make_kv_cache_config(block_size=16)
+        )
+    request = create_request(request_id=1, num_tokens=32, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["nixl_local_fastpath"] = {
+        "version": 1,
+        "boot_id": scheduler.local_boot_id,
+    }
+    try:
+        tokens, load_async = scheduler.get_num_new_matched_tokens(request, 0)
+        assert tokens == 32
+        assert not load_async
+
+        request.kv_transfer_params["nixl_local_fastpath"]["boot_id"] = "remote"
+        tokens, load_async = scheduler.get_num_new_matched_tokens(request, 0)
+        assert tokens == 32
+        assert load_async
+    finally:
+        scheduler.shutdown()
+
+
 @pytest.mark.parametrize(
     "mismatch_type,config_overrides,version_override,should_fail,enforce_handshake_compat",
     [

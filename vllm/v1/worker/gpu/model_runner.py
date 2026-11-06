@@ -1845,6 +1845,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for req_id, updates in scheduler_output.encoder_input_updates.items():
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
+            # Stream-ordered loads can overlap model-input preparation after
+            # destination block initialization.
+            self.kv_connector.start_load_early(scheduler_output)
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(

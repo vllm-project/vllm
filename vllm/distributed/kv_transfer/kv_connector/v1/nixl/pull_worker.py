@@ -3,13 +3,21 @@
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
+from vllm._custom_ops import swap_blocks_batch
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.local_fastpath import (
+    coalesce_copy_spans,
+    expand_strided_descriptors,
+    translate_remote_addresses,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
@@ -33,6 +41,11 @@ logger = init_logger(__name__)
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
+@dataclass
+class _LocalFastpathTransfer:
+    event: torch.Event
+
+
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
@@ -45,6 +58,28 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
+        self.local_fastpath_early_started = False
+        self._local_fastpath_stream: torch.Stream | None = None
+        self._local_fastpath_waits: list[torch.Event] = []
+        self._local_fastpath_transfers: dict[str, _LocalFastpathTransfer] = {}
+
+    def wait_for_local_fastpath_load(self) -> None:
+        waits = getattr(self, "_local_fastpath_waits", None)
+        if not waits:
+            return
+        stream = torch.accelerator.current_stream()
+        for event in waits:
+            stream.wait_event(event)
+        waits.clear()
+
+    def _pop_done_local_fastpath(self) -> set[str]:
+        done: set[str] = set()
+        transfers = getattr(self, "_local_fastpath_transfers", {})
+        for req_id, transfer in list(transfers.items()):
+            if transfer.event.query():
+                done.add(req_id)
+                del transfers[req_id]
+        return done
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -58,6 +93,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Remote block IDs are kept logical here; expanded in
             # _read_blocks_for_req using the remote engine's phys ratio.
             remote_engine_id = meta.remote.engine_id
+            if (
+                meta.local_fastpath is True
+                and remote_engine_id not in self._remote_agents
+            ):
+                self._ensure_handshake_blocking(
+                    remote_engine_id,
+                    meta.remote.host,
+                    meta.remote.port,
+                    meta.tp_size,
+                    meta.dcp_size,
+                    meta.pp_size,
+                )
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ",
@@ -171,7 +218,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
             return
 
-        if any(len(group) > 0 for group in meta.local_block_ids):
+        if meta.local_fastpath is not True and any(
+            len(group) > 0 for group in meta.local_block_ids
+        ):
             # The scheduler waits for finished_recving from *every* worker.
             # Under DCP a rank's slice can legitimately come out empty when its
             # interleaved positions fall past the end of the sequence. _read_blocks
@@ -379,6 +428,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                local_fastpath=meta.local_fastpath is True,
             ):
                 return
 
@@ -406,6 +456,80 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         )
                         self.xfer_stats.record_failed_notification()
 
+    def _start_local_fastpath_copy(
+        self,
+        request_id: str,
+        dst_engine_id: str,
+        remote_rank: int,
+        local_xfer_side_handle: int,
+        remote_xfer_side_handle: int,
+        local_block_descs_ids: np.ndarray,
+        remote_block_descs_ids: np.ndarray,
+        notif_id: bytes,
+    ) -> None:
+        local_dlist = self.local_ipc_dlists.get(local_xfer_side_handle)
+        remote_dlist = self.local_ipc_dlists.get(remote_xfer_side_handle)
+        peer = self.local_ipc_peers.get((dst_engine_id, remote_rank))
+        if local_dlist is None or remote_dlist is None or peer is None:
+            raise RuntimeError("NIXL local fast-path descriptors are unavailable")
+
+        local_addresses, local_lengths = expand_strided_descriptors(
+            local_dlist, local_block_descs_ids
+        )
+        remote_addresses, remote_lengths = expand_strided_descriptors(
+            remote_dlist, remote_block_descs_ids
+        )
+        remote_metadata, mapped_bases = peer
+        remote_addresses = translate_remote_addresses(
+            remote_addresses, remote_metadata.allocations, mapped_bases, remote_lengths
+        )
+        spans = coalesce_copy_spans(
+            remote_addresses,
+            local_addresses,
+            remote_lengths,
+            local_lengths,
+        )
+        if request_id in self._local_fastpath_transfers:
+            raise ValueError(
+                "NIXL local fast path requires one read per request per rank"
+            )
+
+        if self._local_fastpath_stream is None:
+            self._local_fastpath_stream = torch.Stream(
+                device=torch.accelerator.current_device_index()
+            )
+        stream = self._local_fastpath_stream
+        src = torch.tensor(
+            [span.src for span in spans], dtype=torch.int64, device="cpu"
+        )
+        dst = torch.tensor(
+            [span.dst for span in spans], dtype=torch.int64, device="cpu"
+        )
+        sizes = torch.tensor(
+            [span.length for span in spans], dtype=torch.int64, device="cpu"
+        )
+        event = torch.Event()
+        # Destination initialization and the preceding forward must finish first.
+        stream.wait_stream(torch.accelerator.current_stream())
+        with stream:
+            swap_blocks_batch(src, dst, sizes)
+            event.record(stream)
+
+        agent_name = self._remote_agents[dst_engine_id][(0, remote_rank)]
+        self._pending_recv_notifs.setdefault(request_id, []).append(
+            (agent_name, notif_id)
+        )
+        self._local_fastpath_waits.append(event)
+        self._local_fastpath_transfers[request_id] = _LocalFastpathTransfer(event)
+        if not getattr(self, "_local_fastpath_logged", False):
+            logger.info(
+                "NIXL_LOCAL_CUDA_IPC_COPY submitted rank=%s spans=%s bytes=%s",
+                self.tp_rank,
+                len(spans),
+                sum(span.length for span in spans),
+            )
+            self._local_fastpath_logged = True
+
     def _read_blocks(
         self,
         read_spec: ReadSpec,
@@ -417,6 +541,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        local_fastpath: bool,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -529,6 +654,19 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+
+        if local_fastpath:
+            self._start_local_fastpath_copy(
+                request_id=request_id,
+                dst_engine_id=dst_engine_id,
+                remote_rank=remote_rank,
+                local_xfer_side_handle=local_xfer_side_handle,
+                remote_xfer_side_handle=remote_xfer_side_handle,
+                local_block_descs_ids=local_block_descs_ids,
+                remote_block_descs_ids=remote_block_descs_ids,
+                notif_id=notif_id,
+            )
+            return True
 
         # Prepare transfer with Nixl.
         handle = None

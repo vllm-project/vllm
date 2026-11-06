@@ -78,6 +78,54 @@ vllm serve <MODEL> \
 
 ## Basic Usage (on the same host)
 
+### Stream-ordered local CUDA IPC
+
+`NixlConnector` can bypass the NIXL data path for same-host pulls while keeping
+the existing NIXL handshake, block mapping, notifications, and cross-host
+fallback. The decode worker opens the producer's CUDA allocations, submits one
+batched device-to-device copy on a dedicated stream, and orders the model stream
+with a CUDA event. This removes the scheduler round trip used to report an
+asynchronous pull as complete.
+
+The path is disabled by default. Enable it on both producer and consumer:
+
+```json
+{
+  "kv_connector": "NixlConnector",
+  "kv_role": "kv_producer",
+  "kv_buffer_device": "cuda",
+  "kv_connector_extra_config": {
+    "enable_local_fastpath": true
+  }
+}
+```
+
+Use `"kv_role": "kv_consumer"` on the decode instance. Both instances must
+also disable the extensible KV cache. Producer async scheduling and sleep mode
+are not supported:
+
+```bash
+--disable-extensible-kv-cache --no-async-scheduling
+```
+
+The initial implementation supports matching P/D TP, block size, and cache
+geometry with PP, PCP, and DCP equal to one. It reuses NIXL's descriptor mapping,
+including hybrid Full Attention plus Mamba/GDN state and speculative lookahead
+regions. A peer on another host or a consumer without the opt-in flag continues
+to use the ordinary NIXL pull path. Once a request selects local CUDA IPC, a
+setup or copy failure fails the request instead of retrying through NIXL.
+During an ordered shutdown, stop consumers before producers so imported CUDA
+allocations are closed before their backing storage is released.
+
+The copy plan merges adjacent and overlapping ranges only when each destination
+byte maps to the same source byte. This avoids copying aliased attention and SSM
+pages repeatedly; conflicting mappings are rejected. The copy stream waits for
+destination initialization, and the compute stream waits for the copy before
+state preprocessing. CPU input preparation can proceed while the GPU copies.
+CUDA 12.8 or newer at build time, plus a driver that provides
+`cuMemcpyBatchAsync`, enables batched submission; older builds use the existing
+per-range asynchronous copy implementation of `swap_blocks_batch`.
+
 ### Producer (Prefiller) Configuration
 
 Start a prefiller instance that produces KV caches
