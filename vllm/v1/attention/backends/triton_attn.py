@@ -42,7 +42,6 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
-    is_gfx1201,
     unified_attention,
 )
 from vllm.v1.kv_cache_interface import (
@@ -137,18 +136,21 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # must be at least equal to the threshold below.
         # If this threshold is not reached (i.e., the batch size is not large enough),
         # the 3D kernel will be selected instead.
-        self.seq_threshold_3D = self._snap_to_capture_size(
+        self.seq_threshold_3D = self._snap_to_CG_capture_size(
             MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
         )
         self.seq_threshold_3D_decode = self.seq_threshold_3D
         if (
             self.gfx1201_decode_threshold
-            and is_gfx1201
+            and current_platform.is_rocm()
             and get_dtype_size(kv_cache_spec.dtype) == 2
         ):
-            self.seq_threshold_3D_decode = self._snap_to_capture_size(
-                max(1, GFX1201_DECODE_MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv)
-            )
+            from vllm.platforms.rocm import on_gfx1201
+
+            if on_gfx1201():
+                self.seq_threshold_3D_decode = self._snap_to_CG_capture_size(
+                    max(1, GFX1201_DECODE_MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv)
+                )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         # On SM120, batches whose 16-segment decode grid under-fills the SMs use
@@ -177,10 +179,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
         max_num_seqs_3d = min(
-            self.seq_threshold_3D_decode
-            if max_query_len_3d == 1
-            else self.seq_threshold_3D,
-            vllm_config.scheduler_config.max_num_seqs,
+            self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
         )
         max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
         if self.max_seqs_64_segments > 0:
@@ -225,7 +224,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 device=device,
             )
 
-    def _snap_to_capture_size(self, threshold: int) -> int:
+    def _snap_to_CG_capture_size(self, threshold: int) -> int:
         # Each captured decode graph must take a single 2D/3D path.
         if not self.decode_cudagraph_enabled:
             return threshold
