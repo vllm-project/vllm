@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+import time
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -774,3 +775,34 @@ def test_requested_cudagraph_mode_is_never_overridden():
     assert (
         MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": False}) is False
     )
+
+
+def test_unmatched_release_is_dropped_after_defer_timeout(monkeypatch):
+    """A release whose transfer prefill no longer knows (e.g. a second release
+    for a failed request) is retried for a while, then dropped."""
+    acks = [["tx-gone"]]
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.READ
+    worker.world_size = 1
+    worker.moriio_config = SimpleNamespace(defer_timeout=60.0)
+    worker.moriio_wrapper = SimpleNamespace(
+        pop_finished_req_ids=lambda: acks.pop() if acks else [],
+        shutdown=lambda: None,
+    )
+    worker.transfer_id_to_request_id = {}
+    worker._consumer_notification_counts = {}
+    worker._completed_consumer_notifications = set()
+    worker._pending_unmapped_acks = []
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+    assert worker.get_finished() == (set(), set())
+    assert len(worker._pending_unmapped_acks) == 1
+    now[0] += 30
+    worker.get_finished()
+    assert len(worker._pending_unmapped_acks) == 1
+    now[0] += 31
+    worker.get_finished()
+    assert worker._pending_unmapped_acks == []

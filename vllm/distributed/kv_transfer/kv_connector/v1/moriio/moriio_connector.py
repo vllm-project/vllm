@@ -2055,7 +2055,7 @@ class MoRIIOConnectorWorker:
         # BEFORE resolve_moriio_transfer_ack, so each ACK is counted exactly once
         # (on the tick its mapping exists) -- the heterogeneous-TP ack-counting
         # is preserved.
-        self._pending_unmapped_acks: list = []
+        self._pending_unmapped_acks: list[tuple[Any, float]] = []
 
     def schedule_write_blocks(
         self,
@@ -2904,18 +2904,23 @@ class MoRIIOConnectorWorker:
             # whose transfer_id wasn't mapped yet (notify raced ahead of
             # start_load_kv); retry the lookup every tick. Buffered before
             # resolve_moriio_transfer_ack so each ACK is counted exactly once.
-            finished_acks = self._pending_unmapped_acks + list(
-                self.moriio_wrapper.pop_finished_req_ids()
-            )
+            now = time.monotonic()
+            finished_acks = self._pending_unmapped_acks + [
+                (ack, now) for ack in self.moriio_wrapper.pop_finished_req_ids()
+            ]
             self._pending_unmapped_acks = []
             resolved_transfer_ids: set[TransferId] = set()
-            for ack in finished_acks:
+            for ack, first_seen in finished_acks:
                 transfer_id = ack if isinstance(ack, str) else ack.transfer_id
                 if transfer_id not in self.transfer_id_to_request_id:
                     # Mapping not populated yet -- buffer and retry next tick,
                     # do NOT drop (dropping leaks producer KV at high conc and
-                    # wedges the prefill).
-                    self._pending_unmapped_acks.append(ack)
+                    # wedges the prefill). After defer_timeout no request can
+                    # still match it (e.g. a duplicate release), so drop it.
+                    if now - first_seen > self.moriio_config.defer_timeout:
+                        logger.debug("Dropping unmatched release %s", transfer_id)
+                    else:
+                        self._pending_unmapped_acks.append((ack, first_seen))
                     continue
                 resolved_transfer_id = resolve_moriio_transfer_ack(
                     ack,
