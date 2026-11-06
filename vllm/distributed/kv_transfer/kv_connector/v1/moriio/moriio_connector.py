@@ -500,6 +500,20 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             return False
 
 
+def _can_route_read_release(request_id: str, params: dict[str, Any]) -> bool:
+    """Whether add_new_req can build a READ release for this request."""
+    if "remote_engine_id" not in params or "remote_block_ids" not in params:
+        return False
+    if get_peer_zmq_from_request_id(request_id, is_producer=False) is not None:
+        return True
+    try:
+        int(params["remote_handshake_port"])
+        int(params["remote_notify_port"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(params.get("remote_host"))
+
+
 def _is_mamba_group_spec(kv_cache_spec: KVCacheSpec) -> bool:
     """True if every layer spec in the group is a MambaSpec."""
     layer_specs = iter_layer_specs(kv_cache_spec)
@@ -1614,13 +1628,7 @@ class MoRIIOConnectorScheduler:
             # embedded MoRIIO ZMQ addresses.
             if self.mode == MoRIIOMode.WRITE:
                 self._release_write_prefill_blocks(request.request_id, params)
-            elif get_peer_zmq_from_request_id(
-                request.request_id, is_producer=False
-            ) is None and not (
-                params.get("remote_host")
-                and params.get("remote_handshake_port") is not None
-                and params.get("remote_notify_port") is not None
-            ):
+            elif not _can_route_read_release(request.request_id, params):
                 # Prefill frees the blocks after its deferred-send timeout.
                 logger.warning(
                     "Cannot release READ prefill blocks for request %s: "
@@ -1628,6 +1636,9 @@ class MoRIIOConnectorScheduler:
                     request.request_id,
                 )
             else:
+                # Same fallback as update_state_after_alloc for llm-d requests.
+                if not params.get("transfer_id"):
+                    params["transfer_id"] = f"sidecar-{request.request_id}"
                 # Carry the actually-allocated blocks (incl. the per-request KDA
                 # mamba slot) instead of []: a do_remote_prefill request finishing
                 # before update_state_after_alloc still has blocks, and dropping the
