@@ -820,8 +820,9 @@ def _promote_local_kv_cache_specs(
                 spec,
                 target_cls,
                 # Promoted specs allocate blocks for all tokens and never free
-                # below the window, so the trailing-edge extension is moot.
-                drop=("extra_retained_tokens",),
+                # below the window, so the trailing-edge extension and replay
+                # bound are moot.
+                drop=("extra_retained_tokens", "bounded_replay"),
                 block_size=block_size,
                 page_size_padded=promoted_page_size_padded(spec, block_size),
             )
@@ -838,20 +839,24 @@ def _promote_local_kv_cache_specs(
 def _try_get_full_allocation_fallback_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
-    """Try a supported full-allocation fallback for local-attention layers."""
+    """Try a supported full-allocation fallback for local-attention layers.
+
+    Full attention is never worse here: without a common page size, a separate
+    sliding-window group still pays for every layer's page on each block ID, so
+    freeing out-of-window blocks saves no memory.
+    """
     if any(isinstance(spec, HiddenStateCacheSpec) for spec in kv_cache_spec.values()):
         return None
     if any(
-        isinstance(spec, (SlidingWindowMLASpec, ChunkedLocalAttentionSpec))
-        for spec in kv_cache_spec.values()
+        isinstance(spec, ChunkedLocalAttentionSpec) for spec in kv_cache_spec.values()
     ):
         return None
 
     has_mla = any(isinstance(spec, MLAAttentionSpec) for spec in kv_cache_spec.values())
-    has_regular_swa = any(
+    has_swa = any(
         isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values()
     )
-    if not (has_mla and has_regular_swa):
+    if not (has_mla and has_swa):
         return None
 
     try:
