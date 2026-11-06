@@ -11,10 +11,12 @@ from vllm.models.kimi_k3.nvidia.ops.kda_conv import (
     packed_causal_conv1d_fn,
     packed_causal_conv1d_supported,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+# The bit-exact match holds for CUDA's code generation; ROCm's differs by ULPs.
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="KDA prefill conv needs CUDA"
+    not current_platform.is_cuda(), reason="KDA prefill conv needs CUDA"
 )
 
 
