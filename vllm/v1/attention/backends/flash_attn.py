@@ -1410,13 +1410,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 causal = not has_window
 
-            if (
-                self.batch_invariant_enabled
-                and sliding_window_size is not None
-                and sliding_window_size[0] >= 0
-            ):
-                # FA3 drops a left window >= max_seqlen_k - 1 and switches to a
-                # kernel with a different KV tile, so keep it for every batch.
+            if self.batch_invariant_enabled and sliding_window_size is not None:
                 max_seqlen_k = max(max_seqlen_k, sliding_window_size[0] + 2)
 
             num_splits = attn_metadata.max_num_splits

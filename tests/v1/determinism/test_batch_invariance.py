@@ -21,6 +21,7 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
 
 
 @skip_unsupported
@@ -1012,35 +1013,37 @@ def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
         )
 
 
-@skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="FA3 drops covered sliding windows only on Hopper",
+)
 @pytest.mark.timeout(600)
-def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch(backend):
-    """A sliding-window request decoding next to other requests' prefill chunks
-    must match the same request run alone.
+def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
+    """A sliding-window request must decode the same bits alone (FULL CUDA
+    graphs) and next to other requests' prefill chunks (eager), see #65587."""
+    model = "google/gemma-2-2b-it"
+    window = get_config(model, trust_remote_code=False).sliding_window
+    max_model_len = 2 * window
+    max_tokens = 16
+    rng = random.Random(int(os.getenv("VLLM_TEST_SEED", "12345")))
 
-    Guards against FlashAttention dropping a sliding window that covers the
-    batch's max_seqlen_k (issue #65587). With max_model_len above the window,
-    decode steps replayed from FULL CUDA graphs keep the window, while mixed
-    prefill/decode steps run attention eagerly with shorter sequences and drop
-    it, which on Hopper switches Gemma-2's head-dim-256 layers to a kernel with
-    a different KV tile.
-    """
-    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-    # Targets must span several KV tiles: within a single tile both FA3
-    # kernels produce identical bits.
-    targets = [_random_prompt(1024, 2048) for _ in range(4)]
-    fillers = [_random_prompt(4096, 8192) for _ in range(4)]
-    sp = SamplingParams(temperature=0.0, max_tokens=16, logprobs=1)
+    def prompt(num_tokens: int) -> TokensPrompt:
+        ids = [rng.randint(1000, 30000) for _ in range(num_tokens)]
+        return TokensPrompt(prompt_token_ids=ids)
 
+    # Every sequence spans several KV tiles but stays inside the window, so
+    # mixed steps see max_seqlen_k < window while FULL graphs see max_model_len.
+    targets = [prompt(rng.randint(256, 512)) for _ in range(4)]
+    fillers = [prompt(rng.randint(window // 2, window - max_tokens)) for _ in range(4)]
+
+    sp = SamplingParams(temperature=0.0, max_tokens=max_tokens, logprobs=1)
     llm = LLM(
-        model="google/gemma-2-2b-it",
-        attention_config={"backend": backend},
-        # Must exceed Gemma-2's 4096-token sliding window.
-        max_model_len=8192,
-        # Chunks the fillers' prefill so the targets decode in mixed batches.
+        model=model,
+        attention_config={"backend": "FLASH_ATTN"},
+        compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
+        max_model_len=max_model_len,
         max_num_batched_tokens=256,
-        max_num_seqs=8,
+        max_num_seqs=len(targets) + len(fillers),
         gpu_memory_utilization=0.4,
         enable_prefix_caching=False,
     )
@@ -1056,12 +1059,10 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch(backend):
             llm.llm_engine.engine_core.shutdown()
 
     for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(alone, batched)):
-        assert lp1 is not None and lpN is not None
-        assert tok1 == tokN, (
-            f"Prompt {i}: tokens differ alone vs batched: {tok1} vs {tokN}"
-        )
+        assert len(tok1) == max_tokens and len(tokN) == max_tokens
+        assert tok1 == tokN, f"Prompt {i}: tokens differ: {tok1} vs {tokN}"
         assert torch.equal(lp1, lpN), (
-            f"Prompt {i}: logprobs are not bitwise equal alone vs batched; "
+            f"Prompt {i}: logprobs differ alone vs batched; "
             f"max abs diff {(lp1 - lpN).abs().max():.3e}"
         )
 
