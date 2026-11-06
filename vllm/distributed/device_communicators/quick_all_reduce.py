@@ -315,9 +315,14 @@ class QuickAllReduce:
 
         They share the all-reduce object's inbox and colors, so
         `--enable-hc-sp-quick-reduce` is the only extra opt-in. Only TP2 was
-        validated for accuracy, and only gfx950 was run. Like `compile`,
-        `compile_sp` launches both collectives on every rank, which keeps the
-        JIT out of the first prefill and out of CUDA graph capture.
+        validated for accuracy, and only gfx950 was run. `compile_sp` builds
+        and loads both collectives without launching them, which keeps the JIT
+        out of the first prefill and out of CUDA graph capture. It is a
+        collective preflight that also agrees the call and the sizes across the
+        ranks, so every rank must reach it with the same sizes (the conditions
+        below do not depend on the rank), and a failure on one rank raises on
+        all of them. It needs an AITER with that collective `compile_sp`; one
+        without it runs `compile_sp` on the local rank only.
         """
         if vllm_config is None or not (
             vllm_config.parallel_config.enable_hc_sp_quick_reduce
