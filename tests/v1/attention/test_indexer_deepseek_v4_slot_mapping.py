@@ -15,6 +15,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import indexer as indexer_module
@@ -41,11 +42,18 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.utils import select_common_block_size
 
+DEVICE_TYPE = current_platform.device_type
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA, ROCm or XPU device",
+)
+
+
+@requires_accelerator
 def test_adaptive_indexer_uses_configured_max_decode_len():
     """GLM adaptive verification may replay wider rows than capture dummy rows."""
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     num_speculative_tokens = 5
     configured_max_decode_len = num_speculative_tokens + 1
 
@@ -105,14 +113,14 @@ def test_adaptive_indexer_uses_configured_max_decode_len():
     assert not metadata.decode.decode_is_uniform
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("query_lens", [[1], [6] * 16, [0, 2, 6, 0, 4], [0, 0, 0]])
 @pytest.mark.parametrize("padding", [0, 17])
 def test_fused_indexer_decode_metadata(query_lens, padding):
     """Flatten device query boundaries and clear graph padding on every replay."""
     from vllm.v1.attention.ops.metadata import _indexer_decode_metadata_kernel
 
-    device = "cuda"
+    device = DEVICE_TYPE
     lengths = torch.tensor(query_lens, device=device, dtype=torch.int32)
     qsl = torch.cat(
         [torch.zeros(1, device=device, dtype=torch.int32), lengths.cumsum(0).int()]
@@ -170,7 +178,7 @@ def test_fused_indexer_decode_metadata(query_lens, padding):
 def test_indexer_draft_decode_metadata_update_is_capture_safe():
     if not indexer_module.has_deep_gemm():
         pytest.skip("requires DeepGEMM")
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     num_reqs = 3
     seq_lens = torch.tensor([17, 33, 65], dtype=torch.int32, device=device)
     decode_seq_lens = torch.zeros((num_reqs, 1), dtype=torch.int32, device=device)
@@ -241,12 +249,12 @@ def test_indexer_draft_decode_metadata_update_is_capture_safe():
     torch.testing.assert_close(metadata.slot_mapping, expected_slot_mapping)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 @pytest.mark.parametrize("compress_ratio", [1, 4])
 def test_indexer_draft_decode_refresh_follows_new_batch(monkeypatch, compress_ratio):
     """Without a prior build(), the refresh must not keep the last batch's state."""
     monkeypatch.setattr(indexer_module, "has_deep_gemm", lambda: False)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     num_reqs, width = 3, 8
 
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
@@ -300,12 +308,12 @@ def test_indexer_draft_decode_refresh_follows_new_batch(monkeypatch, compress_ra
 @pytest.mark.parametrize("use_sparse_mla_builder", [False, True])
 def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     """Graph replay follows device boundaries even when CPU lengths are stale."""
-    lengths = torch.tensor(query_lens, device="cuda", dtype=torch.int32)
+    lengths = torch.tensor(query_lens, device=DEVICE_TYPE, dtype=torch.int32)
     qsl = torch.cat(
-        [torch.zeros(1, device="cuda", dtype=torch.int32), lengths.cumsum(0).int()]
+        [torch.zeros(1, device=DEVICE_TYPE, dtype=torch.int32), lengths.cumsum(0).int()]
     )
     n = sum(query_lens)
-    output = torch.full((n + 7,), -99, device="cuda", dtype=torch.int32)
+    output = torch.full((n + 7,), -99, device=DEVICE_TYPE, dtype=torch.int32)
     common = CommonAttentionMetadata(
         query_start_loc=qsl,
         query_start_loc_cpu=qsl.cpu(),
@@ -315,9 +323,9 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
         max_query_len=max(query_lens),
         max_seq_len=max(query_lens),
         block_table_tensor=torch.empty(
-            (len(query_lens), 1), device="cuda", dtype=torch.int32
+            (len(query_lens), 1), device=DEVICE_TYPE, dtype=torch.int32
         ),
-        slot_mapping=torch.full((n + 7,), -1, device="cuda", dtype=torch.int64),
+        slot_mapping=torch.full((n + 7,), -1, device=DEVICE_TYPE, dtype=torch.int64),
     )
 
     def build_mapping():
@@ -331,7 +339,7 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     result = build_mapping()
     assert result.data_ptr() == output.data_ptr()
     expected = torch.repeat_interleave(
-        torch.arange(len(query_lens), device="cuda", dtype=torch.int32), lengths
+        torch.arange(len(query_lens), device=DEVICE_TYPE, dtype=torch.int32), lengths
     )
     torch.testing.assert_close(output[:n], expected)
     assert torch.count_nonzero(output[n:]) == 0
@@ -343,7 +351,8 @@ def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     qsl[1:].copy_(reversed_lens.cumsum(0))
     graph.replay()
     expected = torch.repeat_interleave(
-        torch.arange(len(query_lens), device="cuda", dtype=torch.int32), reversed_lens
+        torch.arange(len(query_lens), device=DEVICE_TYPE, dtype=torch.int32),
+        reversed_lens,
     )
     torch.testing.assert_close(output[:n], expected)
     assert torch.count_nonzero(output[n:]) == 0
@@ -456,11 +465,11 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
     assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_compressed_slot_mapping_inherits_padded_token_slots():
     """A token whose own slot is padded (SWA bounded replay) closes no
     compressed state either."""
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     query_start_loc = torch.tensor([0, 8], dtype=torch.int32, device=device)
     seq_lens = torch.tensor([8], dtype=torch.int32, device=device)
     block_table = torch.tensor([[3]], dtype=torch.int32, device=device)
@@ -478,11 +487,11 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
     assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
     """Under DCP each rank writes only the states it owns, at the state's
     rank-local position."""
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     dcp, interleave, ratio, block_size = 2, 4, 2, 4
     num_tokens = 32
     query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
@@ -611,12 +620,12 @@ def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypat
     torch.testing.assert_close(metadata.slot_mapping, gathered_slot_mapping)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_accelerator
 def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
     """
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
 
     # num_states = block_size // tokens_per_state = 256 // 4 = 64
     kv_cache_spec = MLAAttentionSpec(

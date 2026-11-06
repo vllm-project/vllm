@@ -14,14 +14,14 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+
+if not current_platform.is_cuda():
+    pytest.skip("CUDA-specific tests", allow_module_level=True)
+
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
-
-pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="CUDA-specific tests"
-)
 
 SELECTOR_CONFIG = AttentionSelectorConfig(
     head_size=64,

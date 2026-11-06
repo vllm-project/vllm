@@ -997,8 +997,8 @@ class MockMLAAttentionLayer(MLAAttention):
 def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
     monkeypatch, default_vllm_config
 ):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for FP8 decode query quantization path.")
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        pytest.skip("FP8 decode query quantization path requires a GPU device.")
 
     device = torch.device(f"{DEVICE_TYPE}:0")
     num_tokens = 2

@@ -55,12 +55,16 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 
-# This module's end-to-end sparse-backend correctness test supports CUDA and
-# ROCm.  The remaining tests exercise CUDA-specific FlashMLA/FlashInfer APIs
-# and are skipped by the autouse fixture below when collecting on ROCm.
-if not (current_platform.is_cuda() or current_platform.is_rocm()):
+# The sparse-backend correctness tests support CUDA, ROCm and XPU. On ROCm
+# and XPU, the autouse fixture below skips tests that exercise CUDA-specific
+# FlashMLA/FlashInfer APIs.
+if not (
+    current_platform.is_cuda()
+    or current_platform.is_rocm()
+    or current_platform.is_xpu()
+):
     pytest.skip(
-        "Sparse MLA backend tests require CUDA or ROCm.",
+        "Sparse MLA backend tests require CUDA, ROCm or XPU.",
         allow_module_level=True,
     )
 
@@ -137,27 +141,47 @@ if current_platform.is_rocm():
     SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
     SPARSE_BLOCK_SIZES = [64]
+elif current_platform.is_xpu():
+    from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseBackend
+
+    SPARSE_BACKENDS = [XPUMLASparseBackend]
+    SPARSE_BACKEND_IDS = ["XPUMLASparse"]
+    SPARSE_KV_CACHE_DTYPES = ["auto"]
+    SPARSE_BLOCK_SIZES = [64]
 else:
     SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
     SPARSE_BACKEND_IDS = ["FlashMLA", "FlashInferTRTLLM"]
     SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"]
     SPARSE_BLOCK_SIZES = [32, 64]
 
+ROCM_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_sparse_backend_prefill_correctness",
+    "test_rocm_fused_v32_dense_prefill_matches_mqa",
+    "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
+}
+
+XPU_PORTABLE_TESTS = {
+    "test_sparse_backend_decode_correctness",
+    "test_triton_convert_req_index_to_global_index_decode_only",
+    "test_triton_convert_req_index_to_global_index_with_prefill_workspace",
+    "test_triton_convert_rejects_req_id_longer_than_token_indices",
+    "test_triton_convert_returns_valid_counts",
+    "test_split_indexer_prefill_chunks",
+    "test_split_indexer_prefill_chunks_single_request_overflow",
+}
+
 
 @pytest.fixture(autouse=True)
-def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
+def _skip_cuda_specific_sparse_mla_tests(request):
     """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
-    rocm_portable_tests = {
-        "test_sparse_backend_decode_correctness",
-        "test_sparse_backend_prefill_correctness",
-        "test_rocm_fused_v32_dense_prefill_matches_mqa",
-        "test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter",
-    }
-    if (
-        current_platform.is_rocm()
-        and getattr(request.node, "originalname", request.node.name)
-        not in rocm_portable_tests
-    ):
+    if current_platform.is_rocm():
+        portable_tests = ROCM_PORTABLE_TESTS
+    elif current_platform.is_xpu():
+        portable_tests = XPU_PORTABLE_TESTS
+    else:
+        return
+    if getattr(request.node, "originalname", request.node.name) not in portable_tests:
         pytest.skip("This sparse MLA test exercises a CUDA-specific API")
 
 
@@ -1154,7 +1178,7 @@ def _triton_convert_reference_impl(
 @pytest.mark.parametrize("block_size", [16, 64, 128])
 @pytest.mark.parametrize("num_topk_tokens", [128, 256, 512])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_decode_only(
@@ -1278,7 +1302,7 @@ def test_index_group_convert_during_piecewise_capture():
 
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_size):
@@ -1343,7 +1367,7 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_triton_convert_rejects_req_id_longer_than_token_indices():
@@ -1487,7 +1511,7 @@ def test_flashmla_bf16_preserves_unused_output_heads(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
@@ -5203,7 +5227,7 @@ def _build_sparse_dcp_vllm_config(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
@@ -5242,7 +5266,7 @@ def test_fp8_dcp_head_envelope_guard(
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize("comm_backend", ["ag_rs", "a2a"])
@@ -5322,7 +5346,7 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
+    current_platform.is_cuda() and torch.cuda.get_device_capability() < (9, 0),
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 @pytest.mark.parametrize(
