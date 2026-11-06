@@ -31,7 +31,7 @@ from vllm.utils.math_utils import cdiv
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
-from .cache import CacheConfig
+from .cache import CacheConfig, _layout_from_name
 from .compilation import (
     CompilationConfig,
     CompilationMode,
@@ -1643,6 +1643,17 @@ class VllmConfig:
             return
 
         self._resolve_mm_encoder_only()
+
+        # An explicit layout must be visible when workers build cache specs;
+        # HiSparse's hybrid-model spec derivation reads it before the engine
+        # core resolves the layout.
+        if (
+            self.cache_config.kv_cache_layout is None
+            and (requested_layout := envs.VLLM_KV_CACHE_LAYOUT) is not None
+        ):
+            self.cache_config.kv_cache_layout = _layout_from_name(
+                requested_layout
+            ).name
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language
