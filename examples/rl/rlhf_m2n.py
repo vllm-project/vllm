@@ -39,10 +39,10 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
@@ -104,9 +104,9 @@ class FSDPTrainWorker:
     ):
         """Build the trainer engine on every FSDP rank.
 
-        `DTensorModuleSource` reads each parameter's FSDP device mesh and
-        placements, so the engine knows the source layout without gathering
-        anything. Rank 0 additionally drives the inference-side handshake.
+        `ModuleSource` reads each parameter's FSDP device mesh and placements,
+        so the engine knows the source layout without gathering anything.
+        Rank 0 additionally drives the inference-side handshake.
         """
         self.engine = WeightTransferTrainerFactory.trainer_init(
             init_info=M2NTrainerInitInfo(
@@ -121,7 +121,7 @@ class FSDPTrainWorker:
                 rank=self.rank,  # FSDP rank; sender is 0
             ),
             client=RayVLLMWeightSyncClient(llm_handle),
-            source=DTensorModuleSource(self.model, FSDP_WORLD_SIZE),
+            source=ModuleSource(self.model),
         )
 
     def send_weights(self):

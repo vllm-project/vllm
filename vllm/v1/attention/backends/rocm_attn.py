@@ -153,7 +153,9 @@ class RocmAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
-        # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
+        # The (head_size, block_size) pairs that have a native kernel are enumerated
+        # by BLOCK_SIZES and VARIANTS in csrc/rocm/generate_paged_attn.py; the
+        # runtime gate is use_rocm_custom_paged_attention() in vllm/platforms/rocm.py.
         # However, vLLM allows support for any multiple of 16 via the Triton path.
         # As addressed in PR: https://github.com/vllm-project/vllm/pull/31380,
         # non-standard models (like qwen3-next with block_size 544, or qwen3_5
@@ -162,7 +164,18 @@ class RocmAttentionBackend(AttentionBackend):
         return [MultipleOf(16)]
 
     @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        # Only 16 (and 32, where a native kernel exists) runs on the native
+        # C++ paged-attention kernel; any other multiple of 16 falls back to
+        # the slower Triton path. Keep the native kernel for default-sized
+        # runs; explicit --block-size values are unaffected.
+        return 16
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        # Head sizes with a native ROCm kernel are only 64 and 128 (see
+        # csrc/rocm/attention_paged_attn_h{64,128}_*.cu); the remaining entries are
+        # served by the Triton fallback selected in use_rocm_custom_paged_attention().
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod

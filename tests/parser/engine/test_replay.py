@@ -72,14 +72,19 @@ def _discover_parsers() -> list[_ParserInfo]:
             continue
         # Concrete parsers supply parser_engine_config themselves
         cfg = obj(bare_tok, None).parser_engine_config  # type: ignore[call-arg]
+        if cfg.name == "llama_json":
+            # Llama JSON uses a semicolon-separated collection with no
+            # TOOL_END terminal. Dedicated coverage lives in
+            # test_llama_json.py.
+            continue
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
-        if cfg.name in ("inkling", "plamo3", "minimax_m3"):
-            # Inkling uses typed structural blocks. PLaMo and MiniMax M3
-            # markers can span several token IDs. None fits this TOOL_END-token
-            # harness; their direct and delegating coverage lives in dedicated
-            # tests.
+        if cfg.name in ("inkling", "plamo3", "minimax_m3", "ripple"):
+            # Inkling uses typed structural blocks. PLaMo, MiniMax M3 and
+            # Ripple markers can span several token IDs. None fits this
+            # TOOL_END-token harness; their direct and delegating coverage lives
+            # in dedicated tests.
             continue
         if cfg.name == "granite":
             # Granite has a JSON-array tool body with no TOOL_END terminal, so
