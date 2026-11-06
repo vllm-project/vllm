@@ -210,11 +210,9 @@ def _make_mega_moe_experts(
     )
 
 
-def _load_mega_moe_checkpoint_shuffled(
-    experts, num_logical_experts, seed, order_seed=None, process=True
-):
-    """Load a random checkpoint, one shard per ``weight_loader`` call in a
-    shuffled order, then run post-load processing unless ``process`` is False."""
+def _mega_moe_checkpoint(experts, num_logical_experts, seed):
+    """A random checkpoint, stacked by logical expert, and its shards:
+    ``(param name, tensor, shard id, expert id)`` as model loaders pass them."""
     hidden, inter = experts.hidden_size, experts.intermediate_size
     routed = experts.weight_format.routed
     group = routed.scale_group_k
@@ -235,6 +233,8 @@ def _load_mega_moe_checkpoint_shuffled(
     shards = []
     for expert_id in range(num_logical_experts):
         for name, tensor in ckpt.items():
+            if name.endswith("weight_scale"):
+                tensor = tensor.view(routed.scale_dtype)
             if name.startswith("w2_"):
                 shards.append((name, tensor[expert_id], "w2", expert_id))
             elif tensor.dim() == 1:
@@ -244,12 +244,18 @@ def _load_mega_moe_checkpoint_shuffled(
             else:
                 shards.append((name, tensor[expert_id, :inter], "w1", expert_id))
                 shards.append((name, tensor[expert_id, inter:], "w3", expert_id))
-    if order_seed is not None:
-        generator.manual_seed(order_seed)
+    return ckpt, shards
+
+
+def _load_mega_moe_checkpoint_shuffled(
+    experts, num_logical_experts, seed, process=True
+):
+    """Load a random checkpoint, one shard per ``weight_loader`` call in a
+    shuffled order, then run post-load processing unless ``process`` is False."""
+    ckpt, shards = _mega_moe_checkpoint(experts, num_logical_experts, seed)
+    generator = torch.Generator().manual_seed(seed)
     for i in torch.randperm(len(shards), generator=generator).tolist():
         name, loaded_weight, shard_id, expert_id = shards[i]
-        if name.endswith("weight_scale"):
-            loaded_weight = loaded_weight.view(routed.scale_dtype)
         # Through the parameter, as model loaders do (reload wraps it).
         param = getattr(experts, name)
         assert param.weight_loader(
@@ -342,16 +348,40 @@ def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_form
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
 
 
+class _MegaMoEModel(torch.nn.Module):
+    """One MegaMoE layer with per-expert checkpoint names,
+    ``experts.{expert}.{shard}.{param}``, as model loaders map them."""
+
+    def __init__(self, weight_format):
+        super().__init__()
+        self.experts = _make_mega_moe_experts(4, 3, weight_format)
+
+    def load_weights(self, weights):
+        for name, loaded_weight in weights:
+            _, expert_id, shard_id, param_name = name.split(".")
+            param = getattr(self.experts, param_name)
+            param.weight_loader(
+                param,
+                loaded_weight,
+                f"experts.{param_name}",
+                shard_id=shard_id,
+                expert_id=int(expert_id),
+            )
+
+
 @pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
-def test_deep_gemm_mega_moe_direct_reload_matches_cold_start(
+def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
     monkeypatch, weight_format
 ):
-    """A direct reload (views back, loaders in another order, post-load
-    processing rerun) ends where a cold start on the new checkpoint does, at
-    the same addresses: each tensor loads on its own (#64418 §5)."""
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        finish_direct_reload,
+    """Every routed-expert name is direct in a load plan, and updates through
+    the plan or through ``load_weights`` in another order end where a cold
+    start on the new checkpoint does, at the same addresses."""
+    from vllm.distributed.weight_transfer.base import ParamMeta
+    from vllm.model_executor.model_loader.reload import (
+        finish_reload,
+        load_planned,
+        plan_loads,
+        start_reload,
     )
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
@@ -361,30 +391,45 @@ def test_deep_gemm_mega_moe_direct_reload_matches_cold_start(
     )
     device = torch.device("cpu")
 
+    def checkpoint(model, seed):
+        _, shards = _mega_moe_checkpoint(model.experts, 3, seed)
+        return {f"experts.{e}.{s}.{name}": t for name, t, s, e in shards}
+
     def cold_start(seed):
-        model = torch.nn.Module()
-        model.experts = _make_mega_moe_experts(4, 3, weight_format)
-        _load_mega_moe_checkpoint_shuffled(model.experts, 3, seed, process=False)
+        model = _MegaMoEModel(weight_format)
+        model.load_weights(checkpoint(model, seed).items())
         process_weights_after_loading(model, model_config, device)
         return model
 
     def tensors(model):
         return dict((*model.named_parameters(), *model.named_buffers()))
 
+    def assert_matches_cold_start(model, seed):
+        fresh = cold_start(seed)
+        actual, expected = tensors(model), tensors(fresh)
+        assert actual.keys() == expected.keys()
+        for name, tensor in actual.items():
+            assert torch.equal(tensor, expected[name]), name
+            assert tensor.data_ptr() == ptrs[name], f"{name} moved"
+        assert model.experts.l2_activation_scale == fresh.experts.l2_activation_scale
+
     model = cold_start(seed=0)
     ptrs = {name: t.data_ptr() for name, t in tensors(model).items()}
-    begin_direct_reload(model)
-    _load_mega_moe_checkpoint_shuffled(
-        model.experts, 3, seed=1, order_seed=3, process=False
+    weights = checkpoint(model, seed=1)
+    start_reload(model)
+    plan = plan_loads(
+        model, [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in weights.items()]
     )
-    finish_direct_reload(model, model_config, device)
-    fresh = cold_start(seed=1)
-    reloaded, expected = tensors(model), tensors(fresh)
-    assert reloaded.keys() == expected.keys()
-    for name, tensor in reloaded.items():
-        assert torch.equal(tensor, expected[name]), name
-        assert tensor.data_ptr() == ptrs[name], f"{name} moved"
-    assert model.experts.l2_activation_scale == fresh.experts.l2_activation_scale
+    assert {n: e.reason for n, e in plan.entries.items() if e.writes is None} == {}
+    load_planned(model, plan, weights.items())
+    finish_reload(model, model_config, device)
+    assert_matches_cold_start(model, seed=1)
+
+    weights = list(checkpoint(model, seed=2).items())
+    start_reload(model)
+    model.load_weights(weights[i] for i in torch.randperm(len(weights)).tolist())
+    finish_reload(model, model_config, device)
+    assert_matches_cold_start(model, seed=2)
 
 
 def test_deep_gemm_mega_moe_nvfp4_layerwise_reload_does_not_buffer_until_finalize(
@@ -417,67 +462,6 @@ def test_deep_gemm_mega_moe_nvfp4_layerwise_reload_does_not_buffer_until_finaliz
         model.experts.w13_weight_scale_2[0], ckpt["w13_weight_scale_2"][physical]
     )
     assert model.experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
-
-
-@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
-def test_deep_gemm_mega_moe_routed_loaders_only_view_and_copy(weight_format):
-    """Routed-expert loaders only view the checkpoint tensor and copy it, so a
-    load-plan trace can write every name directly."""
-    from vllm.distributed.weight_transfer.sharded_rdt_fake import (
-        BakeSink,
-        FakeRDTTensor,
-    )
-
-    experts = _make_mega_moe_experts(4, 3, weight_format)
-    routed = weight_format.routed
-    group = routed.scale_group_k
-    hidden, inter = experts.hidden_size, experts.intermediate_size
-    shapes = {
-        "w13_weight": ((inter, hidden // 2), torch.uint8),
-        "w13_weight_scale": ((inter, hidden // group), routed.scale_dtype),
-        "w2_weight": ((hidden, inter // 2), torch.uint8),
-        "w2_weight_scale": ((hidden, inter // group), routed.scale_dtype),
-    }
-    if routed.has_global_scale:
-        for name in ("w13_weight_scale_2", "w2_weight_scale_2", "w2_input_scale"):
-            shapes[name] = ((), torch.float32)
-    sink = BakeSink()
-    num_writes = 0
-    for name, (shape, dtype) in shapes.items():
-        for shard_id in ("w2",) if name.startswith("w2_") else ("w1", "w3"):
-            sink.current = (experts, name)
-            fake = FakeRDTTensor(
-                f"experts.0.{shard_id}.{name}",
-                shape,
-                dtype,
-                torch.device("cpu"),
-                sink=sink,
-            )
-            # Expert 0 has two local replicas; w2_input_scale is per logical expert.
-            experts.weight_loader(
-                getattr(experts, name),
-                fake,
-                f"experts.{name}",
-                shard_id=shard_id,
-                expert_id=0,
-            )
-            num_writes += 1 if name == "w2_input_scale" else 2
-    scatters = sink.copies_by_layer[experts]
-    assert len(scatters) == num_writes
-    # One write per shard, into disjoint parts of each parameter.
-    written: dict[str, set[int]] = {}
-    for scatter in scatters:
-        assert scatter is not None
-        param = getattr(experts, scatter.param_name)
-        dst = torch.as_strided(
-            torch.arange(param.untyped_storage().nbytes() // param.element_size()),
-            scatter.shape,
-            scatter.stride,
-            scatter.offset,
-        )
-        offsets = set(dst.flatten().tolist())
-        assert not offsets & written.setdefault(scatter.param_name, set())
-        written[scatter.param_name] |= offsets
 
 
 def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
