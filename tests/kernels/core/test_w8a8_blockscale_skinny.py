@@ -143,6 +143,26 @@ def test_native_aiter_fallback_non_skinny_sizes(m: int, n: int, pad_cols: int):
     assert torch.isfinite(ref).all()
 
 
+def test_skinny_blockscale_opt_in_validates_backend_and_shape():
+    kernel = SimpleNamespace(
+        config=SimpleNamespace(weight_shape=(4096, 4096)),
+        use_triton=False,
+        use_bpreshuffle=False,
+        use_gfx1151_skinny_blockscale=False,
+    )
+    AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(kernel, 4096)
+    assert not kernel.use_gfx1151_skinny_blockscale
+
+    kernel.use_triton = True
+    kernel.use_bpreshuffle = True
+    AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(kernel, 4096)
+    assert not kernel.use_gfx1151_skinny_blockscale
+
+    kernel.use_bpreshuffle = False
+    with pytest.raises(ValueError, match="kernel weight shape"):
+        AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(kernel, 1536)
+
+
 @pytest.mark.parametrize("pad_cols", [0, 256])
 @pytest.mark.parametrize("m", [1, 2, 3, 4, 5, 6, 8])
 @pytest.mark.parametrize("n", [1536, 4096])
@@ -150,14 +170,14 @@ def test_only_marked_native_aiter_instances_dispatch_skinny(
     monkeypatch: pytest.MonkeyPatch, m: int, n: int, pad_cols: int
 ):
     a, w, a_scale, w_scale = _make_case(m, n, pad_cols=pad_cols)
-    cu = torch.cuda.get_device_properties(a.device).multi_processor_count
-
     # Exercise the REAL AITER backend method with minimal instance state.
     # This establishes that unmarked kernels and M=8 retain the original
     # tuned Triton fallback and that marked M<=6 kernels call skinny.
     native = SimpleNamespace(
-        config=SimpleNamespace(out_dtype=torch.bfloat16),
+        config=SimpleNamespace(out_dtype=torch.bfloat16, weight_shape=(n, 4096)),
         use_triton=True,
+        use_bpreshuffle=False,
+        use_gfx1151_skinny_blockscale=False,
         weight_group_shape=(128, 128),
     )
     expected = AiterFp8BlockScaledMMKernel.apply_block_scaled_mm(
@@ -172,12 +192,13 @@ def test_only_marked_native_aiter_instances_dispatch_skinny(
 
     monkeypatch.setattr(ops, "wvSplitKQBlockScale", traced_skinny)
     opted_in = SimpleNamespace(
-        config=SimpleNamespace(out_dtype=torch.bfloat16),
+        config=SimpleNamespace(out_dtype=torch.bfloat16, weight_shape=(n, 4096)),
         use_triton=True,
+        use_bpreshuffle=False,
         weight_group_shape=(128, 128),
-        _gfx1151_skinny_blockscale_n=n,
-        _gfx1151_skinny_cu_count=cu,
+        use_gfx1151_skinny_blockscale=False,
     )
+    AiterFp8BlockScaledMMKernel.enable_gfx1151_skinny_blockscale(opted_in, n)
     actual = AiterFp8BlockScaledMMKernel.apply_block_scaled_mm(
         opted_in, a, w, a_scale, w_scale
     )

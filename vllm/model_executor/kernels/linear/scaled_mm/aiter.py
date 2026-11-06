@@ -400,6 +400,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and k % 128 == 0
             and bool(rocm_aiter_ops.is_triton_blockscale_bpreshuffle_gemm_tuned(n, k))
         )
+        self.use_gfx1151_skinny_blockscale = False
         if self.use_bpreshuffle:
             # The tuned preshuffle configs expect a column-major group scale.
             act_scale_descriptor = config.activation_quant_key.scale
@@ -436,6 +437,23 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
             )
             layer.aiter_bpreshuffled = True
+
+    def enable_gfx1151_skinny_blockscale(self, output_size: int) -> None:
+        """Opt in to gfx1151 skinny blockscale dispatch for native RDNA layout."""
+        if not self.use_triton or self.use_bpreshuffle:
+            return
+        if output_size <= 0 or output_size % 128 != 0:
+            raise ValueError(
+                "gfx1151 skinny blockscale output size must be a positive "
+                f"multiple of 128, got {output_size}"
+            )
+        n, _ = self.config.weight_shape
+        if output_size != n:
+            raise ValueError(
+                "gfx1151 skinny blockscale output size must match the "
+                f"kernel weight shape N={n}, got {output_size}"
+            )
+        self.use_gfx1151_skinny_blockscale = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -492,20 +510,17 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         out_dtype = self.config.out_dtype
 
-        # Opted-in DSV4 projections only. A/B/As/Bs are exactly the already-
-        # prepared tensors received by the passing native AITER backend;
-        # no extra quantization, weight shuffle, or fallback layout change.
-        skinny_n = getattr(self, "_gfx1151_skinny_blockscale_n", None)
-        skinny_cu = getattr(self, "_gfx1151_skinny_cu_count", None)
+        # Opted-in native RDNA Triton blockscale projections only. A/B/As/Bs
+        # are exactly the already-prepared tensors received by the passing
+        # backend; no extra quantization, weight shuffle, or layout change.
+        skinny_n, _ = self.config.weight_shape
         skinny_k = A.shape[1] if A.ndim == 2 else None
         if (
-            self.use_triton
+            self.use_gfx1151_skinny_blockscale
+            and self.use_triton
+            and not self.use_bpreshuffle
             and tuple(self.weight_group_shape) == (128, 128)
             and out_dtype == torch.bfloat16
-            and skinny_cu is not None
-            and isinstance(skinny_cu, int)
-            and skinny_cu > 0
-            and isinstance(skinny_n, int)
             and skinny_n > 0
             and skinny_n % 128 == 0
             and A.ndim == 2
@@ -531,7 +546,8 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         ):
             import vllm._custom_ops as ops
 
-            return ops.wvSplitKQBlockScale(B, A, As, Bs, skinny_cu)
+            cu_count = torch.cuda.get_device_properties(A.device).multi_processor_count
+            return ops.wvSplitKQBlockScale(B, A, As, Bs, cu_count)
 
         if self.use_bpreshuffle:
             gemm_a8w8_blockscale_op = (
