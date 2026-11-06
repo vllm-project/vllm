@@ -592,7 +592,7 @@ class MegaExperts:
             logits = torch.zeros(m, experts, dtype=logits_dtype, device=device)
             self(x, logits, bias)
 
-    def __call__(self, x, logits, bias):
+    def __call__(self, x: torch.Tensor, logits: torch.Tensor, bias: torch.Tensor):
         """BF16 [M * top_k, hidden] expert outputs (one row per route), int32
         [M, top_k] experts and FP32 [M, top_k] routing weights.
 
