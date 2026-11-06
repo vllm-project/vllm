@@ -2176,7 +2176,6 @@ class ModelConfig:
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
-
         return self.get_hidden_size()
 
     def get_and_verify_max_len(self, max_model_len: int):

@@ -96,14 +96,13 @@ def test_text_parity(vllm_runner, st_model, prompt):
     )
 
 
+@needs_model
 def test_matryoshka_parity(vllm_runner, st_model):
     from vllm import PoolingParams
 
     prompt = "task: search result | query: what is vllm"
     dims = [128, 256, 512, 768]
-    with vllm_runner(
-        MODEL, runner="pooling", max_model_len=1024, gpu_memory_utilization=0.8
-    ) as vm:
+    with vllm_runner(MODEL, runner="pooling", max_model_len=8192) as vm:
         outs = vm.embed(
             [prompt] * len(dims),
             pooling_params=[PoolingParams(dimensions=d) for d in dims],
