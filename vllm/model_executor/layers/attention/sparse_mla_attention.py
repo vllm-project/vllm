@@ -965,9 +965,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """``return_lse`` None means ``need_to_return_lse_for_decode``."""
         raise NotImplementedError
 
     @staticmethod
