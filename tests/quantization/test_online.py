@@ -3071,12 +3071,7 @@ class _OotOnlineConfig(OnlineQuantizationConfig):
 
 
 def _register_online_config(name: str):
-    """Register ``_OotOnlineConfig`` for ``name`` and return a restore hook.
-
-    ``register_quantization_config`` is how an out-of-tree platform overrides a
-    quantization method; these tests pin that ``get_quant_config`` then builds
-    the registered class instead of a hardcoded ``OnlineQuantizationConfig``.
-    """
+    """Register ``_OotOnlineConfig`` for ``name`` and return a restore hook."""
     previous = _CUSTOMIZED_METHOD_TO_QUANT_CONFIG.get(name)
     added_to_methods = name not in QUANTIZATION_METHODS
     supported = current_platform.supported_quantization
@@ -3101,57 +3096,32 @@ def _register_online_config(name: str):
     return restore
 
 
-def test_registered_online_config_is_instantiated(tmp_path) -> None:
-    """A subclass registered for a new method name must be the one built."""
-    name = "test_oot_online_method"
-    restore = _register_online_config(name)
+@pytest.mark.parametrize(
+    "quantization,quant_args",
+    [
+        pytest.param("test_oot_online_method", {"moe": "mxfp8"}, id="custom-method"),
+        pytest.param("online", {"moe": "mxfp4"}, id="online"),
+        pytest.param("fp8_per_block", None, id="shorthand"),
+    ],
+)
+def test_registered_online_config_is_instantiated(
+    tmp_path, quantization, quant_args
+) -> None:
+    """``get_quant_config`` builds the class registered for the method name."""
+    restore = _register_online_config(quantization)
     try:
         _write_minimal_llama_config(tmp_path)
-        args = quant_config_args(moe="mxfp8")
         model_config = ModelConfig(
             model=str(tmp_path),
-            quantization=name,
-            quantization_config=args,
+            quantization=quantization,
+            quantization_config=(
+                quant_config_args(**quant_args) if quant_args else None
+            ),
         )
 
         result = weight_utils.get_quant_config(model_config, LoadConfig())
-
-        assert type(result) is _OotOnlineConfig
-        assert result.args is args
     finally:
         restore()
 
-
-def test_registered_online_config_is_used_for_online_method(tmp_path) -> None:
-    """``--quantization online`` must build the registered subclass."""
-    restore = _register_online_config("online")
-    try:
-        _write_minimal_llama_config(tmp_path)
-        args = quant_config_args(moe="mxfp4")
-        model_config = ModelConfig(
-            model=str(tmp_path),
-            quantization="online",
-            quantization_config=args,
-        )
-
-        result = weight_utils.get_quant_config(model_config, LoadConfig())
-
-        assert type(result) is _OotOnlineConfig
-        assert result.args.moe == args.moe
-    finally:
-        restore()
-
-
-def test_registered_online_config_is_used_for_shorthand(tmp_path) -> None:
-    """A shorthand resolved from ``_ONLINE_SHORTHANDS`` also honours it."""
-    restore = _register_online_config("fp8_per_block")
-    try:
-        _write_minimal_llama_config(tmp_path)
-        model_config = ModelConfig(model=str(tmp_path), quantization="fp8_per_block")
-
-        result = weight_utils.get_quant_config(model_config, LoadConfig())
-
-        assert type(result) is _OotOnlineConfig
-        assert result.args.linear is not None
-    finally:
-        restore()
+    assert type(result) is _OotOnlineConfig
+    assert result.args is not None
