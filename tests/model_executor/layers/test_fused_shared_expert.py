@@ -2468,6 +2468,7 @@ def test_store_dtype_fp8_shared_expert_fse_is_incompatible(store_dtype: str) -> 
         ["model.layers.0.mlp.experts"],
         ["model.layers.0.mlp.shared_experts.gate_up_proj"],
         ["model.layers.0.mlp.shared_experts.down_proj"],
+        ["model.layers.0.mlp.shared_experts"],
     ],
 )
 def test_fp8_shared_expert_fse_rejects_asymmetric_ignored_layers(
