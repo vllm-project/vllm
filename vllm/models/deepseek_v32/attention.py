@@ -290,6 +290,13 @@ class DeepseekV32Attention(MLAAttention):
             or torch.cuda.is_current_stream_capturing()
         )
 
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        # `finalize_model_weights` skips the children of a layer with a quant
+        # method (here a KV-cache one, e.g. ModelOpt), so fuse the indexer here
+        if self.indexer is not None:
+            self.indexer.process_weights_after_loading()
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,

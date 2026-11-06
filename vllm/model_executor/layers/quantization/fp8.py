@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -487,12 +488,17 @@ class Fp8DequantLinearMethod(LinearMethodBase):
         self.bf16_method = UnquantizedLinearMethod()
 
     @classmethod
-    def wrap(cls, layer: LinearBase) -> None:
-        """Run an already built layer with an FP8 weight in BF16."""
+    def wrap(cls, layer: LinearBase) -> bool:
+        """Run an already built layer with an FP8 weight in BF16. Returns
+        whether the layer runs this way."""
+        if isinstance(layer.quant_method, cls):
+            return True
         weight = getattr(layer, "weight", None)  # None: e.g. packed FP4
-        if weight is not None and weight.dtype == torch.float8_e4m3fn:
-            layer.quant_method = cls(layer.quant_method)
-            _load_weight_in_sent_dtype(layer)
+        if weight is None or weight.dtype != torch.float8_e4m3fn:
+            return False
+        layer.quant_method = cls(layer.quant_method)
+        _load_weight_in_sent_dtype(layer)
+        return True
 
     def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
         self.base.create_weights(layer, *args, **kwargs)
@@ -539,28 +545,35 @@ class Fp8DequantLinearMethod(LinearMethodBase):
 
 def _load_weight_in_sent_dtype(layer: torch.nn.Module) -> None:
     """Keep a whole weight in the dtype it is sent in: FP8, or BF16 (no scale
-    needed). The parameter is viewed in that dtype on its storage when it fits
+    needed). The loader is bound to the layer, so layerwise reload's metadata
+    does not keep the layer alive (`sanitize_layer_refs`)."""
+    layer.checkpoint_weight_loader = layer.weight.weight_loader
+    layer.weight.weight_loader = MethodType(_weight_loader_in_sent_dtype, layer)
+
+
+def _weight_loader_in_sent_dtype(
+    layer: torch.nn.Module,
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    *args,
+    **kwargs,
+):
+    """The parameter is viewed in the sent dtype on its storage when it fits
     (after a cold start it holds BF16), else it gets new storage."""
-    param = layer.weight
-    loader = param.weight_loader
-
-    def weight_loader(param, loaded_weight, *args, **kwargs):
-        fp8 = loaded_weight.dtype == torch.float8_e4m3fn
-        dtype = torch.float8_e4m3fn if fp8 else layer.params_dtype
-        if param.dtype != dtype:
-            storage = param.untyped_storage()
-            if (
-                param.is_contiguous()
-                and param.storage_offset() == 0
-                and storage.nbytes() >= param.numel() * dtype.itemsize
-            ):
-                shape, stride = param.shape, param.stride()
-                param.data = storage_view(storage, 0, shape, stride, dtype)
-            else:
-                param.data = torch.empty_like(param, dtype=dtype)
-        return loader(param, loaded_weight, *args, **kwargs)
-
-    param.weight_loader = weight_loader
+    fp8 = loaded_weight.dtype == torch.float8_e4m3fn
+    dtype = torch.float8_e4m3fn if fp8 else layer.params_dtype
+    if param.dtype != dtype:
+        storage = param.untyped_storage()
+        if (
+            param.is_contiguous()
+            and param.storage_offset() == 0
+            and storage.nbytes() >= param.numel() * dtype.itemsize
+        ):
+            shape, stride = param.shape, param.stride()
+            param.data = storage_view(storage, 0, shape, stride, dtype)
+        else:
+            param.data = torch.empty_like(param, dtype=dtype)
+    return layer.checkpoint_weight_loader(param, loaded_weight, *args, **kwargs)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

@@ -46,6 +46,7 @@ from vllm.model_executor.layers.indexer_topk import (
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8DequantLinearMethod
@@ -1638,19 +1639,28 @@ def init_indexer_wk_weights_proj(
     quant_config: QuantizationConfig | None,
     prefix: str,
 ) -> None:
-    """Build the indexer's checkpoint layers ``wk`` (stored as the checkpoint
-    stores it, run in BF16: `Fp8DequantLinearMethod`) and ``weights_proj``
-    (BF16), and ``wk_weights_proj``, the BF16 linear that runs both as one
-    GEMM. Its weight is not a parameter: it is derived from theirs after every
-    load (`fuse_indexer_wk_weights_proj`)."""
-    indexer.wk = ReplicatedLinear(
-        hidden_size,
-        indexer.head_dim,
-        bias=False,
-        quant_config=quant_config,
-        prefix=f"{prefix}.wk",
-    )
-    Fp8DequantLinearMethod.wrap(indexer.wk)
+    """Build the indexer's checkpoint layers ``wk`` (BF16, or FP8 as the
+    checkpoint stores it and run in BF16: `Fp8DequantLinearMethod`) and
+    ``weights_proj`` (BF16), and ``wk_weights_proj``, the BF16 linear that runs
+    both as one GEMM. Its weight is not a parameter: it is derived from theirs
+    after every load and every in-place reload of the runtime weights
+    (`fuse_indexer_wk_weights_proj` from the indexer's post-load hook)."""
+
+    def wk(config: QuantizationConfig | None) -> ReplicatedLinear:
+        return ReplicatedLinear(
+            hidden_size,
+            indexer.head_dim,
+            bias=False,
+            quant_config=config,
+            prefix=f"{prefix}.wk",
+        )
+
+    indexer.wk = wk(quant_config)
+    if not Fp8DequantLinearMethod.wrap(indexer.wk) and not isinstance(
+        indexer.wk.quant_method, UnquantizedLinearMethod
+    ):  # e.g. online quantization: keep wk exact, as the fused GEMM is BF16
+        indexer.wk = wk(None)
+    indexer.refresh_derived_weights = indexer.process_weights_after_loading
     indexer.weights_proj = ReplicatedLinear(
         hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
     )

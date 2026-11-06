@@ -221,6 +221,13 @@ def _quant_config(layout: str):
         )
 
         return ModelOptMxFp8Config(True, None, [])
+    if layout == "online":  # a BF16 checkpoint quantized on load
+        from vllm.config.quantization import QuantizationConfigArgs
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        return OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))
     return None
 
 
@@ -392,3 +399,42 @@ def test_glm5next_nope_kv_a_padding_block_scale():
     )
     assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
     assert torch.equal(padded[:4], scale)
+
+
+def test_indexer_wk_stays_bf16_under_online_quantization(model_config):
+    """The fused GEMM runs in BF16, so online quantization must not round wk."""
+    ckpt, expected = _indexer_checkpoint(10, "bf16")
+    model = _indexer_cold_start(ckpt, "online", model_config)
+    fused = model.indexer.wk_weights_proj.weight
+    torch.testing.assert_close(fused, expected, rtol=0, atol=0)
+
+
+def test_indexer_in_place_reload_refreshes_fused_weight(model_config):
+    """An in-place reload of the runtime weights (no post-load processing)
+    refills the derived fused weight through `refresh_derived_weights`."""
+    from vllm.model_executor.model_loader.weight_utils import refresh_derived_weights
+
+    model = _indexer_cold_start(
+        _indexer_checkpoint(10, "block")[0], "block", model_config
+    )
+    _, expected = _indexer_checkpoint(11, "bf16")
+    model.indexer.wk.weight.data.copy_(expected[:_WK])
+    model.indexer.weights_proj.weight.data.copy_(expected[_WK:])
+    refresh_derived_weights(model)
+    torch.testing.assert_close(
+        model.indexer.wk_weights_proj.weight, expected, rtol=0, atol=0
+    )
+
+
+def test_layerwise_metadata_does_not_keep_layers_alive(model_config):
+    """`wk`'s weight loader must not pin the layer through the layerwise
+    reload metadata (a WeakKeyDictionary keyed by the layer)."""
+    import gc
+    import weakref
+
+    model = _IndexerModel("block")
+    record_metadata_for_reloading(model)
+    wk = weakref.ref(model.indexer.wk)
+    del model
+    gc.collect()
+    assert wk() is None
