@@ -26,12 +26,12 @@ mod world_size;
 
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
-use axum::extract::MatchedPath;
-use axum::http::{Method, StatusCode};
+use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
+use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tower::ServiceExt as _;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -89,58 +89,51 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
     )
 }
 
-fn server_dev_mode_enabled() -> bool {
-    std::env::var("VLLM_SERVER_DEV_MODE")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .is_some_and(|value| value != 0)
-}
-
 fn runtime_lora_updating_enabled() -> bool {
     std::env::var("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
         .ok()
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
+fn cohere_api_enabled() -> bool {
+    std::env::var("VLLM_ENABLE_COHERE_API")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|value| value != 0)
+}
+
+/// Optional route families, each enabled by a CLI flag or an environment
+/// variable as in the Python frontend.
+#[derive(Debug, Clone, Copy, Default)]
+struct RouteGates {
+    /// `VLLM_SERVER_DEV_MODE`: development-only routes.
+    dev_mode: bool,
+    /// `VLLM_ALLOW_RUNTIME_LORA_UPDATING`: LoRA load and unload routes.
+    runtime_lora_updating: bool,
+    /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
+    scale_out: bool,
+    /// `VLLM_ENABLE_COHERE_API`: Cohere v2 chat routes.
+    cohere_api: bool,
+}
+
+impl RouteGates {
+    fn resolve(state: &AppState) -> Self {
+        Self {
+            dev_mode: state.api_server_options.server_dev_mode,
+            runtime_lora_updating: runtime_lora_updating_enabled(),
+            scale_out: state.api_server_options.enable_scale_out,
+            cohere_api: cohere_api_enabled(),
+        }
+    }
+}
+
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let scale_out_endpoints_enabled = state.api_server_options.enable_scale_out;
-    build_router_with_options(
-        state,
-        server_dev_mode_enabled(),
-        runtime_lora_updating_enabled(),
-        scale_out_endpoints_enabled,
-    )
+    let gates = RouteGates::resolve(&state);
+    build_router_with_gates(state, gates)
 }
 
-#[cfg(test)]
-fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> Router {
-    build_router_with_dev_mode_and_lora(state, dev_mode_enabled, false)
-}
-
-#[cfg(test)]
-fn build_router_with_dev_mode_and_lora(
-    state: Arc<AppState>,
-    dev_mode_enabled: bool,
-    runtime_lora_updating_enabled: bool,
-) -> Router {
-    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled, true)
-}
-
-#[cfg(test)]
-fn build_router_with_scale_out_endpoints(
-    state: Arc<AppState>,
-    scale_out_endpoints_enabled: bool,
-) -> Router {
-    build_router_with_options(state, false, false, scale_out_endpoints_enabled)
-}
-
-fn build_router_with_options(
-    state: Arc<AppState>,
-    dev_mode_enabled: bool,
-    runtime_lora_updating_enabled: bool,
-    scale_out_endpoints_enabled: bool,
-) -> Router {
+fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
@@ -163,11 +156,22 @@ fn build_router_with_options(
         // TODO: implement elastic EP scaling.
         .route("/scale_elastic_ep", post(not_supported))
         .route("/is_scaling_elastic_ep", post(not_supported))
+        .route("/v1/responses", post(openai::create_responses))
+        .route(
+            "/v1/responses/{response_id}",
+            get(openai::retrieve_response),
+        )
+        .route(
+            "/v1/responses/{response_id}/cancel",
+            post(openai::cancel_response),
+        )
+        // TODO: implement generative scoring.
+        .route("/generative_scoring", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
 
-    if scale_out_endpoints_enabled {
+    if gates.scale_out {
         router = router.route("/inference/v1/generate", post(inference::generate));
         // TODO: implement the remaining scale-out routes.
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
@@ -178,6 +182,14 @@ fn build_router_with_options(
         router = router.route("/inference/v1/generate", post(disabled_scale_out));
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
+        }
+    }
+
+    if gates.cohere_api {
+        // TODO: implement the Cohere v2 chat API.
+        router = router.route("/cohere/v2/chat", post(not_supported));
+        if gates.scale_out {
+            router = router.route("/cohere/v2/chat/render", post(not_supported));
         }
     }
 
@@ -199,13 +211,13 @@ fn build_router_with_options(
             .route("/checkpoint/status", get(checkpoint::status));
     }
 
-    if runtime_lora_updating_enabled {
+    if gates.runtime_lora_updating {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
             .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter));
     }
 
-    if dev_mode_enabled {
+    if gates.dev_mode {
         // Development-only
         router = router
             .route("/reset_prefix_cache", post(cache::reset_prefix_cache))
@@ -266,7 +278,9 @@ fn build_router_with_options(
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
+    let log_error_stack = state.api_server_options.log_error_stack;
     let enable_api_key_auth = state.has_api_keys();
+    let enable_access_log = state.access_log.enabled;
     let mut router = router
         .with_state(state.clone())
         .layer(match state.api_server_options.request_body_limit_bytes {
@@ -282,6 +296,10 @@ fn build_router_with_options(
         .layer(middleware::cors_layer(&state.cors))
         .layer(from_fn(middleware::strip_cors_on_no_origin));
 
+    if log_error_stack {
+        router = router.layer(from_fn(middleware::log_error_response));
+    }
+
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(
             state.clone(),
@@ -293,11 +311,48 @@ fn build_router_with_options(
     // requests are visible, while metrics/load only see authenticated traffic.
     router = router.layer(TraceLayer::new_for_http());
 
+    // Log every response, including rejected and unrouted ones, like Python's
+    // uvicorn access log.
+    if enable_access_log {
+        router = router.layer(from_fn_with_state(state.clone(), middleware::log_access));
+    }
+
     if enable_request_id_headers {
         router = router.layer(from_fn(middleware::set_request_id_header));
     }
 
     router
+}
+
+/// Also serve every route of `router` under `root_path`, like FastAPI's
+/// `root_path`: with `/llm`, both `/llm/v1/models` and `/v1/models` reach
+/// `/v1/models`.
+///
+/// The prefix is stripped before routing, so every layer sees the bare path.
+/// Like Starlette's `get_route_path`, it only matches up to a path segment
+/// boundary: `/llmx/v1/models` keeps its path.
+pub(crate) fn with_root_path(router: Router, root_path: String) -> Router {
+    Router::new().fallback_service(
+        router.map_request(move |request: Request| strip_root_path(request, &root_path)),
+    )
+}
+
+fn strip_root_path(mut request: Request, root_path: &str) -> Request {
+    let uri = request.uri();
+    let path = match uri.path().strip_prefix(root_path) {
+        Some("") => "/",
+        Some(path) if path.starts_with('/') => path,
+        _ => return request,
+    };
+    let path_and_query = match uri.query() {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_owned(),
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query =
+        Some(path_and_query.parse().expect("a suffix of a valid path is a valid path"));
+    *request.uri_mut() = Uri::from_parts(parts).expect("only the path changed");
+    request
 }
 
 #[cfg(test)]
