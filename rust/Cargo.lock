@@ -5867,6 +5867,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "indexmap 2.13.0",
+ "ipnet",
  "itertools 0.14.0",
  "libc",
  "llm-multimodal",

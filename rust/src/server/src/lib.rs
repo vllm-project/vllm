@@ -32,9 +32,9 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, TlsConfig,
+    DEFAULT_FORWARDED_ALLOW_IPS, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -173,6 +173,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
+            .with_forwarded_allow_ips(&config.forwarded_allow_ips)
             .with_profiler(config.profiler.clone()),
     );
 
