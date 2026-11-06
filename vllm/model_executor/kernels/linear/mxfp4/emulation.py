@@ -6,8 +6,8 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
@@ -19,9 +19,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_quark
 
@@ -45,9 +47,8 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         super().__init__(config)
         if config.activation_quant_key is None:
             # no input Q/DQ for weight-only
-            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
-                lambda x: x
-            )
+            qdq_fn: Callable[[torch.Tensor], torch.Tensor] = lambda x: x
+            self.quant_dequant_func = qdq_fn
         else:
             self.quant_dequant_func = _ACTIVATION_QUANT_DEQUANT_FUNCS[
                 config.activation_quant_key
@@ -58,6 +59,16 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         return True, None
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key == kMxfp4Static and (
+            activation_key is None or activation_key in _ACTIVATION_QUANT_DEQUANT_FUNCS
+        )
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
@@ -97,7 +108,12 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        # Match the MXFP8 emulation path when explicitly enabled: dequantize
+        # once at load time so inference uses a plain high-precision linear.
+        # Otherwise retain packed weights and dequantize per invocation.
+        if envs.VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD:
+            weight = dequant_mxfp4(layer.weight, layer.weight_scale, torch.bfloat16)
+            replace_parameter(layer, "weight", weight.contiguous())
 
     def apply_weights(
         self,
@@ -105,6 +121,12 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
         qdq_x = self.quant_dequant_func(x)
+
+        # Packed MXFP4 weights use one byte for two values. A weight with
+        # elements wider than one byte was already dequantized at load time.
+        if layer.weight.element_size() >= 2:
+            return F.linear(qdq_x, layer.weight.to(x.dtype), bias)
+
+        dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
         return F.linear(qdq_x, dq_w, bias)

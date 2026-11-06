@@ -145,9 +145,6 @@ pub struct BenchConfig {
     pub prefix_repetition_num_prefixes: usize,
     pub prefix_repetition_output_len: usize,
     pub sharegpt_output_len: Option<usize>,
-    pub sonnet_input_len: usize,
-    pub sonnet_output_len: usize,
-    pub sonnet_prefix_len: usize,
     pub no_oversample: bool,
     pub disable_shuffle: bool,
     pub num_prompts: usize,
@@ -201,6 +198,15 @@ pub struct BenchConfig {
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
     pub hf_text_column: Option<String>,
+    /// Fire each request at its trace-recorded timestamp instead of a
+    /// synthetic --request-rate schedule. Only timed_trace can set this.
+    pub self_timed: bool,
+    pub timed_trace_chunk_hash_size: usize,
+    pub timed_trace_sec_multiplier: f64,
+    pub timed_trace_label_timestamp: String,
+    pub timed_trace_label_input_length: String,
+    pub timed_trace_label_output_length: String,
+    pub timed_trace_label_hash_ids: String,
     pub reset_prefix_cache: bool,
     pub prompt_token_ids: bool,
     // --- Random multimodal dataset ---
@@ -237,6 +243,17 @@ impl BenchConfig {
         if args.max_model_len == Some(0) {
             return Err(BenchError::Config(
                 "--max-model-len must be at least 1".into(),
+            ));
+        }
+
+        if args.max_concurrency == Some(0) {
+            return Err(BenchError::Config(
+                "--max-concurrency must be greater than 0".into(),
+            ));
+        }
+        if args.multi_turn_concurrency == Some(0) {
+            return Err(BenchError::Config(
+                "--multi-turn-concurrency must be greater than 0".into(),
             ));
         }
 
@@ -309,6 +326,14 @@ impl BenchConfig {
             }
         }
 
+        if uses_server_default_temperature(args.backend, extra_body.as_ref()) {
+            tracing::warn!(
+                "vllm-bench does not set temperature==0 (greedy) in requests by default. \
+                 The default will be determined on the server side and can be \
+                 model/API specific. For greedy decoding, include --temperature=0."
+            );
+        }
+
         // Parse metadata
         let metadata = match &args.metadata {
             None => None,
@@ -371,6 +396,79 @@ impl BenchConfig {
         let mut multi_turn_min_turns = args.multi_turn_num_turns;
         let mut multi_turn_max_turns = args.multi_turn_num_turns;
 
+        let self_timed = if args.dataset_name == DatasetName::TimedTrace {
+            if !matches!(args.backend, BackendKind::Vllm | BackendKind::Openai) {
+                return Err(BenchError::Config(
+                    "timed_trace passes pre-tokenized prompts (list[int]) and requires \
+                     a completions backend ('vllm' or 'openai')"
+                        .into(),
+                ));
+            }
+            if args.dataset_path.is_none() {
+                return Err(BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                ));
+            }
+            // A zero, negative or non-finite scale turns trace timestamps into
+            // offsets the scheduler cannot sleep on.
+            if !(args.timed_trace_sec_multiplier.is_finite()
+                && args.timed_trace_sec_multiplier > 0.0)
+            {
+                return Err(BenchError::Config(format!(
+                    "--timed-trace-sec-multiplier must be finite and positive, got {}",
+                    args.timed_trace_sec_multiplier
+                )));
+            }
+            let self_timed = !args.no_self_timed;
+            if self_timed {
+                // Flags that shape a synthetic schedule are unreachable once
+                // the trace supplies arrival times. Accepting them silently
+                // would still stamp the result JSON and its filename with a
+                // request rate that never ran.
+                let mut unused: Vec<&str> = Vec::new();
+                if args.request_rate.is_finite() {
+                    unused.push("--request-rate");
+                }
+                if args.burstiness != 1.0 {
+                    unused.push("--burstiness");
+                }
+                if args.ramp_up_strategy.is_some() {
+                    unused.push("--ramp-up-strategy");
+                }
+                if args.sweep_request_rate.is_some() {
+                    unused.push("--sweep-request-rate");
+                }
+                // A per-point num_prompts truncates the trace to a different
+                // number of rows, so each sweep point replays a different span.
+                if args.sweep_max_concurrency.is_some() && args.sweep_num_prompts_factor.is_some() {
+                    return Err(BenchError::Config(
+                        "--sweep-num-prompts-factor truncates the trace to a different \
+                         number of rows per sweep point, so each point replays a \
+                         different span; drop it to sweep concurrency over the whole trace"
+                            .into(),
+                    ));
+                }
+                if !unused.is_empty() {
+                    return Err(BenchError::Config(format!(
+                        "{} {} no effect under trace-driven timing; pass --no-self-timed \
+                         to schedule timed_trace by --request-rate instead",
+                        unused.join(" / "),
+                        if unused.len() == 1 { "has" } else { "have" },
+                    )));
+                }
+            }
+            self_timed
+        } else {
+            if args.self_timed || args.no_self_timed {
+                return Err(BenchError::Config(
+                    "--self-timed/--no-self-timed is only supported with \
+                     --dataset-name timed_trace"
+                        .into(),
+                ));
+            }
+            false
+        };
+
         // For random datasets with openai-compatible backends, default to ignore_eos.
         // Exception: multi-turn mode, where ignore_eos causes unbounded context growth
         // across turns. Multi-turn uses min_tokens instead for output length control.
@@ -379,6 +477,8 @@ impl BenchConfig {
             false
         } else {
             args.ignore_eos
+                // timed_trace: generation must run to the trace's output_length
+                || args.dataset_name == DatasetName::TimedTrace
                 || ((args.dataset_name == DatasetName::Random
                     || args.dataset_name == DatasetName::RandomMm)
                     && args.backend.is_openai_compatible()
@@ -439,8 +539,7 @@ impl BenchConfig {
             (MmLimitPerPrompt::default(), Vec::new())
         };
 
-        // Note: --dataset-path is optional for sharegpt (auto-downloads) and
-        // sonnet (uses built-in Shakespeare's sonnets).
+        // --dataset-path is optional for sharegpt (auto-downloads).
 
         // Range ratio (Python semantics: [len*(1-r), len*(1+r)], each r in [0,1))
         let random_range_ratio = RangeRatio::parse(&args.random_range_ratio)?;
@@ -478,6 +577,27 @@ impl BenchConfig {
                         .into(),
                 ));
             }
+        }
+
+        // Synthetic datasets generate their own prompts and never read a
+        // dataset file, so a path given with one would be silently ignored.
+        if let Some(path) = &args.dataset_path
+            && matches!(
+                args.dataset_name,
+                DatasetName::Random
+                    | DatasetName::RandomMm
+                    | DatasetName::RandomRerank
+                    | DatasetName::PrefixRepetition
+            )
+        {
+            let name = clap::ValueEnum::to_possible_value(&args.dataset_name)
+                .expect("DatasetName has no skipped variants");
+            return Err(BenchError::Config(format!(
+                "Cannot use '{}' dataset with --dataset-path. Please specify the \
+                 appropriate --dataset-name (e.g., 'sharegpt', 'custom', 'hf') for \
+                 your dataset file: {path}",
+                name.get_name()
+            )));
         }
 
         // Custom dataset validation
@@ -528,11 +648,11 @@ impl BenchConfig {
                     .into(),
             ));
         }
-        if let Some(len) = args.hf_output_len
-            && len == 0
+        if args.hf_output_len == Some(0)
+            || (args.dataset_name == DatasetName::Hf && args.output_len == Some(0))
         {
             return Err(BenchError::Config(
-                "--hf-output-len must be at least 1".into(),
+                "--hf-output-len and --output-len must be at least 1 for --dataset-name hf".into(),
             ));
         }
 
@@ -549,13 +669,15 @@ impl BenchConfig {
                 ));
             }
 
-            // Normalize and validate min/max turns. ShareGPT only consumes max_turns
-            // (the loader walks all available turns up to the cap), so the
-            // min/num/max coupling used for synthetic generation does not apply.
-            if args.dataset_name == DatasetName::ShareGpt {
+            // Normalize and validate min/max turns. Conversation datasets only
+            // consume max_turns (the loader walks all available turns up to the
+            // cap), so the min/num/max coupling used for synthetic generation
+            // does not apply.
+            if matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf) {
                 if args.multi_turn_max_turns == 1 {
                     return Err(BenchError::Config(
-                        "--multi-turn-max-turns must be at least 2 for ShareGPT multi-turn".into(),
+                        "--multi-turn-max-turns must be at least 2 for ShareGPT-format multi-turn"
+                            .into(),
                     ));
                 }
             } else {
@@ -678,10 +800,7 @@ impl BenchConfig {
                 .unwrap_or(args.prefix_repetition_output_len),
             random_cache_hit_fraction: args.random_cache_hit_fraction,
             random_cache_ratio: args.random_cache_ratio,
-            sharegpt_output_len: args.sharegpt_output_len,
-            sonnet_input_len: args.sonnet_input_len,
-            sonnet_output_len: args.sonnet_output_len,
-            sonnet_prefix_len: args.sonnet_prefix_len,
+            sharegpt_output_len: args.output_len.or(args.sharegpt_output_len),
             no_oversample: args.no_oversample,
             disable_shuffle: args.disable_shuffle,
             num_prompts: args.num_prompts,
@@ -722,7 +841,7 @@ impl BenchConfig {
             multi_turn_min_turns,
             multi_turn_max_turns,
             sharegpt_multi_turn_max_turns: if args.multi_turn
-                && args.dataset_name == DatasetName::ShareGpt
+                && matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf)
                 && args.multi_turn_max_turns != 0
             {
                 Some(args.multi_turn_max_turns)
@@ -740,8 +859,15 @@ impl BenchConfig {
             speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
-            hf_output_len: args.hf_output_len,
+            hf_output_len: args.output_len.or(args.hf_output_len),
             hf_text_column: args.hf_text_column.clone(),
+            self_timed,
+            timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
+            timed_trace_sec_multiplier: args.timed_trace_sec_multiplier,
+            timed_trace_label_timestamp: args.timed_trace_label_timestamp.clone(),
+            timed_trace_label_input_length: args.timed_trace_label_input_length.clone(),
+            timed_trace_label_output_length: args.timed_trace_label_output_length.clone(),
+            timed_trace_label_hash_ids: args.timed_trace_label_hash_ids.clone(),
             reset_prefix_cache: args.reset_prefix_cache,
             prompt_token_ids: args.prompt_token_ids,
             random_mm_base_items_per_request: args.random_mm_base_items_per_request,
@@ -839,6 +965,20 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
         Some(s) => s,
     };
 
+    // The ramp-up schedule replaces the request rate. Accepting one anyway
+    // would stamp the result JSON and its filename with a rate that never ran.
+    for (flag, set) in [
+        ("--request-rate", args.request_rate.is_finite()),
+        ("--sweep-request-rate", args.sweep_request_rate.is_some()),
+    ] {
+        if set {
+            return Err(BenchError::Config(format!(
+                "{flag} cannot be combined with --ramp-up-strategy; \
+                 the ramp-up parameters control the request rate"
+            )));
+        }
+    }
+
     let start_rps = args.ramp_up_start_rps.ok_or_else(|| {
         BenchError::Config("--ramp-up-start-rps is required when --ramp-up-strategy is set".into())
     })?;
@@ -852,12 +992,32 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
             "Ramp-up RPS values must be positive".into(),
         ));
     }
+    if start_rps > end_rps {
+        return Err(BenchError::Config(
+            "--ramp-up-start-rps must not exceed --ramp-up-end-rps".into(),
+        ));
+    }
 
     Ok(Some(RampUpConfig {
         strategy,
         start_rps,
         end_rps,
     }))
+}
+
+/// Whether generation requests leave `temperature` to the server-side default.
+///
+/// Python `vllm bench serve` defaulted to greedy decoding before v0.15, so
+/// results are only comparable with older runs when temperature is set explicitly.
+/// An explicit `"temperature": null` also falls back to the server default.
+fn uses_server_default_temperature(
+    backend: BackendKind,
+    extra_body: Option<&serde_json::Value>,
+) -> bool {
+    !backend.is_pooling()
+        && extra_body
+            .and_then(|b| b.get("temperature"))
+            .is_none_or(serde_json::Value::is_null)
 }
 
 #[cfg(test)]
@@ -881,6 +1041,150 @@ mod tests {
         TestCli::parse_from(args).args
     }
 
+    fn base_timed_trace_args() -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "timed_trace",
+            "--dataset-path",
+            "trace.jsonl",
+        ]
+    }
+
+    #[test]
+    fn test_timed_trace_defaults_to_self_timed() {
+        let config = BenchConfig::from_args(&parse_args(base_timed_trace_args())).unwrap();
+        assert!(config.self_timed);
+        assert!(config.ignore_eos);
+    }
+
+    #[test]
+    fn test_no_self_timed_restores_rate_scheduling() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--no-self-timed", "--request-rate", "10"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert!(!config.self_timed);
+        assert_eq!(config.request_rate, 10.0);
+    }
+
+    /// Rate/burstiness/ramp-up shape a synthetic schedule the trace replaces;
+    /// accepting them would mislabel the result JSON with a rate that never ran.
+    #[test]
+    fn test_self_timed_rejects_synthetic_schedule_flags() {
+        for flag in [
+            vec!["--request-rate", "10"],
+            vec!["--burstiness", "0.5"],
+            vec!["--sweep-request-rate", "1,5,10"],
+        ] {
+            let mut args = base_timed_trace_args();
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("self-timed replay should reject synthetic schedule flags")
+                .to_string();
+            assert!(
+                msg.contains(flag[0]) && msg.contains("--no-self-timed"),
+                "{flag:?}: {msg}"
+            );
+        }
+    }
+
+    /// A per-point num_prompts truncates the trace differently at every sweep
+    /// point, so the replayed span stops being comparable across them.
+    #[test]
+    fn test_self_timed_rejects_sweep_num_prompts_factor() {
+        let mut args = base_timed_trace_args();
+        args.extend([
+            "--sweep-max-concurrency",
+            "8,16",
+            "--sweep-num-prompts-factor",
+            "4",
+        ]);
+        let err = BenchConfig::from_args(&parse_args(args)).expect_err("should reject the factor");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--sweep-num-prompts-factor") && msg.contains("different span"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_self_timed_allows_concurrency_sweep_over_full_trace() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--sweep-max-concurrency", "8,16"]);
+        assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
+    }
+
+    fn ramp_up_args(start: &'static str, end: &'static str) -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--ramp-up-strategy",
+            "linear",
+            "--ramp-up-start-rps",
+            start,
+            "--ramp-up-end-rps",
+            end,
+        ]
+    }
+
+    /// The result filename names the ramp-up, as Python's does, instead of the
+    /// unused `--request-rate` (`infqps`).
+    #[test]
+    fn test_ramp_up_result_filename() {
+        let mut args = ramp_up_args("2", "10");
+        args.extend(["--max-concurrency", "8"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert_eq!(
+            crate::output::json::compute_result_filename(&config, "org/model", "20261028-120000"),
+            "openai-ramp-up-linear-2qps-10qps-concurrency8-model-20261028-120000.json"
+        );
+    }
+
+    /// The ramp-up schedule replaces the request rate, so a rate given next to
+    /// it would never run but still label the result.
+    #[test]
+    fn test_ramp_up_rejects_request_rate_flags() {
+        for flag in [
+            vec!["--request-rate", "5"],
+            vec!["--sweep-request-rate", "1,5"],
+        ] {
+            let mut args = ramp_up_args("2", "10");
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("ramp-up should reject request-rate flags")
+                .to_string();
+            assert!(msg.contains(flag[0]), "{flag:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_ramp_up_rejects_start_above_end() {
+        let msg = BenchConfig::from_args(&parse_args(ramp_up_args("10", "2")))
+            .expect_err("start > end should be rejected")
+            .to_string();
+        assert!(msg.contains("must not exceed"), "{msg}");
+    }
+
+    #[test]
+    fn test_non_positive_sec_multiplier_fails() {
+        // `=` form: clap reads a bare "-0.001" as a flag.
+        for value in [
+            "--timed-trace-sec-multiplier=0",
+            "--timed-trace-sec-multiplier=-0.001",
+            "--timed-trace-sec-multiplier=inf",
+            "--timed-trace-sec-multiplier=nan",
+        ] {
+            let mut args = base_timed_trace_args();
+            args.push(value);
+            let err = BenchConfig::from_args(&parse_args(args))
+                .expect_err("should reject a multiplier that cannot scale timestamps");
+            assert!(err.to_string().contains("--timed-trace-sec-multiplier"));
+        }
+    }
+
     fn base_multi_turn_args() -> Vec<&'static str> {
         vec![
             "vllm-bench",
@@ -890,6 +1194,75 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_output_len_maps_to_sharegpt_and_hf() {
+        let config = |args: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model"];
+            argv.extend_from_slice(args);
+            BenchConfig::from_args(&parse_args(argv)).unwrap()
+        };
+        let sharegpt = ["--dataset-name", "sharegpt", "--dataset-path", "data.json"];
+        let hf = ["--dataset-name", "hf", "--dataset-path", "org/data"];
+
+        assert_eq!(config(&sharegpt).sharegpt_output_len, None);
+        assert_eq!(config(&hf).hf_output_len, None);
+        assert_eq!(
+            config(&[&sharegpt[..], &["--output-len", "32"]].concat()).sharegpt_output_len,
+            Some(32)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--output-len", "32"]].concat()).hf_output_len,
+            Some(32)
+        );
+        // The dataset-specific flags still work on their own.
+        assert_eq!(
+            config(&[&sharegpt[..], &["--sharegpt-output-len", "16"]].concat()).sharegpt_output_len,
+            Some(16)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--hf-output-len", "16"]].concat()).hf_output_len,
+            Some(16)
+        );
+        // Like Python and the other datasets, --output-len wins over both.
+        assert_eq!(
+            config(
+                &[
+                    &sharegpt[..],
+                    &["--output-len", "32", "--sharegpt-output-len", "16"]
+                ]
+                .concat()
+            )
+            .sharegpt_output_len,
+            Some(32)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--output-len", "32", "--hf-output-len", "16"]].concat())
+                .hf_output_len,
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn test_hf_rejects_zero_output_len() {
+        let hf_args = |flag| {
+            vec![
+                "vllm-bench",
+                "--model",
+                "test-model",
+                "--dataset-name",
+                "hf",
+                "--dataset-path",
+                "org/data",
+                flag,
+                "0",
+            ]
+        };
+        for flag in ["--output-len", "--hf-output-len"] {
+            let err = BenchConfig::from_args(&parse_args(hf_args(flag))).err().unwrap();
+            assert!(err.to_string().contains("must be at least 1"), "{err}");
+        }
     }
 
     #[test]
@@ -906,6 +1279,42 @@ mod tests {
             crate::cli::SpeedBenchConfig::Throughput8k
         ));
         assert_eq!(args.speed_bench_output_len, 4096);
+    }
+
+    /// Temperature left unset is flagged, since older Python versions defaulted to greedy.
+    #[test]
+    fn test_uses_server_default_temperature() {
+        let check = |backend, extra: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model", "--backend", backend];
+            argv.extend_from_slice(extra);
+            let config = BenchConfig::from_args(&parse_args(argv)).unwrap();
+            uses_server_default_temperature(config.backend, config.extra_body.as_ref())
+        };
+
+        assert!(check("openai-chat", &[]));
+        assert!(check("vllm", &["--extra-body", r#"{"top_p": 0.9}"#]));
+        assert!(!check("openai-chat", &["--temperature", "0"]));
+        assert!(!check(
+            "openai",
+            &["--extra-body", r#"{"temperature": 0.6}"#]
+        ));
+        assert!(!check("openai-embeddings", &[]));
+
+        // `"temperature": null` leaves it to the server, and `--extra-body`
+        // overrides `--temperature`, so both cases must still warn.
+        assert!(check(
+            "openai-chat",
+            &["--extra-body", r#"{"temperature": null}"#]
+        ));
+        assert!(check(
+            "openai-chat",
+            &[
+                "--temperature",
+                "0",
+                "--extra-body",
+                r#"{"temperature": null}"#
+            ]
+        ));
     }
 
     #[test]
@@ -1068,6 +1477,30 @@ mod tests {
     }
 
     #[test]
+    fn test_hf_multi_turn_uses_conversation_turn_cap() {
+        let args = vec![
+            "vllm-bench",
+            "--backend",
+            "openai-chat",
+            "--multi-turn",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "org/sharegpt-dataset",
+            "--hf-subset",
+            "sharegpt",
+            "--multi-turn-max-turns",
+            "2",
+        ];
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.sharegpt_multi_turn_max_turns, Some(2));
+    }
+
+    #[test]
     fn test_sweep_summary_percentiles_default_empty() {
         let args = base_multi_turn_args();
         let args = parse_args(args);
@@ -1137,6 +1570,112 @@ mod tests {
 
         assert!(BenchConfig::from_args(&args).is_err());
     }
+
+    #[test]
+    fn test_synthetic_dataset_rejects_dataset_path() {
+        // Pair each dataset with a backend it supports, so --dataset-path is
+        // the only invalid argument.
+        for (name, backend) in [
+            ("random", "openai"),
+            ("random-mm", "openai-chat"),
+            ("random-rerank", "vllm-rerank"),
+            ("prefix_repetition", "openai"),
+        ] {
+            let args = parse_args([
+                "vllm-bench",
+                "--backend",
+                backend,
+                "--dataset-name",
+                name,
+                "--dataset-path",
+                "workload.jsonl",
+            ]);
+            let msg = BenchConfig::from_args(&args)
+                .expect_err("a synthetic dataset must reject --dataset-path")
+                .to_string();
+            assert!(
+                msg.contains(&format!("Cannot use '{name}' dataset with --dataset-path")),
+                "{name}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_dataset_rejects_dataset_path() {
+        // --dataset-name defaults to random, so a forgotten --dataset-name must
+        // not silently benchmark random prompts instead of the given file.
+        let args = parse_args(["vllm-bench", "--dataset-path", "workload.jsonl"]);
+        let msg = BenchConfig::from_args(&args)
+            .expect_err("the default random dataset must reject --dataset-path")
+            .to_string();
+        assert!(msg.contains("Cannot use 'random' dataset"), "{msg}");
+    }
+
+    #[test]
+    fn test_file_dataset_accepts_dataset_path() {
+        let args = parse_args([
+            "vllm-bench",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            "workload.jsonl",
+        ]);
+        assert!(BenchConfig::from_args(&args).is_ok());
+    }
+
+    #[test]
+    fn test_zero_max_concurrency_fails() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--max-concurrency",
+            "0",
+        ]);
+        let err = BenchConfig::from_args(&args).expect_err("0 concurrency must be rejected");
+        assert!(
+            err.to_string().contains("--max-concurrency must be greater than 0"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_positive_max_concurrency_passes() {
+        for value in ["1", "16"] {
+            let args = parse_args(vec![
+                "vllm-bench",
+                "--model",
+                "test-model",
+                "--max-concurrency",
+                value,
+            ]);
+            assert!(
+                BenchConfig::from_args(&args).is_ok(),
+                "value {value} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zero_multi_turn_concurrency_fails() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--multi-turn",
+            "--multi-turn-concurrency",
+            "0",
+        ]);
+        let err =
+            BenchConfig::from_args(&args).expect_err("0 multi-turn concurrency must be rejected");
+        assert!(
+            err.to_string().contains("--multi-turn-concurrency must be greater than 0"),
+            "{}",
+            err
+        );
+    }
+
     #[test]
     fn test_range_ratio_parse_float() {
         let rr = RangeRatio::parse("0.2").unwrap();

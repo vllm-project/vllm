@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Micro benchmark comparing built-in hash(), SHA-256, and xxHash.
+"""Micro benchmark comparing built-in hash(), SHA-256, and xxHash.
 
 This focuses on a single test payload shaped like the prefix-cache hash input:
     (32-byte bytes object, 32-int tuple)

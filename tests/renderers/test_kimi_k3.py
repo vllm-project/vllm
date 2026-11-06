@@ -40,6 +40,7 @@ class MockHFConfig:
 class MockModelConfig:
     runner_type: str = "generate"
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     multimodal_config: Any = None
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     allowed_local_media_path: str = ""
@@ -302,10 +303,12 @@ def test_render_messages_derives_private_xtml_tool_attrs():
         "first",
         "second",
     ]
-    assert conversation[1]["tool"] == "lookup"
-    assert conversation[1]["index"] == 1
-    assert conversation[2]["tool"] == "lookup"
-    assert conversation[2]["index"] == 2
+    # ``tool`` and ``index`` are Kimi-K3 XTML attributes the renderer adds to
+    # resolved tool messages; ``ConversationMessage`` does not declare them.
+    assert conversation[1].get("tool") == "lookup"
+    assert conversation[1].get("index") == 1
+    assert conversation[2].get("tool") == "lookup"
+    assert conversation[2].get("index") == 2
     assert tokenizer.conversations[-1] == conversation
 
 

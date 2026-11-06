@@ -13,13 +13,14 @@ the newest scheduled step's output has been processed.
 
 import os
 import time
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -48,13 +49,17 @@ def _make_model_runner_output(
     )
 
 
-def _create_deferring_scheduler():
+def _create_deferring_scheduler(scheduling_policy="fcfs"):
     """Async scheduler with deferred block freeing forced on.
 
     The production gate additionally requires a PD KV-consumer connector;
     the mechanism itself is independent of it.
     """
-    scheduler = create_scheduler(model=MODEL, async_scheduling=True)
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        scheduling_policy=scheduling_policy,
+    )
     scheduler.defer_block_free = True
     return scheduler
 
@@ -77,6 +82,24 @@ def _setup_request_with_inflight_step(scheduler, max_tokens: int = 5):
     out1 = scheduler.schedule()
     assert out1.num_scheduled_tokens[request.request_id] == 1
     return request, out0, out1
+
+
+def _fail_one_allocation(scheduler, call_number: int):
+    real_allocate = scheduler.kv_cache_manager.allocate_slots
+    calls = 0
+
+    def allocate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == call_number:
+            return None
+        return real_allocate(*args, **kwargs)
+
+    return patch.object(
+        scheduler.kv_cache_manager,
+        "allocate_slots",
+        side_effect=allocate,
+    )
 
 
 def test_gate_enabled_for_async_consumer():
@@ -224,6 +247,54 @@ def test_preempt_defers_free_and_clears_bookkeeping():
     assert pool.get_num_free_blocks() == num_free_initially
 
 
+@pytest.mark.parametrize(
+    ("policy", "failed_call"),
+    [
+        ("fcfs", 1),
+        ("priority", 2),
+    ],
+)
+def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
+    scheduler = _create_deferring_scheduler(policy)
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=10,
+        stop_token_ids=[STOP_TOKEN_ID],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    out0 = scheduler.schedule()
+    out1 = scheduler.schedule()
+
+    worst, trigger, tail = requests
+    worst.priority, trigger.priority, tail.priority = 9, 0, 1
+
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        blocked = scheduler.schedule()
+    assert allocate.call_count == failed_call
+    assert not blocked.preempted_req_ids
+    retry_trigger = requests[failed_call - 1]
+    assert retry_trigger.request_id not in blocked.num_scheduled_tokens
+
+    for output in (out0, out1, blocked):
+        if output.total_num_scheduled_tokens:
+            scheduler.update_from_output(
+                output,
+                _make_model_runner_output(output),
+            )
+
+    expected_victim = worst if policy == "priority" else tail
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        resumed = scheduler.schedule()
+
+    assert allocate.call_count > failed_call
+    assert expected_victim.request_id in resumed.preempted_req_ids
+    assert retry_trigger.request_id in resumed.num_scheduled_tokens
+    if policy == "priority":
+        assert tail.request_id in resumed.num_scheduled_tokens
+
+
 def test_multiple_deferred_frees_drain_in_order():
     scheduler = _create_deferring_scheduler()
     pool = scheduler.kv_cache_manager.block_pool
@@ -347,7 +418,7 @@ def test_abort_mid_prefill_defers_free():
     chunk is still in flight must withhold its blocks.
     """
     scheduler = create_scheduler(
-        model=MODEL, async_scheduling=True, long_prefill_token_threshold=16
+        model=MODEL, async_scheduling=True, max_num_batched_tokens=16
     )
     scheduler.defer_block_free = True
     pool = scheduler.kv_cache_manager.block_pool
@@ -474,3 +545,105 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     assert not scheduler.deferred_frees
     out2 = scheduler.schedule()
     assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]
+
+
+def _setup_async_load(defer_async_loads: bool):
+    """Schedule a running request's prefill and one in-flight decode, then
+    admit a request whose KV an async connector load fills.
+
+    Returns (scheduler, importer, outputs, update_state_after_alloc mock).
+    """
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.defer_block_free = True
+    scheduler.defer_async_loads = defer_async_loads
+    _, out0, out1 = _setup_request_with_inflight_step(scheduler)
+
+    importer = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, max_tokens=5, req_ids=["imp"]
+    )[0]
+    scheduler.add_request(importer)
+    connector = scheduler.connector
+    assert connector is not None
+    with (
+        patch.object(
+            connector,
+            "get_num_new_matched_tokens",
+            return_value=(2 * scheduler.block_size, True),
+        ),
+        patch.object(connector, "update_state_after_alloc") as registered,
+    ):
+        out2 = scheduler.schedule()
+    assert importer.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    return scheduler, importer, [out0, out1, out2], registered
+
+
+def test_deferred_async_load_registers_after_inflight_step():
+    """HiSparse keeps reading a released page until the pool reuses it, and an
+    async connector load isn't ordered against the in-flight step, so the load
+    is registered only once that step is processed.
+    """
+    scheduler, importer, outputs, registered = _setup_async_load(defer_async_loads=True)
+    out0, out1, _ = outputs
+    registered.assert_not_called()
+
+    connector = scheduler.connector
+    with patch.object(connector, "update_state_after_alloc") as registered:
+        scheduler.update_from_output(out0, _make_model_runner_output(out0))
+        outputs.append(scheduler.schedule())
+        registered.assert_not_called()
+
+        scheduler.update_from_output(out1, _make_model_runner_output(out1))
+        outputs.append(scheduler.schedule())
+    registered.assert_called_once()
+    assert registered.call_args.args[0] is importer
+
+
+def test_deferred_async_load_records_hit_sources_when_started():
+    """The connector attributes cache-hit tiers only once the load is
+    registered, so a deferred load records its prefix cache stats then."""
+    scheduler, importer, outputs, _ = _setup_async_load(defer_async_loads=True)
+    out0, out1, _ = outputs
+    connector = scheduler.connector
+    scheduler.connector_prefix_cache_stats = PrefixCacheStats()
+    sources = MagicMock()
+    with (
+        patch.object(connector, "update_state_after_alloc"),
+        patch.object(
+            connector, "get_external_cache_hit_sources", return_value=sources
+        ) as hit_sources,
+        patch.object(PrefixCacheStats, "record") as record,
+    ):
+        scheduler.update_from_output(out0, _make_model_runner_output(out0))
+        scheduler.update_from_output(out1, _make_model_runner_output(out1))
+    hit_sources.assert_called_once()
+    assert hit_sources.call_args.args[0] is importer
+    assert record.call_args.kwargs["hits_by_source"] is sources
+
+
+def test_async_load_registers_immediately_without_deferral():
+    scheduler, importer, _, registered = _setup_async_load(defer_async_loads=False)
+    registered.assert_called_once()
+
+
+def test_abort_deferred_async_load_frees_after_inflight_step():
+    """No load was posted for a deferred request, so nothing will report it
+    done; its blocks are freed once the step that may still read them is
+    processed.
+    """
+    scheduler, importer, outputs, _ = _setup_async_load(defer_async_loads=True)
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_held = pool.get_num_free_blocks()
+
+    scheduler.finish_requests(importer.request_id, RequestStatus.FINISHED_ABORTED)
+    assert importer.request_id not in scheduler.requests
+    assert scheduler.deferred_frees
+    assert pool.get_num_free_blocks() == num_free_held
+
+    for output in outputs:
+        scheduler.update_from_output(output, _make_model_runner_output(output))
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() > num_free_held

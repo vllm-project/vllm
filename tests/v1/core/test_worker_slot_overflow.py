@@ -105,8 +105,8 @@ def test_streaming_pause_does_not_over_admit_worker_slot():
     # still holds its slot.
     scheduler.update_from_output(out, _model_runner_output(["session"], [[STOP_TOKEN]]))
     assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-    # A blocked waiting status lands in skipped_waiting, not the main queue.
-    assert session in scheduler.skipped_waiting
+    # The paused session keeps its KV blocks, so it lands in kv_holding_waiting.
+    assert session in scheduler.kv_holding_waiting
     assert scheduler.num_waiting_for_streaming_input == 1
 
     # A different request arrives while the session is paused.

@@ -113,7 +113,6 @@ async def test_pp_dp_v2_mid_concurrency(async_scheduling: bool):
 async def test_pp_dp_v2_abort_mid_decode():
     """Cancel half the in-flight requests mid-stream and confirm the
     engine survives the abort storm."""
-
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling=True))
         after.callback(engine.shutdown)
@@ -154,7 +153,6 @@ async def test_pp_dp_v2_abort_mid_decode():
 async def test_pp_dp_v2_pause_resume():
     """Pause an engine with a request in flight, then resume and confirm
     new requests still work."""
-
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling=True))
         after.callback(engine.shutdown)

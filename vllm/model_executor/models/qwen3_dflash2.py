@@ -11,6 +11,9 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from .qwen3_dflash import (
     DFlashQwen3DecoderLayer,
@@ -18,6 +21,125 @@ from .qwen3_dflash import (
     DFlashQwen3Model,
 )
 from .utils import maybe_prefix
+
+
+@triton.jit
+def _dflash2_grouped_conv_kernel(
+    x_ptr,
+    delta_ptr,
+    base_ptr,
+    output_ptr,
+    x_stride_row,
+    delta_stride_row,
+    delta_stride_tap,
+    base_stride_tap,
+    output_stride_row,
+    NUM_CHANNELS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    TAPS: tl.constexpr,
+    ELEMENT_BLOCK: tl.constexpr,
+) -> None:
+    row = tl.program_id(0) // triton.cdiv(NUM_CHANNELS, ELEMENT_BLOCK)
+    col_block = tl.program_id(0) % triton.cdiv(NUM_CHANNELS, ELEMENT_BLOCK)
+    channels = col_block * ELEMENT_BLOCK + tl.arange(0, ELEMENT_BLOCK)
+    mask = channels < NUM_CHANNELS
+    groups = channels // GROUP_SIZE
+    position = row % BLOCK_SIZE
+
+    delta_row = delta_ptr + row * delta_stride_row
+    x_row = x_ptr + row * x_stride_row
+    accumulator = (
+        tl.load(base_ptr + channels, mask=mask, other=0.0).to(tl.float32)
+        + tl.load(delta_row + groups, mask=mask, other=0.0).to(tl.float32)
+    ) * tl.load(x_row + channels, mask=mask, other=0.0).to(tl.float32)
+
+    for tap in tl.static_range(1, TAPS):
+        tap_mask = mask & (position >= tap)
+        coefficient = tl.load(
+            base_ptr + tap * base_stride_tap + channels,
+            mask=tap_mask,
+            other=0.0,
+        ).to(tl.float32) + tl.load(
+            delta_row + tap * delta_stride_tap + groups,
+            mask=tap_mask,
+            other=0.0,
+        ).to(tl.float32)
+        x = tl.load(
+            x_ptr + (row - tap) * x_stride_row + channels,
+            mask=tap_mask,
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += coefficient * x
+
+    tl.store(
+        output_ptr + row * output_stride_row + channels,
+        accumulator,
+        mask=mask,
+    )
+
+
+def dflash2_grouped_conv_impl(
+    x: torch.Tensor,
+    delta: torch.Tensor,
+    base: torch.Tensor,
+    block_size: int,
+    group_size: int,
+) -> torch.Tensor:
+    """DFlash2 grouped convolution adapted from LightSeek TokenSpeed PR #1399."""
+    num_rows, num_channels = x.shape
+    output = torch.empty_like(x)
+    if num_rows == 0:
+        return output
+
+    element_block = 1024 if num_rows >= 128 and num_channels % 1024 == 0 else 512
+    grid = (num_rows * triton.cdiv(num_channels, element_block),)
+    _dflash2_grouped_conv_kernel[grid](
+        x,
+        delta,
+        base,
+        output,
+        x.stride(0),
+        delta.stride(0),
+        delta.stride(1),
+        base.stride(0),
+        output.stride(0),
+        NUM_CHANNELS=num_channels,
+        BLOCK_SIZE=block_size,
+        GROUP_SIZE=group_size,
+        TAPS=base.shape[0],
+        ELEMENT_BLOCK=element_block,
+        num_warps=4,
+    )
+    return output
+
+
+def dflash2_grouped_conv_fake(
+    x: torch.Tensor,
+    delta: torch.Tensor,
+    base: torch.Tensor,
+    block_size: int,
+    group_size: int,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+direct_register_custom_op(
+    op_name="dflash2_grouped_conv",
+    op_func=dflash2_grouped_conv_impl,
+    fake_impl=dflash2_grouped_conv_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+def dflash2_grouped_conv(
+    x: torch.Tensor,
+    delta: torch.Tensor,
+    base: torch.Tensor,
+    block_size: int,
+    group_size: int,
+) -> torch.Tensor:
+    return torch.ops.vllm.dflash2_grouped_conv(x, delta, base, block_size, group_size)
 
 
 def _grouped_conv(
@@ -29,6 +151,9 @@ def _grouped_conv(
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
+    if hidden_states.is_cuda:
+        return dflash2_grouped_conv(hidden_states, delta, base, block_size, group_size)
+
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
     coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
     output = coefficients[:, 0] * blocks
@@ -52,6 +177,7 @@ class DFlashGroupedConv(nn.Module):
         block_size: int,
         params_dtype: torch.dtype,
         prefix: str,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         if hidden_size % group_size:
@@ -71,7 +197,7 @@ class DFlashGroupedConv(nn.Module):
             2 * taps * self.num_groups,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "kernel_projection"),
             return_bias=False,
         )
@@ -130,6 +256,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             # Query tokens per request: the bonus token plus the mask tokens.
             block_size=1 + speculative_config.num_speculative_tokens,
             params_dtype=vllm_config.model_config.dtype,
+            quant_config=quant_config,
         )
         self.attention_conv = DFlashGroupedConv(
             **conv_args, prefix=maybe_prefix(prefix, "attention_conv")
@@ -161,6 +288,121 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         return hidden_states, residual
 
 
+@triton.jit
+def _dflash2_score_edges_kernel(
+    predecessor_ptr,
+    successor_ptr,
+    candidate_ptr,
+    unary_ptr,
+    hidden_ptr,
+    anchor_ptr,
+    output_ptr,
+    anchor_stride,
+    vocab_size,
+    NUM_STEPS: tl.constexpr,
+    TOP_K: tl.constexpr,
+    RANK: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
+    position = tl.program_id(0)
+    req_idx = position // NUM_STEPS
+    step = position % NUM_STEPS
+    k = tl.arange(0, BLOCK_K)
+    r = tl.arange(0, BLOCK_R)
+    k_mask = k < TOP_K
+    r_mask = r < RANK
+    candidate_ids = tl.load(
+        candidate_ptr + position * TOP_K + k, mask=k_mask, other=0
+    ).to(tl.int64)
+    if step == 0:
+        # The predecessor for the first step is the anchor token.
+        anchor = tl.load(anchor_ptr + req_idx * anchor_stride).to(tl.int64)
+        anchor = tl.minimum(tl.maximum(0, anchor), vocab_size - 1)
+        predecessor_ids = tl.zeros_like(candidate_ids) + anchor
+    else:
+        predecessor_ids = tl.load(
+            candidate_ptr + (position - 1) * TOP_K + k, mask=k_mask, other=0
+        ).to(tl.int64)
+
+    unary = tl.load(unary_ptr + position * TOP_K + k, mask=k_mask, other=0.0)
+    hidden = tl.load(hidden_ptr + position * RANK + r, mask=r_mask, other=0.0)
+    mask = k_mask[:, None] & r_mask[None, :]
+    predecessors = tl.load(
+        predecessor_ptr + predecessor_ids[:, None] * RANK + r[None, :],
+        mask=mask,
+        other=0.0,
+    )
+    successors = tl.load(
+        successor_ptr + candidate_ids[:, None] * RANK + r[None, :],
+        mask=mask,
+        other=0.0,
+    )
+    weighted = predecessors.to(tl.float32) * hidden[None, :].to(tl.float32)
+    edges = tl.dot(weighted.to(successors.dtype), tl.trans(successors))
+    tl.store(
+        output_ptr + (position * TOP_K + k[:, None]) * TOP_K + k[None, :],
+        unary[None, :].to(tl.float32) + edges.to(tl.float32),
+        mask=k_mask[:, None] & k_mask[None, :],
+    )
+
+
+def _score_edges_output(candidate_ids: torch.Tensor) -> torch.Tensor:
+    num_reqs, steps, top_k = candidate_ids.shape
+    return candidate_ids.new_empty((num_reqs, steps, top_k, top_k), dtype=torch.float32)
+
+
+def dflash2_score_edges_impl(
+    predecessor_table: torch.Tensor,
+    successor_table: torch.Tensor,
+    candidate_ids: torch.Tensor,
+    unary_logits: torch.Tensor,
+    hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    output = _score_edges_output(candidate_ids)
+    num_reqs, steps, top_k = candidate_ids.shape
+    if num_reqs * steps == 0:
+        return output
+    vocab_size, rank = predecessor_table.shape
+    _dflash2_score_edges_kernel[(num_reqs * steps,)](
+        predecessor_table,
+        successor_table,
+        candidate_ids.contiguous(),
+        unary_logits.contiguous(),
+        hidden.contiguous(),
+        anchor_token_ids,
+        output,
+        anchor_token_ids.stride(0),
+        vocab_size,
+        NUM_STEPS=steps,
+        TOP_K=top_k,
+        RANK=rank,
+        BLOCK_K=max(16, triton.next_power_of_2(top_k)),
+        BLOCK_R=max(16, triton.next_power_of_2(rank)),
+        num_warps=4,
+    )
+    return output
+
+
+def dflash2_score_edges_fake(
+    predecessor_table: torch.Tensor,
+    successor_table: torch.Tensor,
+    candidate_ids: torch.Tensor,
+    unary_logits: torch.Tensor,
+    hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return _score_edges_output(candidate_ids)
+
+
+direct_register_custom_op(
+    op_name="dflash2_score_edges",
+    op_func=dflash2_score_edges_impl,
+    fake_impl=dflash2_score_edges_fake,
+)
+
+
 def _score_edges(
     predecessor_table: torch.Tensor,
     successor_table: torch.Tensor,
@@ -170,6 +412,39 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
+    if candidate_ids.is_cuda:
+        return torch.ops.vllm.dflash2_score_edges(
+            predecessor_table,
+            successor_table,
+            candidate_ids,
+            unary_logits,
+            hidden,
+            anchor_token_ids,
+        )
+    return _score_edges_reference(
+        predecessor_table,
+        successor_table,
+        candidate_ids,
+        unary_logits,
+        hidden,
+        anchor_token_ids,
+        top_k,
+    )
+
+
+def _score_edges_reference(
+    predecessor_table: torch.Tensor,
+    successor_table: torch.Tensor,
+    candidate_ids: torch.Tensor,
+    unary_logits: torch.Tensor,
+    hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+    top_k: int,
+) -> torch.Tensor:
+    # A request still in chunked prefill anchors on its next prompt token, which
+    # can lie past the draft vocabulary (an audio placeholder, say). Its draft is
+    # discarded, so only keep the codebook lookup in range.
+    anchor_token_ids = anchor_token_ids.clamp(0, predecessor_table.shape[0] - 1)
     successors = successor_table[candidate_ids]
     predecessor_ids = torch.cat(
         (
@@ -179,7 +454,7 @@ def _score_edges(
         dim=1,
     )
     predecessors = predecessor_table[predecessor_ids]
-    return unary_logits[:, :, None] + torch.einsum(
+    return unary_logits.float()[:, :, None] + torch.einsum(
         "blpr,blcr->blpc", predecessors * hidden[:, :, None], successors
     )
 
@@ -267,14 +542,19 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DFlash2SpeculatorConfig
+
     model_cls = DFlash2Qwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         draft_config = self.config.dflash_config
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
+        # Candidates index the selector codebooks, which have the draft's
+        # vocabulary; the target's vocabulary can be larger.
         self.candidate_logits_processor = LogitsProcessor(
-            vllm_config.model_config.get_vocab_size(),
+            min(vllm_config.model_config.get_vocab_size(), self.config.vocab_size),
             scale=float(draft_config.get("output_multiplier", 1.0)),
             soft_cap=softcap if softcap > 0 else None,
         )

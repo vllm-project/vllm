@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the MoE fused topk kernel
+"""Tests for the MoE fused topk kernel.
 
 Run `pytest tests/kernels/moe/test_fused_topk.py`.
 """
@@ -95,7 +95,7 @@ def test_fused_topk(
 )
 @pytest.mark.parametrize("num_tokens", [1, 33, 56])
 @pytest.mark.parametrize("hidden_size", [1024, 2048])
-@pytest.mark.parametrize("num_experts", [6, 16])
+@pytest.mark.parametrize("num_experts", [6, 16, 352])
 @pytest.mark.parametrize("topk", [3, 4])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])

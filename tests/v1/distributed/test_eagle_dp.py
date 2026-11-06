@@ -50,7 +50,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
-    draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+    draft_model = "vllm-project/EAGLE-LLaMA3.1-Instruct-8B"
 
     engine_args = AsyncEngineArgs(
         model=target_model,
@@ -61,7 +61,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
         max_model_len=16384,
-        attention_config={"backend": attn_backend},  # type: ignore[arg-type]
+        attention_config={"backend": attn_backend},
     )
 
     eagle_engine_args = replace(

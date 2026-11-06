@@ -8,11 +8,19 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <map>
+#include <mutex>
+#include <utility>
 
-#include "../cuda_compat.h"
+#include "core/cuda_compat.h"
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
-#include "core/batch_invariant.hpp"
+#include "core/utils.hpp"
+
+// Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
+static constexpr int64_t kWvSlots = 8;
+// Slots held back for capturing streams, which cannot allocate one themselves.
+static constexpr int64_t kWvCaptureSlots = 8;
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
@@ -75,6 +83,18 @@ bool on_gfx1151() {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx1151") != std::string::npos;
+  }();
+  return result;
+}
+
+// gfx1150, gfx1152 and gfx1153: 1024 VGPRs a lane and a 128-bit memory bus.
+bool on_gfx1150_class() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1150") != std::string::npos ||
+           device_arch.find("gfx1152") != std::string::npos ||
+           device_arch.find("gfx1153") != std::string::npos;
   }();
   return result;
 }
@@ -328,14 +348,13 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
       V0 += (s.x + s.y);                                             \
     }
 #elif defined(__HIP__GFX1X__)
-  // gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12)
-  #define DOT2C(V0, V2, V3)                                               \
-    if constexpr (std::is_same_v<scalar_t, half>) {                       \
-      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
-    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {      \
-      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *       \
-                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));        \
-      V0 += (s.x + s.y);                                                  \
+  // gfx1x: v_dot2_f32_f16 and v_dot2_f32_bf16 (VOP3-P, gfx11 and gfx12). The
+  // bf16 dot keeps the weights packed instead of widening them to f32.
+  #define DOT2C(V0, V2, V3)                                                \
+    if constexpr (std::is_same_v<scalar_t, half>) {                        \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3));  \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {       \
+      asm("v_dot2_f32_bf16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
     }
 #endif
 
@@ -362,8 +381,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -429,7 +448,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // are being worked on by each wave.
     //----------------------------------------------------
     float sum[N][YTILE] = {};
-    scalar8 sum4[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
 
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
@@ -599,8 +618,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -647,7 +666,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   while (m < M) {
     float sum[N][YTILE] = {};
-    scalar8 sum4[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
 
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
@@ -833,8 +852,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -945,7 +964,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // are being worked on by each wave.
     //----------------------------------------------------
     float sum[N][YTILE] = {};
-    scalar8 sum4[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
 
     //----------------------------------------------------
     // Fetch weight matrix B in interleaved K-split!
@@ -1210,28 +1229,38 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                     \
+// WVSPLITK_CFG_AC arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N, A_CHUNK).
+//   THRDS   = wavefront width (32 on GFX11/GFX12, 64 on GFX9)
+//   WVPRGRP = waves per group
+//   YTILE   = output rows per thread tile
+//   UNRL    = K-loop unroll factor
+//   N       = batch size (passed through from the switch in wvSplitK)
+//   A_CHUNK = elements per thread per load; above 8 it needs K % A_CHUNK == 0
+#define WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, _AC)             \
   {                                                                           \
     dim3 block(_THRDS, _WVPRGRP);                                             \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);                 \
     if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
-      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else if (Kbp_in * N_in <= max_lds_len * 1.2)                              \
-      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>            \
+      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>          \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else                                                                      \
-      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
   }
 
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
+#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
+  WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
+
+#define WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N) \
   {                                                       \
     bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
     if (_sYT <= 1)                                        \
@@ -1246,43 +1275,39 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
   }
 
-// WVSPLITK_CFG arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N).
-//   THRDS  = wavefront width (32 on GFX11/GFX12, 64 on GFX9)
-//   WVPRGRP= waves per group (always 16)
-//   YTILE  = output rows per thread tile
-//   UNRL   = K-loop unroll factor
-//   N      = batch size (passed through from the switch in wvSplitK)
-#define WVSPLIT_TILE(_sYT, __N)                                             \
-  {                                                                         \
-    if (on_gfx1151()) {                                                     \
-      bool fit_lds = (Kbp_in * N_in <= max_lds_len);                        \
-      if (_sYT <= 1)                                                        \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if ((K_in % 1024 == 512) && K_in >= 1536 &&                      \
-               (_sYT >= 40 || K_in >= 4096))                                \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/4, /*UNRL=*/1, \
-                     __N)                                                   \
-      else if (K_in < 1024)                                                 \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/2, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if (K_in <= 2048 && (__N >= 2 || _sYT <= 26))                    \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if (__N >= 2 && !fit_lds)                                        \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if (__N == 1)                                                    \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/2, \
-                     __N)                                                   \
-      else                                                                  \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/1, \
-                     __N)                                                   \
-    } else if (on_gfx1x()) { /* gfx1100/gfx1150/GFX12, wave32 */            \
-      WVSPLIT_TILE_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, _sYT, __N)             \
-    } else { /* GFX9, wave64 */                                             \
-      WVSPLIT_TILE_CFG(/*THRDS=*/64, /*WVPRGRP=*/16, _sYT, __N)             \
-    }                                                                       \
+// gfx1151 and the gfx1150 class take the tile that a sweep of every
+// non-spilling (YTILE, UNRL, A_CHUNK, WVPRGRP) found within ~1% of the best
+// one for nearly every (M, K, N) on that arch: 99.3-99.5% of the per-shape
+// best on average (benchmarks/kernels/sweep_bf16_kernel.py). The other archs
+// keep the generic rows.
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)      \
+  {                                                        \
+    if constexpr (_THRDS == 32) {                          \
+      if (on_gfx1151()) {                                  \
+        if (K_in < 1024 || K_in % 16 != 0)                 \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)        \
+        else                                               \
+          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 4, __N, 16) \
+      } else if (on_gfx1150_class()) {                     \
+        if (K_in % 16 != 0)                                \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)        \
+        else if (_sYT <= 8)                                \
+          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 2, __N, 16) \
+        else                                               \
+          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 2, 1, __N, 16) \
+      } else                                               \
+        WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)  \
+    } else                                                 \
+      WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)    \
+  }
+
+#define WVSPLIT_TILE(_sYT, __N)                                 \
+  {                                                             \
+    if (on_gfx1x()) { /* gfx11/GFX12, wave32 */                 \
+      WVSPLIT_TILE_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, _sYT, __N) \
+    } else { /* GFX9, wave64 */                                 \
+      WVSPLIT_TILE_CFG(/*THRDS=*/64, /*WVPRGRP=*/16, _sYT, __N) \
+    }                                                           \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
@@ -1350,8 +1375,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -1364,9 +1388,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   };
   using big4 = __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
 
-  __shared__ scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+  // The main-loop staging areas are separated from the split-K readback by a
+  // __syncthreads(), so the readback may reuse all of LDS.
+  __shared__ union {
+    struct {
+      scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+      scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
+    } mainloop;
+    scalar_t all[max_lds_len];
+  } lds;
+  auto& stg = lds.mainloop.stg;
+  auto& s = lds.mainloop.s;
   unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
-  __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
   #ifndef WVSPLITKRC_1KPASS
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
@@ -1682,33 +1715,69 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (my_cntr + 1 == k_rnd) {
       cntr[adr_] = 0;  // clear for next round
       if constexpr (DTRMNSTC) {
+        constexpr uint32_t NT = N / NTILE / GrpsShrB;
+        // The readback stages k-shard partials through LDS, which bounds how
+        // many shards may be in flight at once.
+        constexpr uint32_t LDS_F4 =
+            max_lds_len * sizeof(scalar_t) / sizeof(float4);
+        constexpr uint32_t KSBMAX = LDS_F4 / (THRDS * 4 * NT);
+        static_assert(KSBMAX >= 1, "LDS cannot stage even one k-shard");
+        const uint32_t KSB = (k_rnd < KSBMAX) ? k_rnd : KSBMAX;
+
+        // First batch is peeled; it is the only batch for most shapes.
   #pragma unroll
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t kb = 0; kb < KSB; kb++) {
+          for (uint32_t nt = 0; nt < NT; nt++) {
             int g_nindx =
                 (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
             int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
             __builtin_amdgcn_global_load_lds(
-                (float4*)(&glbl[g_adr + M * N * ks]),
-                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                               nt * THRDS * 4 * k_rnd]),
+                (float4*)(&glbl[g_adr + M * N * kb]),
+                &(((float4*)lds.all)[(threadIdx.y * THRDS) + kb * THRDS * 4 +
+                                     nt * THRDS * 4 * KSB]),
                 16, 0, 0);
           }
         }
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        if (BIAS)  // overlaps the DMAs above
+          for (uint32_t nt = 0; nt < NT; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
               int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
                           (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
               biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
             }
           }
-        asm volatile("s_waitcnt 0");
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
-                                       ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
-            vals[nt].f4 += eval;
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+        for (uint32_t kb = 0; kb < KSB; kb++) {
+          for (uint32_t nt = 0; nt < NT; nt++) {
+            vals[nt].f4 +=
+                ((float4*)lds.all)[(threadIdx.x + threadIdx.y * THRDS) +
+                                   kb * THRDS * 4 + nt * THRDS * 4 * KSB];
+          }
+        }
+
+        for (uint32_t ks0 = KSB; ks0 < k_rnd; ks0 += KSB) {
+          const uint32_t ksn = (k_rnd - ks0 < KSB) ? (k_rnd - ks0) : KSB;
+          // prior reads must retire before the staging is overwritten
+          asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+          for (uint32_t kb = 0; kb < ksn; kb++) {
+            for (uint32_t nt = 0; nt < NT; nt++) {
+              int g_nindx =
+                  (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+              int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+              __builtin_amdgcn_global_load_lds(
+                  (float4*)(&glbl[g_adr + M * N * (ks0 + kb)]),
+                  &(((float4*)lds.all)[(threadIdx.y * THRDS) + kb * THRDS * 4 +
+                                       nt * THRDS * 4 * KSB]),
+                  16, 0, 0);
+            }
+          }
+          asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+          for (uint32_t kb = 0; kb < ksn; kb++) {
+            for (uint32_t nt = 0; nt < NT; nt++) {
+              vals[nt].f4 +=
+                  ((float4*)lds.all)[(threadIdx.x + threadIdx.y * THRDS) +
+                                     kb * THRDS * 4 + nt * THRDS * 4 * KSB];
+            }
           }
         }
       } else {
@@ -1771,7 +1840,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount) {
-  int _DTRMNSTC = 1;  // vllm::vllm_is_batch_invariant();
+  static constexpr bool _DTRMNSTC = true;
 
   auto M_in = in_b.size(0);
   auto N_in = in_a.size(0);
@@ -1819,26 +1888,157 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
-  // Can we increase SplitK by shrinking the K-shared to 256?
-  int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
+  // Can we increase SplitK by shrinking the K-shard to 256? That doubles both
+  // the CUs needed and the k-shards to read back, and the readback is serial in
+  // the shard count, so it pays only up to a crossover. The crossover is not a
+  // constant -- it falls as M grows -- so one cap cannot sit on it for every
+  // shape; this value minimizes total time over the admitted shapes. Retune it
+  // if the readback cost changes, and note the directions are not symmetric:
+  // capping too high costs about twice what capping too low does.
+  // Mirrored by rocm_unquantized_gemm_impl() in
+  // vllm/model_executor/layers/utils.py; both must pick the same chunkk or the
+  // host-side fit check bounds the wrong k_rnd.
+  constexpr int64_t CHUNKK2_MAX_SHARDS = 11;
+  const int64_t shards_chunkk2 = (K_in + 256 - 1) / 256;  // 256 == 512 / 2
+  const int chunkk = (N_p2 != 16 && CuNeeded * 2 <= CuCount &&
+                      shards_chunkk2 <= CHUNKK2_MAX_SHARDS)
+                         ? 2
+                         : 1;
 
-  static torch::Tensor axl_glbl =
-      torch::zeros(
-          128 * 1024 * (_DTRMNSTC ? 12 : 1),
-          torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()))
-          .detach();
-  static torch::Tensor axl_cntr =
-      torch::zeros(
-          128 * 1024 * (_DTRMNSTC ? 12 : 1) / 4,
-          torch::TensorOptions().dtype(torch::kInt).device(in_a.device()))
-          .detach();
-  auto glbl = axl_glbl.data_ptr<float>();
-  auto cntr = axl_cntr.data_ptr<int>();
+  // One fp32 partial per (M, N, k-shard) must fit the split-K workspace.
+  const int64_t k_rnd = (K_in + 512 / chunkk - 1) / (512 / chunkk);
+  constexpr int64_t glbl_cap = 128 * 1024 * (_DTRMNSTC ? 12 : 1);
+  const int64_t glbl_needed =
+      _DTRMNSTC ? (int64_t)N_p2 * M_in * k_rnd : (int64_t)N_p2 * M_in;
+  TORCH_CHECK(glbl_needed <= glbl_cap,
+              "wvSplitKrc: split-K workspace too small", " (need ", glbl_needed,
+              " > ", glbl_cap, " floats) for N=", N_in, " K=", K_in,
+              " M=", M_in);
+
+  // Split-K workspaces: one pre-partitioned pool per device.
+  // These must be zeroed before first use, and the kernel re-zeros them after
+  // each use.
+  // To avoid unnecessary overhead, we do not allocate them zeroed
+  // per-invocation. However, a simple static allocation does not work with
+  // multi-streams, because concurrent streams can alias into the same
+  // workspace. Solution: pre-allocate kWvSlots = 8 slots per device, plus
+  // kWvCaptureSlots reserved for capturing streams, and zero the whole pool
+  // once at creation. On first use, a stream takes one of the slots if any are
+  // still available. On subsequent uses, it re-uses the slot. If no slots are
+  // available, fall back to allocating a zeroed one per call, which is safe but
+  // adds overhead.
+  // A capturing stream must neither allocate nor enqueue anything -- either
+  // would be captured into the graph -- so it is only handed a reserved slot.
+  struct WvSplitKrcPool {
+    torch::Tensor glbl, cntr;
+    int64_t glbl_stride = 0, cntr_stride = 0;
+    int next_slot = 0;
+    int next_capture_slot = 0;
+    std::map<cudaStream_t, int> slot_of;
+    std::map<cudaStream_t, int> capture_slot_of;
+  };
+  // mutex not strictly necessary if caller is always single-threaded (Python)
+  // but this preserves Torch thread_local semantics for the C++ API
+  static std::mutex wv_pool_mu;
+  static std::map<int, WvSplitKrcPool> wv_pools;
+
+  float* glbl;
+  int* cntr;
+  // Fallback space
+  torch::Tensor spill_glbl, spill_cntr;
+  {
+    std::lock_guard<std::mutex> wv_lk(wv_pool_mu);
+    const int wv_dev = static_cast<int>(in_a.device().index());
+    WvSplitKrcPool& P = wv_pools[wv_dev];
+    constexpr int64_t wv_gf = 128 * 1024 * (_DTRMNSTC ? 12 : 1);
+    constexpr int64_t wv_ci = wv_gf / 4;
+    constexpr int64_t wv_all_slots = kWvSlots + kWvCaptureSlots;
+
+    // A stream whose capture was already invalidated reports an error; treat
+    // that as not capturing, since the capture is lost either way.
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    unsigned long long capture_id = 0;
+    if (cudaStreamGetCaptureInfo(stream, &capture_status, &capture_id) !=
+        cudaSuccess) {
+      capture_status = cudaStreamCaptureStatusNone;
+    }
+    const bool wv_capturing = capture_status != cudaStreamCaptureStatusNone;
+
+    if (!P.glbl.defined()) {
+      TORCH_CHECK(!wv_capturing,
+                  "wvSplitKrc: the split-K workspace pool cannot be allocated "
+                  "during graph capture. Call "
+                  "warmup_rocm_skinny_gemm_workspaces() "
+                  "(vllm/model_executor/layers/utils.py) eagerly first.");
+      P.glbl_stride = wv_gf;
+      P.cntr_stride = wv_ci;
+      P.glbl = torch::zeros(wv_gf * wv_all_slots, torch::TensorOptions()
+                                                      .dtype(torch::kFloat32)
+                                                      .device(in_a.device()))
+                   .detach();
+      P.cntr =
+          torch::zeros(
+              wv_ci * wv_all_slots,
+              torch::TensorOptions().dtype(torch::kInt).device(in_a.device()))
+              .detach();
+      // The mutex orders host access to the map, not device execution, so it
+      // alone would let another stream be handed a slot the fill above is
+      // still clearing. Synchronizing here, inside the lock, is what makes
+      // every slot safe to use without any further per-slot zeroing.
+      const cudaError_t wv_err = cudaStreamSynchronize(stream);
+      TORCH_CHECK(wv_err == cudaSuccess,
+                  "wvSplitKrc: failed to zero the split-K workspace pool: ",
+                  cudaGetErrorString(wv_err));
+    }
+
+    int wv_slot = -1;
+    if (wv_capturing) {
+      // One workspace per capturing stream, so graphs captured on the same
+      // stream share it -- safe because at most one of them replays at a time
+      // (vLLM captures one graph per padded batch size, and runs one per step).
+      auto cap_it = P.capture_slot_of.find(stream);
+      if (cap_it == P.capture_slot_of.end()) {
+        TORCH_CHECK(P.next_capture_slot < kWvCaptureSlots,
+                    "wvSplitKrc: no free capture workspace slot; more than ",
+                    kWvCaptureSlots,
+                    " distinct streams have captured a graph containing "
+                    "wvSplitKrc. Raise kWvCaptureSlots in "
+                    "csrc/rocm/skinny_gemms.cu.");
+        cap_it = P.capture_slot_of
+                     .emplace(stream, static_cast<int>(kWvSlots) +
+                                          P.next_capture_slot++)
+                     .first;
+      }
+      wv_slot = cap_it->second;
+    } else {
+      auto slot_it = P.slot_of.find(stream);
+      if (slot_it != P.slot_of.end()) {
+        wv_slot = slot_it->second;
+      } else if (P.next_slot < kWvSlots) {
+        wv_slot = P.next_slot++;
+        P.slot_of.emplace(stream, wv_slot);
+      }
+    }
+
+    if (wv_slot >= 0) {
+      glbl = P.glbl.data_ptr<float>() + wv_slot * P.glbl_stride;
+      cntr = P.cntr.data_ptr<int>() + wv_slot * P.cntr_stride;
+    } else {
+      spill_glbl = torch::zeros(
+          wv_gf,
+          torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()));
+      spill_cntr = torch::zeros(
+          wv_ci,
+          torch::TensorOptions().dtype(torch::kInt).device(in_a.device()));
+      glbl = spill_glbl.data_ptr<float>();
+      cntr = spill_cntr.data_ptr<int>();
+    }
+  }
 
 #define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
   {                                                                            \
     dim3 block(64, 4);                                                         \
-    if (_DTRMNSTC)                                                             \
+    if constexpr (_DTRMNSTC)                                                   \
       wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 1>          \
           <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
                                        af4, bf4, biasf4, glbl, cntr, c,        \

@@ -42,9 +42,7 @@ DIRECT_NUM_HEADS = (8, 2)
 DIRECT_HEAD_SIZE = 128
 DIRECT_DTYPE = torch.bfloat16
 HEAD_SIZE_TEST_NUM_HEADS_PAIRS = [(16, 16), (16, 4)]
-# Prefill seq lens: (query_len, kv_len). Exclude single-token decode (q=1)
-# because flash_attn_varlen_func is a prefill kernel; q_len=1 with short kv
-# triggers kernel limitations (MAE > 0.1 for head != 128 in BF16, all heads in FP16).
+# Prefill seq lens: (query_len, kv_len).
 # Single-token decode is covered separately in test_aiter_mha_decode_single_token.
 SEQ_LENS = [(8, 512), (32, 1024)]
 DIRECT_SEQ_LENS = [(10, 1328), (5, 18), (129, 463)]
@@ -60,6 +58,7 @@ def ref_paged_attn(
     block_tables: torch.Tensor,
     scale: float,
     sliding_window: int | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Naive reference paged attention using einsum."""
     num_seqs = len(query_lens)
@@ -98,7 +97,10 @@ def ref_paged_attn(
             )
             mask |= window_mask
         attn.masked_fill_(mask, float("-inf"))
-        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        if sinks is not None:
+            sink = sinks.float()[:, None, None].expand(-1, query_len, 1)
+            attn = torch.cat([attn, sink], dim=-1)
+        attn = torch.softmax(attn, dim=-1)[..., :kv_len].to(v.dtype)
         out = torch.einsum("hqk,khd->qhd", attn, v)
         outputs.append(out)
         start_idx += query_len
@@ -715,7 +717,7 @@ def test_aiter_fa_shared_kv_matches_reference(
     monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", shuffle)
     set_random_seed(42)
     batch_spec = {
-        "prefill": BatchSpec(seq_lens=[32, 24], query_lens=[32, 24]),
+        "prefill": BatchSpec(seq_lens=[32, 24, 1], query_lens=[32, 24, 1]),
         "extend": BatchSpec(seq_lens=[80, 56], query_lens=[32, 24]),
         "mixed": BatchSpec(seq_lens=[48, 80, 24], query_lens=[1, 32, 24]),
     }[batch]
@@ -783,6 +785,9 @@ def test_aiter_fa_shared_kv_matches_reference(
             32 * BLOCK_SIZE, num_kv_heads, head_size, dtype=torch.bfloat16
         )
         value = torch.randn_like(key)
+        from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionImpl
+
+        assert isinstance(target.impl, AiterFlashAttentionImpl)
         target.impl.do_kv_cache_update(
             target,
             key,
@@ -835,32 +840,116 @@ def test_aiter_fa_shared_kv_matches_reference(
         )
 
 
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize("use_sinks", [True, False])
+def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_sinks):
+    """Extends whose cached context spans several chunks count each sink once."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends import rocm_aiter_fa
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", False)
+    # 32 context tokens per request per chunk: context lens 128, 32 and 69 give
+    # 4 chunks, with empty chunks 1-3 for the second request and 3 for the third.
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 96)
+    set_random_seed(42)
+    batch_spec = BatchSpec(seq_lens=[160, 48, 77], query_lens=[32, 16, 8])
+    num_blocks = 64
+    # head_dim 64, as in gpt-oss: at 128, aiter < 0.1.28 routes bf16 varlen calls
+    # to its v3 kernel, which ignores sinks (ROCm/aiter#6906).
+    config = create_vllm_config(
+        model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+    )
+    num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
+    head_size = config.model_config.get_head_size()
+    scale = head_size**-0.5
+    # Sinks comparable to the softmax mass of the real keys.
+    sinks = torch.randn(num_heads, dtype=torch.float32) + 4.0 if use_sinks else None
+    with set_current_vllm_config(config):
+        layer = Attention(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            prefix="layer",
+            attn_backend=AiterFlashAttentionBackend,
+            sinks=sinks,
+        )
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            ["layer"],
+            config,
+            torch.device("cuda"),
+        )
+        common = create_common_attn_metadata(
+            batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=num_blocks
+        )
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+    assert isinstance(layer.impl, AiterFlashAttentionImpl)
+    assert metadata.num_extends == 3
+    assert metadata.extend_metadata is not None
+    assert metadata.extend_metadata.chunk_context_metadata.num_chunks == 4
+
+    kv_cache = torch.empty(
+        num_blocks, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=torch.bfloat16
+    )
+    key_cache, value_cache = layer.impl._split_kv_cache(kv_cache)
+    key_cache.copy_(torch.randn_like(key_cache))
+    value_cache.copy_(torch.randn_like(value_cache))
+    key_cache, value_cache = key_cache.contiguous(), value_cache.contiguous()
+
+    # The new tokens' K/V must match what the cache holds at their positions.
+    keys, values = [], []
+    for i, (seq_len, query_len) in enumerate(
+        zip(batch_spec.seq_lens, batch_spec.query_lens)
+    ):
+        pos = torch.arange(seq_len - query_len, seq_len)
+        blocks = common.block_table_tensor[i, pos // BLOCK_SIZE]
+        keys.append(key_cache[blocks, pos % BLOCK_SIZE])
+        values.append(value_cache[blocks, pos % BLOCK_SIZE])
+    query = torch.randn(
+        batch_spec.compute_num_tokens(), num_heads, head_size, dtype=torch.bfloat16
+    )
+    output = torch.empty_like(query)
+    layer.impl.forward(
+        layer, query, torch.cat(keys), torch.cat(values), kv_cache, metadata, output
+    )
+    expected = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        batch_spec.query_lens,
+        batch_spec.seq_lens,
+        common.block_table_tensor,
+        scale,
+        sinks=sinks,
+    )
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
 # Decode path test --------------------------------------------------------
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        torch.bfloat16,
-        pytest.param(
-            torch.float16,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "aiter bug #2229: flash_attn_varlen_func currently "
-                    "miscomputes FP16 single-token decode on MI3xx "
-                    "(validated on gfx950; max abs diff 1.95 vs atol 1.5e-2). "
-                    "Remove xfail when the AITER decode kernel is fixed. "
-                    "https://github.com/ROCm/aiter/issues/2229"
-                ),
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("dtype", DTYPES)
 def test_aiter_mha_decode_single_token(dtype):
-    """Test AITER MHA for decode (single query token per sequence).
-
-    BF16 is the working reference configuration here. FP16 remains xfail until
-    the upstream AITER single-token decode bug is fixed.
-    """
+    """Test AITER MHA for decode (single query token per sequence)."""
     atol = 1.5e-2
     rtol = 1e-2
     _assert_aiter_supported()
@@ -917,7 +1006,7 @@ def test_aiter_mha_decode_single_token(dtype):
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=1,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,
@@ -1058,3 +1147,138 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
         rtol=rtol,
     )
     torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+def test_aiter_paged_decode_over_window_trimmed_block_table_matches_reference():
+    """Sliding-window decode on the paged kernel, fed the trimmed block table.
+
+    The metadata builder keeps only the blocks that overlap the window and
+    rebases the sequence lengths onto the first kept block. That must give the
+    same attention as the full table, for contexts below, at and above the
+    window, including a window start that falls inside a block.
+    """
+    _assert_aiter_supported()
+    from types import SimpleNamespace
+
+    import aiter  # noqa: F401
+
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    set_random_seed(0)
+    device, dtype = "cuda", torch.bfloat16
+    num_q_heads, num_kv_heads, head_size, block_size, window = 16, 2, 64, 16, 256
+    seq_lens_list = [100, 256, 257, 300, 1000, 2011]
+    num_seqs = len(seq_lens_list)
+    max_blocks = (max(seq_lens_list) + block_size - 1) // block_size
+    num_blocks = num_seqs * max_blocks + 4
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, device=device, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_table = (
+        torch.randperm(num_blocks - 4, device=device)[: num_seqs * max_blocks]
+        .reshape(num_seqs, max_blocks)
+        .to(torch.int32)
+    )
+    seq_lens = torch.tensor(seq_lens_list, device=device, dtype=torch.int32)
+    query = torch.randn(num_seqs, num_q_heads, head_size, device=device, dtype=dtype)
+    scale = head_size**-0.5
+
+    num_window_blocks = (window + block_size - 1) // block_size + 1
+    builder = SimpleNamespace(
+        aot_sliding_window=(window - 1, 0),
+        block_size=block_size,
+        _swa_block_table=torch.zeros(
+            (num_seqs, num_window_blocks), dtype=torch.int32, device=device
+        ),
+        _swa_seq_lens=torch.zeros(num_seqs, dtype=torch.int32, device=device),
+        _swa_block_offsets=torch.arange(
+            num_window_blocks, dtype=torch.int64, device=device
+        ),
+    )
+    swa_table, swa_lens, swa_max_len = (
+        AiterFlashAttentionMetadataBuilder._build_swa_decode_tables(
+            builder, block_table, seq_lens, num_seqs, max(seq_lens_list)
+        )
+    )
+    assert swa_table is not None and swa_lens is not None
+    assert swa_table.shape == (num_seqs, num_window_blocks)
+    assert swa_max_len == window + block_size - 1
+    assert int(swa_lens.max()) <= swa_max_len
+    # Below the window nothing is dropped.
+    assert int(swa_lens[0]) == seq_lens_list[0]
+
+    partition = 256
+    num_partitions = (swa_max_len + partition - 1) // partition
+    workspace = torch.empty(
+        num_seqs * num_q_heads * num_partitions * head_size * 2
+        + 2 * num_seqs * num_q_heads * num_partitions * 4,
+        dtype=torch.uint8,
+        device=device,
+    )
+    one = torch.ones(1, device=device, dtype=torch.float32)
+    output = torch.empty_like(query)
+    torch.ops.aiter.paged_attention_v1(
+        output,
+        workspace,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        swa_table,
+        torch.arange(num_seqs, device=device, dtype=torch.int32),
+        swa_lens,
+        swa_max_len,
+        None,
+        "auto",
+        "NHD",
+        0.0,
+        one,
+        one,
+        None,
+        partition,
+        1,
+        window,
+    )
+
+    ref = torch.empty_like(query)
+    for i, length in enumerate(seq_lens_list):
+        blocks = block_table[i, : (length + block_size - 1) // block_size].long()
+        keys = key_cache[blocks].reshape(-1, num_kv_heads, head_size)[:length]
+        values = value_cache[blocks].reshape(-1, num_kv_heads, head_size)[:length]
+        keys, values = (
+            keys[max(0, length - window) :],
+            values[max(0, length - window) :],
+        )
+        keys = keys.float().repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+        values = values.float().repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+        weights = (torch.einsum("hd,lhd->hl", query[i].float(), keys) * scale).softmax(
+            -1
+        )
+        ref[i] = torch.einsum("hl,lhd->hd", weights, values).to(dtype)
+    torch.testing.assert_close(output, ref, atol=1.5e-2, rtol=1e-2)
+
+
+def test_asm_kv_scale_tables_shared_across_builders():
+    """Builders share one AsmKvScaleTables; equal (shape, scale) requests must
+    return the same dense table, a different scale a different one."""
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionMetadataBuilder,
+        AsmKvScaleTables,
+    )
+
+    tables = AsmKvScaleTables()
+    device = torch.device("cuda")
+    table = tables.get(device, 8, 2, 16, 0.5)
+    assert tables.get(device, 8, 2, 16, 0.5) is table
+    assert tables.get(device, 8, 2, 16, 1.0) is not table
+    assert table.shape == (8, 2, 16)
+    assert table.dtype == torch.float32
+    assert torch.all(table == 0.5)
+    # The builder class holds the single process-wide instance.
+    assert isinstance(
+        AiterFlashAttentionMetadataBuilder.asm_kv_scale_tables, AsmKvScaleTables
+    )

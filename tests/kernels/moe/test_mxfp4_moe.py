@@ -19,6 +19,73 @@ set_random_seed(42)
 MXFP4_BLOCK_SIZE = 32
 
 
+def _mxfp4_experts_quant_for_test(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    sorted_expert_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call the raw quant op with a compact, zero-initialized scale buffer."""
+    m_numtopk, k = input_tensor.shape
+    scales_k = k // MXFP4_BLOCK_SIZE
+    padded_k = (scales_k + 3) // 4
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.zeros(
+        num_sf_rows,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+        sorted_expert_ids,
+    )
+    return output, output_scales.view(torch.uint8)
+
+
+def _silu_and_mul_mxfp4_experts_quant_for_test(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    sorted_expert_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call the raw fused quant op with a compact, zero-initialized scale buffer."""
+    m_numtopk, k_times_2 = input_tensor.shape
+    k = k_times_2 // 2
+    scales_k = k // MXFP4_BLOCK_SIZE
+    padded_k = (scales_k + 3) // 4
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.zeros(
+        num_sf_rows,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.silu_and_mul_mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+        sorted_expert_ids,
+    )
+    return output, output_scales.view(torch.uint8)
+
+
 def align(val: int, alignment: int = 128) -> int:
     return int((val + alignment - 1) // alignment * alignment)
 
@@ -67,8 +134,7 @@ def compute_ref_output(
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16])
 def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
-    """
-    Test the MXFP4 grouped GEMM kernel by:
+    """Test the MXFP4 grouped GEMM kernel by:
     1. Creating random per-expert inputs and weights
     2. Quantizing both to MXFP4 using the CUDA kernel
     3. Running the CUTLASS grouped GEMM
@@ -205,9 +271,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     reason="mxfp4_experts_quant requires CUDA SM100",
 )
 def test_mxfp4_experts_quant_basic():
-    """
-    Basic smoke test for the MXFP4 experts quantization kernel.
-    """
+    """Basic smoke test for the MXFP4 experts quantization kernel."""
     device = "cuda"
     num_experts = 4
     k = 256
@@ -295,8 +359,7 @@ def compute_reference_e8m0_scale(block_max: float) -> int:
 @pytest.mark.parametrize("k", [256, 7168])
 @pytest.mark.parametrize("m", [16, 64])
 def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
-    """
-    Test that mxfp4_experts_quant computes E8M0 block scales correctly
+    """Test that mxfp4_experts_quant computes E8M0 block scales correctly
     per OCP MX spec (not the NVFP4 formula).
 
     The old buggy kernel used: floor(log2(max/6)) + 127
@@ -416,8 +479,7 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
     reason="mxfp4_experts_quant requires CUDA SM100",
 )
 def test_mxfp4_experts_quant_no_saturation():
-    """
-    Test that the E8M0 scale is large enough to avoid unexpected saturation.
+    """Test that the E8M0 scale is large enough to avoid unexpected saturation.
 
     With the buggy NVFP4 formula, the scale was too small causing most values
     to saturate to ±6 in FP4. The fixed OCP MX formula should ensure that
@@ -461,6 +523,156 @@ def test_mxfp4_experts_quant_no_saturation():
         "This suggests the E8M0 scale is too small (NVFP4 formula bug). "
         "Expected < 5% for Gaussian(0, 0.5) input with correct OCP MX scale."
     )
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="get_cutlass_moe_mm_data sorted expert IDs require CUDA SM100 MoE",
+)
+def test_get_cutlass_moe_mm_data_populates_sorted_expert_ids():
+    num_experts = 32
+    m, topk = 8, 4
+    topk_ids = torch.randint(
+        0, num_experts, (m, topk), device="cuda", dtype=torch.int32
+    )
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        512,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    expected = torch.sort(topk_ids.flatten(), stable=True).values
+    torch.testing.assert_close(sorted_expert_ids, expected)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize("num_experts", [16, 64, 256])
+def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
+    num_experts: int,
+):
+    """Sorted expert IDs must match the offset-search quantization path."""
+    set_random_seed(0)
+    m, topk, k, n = 32, 1, 512, 128
+    topk_ids = torch.randint(
+        0, num_experts, (m, topk), device="cuda", dtype=torch.int32
+    )
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        n,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    activations = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) / 5
+    sorted_activations = ops.shuffle_rows(activations, input_permutation)
+
+    baseline_out, baseline_sf = _mxfp4_experts_quant_for_test(
+        sorted_activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+    )
+    direct_out, direct_sf = _mxfp4_experts_quant_for_test(
+        sorted_activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    assert torch.equal(baseline_out, direct_out)
+    assert torch.equal(baseline_sf, direct_sf)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="silu_and_mul_mxfp4_experts_quant requires CUDA SM100",
+)
+def test_silu_and_mul_mxfp4_sorted_expert_ids_matches_offset_search():
+    set_random_seed(1)
+    num_experts = 64
+    m, topk, k, n = 32, 1, 256, 128
+    topk_ids = torch.randint(
+        0, num_experts, (m, topk), device="cuda", dtype=torch.int32
+    )
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        n,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    gate_up = torch.randn(m, 2 * k, device="cuda", dtype=torch.bfloat16) / 5
+    sorted_gate_up = ops.shuffle_rows(gate_up, input_permutation)
+
+    baseline_out, baseline_sf = _silu_and_mul_mxfp4_experts_quant_for_test(
+        sorted_gate_up,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+    )
+    direct_out, direct_sf = _silu_and_mul_mxfp4_experts_quant_for_test(
+        sorted_gate_up,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    assert torch.equal(baseline_out, direct_out)
+    assert torch.equal(baseline_sf, direct_sf)
 
 
 if __name__ == "__main__":

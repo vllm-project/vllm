@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -118,6 +120,7 @@ class ExampleConnector(KVConnectorBase_V1):
         Note:
             The number of elements in kv_caches and layer_names should be
             the same.
+
         """
 
         def inject_kv_into_layer(
@@ -134,6 +137,9 @@ class ExampleConnector(KVConnectorBase_V1):
                 src_kv_cache (torch.Tensor): the source KV cache.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
+                attn_metadata (AttentionMetadata): attention metadata for the
+                    current forward pass.
+
             """
             # Deliberate bulk transfers in this reference connector.
             with gpu_sync_allowed():
@@ -201,6 +207,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
         Args:
             layer_name: the name of that layer
+
         """
         return
 
@@ -220,6 +227,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
+
         """
 
         def extract_kv_from_layer(
@@ -260,8 +268,7 @@ class ExampleConnector(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -272,6 +279,7 @@ class ExampleConnector(KVConnectorBase_V1):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
@@ -295,8 +303,7 @@ class ExampleConnector(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
+        """Update KVConnector state after block allocation.
 
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.
@@ -315,6 +322,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         meta = ExampleConnectorMetadata()
 
@@ -390,20 +398,20 @@ class ExampleConnector(KVConnectorBase_V1):
     ) -> bool:
         """Check if the cache is hit for the request."""
         return self._found_match_for_prompt(
-            list(request.prompt_token_ids or []),
+            request.prompt_token_ids or [],
             [f.identifier for f in request.mm_features],
         )
 
     def _found_match_for_prompt(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_hashes: list[str],
     ) -> bool:
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
         )
         foldername = self._generate_foldername_debug(
-            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            token_ids_to_tensor(prompt_token_ids)[:num_tokens_to_check],
             mm_hashes,
             create_folder=False,
         )

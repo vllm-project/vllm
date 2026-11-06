@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-use super::dtype::{NumpyDtype, TensorDtype};
+use super::dtype::{Endianness, NumpyDtype, TensorDtype};
 
 /// Tensors and ndarrays are encoded with this extension type in Python.
 ///
@@ -121,6 +121,18 @@ impl<Dtype: From<TensorDtype> + Serialize + DeserializeOwned> WireArray<Dtype> {
         ))
     }
 
+    /// Build an int32 tensor/ndarray backed by native-endian raw-view bytes.
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_i32(shape: Vec<usize>, data: Vec<i32>) -> Result<Self, String> {
+        validate_element_count(&shape, data.len())?;
+        Ok(Self::from_raw_bytes(
+            TensorDtype::I32,
+            shape,
+            bytes_from_pod_vec(data),
+        ))
+    }
+
     /// Build a uint32 tensor/ndarray backed by native-endian raw-view bytes.
     ///
     /// Takes ownership of the backing buffer without copying its data.
@@ -199,6 +211,29 @@ pub type WireTensor = WireArray<TensorDtype>;
 
 /// Numeric array with a typed NumPy descriptor or native-endian Torch dtype.
 pub type WireNdArray = WireArray<NumpyDtype>;
+
+/// A rank-1 uint32 array, such as prompt token ids.
+impl From<Vec<u32>> for WireNdArray {
+    fn from(data: Vec<u32>) -> Self {
+        Self::from_u32(vec![data.len()], data).expect("rank-1 shape matches the data")
+    }
+}
+
+impl WireNdArray {
+    /// The values of an inline 32-bit integer array.
+    pub fn to_u32_vec(&self) -> Option<Vec<u32>> {
+        if !matches!(self.dtype.scalar, TensorDtype::U32 | TensorDtype::I32) {
+            return None;
+        }
+        let decode = match self.dtype.endianness {
+            Endianness::Little => u32::from_le_bytes,
+            Endianness::Big => u32::from_be_bytes,
+            Endianness::Native => u32::from_ne_bytes,
+        };
+        let bytes = self.data.as_raw_view()?;
+        Some(bytes.chunks_exact(4).map(|c| decode(c.try_into().unwrap())).collect())
+    }
+}
 
 /// Python array/tensor payload reference inside [`WireNdArray`].
 ///

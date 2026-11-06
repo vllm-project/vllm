@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from .bailing_mrope import BailingMRotaryEmbedding
 from .base import RotaryEmbedding
 from .deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
@@ -23,7 +24,6 @@ from .mrope import MRotaryEmbedding
 from .mrope_interleaved import MRotaryEmbeddingInterleaved
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
-from .telechat3_scaling_rope import TeleChat3RoPEScaledRotaryEmbedding
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
@@ -36,6 +36,7 @@ def get_rope(
     rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype | None = None,
     dual_chunk_attention_config: dict[str, Any] | None = None,
+    mrope_positions_factor: int = 4,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -78,6 +79,7 @@ def get_rope(
         rope_parameters_args,
         dual_chunk_attention_args,
         dtype,
+        mrope_positions_factor,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
@@ -97,6 +99,16 @@ def get_rope(
             dtype,
             **extra_kwargs,
         )
+    elif scaling_type == "bailing_mrope":
+        rotary_emb = BailingMRotaryEmbedding(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            dtype,
+            mrope_section=rope_parameters["mrope_section"],
+        )
     elif scaling_type == "default":
         if "mrope_section" in rope_parameters:
             rotary_emb = MRotaryEmbedding(
@@ -108,6 +120,7 @@ def get_rope(
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                positions_factor=mrope_positions_factor,
             )
         elif "use_fope" in rope_parameters and rope_parameters["use_fope"]:
             extra_kwargs = {
@@ -235,16 +248,15 @@ def get_rope(
             for k, v in rope_parameters.items()
             if k
             in (
-                "extrapolation_factor",
-                "attn_factor",
                 "beta_fast",
                 "beta_slow",
-                "apply_yarn_scaling",
+                "mscale",
+                "mscale_all_dim",
+                "attention_factor",
                 "truncate",
             )
         }
         if "mrope_section" in rope_parameters:
-            extra_kwargs.pop("apply_yarn_scaling", None)
             rotary_emb = MRotaryEmbedding(
                 head_size,
                 rotary_dim,
@@ -254,6 +266,7 @@ def get_rope(
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                positions_factor=mrope_positions_factor,
                 scaling_factor=scaling_factor,
                 **extra_kwargs,
             )
@@ -277,8 +290,6 @@ def get_rope(
             for k, v in rope_parameters.items()
             if k
             in (
-                "extrapolation_factor",
-                "attn_factor",
                 "beta_fast",
                 "beta_slow",
                 "mscale",
@@ -335,36 +346,6 @@ def get_rope(
             )
         else:
             raise ValueError("Pangu mrope lacks necessary parameters.")
-    elif scaling_type == "telechat3-yarn":
-        scaling_factor = rope_parameters["factor"]
-        if "original_max_position_embeddings" in rope_parameters:
-            original_max_position = rope_parameters["original_max_position_embeddings"]
-            scaling_factor = max_position / original_max_position
-        else:
-            original_max_position = max_position
-        extra_kwargs = {
-            k: v
-            for k, v in rope_parameters.items()
-            if k
-            in (
-                "extrapolation_factor",
-                "attn_factor",
-                "beta_fast",
-                "beta_slow",
-                "mscale",
-                "mscale_all_dim",
-            )
-        }
-        rotary_emb = TeleChat3RoPEScaledRotaryEmbedding(
-            head_size,
-            rotary_dim,
-            original_max_position,
-            base,
-            is_neox_style,
-            scaling_factor,
-            dtype,
-            **extra_kwargs,
-        )
     else:
         raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb

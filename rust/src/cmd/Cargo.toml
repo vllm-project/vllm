@@ -33,6 +33,7 @@ vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-managed-engine.workspace = true
 vllm-server.workspace = true
+vllm-text.workspace = true
 vllm-tracing.workspace = true
 
 [dev-dependencies]

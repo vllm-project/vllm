@@ -10,6 +10,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,8 +18,7 @@ if TYPE_CHECKING:
 
 
 class Step3ReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Step3 model.
+    """Reasoning parser for Step3 model.
 
     The Step3 model uses </think> token to denote the end of reasoning
     text. This parser extracts all content before </think> as reasoning content.
@@ -62,8 +62,7 @@ class Step3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message.
+        """Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         For text "abc</think>xyz":
@@ -108,7 +107,7 @@ class Step3ReasoningParser(ReasoningParser):
             return reasoning, content
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self.think_end_token_id in input_ids
+        return rfind_tokens(input_ids, (self.think_end_token_id,)) >= 0
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -123,3 +122,8 @@ class Step3ReasoningParser(ReasoningParser):
             return []
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1 :]
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if self.think_end_token_id not in token_ids:
+            return len(token_ids)
+        return list(token_ids).index(self.think_end_token_id)
