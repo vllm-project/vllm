@@ -283,7 +283,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pip install vllm[audio] || true &&
     cd tests &&
     pytest --continue-on-collection-errors -v -s entrypoints/speech_to_text || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)'
@@ -313,7 +312,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pip install vllm[audio] || true &&
     cd tests &&
     pytest --continue-on-collection-errors -v -s entrypoints/multimodal || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)'
