@@ -305,8 +305,8 @@ def _run_hf_reranker(
             }
             with torch.inference_mode():
                 logits = hf_model.model(**batch_dict, return_dict=True).logits
-            # vLLM applies sigmoid activation to raw logits before returning scores.
-            scores = torch.sigmoid(logits.squeeze(-1).float())
+            # The checkpoint declares an Identity activation, so vLLM returns logits.
+            scores = logits.squeeze(-1).float()
             scores_per_case.append(scores.detach().cpu().tolist())
 
     return scores_per_case

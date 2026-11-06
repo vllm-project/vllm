@@ -1000,6 +1000,13 @@ def get_config(
                     scale_fmt,
                 )
 
+    # Sentence Transformers v6 prefers the CrossEncoder activation it saves outside
+    # config.json. Set it under the legacy key so that hf_overrides of either key win.
+    if act_fn := get_sentence_transformers_activation_fn(model, revision):
+        sentence_transformers = getattr(config, "sentence_transformers", None) or {}
+        sentence_transformers.pop("activation_fn", None)
+        config.sbert_ce_default_activation_function = act_fn
+
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
         config.update(hf_overrides_kw)
@@ -1468,68 +1475,29 @@ def get_sentence_transformers_activation_fn(
     model: str | Path,
     revision: str | None = None,
 ) -> str | None:
-    """Get the activation function of a Sentence Transformers CrossEncoder.
-
-    Sentence Transformers v6 saves it as `activation_fn` in
-    `config_sentence_transformers.json` and prefers it over the copies older
-    versions kept in `config.json`.
-
-    The activation applies to the output of the last module, so it is only
-    returned when that is the classifier output vLLM computes: a lone
-    Transformer module. Pipelines with more or custom modules (e.g. the
-    LogitScore of the Qwen3 rerankers) keep vLLM's own activation.
-
-    Args:
-        model: Local checkpoint path or Hugging Face model ID.
-        revision: Model revision to inspect.
-
-    Returns:
-        The qualified name of the activation function, or `None` if the
-        checkpoint is not a plain CrossEncoder that declares one.
-
-    """
     try:
+        if not file_or_path_exists(
+            model, "config_sentence_transformers.json", revision
+        ):
+            return None
         st_config = get_hf_file_to_dict(
             "config_sentence_transformers.json", model, revision
         )
+        if not isinstance(st_config, dict) or (
+            st_config.get("model_type") != "CrossEncoder"
+        ):
+            return None
         modules = get_hf_file_to_dict("modules.json", model, revision)
     except Exception:
         logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
         return None
 
-    if not isinstance(st_config, dict) or st_config.get("model_type") != "CrossEncoder":
-        return None
     if modules is not None:
         types = [m.get("type") if isinstance(m, dict) else None for m in modules]
         if not (len(types) == 1 and types[0] in _ST_TRANSFORMER_MODULE_TYPES):
             return None
     activation_fn = st_config.get("activation_fn")
     return activation_fn if isinstance(activation_fn, str) else None
-
-
-def is_cross_encoder_activation_overridden(
-    hf_overrides: dict[str, Any] | Callable[[PreTrainedConfig], PreTrainedConfig],
-) -> bool:
-    """Whether `hf_overrides` sets the CrossEncoder activation, either
-    `sentence_transformers.activation_fn` or the legacy
-    `sbert_ce_default_activation_function`, as a dict or a callable."""
-    if callable(hf_overrides):
-        # Like the model_type probe in HFConfigParser: run the callable on a
-        # dummy config and check whether it sets either key.
-        dummy = hf_overrides(
-            PreTrainedConfig(
-                sentence_transformers={}, sbert_ce_default_activation_function=None
-            )
-        )
-        return (
-            "activation_fn" in (getattr(dummy, "sentence_transformers", None) or {})
-            or getattr(dummy, "sbert_ce_default_activation_function", None) is not None
-        )
-    sentence_transformers = hf_overrides.get("sentence_transformers")
-    return "sbert_ce_default_activation_function" in hf_overrides or (
-        isinstance(sentence_transformers, dict)
-        and "activation_fn" in sentence_transformers
-    )
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:

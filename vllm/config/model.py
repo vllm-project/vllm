@@ -36,8 +36,6 @@ from vllm.transformers_utils.config import (
     get_hf_text_config,
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
-    get_sentence_transformers_activation_fn,
-    is_cross_encoder_activation_overridden,
     is_encoder_decoder,
     iter_rope_parameters,
     mrope_num_dims,
@@ -807,16 +805,6 @@ class ModelConfig:
                     if getattr(self.pooler_config, k) is None:
                         setattr(self.pooler_config, k, v)
                         pooler_config_sources[k] = "sentence_transformers"
-
-            if (
-                act_fn := get_sentence_transformers_activation_fn(
-                    self.model, self.revision
-                )
-            ) and not is_cross_encoder_activation_overridden(self.hf_overrides):
-                self.hf_config.sentence_transformers = {
-                    **(getattr(self.hf_config, "sentence_transformers", None) or {}),
-                    "activation_fn": act_fn,
-                }
 
             default_seq_pooling_type = self._model_info.default_seq_pooling_type
             if self.pooler_config.seq_pooling_type is None:
