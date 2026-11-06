@@ -203,7 +203,9 @@ def test_hisparse_device_buffer_covers_speculative_window():
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
             parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
+        use_v2_model_runner=True,
     )
 
     resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
