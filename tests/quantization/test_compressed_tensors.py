@@ -18,6 +18,7 @@ from compressed_tensors.quantization import (
 
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
+from tests.utils import multi_gpu_marks
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
@@ -502,29 +503,40 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
 @pytest.mark.parametrize(
-    "model,prompt,exp_perplexity",
+    "model,prompt,exp_perplexity,tp",
     [
         (
             "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            1,
         ),
         (
             "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            1,
         ),
         (
             "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
+            1,
+        ),
+        # Block-diagonal (head_dim) transforms are rank-local under TP
+        pytest.param(
+            "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
+            "Flat is better than nested.\nSparse is better than dense.",
+            150.0,
+            2,
+            marks=multi_gpu_marks(num_gpus=2),
         ),
     ],
 )
 def test_compressed_tensors_transforms_perplexity(
-    vllm_runner, model, prompt, exp_perplexity
+    vllm_runner, model, prompt, exp_perplexity, tp
 ):
-    with vllm_runner(model, enforce_eager=True) as llm:
+    with vllm_runner(model, enforce_eager=True, tensor_parallel_size=tp) as llm:
         perplexity = llm.generate_prompt_perplexity([prompt])[0]
         print(perplexity)
         assert perplexity <= exp_perplexity

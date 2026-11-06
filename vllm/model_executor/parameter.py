@@ -391,6 +391,8 @@ class SharedWeightParameter(BasevLLMParameter):
     For example, when applying transforms to the "gate" and "up" partitions of
     `MergedColumnParallelLinear`, the transform weights must stay separate
     tensors in order to allow for tensor memory sharing between layers.
+    Partitions are replicated on every tensor parallel rank. Callers must
+    reject configurations whose computation is not shardable.
     """
 
     # global registry for sharing tensors based on passed `data_key`
@@ -419,12 +421,6 @@ class SharedWeightParameter(BasevLLMParameter):
             "output_dim": output_dim,
             "weight_loader": self._fake_weight_loader,
         }
-
-        if self.tp_size > 1:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not "
-                "currently support tensor parallelism"
-            )
 
     def add_partition(self, index: int, data_key: Hashable, *args: Any, **kwargs: Any):
         """Add a partition to the weight parameter. Partitions whose `data_key`
@@ -455,45 +451,26 @@ class SharedWeightParameter(BasevLLMParameter):
         assert len(self.partitions) == 1 and 0 in self.partitions
         partition = self.partitions[0]
 
-        ModelWeightParameter.load_column_parallel_weight(partition, loaded_weight)
+        copy_weight_(partition.data, loaded_weight)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
         partition = self.partitions[0]
 
-        ModelWeightParameter.load_row_parallel_weight(partition, loaded_weight)
+        copy_weight_(partition.data, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         partition_id = kwargs.pop("shard_id")
         partition_id = self._shard_id_as_int(partition_id)
         partition = self.partitions[partition_id]
 
-        input_dim = self.kwargs.get("input_dim")
-        shard_size = partition.data.size(input_dim) // self.tp_size
-        shard_offset = self.tp_rank * shard_size
-
-        ModelWeightParameter.load_merged_column_weight(
-            partition, loaded_weight, shard_offset=shard_offset, shard_size=shard_size
-        )
+        copy_weight_(partition.data, loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         partition_id = self._shard_id_as_int(kwargs.pop("shard_id"))
         partition = self.partitions[partition_id]
 
-        input_dim = self.kwargs.get("input_dim")
-        shard_size = partition.data.size(input_dim) // self.tp_size
-        shard_offset = self.tp_rank * shard_size
-        shard_id = "q"  # fake first partition
-        num_heads = kwargs.get("num_heads")
-
-        ModelWeightParameter.load_qkv_weight(
-            partition,
-            loaded_weight,
-            shard_offset=shard_offset,
-            shard_size=shard_size,
-            shard_id=shard_id,
-            num_heads=num_heads,
-        )
+        copy_weight_(partition.data, loaded_weight)
 
     def process_weights_after_loading(self):
         for key in self.partitions:
