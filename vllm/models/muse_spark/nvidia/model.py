@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -61,13 +61,16 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe.router.base_router import get_moe_padding_mask
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
@@ -80,8 +83,10 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.models.common.ops.sequence_parallel import (
+    can_sp_all_gather_matmul,
     is_sequence_parallel_active,
     sp_all_gather,
+    sp_all_gather_matmul,
     sp_reduce_scatter,
     sp_shard,
 )
@@ -106,7 +111,10 @@ from vllm.models.muse_spark.common.ops.fused_rmsnorm import (
     supports_norm_residual_norm,
 )
 from vllm.models.muse_spark.common.ops.fused_routing import fused_musespark1x_routing
-from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
+from vllm.models.muse_spark.nvidia.mega_moe import (
+    MuseSparkMegaMoEExperts,
+    get_trtllm_token_threshold,
+)
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MuseSpark1xRouter,
@@ -120,13 +128,18 @@ from vllm.models.muse_spark.nvidia.ops.cute_dsl.qk_norm import (
 from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     maybe_create_all_gather_dual_norm,
     maybe_create_all_gather_norm_quant,
+    maybe_create_all_reduce_dual_norm,
     tp_group_spans_nodes,
 )
 from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
+    _norm_quant_megamoe_nvfp4_kernel,
     prepare_megamoe_nvfp4_with_norm,
 )
 from vllm.models.muse_spark.nvidia.ops.prepare_trtllm_nvfp4 import (
     norm_quant_trtllm_nvfp4,
+)
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+    specialized_decode_config,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -141,6 +154,12 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
+if TYPE_CHECKING:
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
 logger = init_logger(__name__)
 
 _FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT = (
@@ -149,6 +168,8 @@ _FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT = (
 _ROUTER_MULTI_STREAM_TOKEN_THRESHOLD = 256
 # Decode-sized batches only; prefill keeps the replicated projections.
 _SHARDED_PROJECTION_MAX_TOKENS = 256
+# The one-shot o_proj all-reduce + boundary beats two-shot + norm up to here.
+_FUSED_ATTN_ALL_REDUCE_MAX_TOKENS = 48
 # Measured on GB300 TP8 (two nodes): below this the cross-node gather costs
 # more than the smaller unpooler GEMM saves.
 _MULTI_NODE_SHARDED_UNPOOLER_MIN_TOKENS = 32
@@ -252,6 +273,11 @@ def _all_gather_norm_residual_then_norm(
     return out, new_stream
 
 
+# The cluster-per-row FlashInfer kernel wins for decode; from here on the
+# Triton boundary kernel streams prefill rows closer to HBM bandwidth.
+_FLASHINFER_DUAL_NORM_MAX_TOKENS = 1024
+
+
 def norm_residual_then_norm(
     x: MuseSpark1xResidualStream,
     pre_norm: MuseSpark1xRMSNorm,
@@ -282,6 +308,11 @@ def norm_residual_then_norm(
     if (
         can_fuse_boundary
         and gated_residual_next_rmsnorm is not None
+        and (
+            router_input is not None
+            or branch.shape[0] < _FLASHINFER_DUAL_NORM_MAX_TOKENS
+            or not supports_norm_residual_norm(branch, stream)
+        )
         and _uses_flashinfer_dual_norm(post_norm, connection, pre_norm, out_dtype)
         and (not post_norm.has_weight or _FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT)
         and supports_gated_residual_next_rmsnorm(
@@ -410,10 +441,7 @@ class MuseSpark1xMoE(nn.Module):
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.n_shared_experts = config.num_shared_experts
 
-        self.fp32_router_input = (
-            getattr(config, "muse_spark_fp32_router_input", True)
-            and torch.backends.cuda.matmul.allow_tf32
-        )
+        self.fp32_router_input = torch.backends.cuda.matmul.allow_tf32
         if self.fp32_router_input and not HAS_ROUTER_OUTPUT:
             raise RuntimeError(
                 "FP32 router input requires FlashInfer dual-norm router output"
@@ -435,14 +463,16 @@ class MuseSpark1xMoE(nn.Module):
 
         self.route_scale = config.routed_scaling_factor
 
+        # folded into the router weight as it loads (`_load_router_weight`)
         self.router_output_multiplier = config.output_multiplier
+        self.router.weight.weight_loader = self._load_router_weight
 
         self.moe_router = MuseSpark1xRouter(
             top_k=config.num_experts_per_tok,
             num_experts=config.num_local_experts,
             expert_bias=self.expert_bias,
             route_scale=self.route_scale,
-            router_output_multiplier=self.router_output_multiplier,
+            router_output_multiplier=None,
             router_score_normalization="sigmoid",
             router_score_division_eps=1e-15,
         )
@@ -493,6 +523,19 @@ class MuseSpark1xMoE(nn.Module):
                 "--enable-expert-parallel, or drop the moe backend."
             )
         self.is_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
+        threshold = get_trtllm_token_threshold(vllm_config)
+        self.sp_min_tokens = threshold + 1
+        self.use_hybrid_moe = threshold > 0
+        if self.use_hybrid_moe and (
+            not self.use_mega_moe
+            or self.tp_size not in (4, 8)
+            or parallel_config.data_parallel_size != 1
+            or parallel_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError(
+                "Muse Spark TRT-LLM token threshold requires MegaMoE with "
+                "TEP4/8, DP1 and PP1"
+            )
         # Only the megakernel takes the shard; FusedMoE gets replicated tokens.
         self.use_sequence_parallel_moe = (
             False
@@ -504,23 +547,21 @@ class MuseSpark1xMoE(nn.Module):
         # loaded, so larger batches keep the replicated projections.
         replicated_tokens = (
             self.tp_size > 1
-            and not self.use_mega_moe
-            and not self.is_sequence_parallel
+            and (
+                (self.use_hybrid_moe and self.is_nvfp4_mega_moe)
+                or (not self.use_mega_moe and not self.is_sequence_parallel)
+            )
             and not self.use_sequence_parallel_moe
             and parallel_config.data_parallel_size == 1
             and not envs.VLLM_BATCH_INVARIANT
         )
-        tep_default = (
+        use_tep_optimizations = (
             replicated_tokens
             and current_platform.is_cuda()
             and current_platform.has_device_capability(100)
         )
-        self.shard_pooler = replicated_tokens and getattr(
-            config, "muse_spark_tep_shard_pooler", tep_default
-        )
-        self.shard_unpooler = replicated_tokens and getattr(
-            config, "muse_spark_tep_shard_unpooler", tep_default
-        )
+        self.shard_pooler = use_tep_optimizations
+        self.shard_unpooler = use_tep_optimizations
         if self.shard_pooler or self.shard_unpooler:
             logger.info_once(
                 "Sharding MuseSpark projection outputs over TP: pooler=%s, "
@@ -540,12 +581,8 @@ class MuseSpark1xMoE(nn.Module):
         # NVFP4 TRT-LLM layers can take inputs prepared outside the experts:
         # the pre-expert norm fused with the FP4 quant, and/or top-k routing
         # finished on the router's aux stream.
-        self.fused_input_quant = not self.use_mega_moe and getattr(
-            config, "muse_spark_tep_fused_moe_input_quant", tep_default
-        )
-        self.aux_stream_routing = not self.use_mega_moe and getattr(
-            config, "muse_spark_tep_aux_stream_routing", tep_default
-        )
+        self.fused_input_quant = not self.use_mega_moe and use_tep_optimizations
+        self.aux_stream_routing = not self.use_mega_moe and use_tep_optimizations
         self.all_gather_norm_quant: Any | None = None
         if self.use_mega_moe and self.tp_size > 1 and not self.is_sequence_parallel:
             raise NotImplementedError(
@@ -575,9 +612,20 @@ class MuseSpark1xMoE(nn.Module):
         if self.use_mega_moe:
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             if self.is_sequence_parallel:
-                # Unsharded small batches carry up to tp_size - 1 tokens.
-                max_tokens = max(cdiv(max_tokens, self.tp_size), self.tp_size - 1)
-            self.experts: nn.Module = MuseSparkMegaMoEExperts(
+                # Reserve room for small batches that stay replicated.
+                max_tokens = max(
+                    cdiv(max_tokens, self.tp_size),
+                    self.tp_size - 1,
+                    self.sp_min_tokens - 1,
+                )
+            experts_cls = MuseSparkMegaMoEExperts
+            if self.use_hybrid_moe:
+                from vllm.models.muse_spark.nvidia.hybrid_moe import (
+                    MuseSparkHybridMoEExperts,
+                )
+
+                experts_cls = MuseSparkHybridMoEExperts
+            self.experts: nn.Module = experts_cls(
                 vllm_config,
                 num_experts=self.n_physical_experts,
                 num_local_experts=self.n_local_physical_experts,
@@ -593,6 +641,18 @@ class MuseSpark1xMoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.experts",
             )
+            if (
+                self.is_nvfp4_mega_moe
+                and hidden_size == 4096
+                and vllm_config.model_config.dtype == torch.bfloat16
+            ):
+                norm = self.pre_expert_norm
+                assert norm is not None and norm.weight is not None
+                _norm_quant_megamoe_nvfp4_kernel.register_warmup(
+                    weight_dtype=norm.weight.dtype,
+                    eps=norm.variance_epsilon,
+                    gain_center=norm.fused_gain_center,
+                )
             return
         self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -612,9 +672,7 @@ class MuseSpark1xMoE(nn.Module):
             runner_cls=self.post_norm_runner_cls,
             runner_args={
                 "post_expert_norm": self.post_expert_norm,
-                "fuse_all_reduce": getattr(
-                    config, "muse_spark_tep_fused_moe_all_reduce", tep_default
-                ),
+                "fuse_all_reduce": use_tep_optimizations,
             },
             moe_config_cls=MuseSparkMoEConfig,
         )
@@ -623,24 +681,28 @@ class MuseSpark1xMoE(nn.Module):
         if self.use_mega_moe:
             self.experts.finalize_weights()
 
-    def fold_router_output_multiplier(self) -> None:
-        """Fold the router output multiplier into the gate weight; idempotent."""
-        if self.router_output_multiplier is None:
-            return
-        with torch.no_grad():
-            self.router.weight.mul_(self.router_output_multiplier)
-        self.router_output_multiplier = None
-        self.moe_router.router_output_multiplier = None
+    def _load_router_weight(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        self.router.weight_loader(param, loaded_weight)
+        if self.router_output_multiplier is not None:
+            with torch.no_grad():
+                param.mul_(self.router_output_multiplier)
 
-    def shards_pooler(self, num_tokens: int) -> bool:
-        return self.shard_pooler and num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS
+    def _can_shard_projection(self, num_tokens: int, sp_active: bool) -> bool:
+        return num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS and (
+            not self.use_mega_moe
+            or (self.use_hybrid_moe and self.experts.use_trtllm(num_tokens, sp_active))
+        )
 
-    def shards_unpooler(self, num_tokens: int) -> bool:
+    def shards_pooler(self, num_tokens: int, sp_active: bool = True) -> bool:
+        return self.shard_pooler and self._can_shard_projection(num_tokens, sp_active)
+
+    def shards_unpooler(self, num_tokens: int, sp_active: bool = True) -> bool:
         return (
             self.shard_unpooler
-            and self.min_sharded_unpooler_tokens
-            <= num_tokens
-            <= _SHARDED_PROJECTION_MAX_TOKENS
+            and self.min_sharded_unpooler_tokens <= num_tokens
+            and self._can_shard_projection(num_tokens, sp_active)
         )
 
     def _project_local_columns(
@@ -674,7 +736,7 @@ class MuseSpark1xMoE(nn.Module):
             return False
         if self.use_sequence_parallel_moe:
             num_tokens = cdiv(num_tokens, self.tp_size)
-        return 32 < num_tokens <= 128
+        return 16 < num_tokens <= 128
 
     def _route_and_pool(
         self, hidden_states: torch.Tensor, router_input: torch.Tensor
@@ -730,9 +792,12 @@ class MuseSpark1xMoE(nn.Module):
         hidden_states: torch.Tensor,
         router_input: torch.Tensor | None = None,
         defer_column_gather: bool = False,
+        sp_active: bool = True,
     ) -> torch.Tensor:
         """With ``defer_column_gather``, returns only this rank's unpooler columns."""
-        return self._routed_forward(hidden_states, router_input, defer_column_gather)
+        return self._routed_forward(
+            hidden_states, router_input, defer_column_gather, sp_active
+        )
 
     def _can_fuse_megamoe_inputs(self, hidden_states: torch.Tensor) -> bool:
         norm = self.pre_expert_norm
@@ -749,16 +814,36 @@ class MuseSpark1xMoE(nn.Module):
         )
 
     def _stage_megamoe_inputs(
-        self, hidden_states: torch.Tensor, router_input: torch.Tensor
+        self, hidden_states: torch.Tensor, router_input: torch.Tensor, sp_active: bool
     ):
         num_tokens = hidden_states.shape[0]
+        use_trtllm = self.use_hybrid_moe and self.experts.use_trtllm(
+            num_tokens, sp_active
+        )
         buffer, padding = self.experts.input_buffer(num_tokens)
+        topk_ids = buffer.topk_idx
+        if use_trtllm:
+            # Reuse the storage for contiguous int32 IDs, without a dtype cast.
+            topk_ids = topk_ids.view(torch.int32).view(-1, topk_ids.shape[-1])
+        topk_ids = topk_ids[:num_tokens]
         norm = self.pre_expert_norm
         pooler = self.pooler
         assert norm is not None and pooler is not None
 
         def pool_and_quantize():
-            pooled, _ = pooler(hidden_states)
+            if use_trtllm and self.shards_pooler(num_tokens, sp_active):
+                pooled = self._project_local_columns(pooler, hidden_states)
+                if fused := self._all_gather_norm_quant(
+                    pooled, norm, self.experts.nvfp4_input_global_scale
+                ):
+                    return None, fused
+                pooled = sp_all_gather(pooled)
+            else:
+                pooled, _ = pooler(hidden_states)
+            if use_trtllm:
+                return None, self.experts.prepare_decode_inputs(
+                    pooled, norm, buffer, num_tokens
+                )
             prepare_megamoe_nvfp4_with_norm(
                 pooled,
                 norm.weight,
@@ -767,7 +852,7 @@ class MuseSpark1xMoE(nn.Module):
                 buffer.x[:num_tokens],
                 buffer.x_sf[:num_tokens].view(torch.uint8),
             )
-            return pooled
+            return pooled, None
 
         def route():
             logits, _ = self.router(router_input)
@@ -780,16 +865,20 @@ class MuseSpark1xMoE(nn.Module):
                 router_output_multiplier=router.router_output_multiplier,
                 router_score_normalization=router.router_score_normalization,
                 router_score_division_eps=router.router_score_division_eps,
-                topk_ids=buffer.topk_idx[:num_tokens],
+                topk_ids=topk_ids,
                 topk_weights=buffer.topk_weights[:num_tokens],
                 is_padding=padding,
             )
 
         # The fork event also orders both writers after the previous layer's
         # MegaMoE, which may have consumed this same symmetric buffer.
-        pooled, _ = maybe_execute_in_parallel(
+        (pooled, quantized_input), _ = maybe_execute_in_parallel(
             pool_and_quantize, route, *self._router_events, self._router_aux_stream
         )
+        if use_trtllm:
+            assert quantized_input is not None
+            return self.experts.forward_trtllm(quantized_input, buffer, topk_ids)
+        assert pooled is not None
         return self.experts.forward_prepared(pooled, buffer)
 
     def _prepares_nvfp4_inputs(self, num_tokens: int) -> bool:
@@ -879,8 +968,13 @@ class MuseSpark1xMoE(nn.Module):
             logits, _ = self.router(router_input)
             if not self.aux_stream_routing:
                 return logits
+            # This path calls TRTLLM's routed experts directly, which skip -1.
+            # An SP all-gather can add rows beyond the runner's padding mask.
+            padding = get_moe_padding_mask(num_tokens)
+            if padding is not None and padding.shape[0] != num_tokens:
+                padding = None
             weights, ids = self.moe_router._compute_routing(
-                hidden_states, logits, torch.int32
+                hidden_states, logits, torch.int32, is_padding=padding
             )
             return ids, weights
 
@@ -900,6 +994,7 @@ class MuseSpark1xMoE(nn.Module):
         hidden_states: torch.Tensor,
         router_input: torch.Tensor | None = None,
         defer_column_gather: bool = False,
+        sp_active: bool = True,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
         if self.use_sequence_parallel_moe:
@@ -910,14 +1005,21 @@ class MuseSpark1xMoE(nn.Module):
             router_input = hidden_states
 
         if self._can_fuse_megamoe_inputs(hidden_states):
-            experts_out = self._stage_megamoe_inputs(hidden_states, router_input)
+            experts_out = self._stage_megamoe_inputs(
+                hidden_states, router_input, sp_active
+            )
         elif self._prepares_nvfp4_inputs(num_tokens):
             experts_out = self._prepared_nvfp4_forward(hidden_states, router_input)
         elif self.use_mega_moe:
             hidden_states, topk_weights, topk_ids = self._route_topk_and_pool(
                 hidden_states, router_input
             )
-            experts_out = self.experts(hidden_states, topk_weights, topk_ids)
+            if self.use_hybrid_moe:
+                experts_out = self.experts(
+                    hidden_states, topk_weights, topk_ids, sp_active=sp_active
+                )
+            else:
+                experts_out = self.experts(hidden_states, topk_weights, topk_ids)
         else:
             router_logits, hidden_states = self._route_and_pool(
                 hidden_states, router_input
@@ -932,7 +1034,7 @@ class MuseSpark1xMoE(nn.Module):
             return self._project_local_columns(self.unpooler, experts_out)
         if self.unpooler is not None:
             experts_out = self._project(
-                self.unpooler, experts_out, self.shards_unpooler(num_tokens)
+                self.unpooler, experts_out, self.shards_unpooler(num_tokens, sp_active)
             )
 
         if self.use_sequence_parallel_moe:
@@ -1079,10 +1181,21 @@ class MuseSpark1xAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         self.is_sequence_parallel_output = False
+        self.sp_min_tokens = 0
         self.gemm_rs = None
 
-        self.rotary_emb = (
-            RotaryEmbedding(
+        # get_rope caches by key, so target layers share one fp32 table.
+        self.rotary_emb: RotaryEmbedding | None = None
+        if self.use_rope and not is_draft:
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=False,
+                rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+                dtype=torch.float,
+            )
+        elif self.use_rope:
+            self.rotary_emb = RotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=max_position_embeddings,
@@ -1090,13 +1203,10 @@ class MuseSpark1xAttention(nn.Module):
                 is_neox_style=False,
                 dtype=(
                     torch.float
-                    if not is_draft or config.rope_use_fp32_in_outer_product
+                    if config.rope_use_fp32_in_outer_product
                     else self.default_dtype
                 ),
             )
-            if self.use_rope
-            else None
-        )
 
         sliding_window = None
         if is_draft:
@@ -1154,6 +1264,14 @@ class MuseSpark1xAttention(nn.Module):
         """Query scale: 1.0 up to ``floor_scale``, logarithmic above it."""
         scaling = torch.log((positions.float() + 1.0) / floor_scale) * q_scale + 1.0
         return scaling.clamp_min(1.0).unsqueeze(-1)
+
+    def can_fuse_sp_gather(self, x: torch.Tensor) -> bool:
+        """Whether the sequence all-gather can be fused into the QKV GEMM."""
+        return (
+            isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod)
+            and self.qkv_proj.bias is None
+            and can_sp_all_gather_matmul(x, self.qkv_proj.weight)
+        )
 
     def _get_attn_temperature_scale(self, positions: torch.Tensor) -> torch.Tensor:
         assert self.attn_temperature_tuning_floor_scale is not None
@@ -1225,9 +1343,19 @@ class MuseSpark1xAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        gather_input: bool = False,
+        reduce_output: bool = True,
     ) -> torch.Tensor:
-        """Attention over an input the caller has already normalized."""
-        qkv, _ = self.qkv_proj(hidden_states)
+        """Attention over an input the caller has already normalized.
+
+        With ``gather_input``, ``hidden_states`` is this rank's sequence shard;
+        the all-gather is fused into the QKV GEMM.
+        """
+        if gather_input:
+            qkv = sp_all_gather_matmul(hidden_states, self.qkv_proj.weight)
+            qkv = qkv[: positions.shape[0]]
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
 
         q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
 
@@ -1266,11 +1394,13 @@ class MuseSpark1xAttention(nn.Module):
                 attn_output = og.sigmoid() * attn_output
 
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
-        return self._project_output(attn_output)
+        return self._project_output(attn_output, reduce_output)
 
-    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+    def _project_output(
+        self, attn_output: torch.Tensor, reduce_output: bool = True
+    ) -> torch.Tensor:
         sp_active = is_sequence_parallel_active(
-            self.is_sequence_parallel_output, attn_output.shape[0]
+            self.is_sequence_parallel_output, attn_output.shape[0], self.sp_min_tokens
         )
         if (
             sp_active
@@ -1282,7 +1412,7 @@ class MuseSpark1xAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         if sp_active:
             output = sp_reduce_scatter(output)
-        elif self.is_sequence_parallel_output:
+        elif self.is_sequence_parallel_output and reduce_output:
             output = tensor_model_parallel_all_reduce(output)
         return output
 
@@ -1321,9 +1451,13 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
+            max_position_embeddings=(
+                max(
+                    config.max_position_embeddings,
+                    vllm_config.model_config.max_model_len,
+                )
+                if is_draft
+                else vllm_config.model_config.max_model_len
             ),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -1396,10 +1530,14 @@ class MuseSpark1xDecoderLayer(nn.Module):
         self.default_dtype = torch.get_default_dtype()
         # Set by the model when the next boundary may consume unpooler shards.
         self.all_gather_dual_norm: Any | None = None
+        # Set by the model to fuse the o_proj all-reduce into the FFN boundary.
+        self.all_reduce_dual_norm: Any | None = None
 
         self.is_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
+        self.sp_min_tokens = get_trtllm_token_threshold(vllm_config) + 1
         self.is_sequence_parallel_input = self.is_sequence_parallel
         self.self_attn.is_sequence_parallel_output = self.is_sequence_parallel
+        self.self_attn.sp_min_tokens = self.sp_min_tokens
         if self.is_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
 
@@ -1440,12 +1578,22 @@ class MuseSpark1xDecoderLayer(nn.Module):
         assert stream.dtype == self.residual_dtype
 
         sp_active = is_sequence_parallel_active(
-            self.is_sequence_parallel, positions.shape[0]
+            self.is_sequence_parallel, positions.shape[0], self.sp_min_tokens
         )
-        if sp_active and self.is_sequence_parallel_input:
+        gather_input = sp_active and self.is_sequence_parallel_input
+        if gather_input and not self.self_attn.can_fuse_sp_gather(attn_input):
             # Positions carries the unpadded length of the gathered sequence.
             attn_input = sp_all_gather(attn_input)[: positions.shape[0]]
-        attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
+            gather_input = False
+        fuse_all_reduce = not sp_active and self._fuses_attn_all_reduce(
+            positions.shape[0]
+        )
+        attn_out = self.self_attn(
+            positions=positions,
+            hidden_states=attn_input,
+            gather_input=gather_input,
+            reduce_output=not fuse_all_reduce,
+        )
         if sp_active and not self.is_sequence_parallel_input:
             stream = sp_shard(stream)
         router_input = None
@@ -1453,25 +1601,45 @@ class MuseSpark1xDecoderLayer(nn.Module):
             self.feed_forward, MuseSpark1xMoE
         ) and self.feed_forward.wants_fp32_router_input(attn_out.shape[0]):
             router_input = torch.empty_like(attn_out, dtype=torch.float32)
-        ffn_in, stream = norm_residual_then_norm(
-            MuseSpark1xResidualStream(
-                stream=stream,
-                branch=attn_out,
-                post_norm=self.post_attn_norm,
-                connection=self.add_attn,
-            ),
-            self.pre_ffn_norm,
-            out_dtype=self.default_dtype,
-            router_input=router_input,
-        )
+        if fuse_all_reduce:
+            assert self.all_reduce_dual_norm is not None
+            ffn_in, stream = self.all_reduce_dual_norm(
+                attn_out,
+                stream,
+                self.add_attn.alpha,
+                self.add_attn.beta,
+                self.pre_ffn_norm.weight,
+                constants=self._attn_boundary_constants(router_input is not None),
+                post_weight=(
+                    self.post_attn_norm.weight
+                    if self.post_attn_norm.has_weight
+                    else None
+                ),
+                router_output=router_input,
+            )
+        else:
+            ffn_in, stream = norm_residual_then_norm(
+                MuseSpark1xResidualStream(
+                    stream=stream,
+                    branch=attn_out,
+                    post_norm=self.post_attn_norm,
+                    connection=self.add_attn,
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+                router_input=router_input,
+            )
         if sp_active and not self.feed_forward.use_mega_moe:
             # Non-megakernel experts need every token.
             branch = sp_shard(self.feed_forward(sp_all_gather(ffn_in)))
-        elif self._defers_column_gather(ffn_in.shape[0]):
+        elif self._defers_column_gather(ffn_in.shape[0], sp_active):
             return MuseSpark1xColumnShardedStream(
                 stream=stream,
                 branch=self.feed_forward(
-                    ffn_in, router_input=router_input, defer_column_gather=True
+                    ffn_in,
+                    router_input=router_input,
+                    defer_column_gather=True,
+                    sp_active=sp_active,
                 ),
                 post_norm=self.post_ffn_norm,
                 connection=self.add_ffn,
@@ -1479,8 +1647,10 @@ class MuseSpark1xDecoderLayer(nn.Module):
             )
         else:
             branch = (
-                self.feed_forward(ffn_in, router_input=router_input)
-                if router_input is not None
+                self.feed_forward(
+                    ffn_in, router_input=router_input, sp_active=sp_active
+                )
+                if isinstance(self.feed_forward, MuseSpark1xMoE)
                 else self.feed_forward(ffn_in)
             )
         return MuseSpark1xResidualStream(
@@ -1490,11 +1660,38 @@ class MuseSpark1xDecoderLayer(nn.Module):
             connection=self.add_ffn,
         )
 
-    def _defers_column_gather(self, num_tokens: int) -> bool:
+    def _attn_boundary_constants(self, has_router: bool) -> Any:
+        from vllm.models.muse_spark.nvidia.ops.all_reduce_dual_norm import (
+            DualNormConstants,
+        )
+
+        post, pre = self.post_attn_norm, self.pre_ffn_norm
+        return DualNormConstants(
+            post_eps=post.variance_epsilon,
+            next_eps=pre.variance_epsilon,
+            post_gain_center=post.fused_gain_center if post.has_weight else 0.0,
+            next_gain_center=pre.fused_gain_center,
+            has_post_weight=post.has_weight,
+            has_router=has_router,
+        )
+
+    def _fuses_attn_all_reduce(self, num_tokens: int) -> bool:
+        return (
+            self.all_reduce_dual_norm is not None
+            and num_tokens <= _FUSED_ATTN_ALL_REDUCE_MAX_TOKENS
+            and _uses_flashinfer_dual_norm(
+                self.post_attn_norm,
+                self.add_attn,
+                self.pre_ffn_norm,
+                self.default_dtype,
+            )
+        )
+
+    def _defers_column_gather(self, num_tokens: int, sp_active: bool) -> bool:
         # Only sharded MoE layers get a workspace (see _configure_column_gather).
         return self.all_gather_dual_norm is not None and cast(
             MuseSpark1xMoE, self.feed_forward
-        ).shards_unpooler(num_tokens)
+        ).shards_unpooler(num_tokens, sp_active)
 
 
 # Runs uncompiled under breakable cudagraphs; drop LlamaModel's torch.compile.
@@ -1532,11 +1729,13 @@ class MuseSpark1xModel(LlamaModel):
 
         self.fuse_across_layers = get_pp_group().world_size == 1
         self.is_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
+        self.sp_min_tokens = get_trtllm_token_threshold(vllm_config) + 1
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.is_sequence_parallel_input = self.is_sequence_parallel
         self._configure_replicated_prefix()
         self._configure_column_gather()
         self._configure_pooler_gather()
+        self._configure_attn_all_reduce()
         if self.is_sequence_parallel:
             from vllm.models.muse_spark.nvidia.ops.gemm_rs import (
                 maybe_create_gemm_rs,
@@ -1583,16 +1782,12 @@ class MuseSpark1xModel(LlamaModel):
             if isinstance(layer.feed_forward, MuseSpark1xMoE)
             and layer.feed_forward.shard_unpooler
         ]
-        if (
-            not sharded
-            or not self.fuse_across_layers
-            or not getattr(self.config, "muse_spark_tep_fused_boundary", True)
-        ):
+        if not sharded or not self.fuse_across_layers:
             return
         all_gather = maybe_create_all_gather_dual_norm(
             self.config.hidden_size,
             _SHARDED_PROJECTION_MAX_TOKENS,
-            enable_pdl=getattr(self.config, "muse_spark_tep_fused_boundary_pdl", True),
+            enable_pdl=True,
         )
         if all_gather is None:
             return
@@ -1610,6 +1805,29 @@ class MuseSpark1xModel(LlamaModel):
                 **_dual_norm_constants(layer.post_ffn_norm, next_norm),
             )
 
+    def _configure_attn_all_reduce(self) -> None:
+        """Fuse the o_proj all-reduce into the attention -> FFN boundary."""
+        layers = [
+            layer
+            for layer in islice(self.layers, self.start_layer, self.end_layer)
+            if layer.self_attn.is_sequence_parallel_output
+            and not layer.self_attn.o_proj.reduce_results
+        ]
+        if not layers or not getattr(
+            self.config, "muse_spark_tep_fused_attn_all_reduce", True
+        ):
+            return
+        op = maybe_create_all_reduce_dual_norm(
+            self.config.hidden_size, _FUSED_ATTN_ALL_REDUCE_MAX_TOKENS
+        )
+        if op is None:
+            return
+        for layer in layers:
+            layer.all_reduce_dual_norm = op
+            # Compile ahead of CUDA graph capture.
+            for has_router in (False, True):
+                op.compiled(layer._attn_boundary_constants(has_router))
+
     def _configure_pooler_gather(self) -> None:
         """Let sharded poolers gather straight into the NVFP4 expert input."""
         moes = [
@@ -1617,7 +1835,10 @@ class MuseSpark1xModel(LlamaModel):
             for layer in islice(self.layers, self.start_layer, self.end_layer)
             if isinstance(layer.feed_forward, MuseSpark1xMoE)
             and layer.feed_forward.shard_pooler
-            and layer.feed_forward.fused_input_quant
+            and (
+                layer.feed_forward.fused_input_quant
+                or layer.feed_forward.use_hybrid_moe
+            )
             and layer.feed_forward.norm_fuses_into_nvfp4_quant
         ]
         if not moes:
@@ -1683,7 +1904,7 @@ class MuseSpark1xModel(LlamaModel):
             self.residual_dtype
         )
         sp_active = is_sequence_parallel_active(
-            self.is_sequence_parallel, positions.shape[0]
+            self.is_sequence_parallel, positions.shape[0], self.sp_min_tokens
         )
         if sp_active and self.is_sequence_parallel_input:
             x = sp_shard(x)
@@ -1814,6 +2035,44 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             self.logits_processor.scale = 1.0
 
         self.set_moe_parameters()
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+            SpecializedDecode,
+        )
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        if self.specialized_decode_config is None:
+            # decode_backend=auto: the runner's default state for this model.
+            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+            return DefaultModelState
+        from vllm.models.muse_spark.nvidia.model_state import MuseSparkModelState
+
+        return MuseSparkModelState
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def _init_model(
         self,
@@ -1917,13 +2176,19 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(
-            interleaved_weights(), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        if self.specialized_decode is not None:
+            # Runs again after a weight reload; the captured decode steps read
+            # the kernels' constants and buffers built from the loaded weights.
+            raise RuntimeError(
+                "The Muse Spark specialized decode does not support reloading "
+                "the model's weights"
+            )
         self.model.finalize_mega_moe_weights()
         n_gates = materialize_residual_path_constants(self)
         logger.info(
             "Materialized residual-path constants for %d gated residual connections",
             n_gates,
         )
-        return loaded

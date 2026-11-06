@@ -219,6 +219,7 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX115X = "gfx115" in _GCN_ARCH
+_ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -322,6 +323,10 @@ def on_gfx1151() -> bool:
 
 def on_gfx115x() -> bool:
     return _ON_GFX115X
+
+
+def on_gfx1201() -> bool:
+    return _ON_GFX1201
 
 
 def on_gfx12x() -> bool:
@@ -559,8 +564,11 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    elif rocm_aiter_ops.is_rdna_aiter_enabled():
-        backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    if rocm_aiter_ops.is_rdna_aiter_enabled():
+        if on_rdna4():
+            backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+        else:
+            backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ROCM_OCTAVE)
@@ -687,6 +695,7 @@ class RocmPlatform(Platform):
         "fp8_per_tensor",
         "fp8_per_block",
         "fp8_per_channel",
+        "mxfp4_hadamard32",
         "online",
         "gpt_oss_mxfp4",
     ]
@@ -753,6 +762,22 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # On gfx1201 and gfx1100, prefer TRITON_ATTN over ROCM_ATTN. An
+        # fp8_e5m2 KV cache keeps ROCM_ATTN: Attention rejects fp8_e5m2 for
+        # backends that take an fp8 query, as TRITON_ATTN does on gfx1201.
+        if (
+            (on_gfx1201() or on_gfx1100())
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+            and AttentionBackendEnum.TRITON_ATTN in backend_priorities
+            and attn_selector_config.kv_cache_dtype != "fp8_e5m2"
+        ):
+            # Swap the two so every other backend keeps its position.
+            rocm_idx = backend_priorities.index(AttentionBackendEnum.ROCM_ATTN)
+            triton_idx = backend_priorities.index(AttentionBackendEnum.TRITON_ATTN)
+            backend_priorities[rocm_idx], backend_priorities[triton_idx] = (
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.ROCM_ATTN,
+            )
         is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -1204,6 +1229,18 @@ class RocmPlatform(Platform):
 
         _maybe_default_dsv4_mxfp4_indexer(vllm_config)
 
+        if parallel_config.all2all_backend == "mori":
+            from vllm.config.parallel import resolve_mori_all2all
+
+            resolve_mori_all2all(
+                parallel_config,
+                model_config,
+                vllm_config.kernel_config.moe_backend,
+                lsa_spans_hosts=on_gfx1250(),
+                sdma_picks_epv1=not on_gfx1250(),
+                validated_arch=on_gfx950() or on_gfx1250(),
+            )
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
@@ -1422,7 +1459,6 @@ class RocmPlatform(Platform):
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
-            and not on_rdna4()
             and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
         ):
             rms_norm = ["aiter"] + default
