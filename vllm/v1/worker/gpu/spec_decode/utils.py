@@ -57,15 +57,21 @@ def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
 
 
 @dataclass(slots=True)
+class CopyPending:
+    pending: bool
+
+
+@dataclass(slots=True)
 class CopyBarrier:
-    # Shared barrier state for one asynchronous copy.
-    copy_event: torch.cuda.Event | None
+    event: torch.cuda.Event
+    pending: CopyPending
 
 
 @dataclass(slots=True)
 class DraftTokens:
     ids: np.ndarray
-    copy_barrier: CopyBarrier
+    copy_pending: CopyPending
+    copy_event: torch.cuda.Event
 
 
 class DraftTokensHandler:
@@ -73,10 +79,14 @@ class DraftTokensHandler:
         self.device = device
         self.copy_stream = new_d2h_stream(device)
         # Blocking (sleep) events to avoid busy-polling the CUDA driver lock.
-        self._copy_events: list[torch.cuda.Event] = [
-            torch.cuda.Event(blocking=True) for _ in range(max_concurrent_batches)
+        self._copy_barriers: list[CopyBarrier] = [
+            CopyBarrier(
+                event=torch.cuda.Event(blocking=True),
+                pending=CopyPending(pending=False),
+            )
+            for _ in range(max_concurrent_batches)
         ]
-        self._next_copy_event = 0
+        self._next_copy_barrier = 0
 
         # Latest drafts per live request: a row view into an async-copied
         # pinned array and associated barrier, or just the draft width when
@@ -108,8 +118,19 @@ class DraftTokensHandler:
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
-        copy_event = self._copy_events[self._next_copy_event]
-        self._next_copy_event = (self._next_copy_event + 1) % len(self._copy_events)
+        copy_barrier = self._copy_barriers[self._next_copy_barrier]
+        self._next_copy_barrier = (self._next_copy_barrier + 1) % len(
+            self._copy_barriers
+        )
+        copy_event = copy_barrier.event
+
+        # Wait on previous copy if it's still pending.
+        # Only occurs if we have more than max_concurrent_batches in-flight.
+        copy_pending_container = copy_barrier.pending
+        if copy_pending_container.pending:
+            copy_event.synchronize()
+            copy_pending_container.pending = False
+
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
@@ -120,14 +141,18 @@ class DraftTokensHandler:
             draft_tokens.record_stream(self.copy_stream)
             copy_event.record()
 
-        copy_barrier = CopyBarrier(copy_event)
+        copy_pending = CopyPending(pending=True)
+        copy_barrier.pending = copy_pending
         for req_id, row in zip(input_batch.req_ids, draft_tokens_np):
             draft_tokens = self._draft_tokens_by_req.get(req_id, None)
             if isinstance(draft_tokens, DraftTokens):
                 draft_tokens.ids = row
-                draft_tokens.copy_barrier = copy_barrier
+                draft_tokens.copy_event = copy_event
+                draft_tokens.copy_pending = copy_pending
             else:
-                self._draft_tokens_by_req[req_id] = DraftTokens(row, copy_barrier)
+                self._draft_tokens_by_req[req_id] = DraftTokens(
+                    row, copy_pending, copy_event
+                )
 
     def discard(self, req_id: str) -> None:
         self._draft_tokens_by_req.pop(req_id, None)
@@ -152,12 +177,11 @@ class DraftTokensHandler:
             if isinstance(draft_tokens, int):
                 draft_token_ids = [-1] * draft_tokens
             else:
-                copy_barrier = draft_tokens.copy_barrier
-                copy_event = copy_barrier.copy_event
-                if copy_event is not None:
+                copy_pending_container = draft_tokens.copy_pending
+                if copy_pending_container.pending:
                     # Clear the barrier for every row from this copy
-                    copy_event.synchronize()
-                    copy_barrier.copy_event = None
+                    draft_tokens.copy_event.synchronize()
+                    copy_pending_container.pending = False
                 draft_token_ids = draft_tokens.ids.tolist()
 
             out_req_ids.append(req_id)
