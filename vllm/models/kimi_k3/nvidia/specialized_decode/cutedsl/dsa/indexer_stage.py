@@ -111,15 +111,15 @@ class IndexerStage:
         from vllm.model_executor.layers.sparse_attn_indexer import (
             kv_cache_as_quant_view,
         )
-        from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import dcp_topk_merge_fits
-        from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
-            dcp_topk_merge_rows,
-        )
         from vllm.utils.deep_gemm import (
             fp8_fp4_paged_mqa_logits,
             mqa_logits_mx_inputs,
         )
         from vllm.utils.math_utils import cdiv
+        from vllm.v1.attention.ops.dcp_topk_merge import dcp_topk_merge_fits
+        from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+            dcp_topk_merge_rows,
+        )
 
         indexer, n = self.indexer, self.local_topk
         index_md: Any = get_forward_context().attn_metadata[indexer.k_cache.prefix]
