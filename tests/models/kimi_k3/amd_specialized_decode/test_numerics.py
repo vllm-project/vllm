@@ -1392,6 +1392,9 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
     ):
         monkeypatch.setattr(mod, name, getattr(mod, name))
     monkeypatch.setattr(cp, "QLEN", qlen)
+    # cp's autouse fixture does not reach this module; max_decode_query_len
+    # reads use_v2_model_runner, which would inspect cp's stand-in spec config.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     device = torch.device("cuda", 0)
     torch.accelerator.set_device_index(device.index)

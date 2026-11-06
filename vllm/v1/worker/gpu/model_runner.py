@@ -375,6 +375,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
+        if self.speculator is not None:
+            self.speculator.update_max_model_len(max_model_len)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -922,6 +924,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs = min(
                 num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
             )
+            # Keep room for each request's draft slots.
             num_tokens = min(
                 num_tokens,
                 self.max_num_tokens

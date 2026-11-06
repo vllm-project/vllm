@@ -150,6 +150,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     muse_spark="MuseSparkConfig",
     kimi_k3="KimiK3Config",
     lfm3="Lfm3Config",
+    lfm3_audio="Lfm3AudioConfig",
     lfm3_vl="Lfm3VlConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
@@ -1345,7 +1346,10 @@ def try_get_safetensors_metadata(
         return with_retry(
             get_safetensors_metadata_partial,
             "Error retrieving safetensors",
-            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
+            fatal_errors=(
+                huggingface_hub.errors.NotASafetensorsRepoError,
+                huggingface_hub.errors.OfflineModeIsEnabled,
+            ),
         )
     except Exception:
         return None
