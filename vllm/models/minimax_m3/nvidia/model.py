@@ -517,7 +517,6 @@ class MiniMaxM3MoE(nn.Module):
 
         self.use_mega_moe = use_mega_moe
         self.reduce_results = reduce_results
-        self.scoring_func = config.scoring_func
         self.top_k = config.num_experts_per_tok
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.n_shared_experts = getattr(config, "n_shared_experts", None)
@@ -564,7 +563,7 @@ class MiniMaxM3MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
             # w13 (gate_up_proj) is loaded packed via MergedColumnParallelLinear
@@ -738,7 +737,7 @@ class MiniMaxM3MoE(nn.Module):
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
-            scoring_func=self.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.e_score_correction_bias.data
             if self.e_score_correction_bias is not None
             else None,

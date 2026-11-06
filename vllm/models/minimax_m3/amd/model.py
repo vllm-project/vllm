@@ -525,7 +525,7 @@ class MiniMaxM3MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             intermediate_pad=0,
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
             use_grouped_topk=self.use_aiter_moe_fse,
