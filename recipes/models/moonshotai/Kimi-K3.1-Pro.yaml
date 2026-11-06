@@ -9,7 +9,7 @@ meta:
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint"
+  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -18,6 +18,7 @@ meta:
     vr200: supported
     810e: verified
     m890: verified
+    ironwood: supported
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
@@ -68,8 +69,18 @@ features:
           - "fp8"
           - "--speculative-config"
           - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}'
+    # TPU: #2775 validated DSpark with 7 draft tokens, but DSpark plus
+    # --async-scheduling (always on for TPU here) hits the spec-decode warmup
+    # bug fixed by vllm-project/vllm-torchtpu#2770, still open — so the feature
+    # is gated off on TPU until it lands.
+    hardware:
+      ironwood: unsupported
   text_only:
     description: "Skip the vision encoder for text-only workloads; frees its memory for KV cache."
+    # Always on in the TPU override (the TPU path is text-only), so the toggle
+    # would be a no-op there.
+    hardware:
+      ironwood: unsupported
     args:
       - "--language-model-only"
   low_latency_decode:
@@ -81,6 +92,8 @@ features:
       - multi_node_tp
     hardware:
       ppu: unsupported
+      # The fused CuTe DSL decode path is CUDA-only.
+      ironwood: unsupported
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
@@ -89,6 +102,8 @@ features:
     description: "Store the MLA latent in NVFP4 instead of FP8 for about 1.5x the KV cache tokens; the indexer keys stay FP8."
     hardware:
       ppu: unsupported
+      # NVFP4 is a Blackwell format; TPU serves with FP8 KV cache.
+      ironwood: unsupported
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
@@ -104,7 +119,7 @@ variants:
     precision: mxfp4
     # 1561 GB of safetensors x 1.2.
     vram_minimum_gb: 1874
-    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890]
+    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
       810e:
@@ -121,6 +136,33 @@ variants:
       vr200:
         docker_image: "vllm/vllm-openai:kimi-k31-cu134"
         install: { pip: false }
+      # TPU serving runs through vllm-torchtpu (vllm-project/vllm-torchtpu).
+      # K3.1 support is under review as vllm-project/vllm-torchtpu#2775; until
+      # it merges, the Install tab builds from the staging branch kimi-k31pro.
+      # The TPU path is text-only (the vision tower is not loaded) and was
+      # validated at TP32 / EP32 on a 2x2x4 TPU v7x slice (4 hosts, 16 chips,
+      # 32 devices).
+      ironwood:
+        install:
+          docker: false
+          pip:
+            command: "git clone https://github.com/vllm-project/vllm-torchtpu.git && cd vllm-torchtpu && git checkout kimi-k31pro && VLLM_TARGET_DEVICE=empty uv sync --group vllm && source .venv/bin/activate"
+            note: "Source build of vLLM-TorchTPU from the kimi-k31pro branch (Python 3.12, uv; its vllm group builds the pinned vLLM 0.32.0). Tracks vllm-torchtpu#2775 until it merges into main."
+        extra_env:
+          TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL: "1"
+          TPU_MOE_HIERARCHICAL_EP: "1"
+        # Settings every TPU serve needs. The run-specific tuning of the
+        # validated config (context, batch, compile sizes) lives in the
+        # v7x_validated / v7x_dcp8 presets, sourced to #2775.
+        extra_args:
+          - "--language-model-only"
+          - "--limit-mm-per-prompt"
+          - '{"image":0,"video":0}'
+          - "--enable-ep-weight-filter"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--async-scheduling"
+          - "--enable-prefix-caching"
 
 compatible_strategies:
   - single_node_tp
@@ -132,6 +174,8 @@ strategy_hardware:
   multi_node_tep:
     810e: supported
     m890: supported
+    # The validated TPU layout is TP32 with expert parallelism (EP32).
+    ironwood: supported
   single_node_tp:
     810e: unsupported
     m890: unsupported
@@ -141,9 +185,15 @@ strategy_hardware:
   multi_node_tp:
     810e: unsupported
     m890: unsupported
+    # TPU offers only TP+EP (the validated layout); plain multi-node TP is
+    # not offered there.
+    ironwood: unsupported
+  # PD disaggregation has not been validated on TPU, and the default NIXL
+  # connector is CUDA-oriented.
   pd_cluster:
     810e: unsupported
     m890: unsupported
+    ironwood: unsupported
 
 # One B300 or MI355X node (8 GPUs) or two GB300 / VR200 trays (2 x 4 GPUs) hold the checkpoint.
 strategy_min_gpus:
@@ -152,6 +202,9 @@ strategy_min_gpus:
   multi_node_tp: 8
   810e: 32
   m890: 32
+  # The validated TPU layout spans a 2x2x4 v7x slice: TP32 over 4 hosts
+  # (16 chips, 32 devices).
+  ironwood: 32
 
 default_strategy: single_node_tp
 
@@ -282,6 +335,72 @@ presets:
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
 
+  # The exact configuration vllm-project/vllm-torchtpu#2775 validated on a
+  # 2x2x4 TPU v7x slice (TP32 / EP32, 4 hosts, 16 chips, 32 devices).
+  v7x_validated:
+    label: "Validated TEP32 (v7x)"
+    hardware: ironwood
+    strategy: multi_node_tep
+    workload: "Accuracy validation (GSM8K)"
+    description: "The #2775 validation config on a 2x2x4 v7x slice: complete GSM8K at 97.50%, prefix-cache hits returning identical tokens and logprobs, BEAM-1M matching the GPU reference."
+    select:
+      nodes: 4
+    args:
+      - "--max-model-len"
+      - "10240"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--gpu-memory-utilization"
+      - "0.82"
+      - "--compilation-config"
+      - '{"compile_sizes":[1,8,16,8192]}'
+    source:
+      href: "https://github.com/vllm-project/vllm-torchtpu/pull/2775"
+      key: "kimi-k31-pro-v7x-tp32-ep32"
+      revision: "af0fce9305f4e591e54892153ea86d49deaf1ccb"
+    runbook: |
+      The configuration vllm-torchtpu#2775 validated on the real checkpoint on a 2x2x4 TPU v7x slice: complete GSM8K at **97.50%** (1,286/1,319), prefix-cache probes returning identical tokens and logprobs, and BEAM-1M long context matching the GPU reference.
+
+      #2775 ran one `vllm serve` driver over a Ray cluster (`TPU_MULTIHOST_BACKEND=ray`); the builder renders torchtpu's default multiprocessing backend (per-host `--nnodes` / `--node-rank` / `--headless`). The flags match; the multi-host transport differs. GSM8K ran through the completions API, so the default-on chat and tool-call parsers were not exercised on TPU.
+
+      GSM8K capped outputs at 1,024 tokens with 8 concurrent requests; `--max-model-len 10240` and `--max-num-seqs 16` come from that run, not from a serving-quality target.
+
+  # The TP32 + DCP8 arm of the same validation: DCP8 shards the MLA latent and
+  # indexer-key caches across the TP group, holding about 8x the KV tokens per
+  # device at some decode-speed cost.
+  v7x_dcp8:
+    label: "Validated TEP32 + DCP8 (v7x)"
+    hardware: ironwood
+    strategy: multi_node_tep
+    workload: "Accuracy validation (GSM8K)"
+    description: "TEP32 + DCP8 on the same 2x2x4 v7x slice: complete GSM8K at 97.42%. Pick it when KV capacity, not decode speed, is the limit. DSpark does not support DCP on TPU, so this preset keeps Spec decoding off."
+    select:
+      nodes: 4
+      features: { spec_decoding: false }
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--cp-kv-cache-interleave-size"
+      - "4"
+      - "--max-model-len"
+      - "10240"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--gpu-memory-utilization"
+      - "0.82"
+      - "--compilation-config"
+      - '{"compile_sizes":[8,16,8192]}'
+    source:
+      href: "https://github.com/vllm-project/vllm-torchtpu/pull/2775"
+      key: "kimi-k31-pro-v7x-tp32-ep32-dcp8"
+      revision: "af0fce9305f4e591e54892153ea86d49deaf1ccb"
+    runbook: |
+      The TP32 + DCP8 arm of the vllm-torchtpu#2775 validation on the same slice: complete GSM8K at **97.42%** (1,285/1,319), with prefix-cache and long-context checks matching the TP32 arm. Compile sizes drop the 1-batch capture (DCP decode batches start at 8).
+
 # DCP8 over the TP8 group (one B300 node or two GB300 trays).
 decode_context_parallel:
   sizes:
@@ -367,6 +486,13 @@ strategy_overrides:
       parallelism: dep
       tp: 1
 
+notes:
+  # TPU serving is text-only: the command always carries --language-model-only
+  # and zeroed mm limits, and the Text only feature toggle is gated off there.
+  - title: "Text-only on TPU"
+    when: { hardware: [ironwood] }
+    body: "TPU serving runs through vllm-torchtpu, which does not load the vision tower for K3.1 — the command always carries `--language-model-only` and image/video are disabled."
+
 guide: |
   ## Overview
 
@@ -390,6 +516,10 @@ guide: |
   two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
   On 810E, `ppu_deep_gemm_w4a16` loads the checkpoint with a W4A16 compute path.
   Use the PPU image specified for each hardware configuration.
+
+  On TPU, the model is served by [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu),
+  text-only: the vision tower is not loaded. The validated layout is TP32 with expert
+  parallelism on a 2x2x4 TPU v7x slice (16 chips, 32 devices, on 4 hosts). See [TPU serving](#tpu-serving).
 
   ## Tensor + expert parallelism
 
@@ -421,6 +551,32 @@ guide: |
   instead of 576) and holds about 1.5x the KV cache tokens of FP8. The indexer keys stay FP8,
   so the top-2048 token selection is unchanged. GSM8K matched FP8 on 8x GB300 (96.1% vs 96.2%);
   long-context accuracy has not been measured yet.
+
+  ## TPU serving
+
+  TPU serving runs through [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu) and
+  is text-only: the vision tower is not loaded. K3.1 support is under review as
+  [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775); until it merges,
+  the Install tab on TPU builds from the `kimi-k31pro` staging branch (Python 3.12, uv). No
+  published image or wheel carries it yet.
+
+  The generated command uses vllm-torchtpu's default multiprocessing multi-host backend: run the
+  head command on the slice's first host and the worker commands on the remaining hosts (the
+  builder renders both). The **Multi-Node TEP** strategy at 4 nodes matches the validated flags of
+  [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775) with two
+  differences: #2775 ran one driver over a Ray cluster (`TPU_MULTIHOST_BACKEND=ray`), and its
+  GSM8K validation used the completions API, so the default-on chat and tool-call parsers were not
+  exercised on TPU. Validated on a 2x2x4 TPU v7x slice with an FP8 latent KV cache, the unified
+  block pool and prefix caching: the complete GSM8K split scored 97.50% (TP32) and 97.42%
+  (TP32 + DCP8), prefix-cache hits returned identical tokens and logprobs, and the BEAM-1M
+  long-context benchmark matched the GPU reference. The run-specific sizing of that validation
+  (10K context, 16 sequences, compile sizes) is not the TPU default — it lives in the two
+  **Validated** presets: [TEP32](#preset-v7x_validated) and
+  [TEP32 + DCP8](#preset-v7x_dcp8) for KV-capacity-bound workloads.
+
+  **Spec decoding is gated off on TPU for now**: DSpark with `--async-scheduling` (always on in
+  this configuration) needs [vllm-torchtpu#2770](https://github.com/vllm-project/vllm-torchtpu/pull/2770),
+  still open. #2775 validated DSpark with 7 draft tokens once that fix is in.
 
   ## Prefill/decode disaggregation
 
