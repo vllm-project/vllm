@@ -159,7 +159,7 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
         spec_config = vllm_config.speculative_config
         if (
             spec_config is not None
-            and spec_config.method != "mtp"
+            and spec_config.method not in ("mtp", "dspark")
             and spec_config.kv_cache_dtype is None
         ):
             spec_config.kv_cache_dtype = "auto"
@@ -178,6 +178,40 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         hf_config = model_config.hf_config
         hf_config.is_causal = not hf_config.use_bidirectional_attention
+
+
+class MuseGlimmerAttentionConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return
+
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            and attention_config.backend is None
+            and not attention_config.backend_per_kind
+        ):
+            attention_config.backend = AttentionBackendEnum.ROCM_AITER_FA
+
+        if rocm_aiter_ops.is_enabled() and (
+            attention_config.backend == AttentionBackendEnum.ROCM_AITER_FA
+            or AttentionBackendEnum.ROCM_AITER_FA
+            in attention_config.backend_per_kind.values()
+        ):
+            # Keep QK norm, RoPE and the KV write in one Inductor graph.
+            compilation_config = vllm_config.compilation_config
+            compilation_config.use_inductor_graph_partition = True
+            if (
+                "-rotary_embedding" not in compilation_config.custom_ops
+                and "+rotary_embedding" not in compilation_config.custom_ops
+            ):
+                compilation_config.custom_ops.append("+rotary_embedding")
 
 
 class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
@@ -529,6 +563,17 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
 
 class EmbeddingGemma2ModelConfig(Gemma4Config):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # Trained with Matryoshka Representation Learning (see the model card),
+        # but the published configs don't declare the supported dimensions.
+        # Only fill in the default; keep explicit settings such as overrides.
+        hf_config = model_config.hf_config
+        if not hasattr(hf_config, "matryoshka_dimensions") and not hasattr(
+            hf_config, "is_matryoshka"
+        ):
+            hf_config.matryoshka_dimensions = [128, 256, 512, 768]
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         Gemma4Config.verify_and_update_config(vllm_config)
@@ -920,6 +965,17 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
             pooler_config.logit_mean = 2.65
+
+
+class Lfm3VlForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # The checkpoints nest the video processor config in processor_config.json,
+        # where the video loader lookup by processor name does not see it.
+        mm_config = model_config.multimodal_config
+        if mm_config is not None:
+            video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
+            video_kwargs.setdefault("video_backend", "qwen3_vl")
 
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
@@ -1486,6 +1542,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
+    "Lfm3VlForConditionalGeneration": Lfm3VlForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
@@ -1496,6 +1553,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
+    "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
+    "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,

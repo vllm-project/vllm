@@ -22,6 +22,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::fingerprint::FingerprintMode;
 use crate::routes::openai::utils::types::ReasoningEffort;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -33,6 +34,9 @@ pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Default maximum size of an HTTP request body or a decoded gRPC message.
 pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
+pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
 
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -96,6 +100,9 @@ pub struct ApiServerOptions {
     /// limit.
     #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
     pub request_body_limit_bytes: Option<usize>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
+    #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
+    pub max_n_sequences: i64,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and
@@ -384,6 +391,8 @@ pub struct Config {
     pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// What `system_fingerprint` reports on chat and completion responses.
+    pub fingerprint_mode: FingerprintMode,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.
