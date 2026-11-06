@@ -4222,7 +4222,10 @@ class Scheduler(SchedulerInterface):
                     request.is_prefill_chunk = (
                         request.num_computed_tokens < request.num_tokens
                     )
-                    if request.is_prefill_chunk:
+                    if (
+                        request.is_prefill_chunk
+                        and request not in self._parked_reservations
+                    ):
                         self._inflight_prefills.add(request)
                     else:
                         self._inflight_prefills.discard(request)
