@@ -307,3 +307,26 @@ async def test_ming_chunk_policy_prefix_cache(model_name, ming_server, ming_audi
         assert after > before, (
             f"Restoring the chunk policy added no prefix hits: {before=} {after=}"
         )
+
+
+@pytest.mark.asyncio
+async def test_crisper_whisper_modes(mary_had_lamb):
+    """CrisperWhisper detects the language and takes its mode from vllm_xargs."""
+    model_name = "nyralabs/CrisperWhisper2.0_small"
+    server_args = ["--enforce-eager", "--dtype", "float32", *ROCM_EXTRA_ARGS]
+    audio = ("mary_had_lamb.ogg", mary_had_lamb.read(), "audio/ogg")
+    texts = {}
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        for mode in ("verbatim", "intended"):
+            texts[mode] = await transcribe_and_check(
+                client,
+                model_name,
+                audio,
+                language=None,
+                expected_text="Mary had a little lamb",
+                response_format="json",
+                extra_body={"vllm_xargs": json.dumps({"mode": mode})},
+            )
+    assert "[UH]" in texts["verbatim"]
+    assert "[UH]" not in texts["intended"]

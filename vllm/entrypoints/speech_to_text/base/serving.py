@@ -125,7 +125,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
-        if self.model_cls.supports_segment_timestamp:
+        if self.model_cls.supports_segment_timestamp or getattr(
+            self.model_cls, "supports_explicit_language_detection", False
+        ):
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
                 get_tokenizer(

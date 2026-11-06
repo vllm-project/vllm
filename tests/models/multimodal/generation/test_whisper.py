@@ -8,7 +8,13 @@ import pytest
 import torch
 from transformers import AutoModelForSpeechSeq2Seq
 
+from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.config import SpeechToTextConfig
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.model_executor.models.crisper_whisper import (
+    CrisperWhisperForConditionalGeneration,
+)
 from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
@@ -22,6 +28,11 @@ HF_PROMPT = ""
 # Whisper expects 16kHz audio
 WHISPER_SAMPLE_RATE = 16000
 BEAM_WIDTHS = (1, 2)
+# Decoder prompts of the official crisperwhisper PromptBuilder for English.
+CRISPER_WHISPER_PROMPT_IDS = {
+    "verbatim": [51880, 51881, 51882, 51883, 51884, 50258, 50259, 50359, 50363],
+    "intended": [51885, 51886, 51887, 51888, 51889, 50258, 50259, 50359, 50363],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -381,6 +392,64 @@ def test_models(
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
         enforce_eager=enforce_eager,
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu_model
+@pytest.mark.parametrize("mode", ["verbatim", "intended"])
+def test_crisper_whisper(hf_runner, vllm_runner, resampled_assets, mode: str) -> None:
+    """The mode tags go before <|startoftranscript|>, with no extra start token."""
+    model = "nyralabs/CrisperWhisper2.0_small"
+    check_model_available(model)
+    prompt_ids = CRISPER_WHISPER_PROMPT_IDS[mode]
+
+    with vllm_runner(
+        model,
+        dtype="float",
+        max_model_len=448,
+        limit_mm_per_prompt={"audio": 1},
+        enforce_eager=True,
+    ) as vllm_model:
+        model_config = vllm_model.llm.llm_engine.model_config
+        prompts = [
+            CrisperWhisperForConditionalGeneration.get_generation_prompt(
+                SpeechToTextParams(
+                    audio=audio,
+                    stt_config=SpeechToTextConfig(),
+                    model_config=model_config,
+                    language="en",
+                    extra_args={"mode": mode},
+                )
+            )
+            for audio, _ in resampled_assets
+        ]
+        vllm_outputs = vllm_model.generate_w_logprobs(
+            prompts,
+            SamplingParams(temperature=0.0, max_tokens=200, logprobs=5),
+            include_prompt_token_ids=True,
+        )
+    assert [output[3] for output in vllm_outputs] == [prompt_ids] * len(prompts)
+
+    with hf_runner(
+        model, dtype="float", auto_cls=AutoModelForSpeechSeq2Seq
+    ) as hf_model:
+        # vLLM does not apply the generation config's suppressed tokens.
+        hf_model.model.generation_config.suppress_tokens = None
+        hf_model.model.generation_config.begin_suppress_tokens = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            [HF_PROMPT] * len(resampled_assets),
+            200,
+            num_logprobs=5,
+            audios=resampled_assets,
+            decoder_input_ids=torch.tensor([prompt_ids], device=hf_model.model.device),
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=[output[:3] for output in vllm_outputs],
+        name_0="hf",
+        name_1="vllm",
     )
 
 

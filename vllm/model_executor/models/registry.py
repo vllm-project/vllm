@@ -661,6 +661,10 @@ _MULTIMODAL_MODELS = {
         "RadioMBartPrefixForCausalLM",
     ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
+    "WhisperForConditionalGenerationWithAttentionLoss": (
+        "crisper_whisper",
+        "CrisperWhisperForConditionalGeneration",
+    ),
 }
 
 _SPECULATIVE_DECODING_MODELS = {

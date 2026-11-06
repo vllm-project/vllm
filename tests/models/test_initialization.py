@@ -224,7 +224,10 @@ def can_initialize(
             if model_arch in ("GptOssForCausalLM", "Step1ForCausalLM")
             else None
         )
-        if model_arch == "WhisperForConditionalGeneration":
+        if model_arch in (
+            "WhisperForConditionalGeneration",
+            "WhisperForConditionalGenerationWithAttentionLoss",
+        ):
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         kwargs = {}

@@ -773,6 +773,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
+| `WhisperForConditionalGenerationWithAttentionLoss` | CrisperWhisper 2.0 | `nyralabs/CrisperWhisper2.0_large`, `nyralabs/CrisperWhisper2.0_turbo`, etc. | | |
 
 !!! note
     `Nemotron3_5TranscribeForConditionalGeneration` transcribes with speaker tags. Its chat template turns
@@ -795,6 +796,12 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
+
+!!! note
+    `WhisperForConditionalGenerationWithAttentionLoss` (CrisperWhisper 2.0) writes verbatim transcripts, with fillers
+    such as `[UM]`, by default. For the clean transcript, send `vllm_xargs` as the JSON string `{"mode": "intended"}`
+    with a transcription request. It does not support translation or timestamps, and it ignores the `prompt` and
+    `hotwords` request fields.
 
 #### Realtime Transcription
 

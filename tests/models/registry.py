@@ -1518,6 +1518,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},
     ),
+    "WhisperForConditionalGenerationWithAttentionLoss": _HfExamplesInfo(
+        "nyralabs/CrisperWhisper2.0_small",
+        extras={"turbo": "nyralabs/CrisperWhisper2.0_turbo"},
+    ),
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),
 }
