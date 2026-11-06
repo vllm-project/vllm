@@ -41,6 +41,10 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    decode_csf_scale,
+    encode_csf_scales,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp8Dynamic,
@@ -1679,3 +1683,38 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
             "w2",
             0,
         )
+
+
+def test_csf_encode_round_trips_with_fewest_exceptions():
+    torch.manual_seed(0)
+    raw = torch.randint(0x30, 0x40, (2, 640, 160), dtype=torch.uint8)
+    raw[:, ::2, 0] = 0x10  # a low outlier that a row-min base would follow
+    raw.view(-1)[torch.randperm(raw.numel())[:64]] = 0x7E
+
+    fixed, exceptions = encode_csf_scales(raw.view(torch.float8_e4m3fn))
+
+    for expert in range(2):
+        streams = {
+            "nvfp4_csf_fixed": fixed[expert],
+            "nvfp4_csf_exceptions": exceptions[expert],
+        }
+        decoded = decode_csf_scale("csf", streams)
+        assert torch.equal(decoded.view(torch.uint8), raw[expert])
+    # Every row keeps the 0x30 base, so only the out-of-window bytes remain.
+    outliers = ((raw < 0x30) | (raw > 0x3F)).sum().item()
+    assert sum(t.numel() for t in exceptions) == outliers
+
+
+def test_mixed_config_resolves_expert_scale_encoding():
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.mlp.experts": {
+                "quant_algo": "NVFP4",
+                "weight_scale_encoding": "csf",
+            },
+            "model.layers.1.mlp.experts": {"quant_algo": "NVFP4"},
+        }
+    )
+
+    assert config._resolve_scale_encoding("model.layers.0.mlp.experts") == "csf"
+    assert config._resolve_scale_encoding("model.layers.1.mlp.experts") is None

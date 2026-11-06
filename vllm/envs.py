@@ -197,6 +197,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_B12X_MOE_CSF_RESIDENT_SCALES: bool = True
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1739,6 +1740,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force b12x FP4 MoE to use BF16 activations.
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
+    ),
+    # Keep `csf`-encoded NVFP4 MoE scales compressed on the GPU with b12x.
+    # Set to 0 to decode them at load instead.
+    "VLLM_B12X_MOE_CSF_RESIDENT_SCALES": lambda: bool(
+        int(os.getenv("VLLM_B12X_MOE_CSF_RESIDENT_SCALES", "1"))
     ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
