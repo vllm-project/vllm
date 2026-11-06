@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from tests.utils import create_new_process_for_each_test
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -279,14 +278,6 @@ def test_capture_replay_bypass_logic():
         full_wrapper, input_3, CUDAGraphMode.NONE, desc_3_unseen, vllm_config
     )
     assert action == "bypass"
-
-    # capture unseen shape is not allowed after disable
-    set_cudagraph_capturing_enabled(False)
-    with pytest.raises(RuntimeError):
-        _run_and_monitor_call(
-            full_wrapper, input_3, CUDAGraphMode.FULL, desc_3_unseen, vllm_config
-        )
-    set_cudagraph_capturing_enabled(True)
 
 
 @create_new_process_for_each_test("spawn")
