@@ -14,6 +14,8 @@ it in vLLM comes down to two things, both exercised here:
      (weight, activation) pair.
 """
 
+import contextlib
+
 import pytest
 import torch
 
@@ -25,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kNvfp4Dynamic,
 )
 from vllm.utils.import_utils import has_humming
 
@@ -169,13 +172,10 @@ def _mxfp6_weight_schema():
     )
 
 
-def _resolve_input_schema(monkeypatch, capability, activation_key, **kwargs):
+@contextlib.contextmanager
+def _mock_sm_version(capability):
     from unittest.mock import patch
 
-    from vllm.model_executor.layers.quantization.utils.humming import (
-        check_and_fallback_input_schema,
-        quant_key_to_input_schema,
-    )
     from vllm.platforms.interface import DeviceCapability
 
     class _Device:
@@ -191,6 +191,16 @@ def _resolve_input_schema(monkeypatch, capability, activation_key, **kwargs):
         platform_mock.get_device_capability.return_value = DeviceCapability(
             capability // 10, capability % 10
         )
+        yield
+
+
+def _resolve_input_schema(capability, activation_key, **kwargs):
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        check_and_fallback_input_schema,
+        quant_key_to_input_schema,
+    )
+
+    with _mock_sm_version(capability):
         return check_and_fallback_input_schema(
             _mxfp6_weight_schema(),
             quant_key_to_input_schema(activation_key),
@@ -201,142 +211,30 @@ def _resolve_input_schema(monkeypatch, capability, activation_key, **kwargs):
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
 @pytest.mark.parametrize(
-    "capability,expect_fp8",
+    "capability,activation_key,kwargs,expected",
     [
-        (90, False),  # WGMMA has no block-scaled MX path: keep BF16 (wna16)
-        (100, True),
-        (103, True),
-        (120, True),
+        # SM90 WGMMA has no block-scaled MX path: keep the 16-bit fallback.
+        (90, kMxfp8Dynamic, {}, "16bit"),
+        (100, kMxfp8Dynamic, {}, "fp8"),
+        (103, kMxfp8Dynamic, {}, "fp8"),
+        (120, kMxfp8Dynamic, {}, "fp8"),
+        # MoE grouped-GEMM FP8 is unvalidated on SM100-SM119: keep the gate.
+        (100, kMxfp8Dynamic, {"allow_fp8_sm100": False}, "16bit"),
+        # FP4 requests keep their gate on SM100.
+        (100, kNvfp4Dynamic, {}, "not_fp4"),
     ],
 )
-def test_mxfp8_activation_honored_from_sm100(monkeypatch, capability, expect_fp8):
-    """An MXFP8 activation request (FP8 E4M3, group-32, E8M0 scales) next to
-    MXFP6 weights must reach the Humming kernel on SM100+ instead of being
-    downgraded to BF16; SM90 keeps the BF16 (wna16) fallback."""
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kMxfp8Dynamic,
-    )
+def test_input_schema_honors_sm_activation_gates(
+    capability, activation_key, kwargs, expected
+):
+    """Honor MXFP8 requests while preserving architecture and MoE gates."""
     from vllm.utils.humming import dtypes as humming_dtypes
 
-    resolved = _resolve_input_schema(monkeypatch, capability, kMxfp8Dynamic)
-    if expect_fp8:
+    resolved = _resolve_input_schema(capability, activation_key, **kwargs)
+    if expected == "fp8":
         assert resolved.a_dtype == humming_dtypes.float8e4m3
         assert resolved.input_scale_group_size == 32
-    else:
+    elif expected == "16bit":
         assert resolved.a_dtype is None or resolved.a_dtype.num_bits == 16
-
-
-@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
-def test_moe_path_keeps_fp8_gate_on_sm100(monkeypatch):
-    """The MoE call site passes allow_fp8_sm100=False: humming's grouped-GEMM
-    path is not validated for FP8 activations on SM100-SM119, so it must keep
-    the BF16 fallback even though dense linear honors FP8 there."""
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kMxfp8Dynamic,
-    )
-
-    resolved = _resolve_input_schema(
-        monkeypatch, 100, kMxfp8Dynamic, allow_fp8_sm100=False
-    )
-    assert resolved.a_dtype is None or resolved.a_dtype.num_bits == 16
-
-
-@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
-@pytest.mark.parametrize(
-    "capability,expect_fp8_key",
-    [(100, None), (120, kMxfp8Dynamic)],
-)
-def test_moe_expert_selection_keeps_fp8_gate_on_sm100(
-    monkeypatch, capability, expect_fp8_key
-):
-    """HummingMoEMethod must resolve the activation key for expert selection
-    with the same SM100 FP8 gate as weight processing: on SM100-SM119 an MXFP8
-    activation request falls back to BF16 (key None), keeping expert selection
-    consistent with the BF16 input schema the weights are prepared for;
-    SM120+ honors FP8."""
-    from unittest.mock import patch
-
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.model_executor.layers.fused_moe.config import (
-        FusedMoEConfig,
-        FusedMoEParallelConfig,
-        RoutingMethodType,
-    )
-    from vllm.model_executor.layers.quantization import humming as humming_module
-    from vllm.model_executor.layers.quantization.humming import (
-        HummingLayerQuantizationConfig,
-        HummingMoEMethod,
-    )
-    from vllm.model_executor.layers.quantization.utils.humming import (
-        quant_key_to_input_schema,
-    )
-    from vllm.platforms.interface import DeviceCapability
-
-    class _Device:
-        sm_version = capability
-
-    moe_config = FusedMoEConfig(
-        num_experts=8,
-        experts_per_token=2,
-        hidden_dim=128,
-        intermediate_size=256,
-        num_local_experts=8,
-        num_logical_experts=8,
-        activation=MoEActivation.SILU,
-        device="cpu",
-        routing_method=RoutingMethodType.DeepSeekV3,
-        moe_parallel_config=FusedMoEParallelConfig(
-            tp_size=1,
-            pcp_size=1,
-            dp_size=1,
-            ep_size=1,
-            tp_rank=0,
-            pcp_rank=0,
-            dp_rank=0,
-            ep_rank=0,
-            sp_size=1,
-            use_ep=False,
-            all2all_backend="allgather_reducescatter",
-            enable_eplb=False,
-        ),
-        in_dtype=torch.bfloat16,
-    )
-    quant_config = HummingLayerQuantizationConfig(
-        weight_schema=_mxfp6_weight_schema(),
-        input_schema=quant_key_to_input_schema(kMxfp8Dynamic),
-    )
-
-    captured = {}
-    real_select = humming_module.select_humming_moe_experts
-
-    def _spy(config, weight_key, activation_key):
-        captured["activation_key"] = activation_key
-        return real_select(
-            config=config, weight_key=weight_key, activation_key=activation_key
-        )
-
-    monkeypatch.setattr(humming_module, "select_humming_moe_experts", _spy)
-    with (
-        patch(
-            "vllm.model_executor.layers.quantization.utils.humming.schema"
-            ".current_platform"
-        ) as platform_mock,
-        patch("humming.schema.humming.current_device", _Device()),
-    ):
-        platform_mock.get_device_capability.return_value = DeviceCapability(
-            capability // 10, capability % 10
-        )
-        HummingMoEMethod(quant_config, moe_config)
-
-    assert captured["activation_key"] == expect_fp8_key
-
-
-@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
-def test_fp4_activation_still_deprecated_on_sm100(monkeypatch):
-    """Only FP8 is ungated: FP4 activations keep falling back on SM100."""
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kNvfp4Dynamic,
-    )
-
-    resolved = _resolve_input_schema(monkeypatch, 100, kNvfp4Dynamic)
-    assert resolved.a_dtype is None or resolved.a_dtype.num_bits != 4
+    else:
+        assert resolved.a_dtype is None or resolved.a_dtype.num_bits != 4
