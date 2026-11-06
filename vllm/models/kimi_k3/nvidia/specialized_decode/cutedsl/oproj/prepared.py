@@ -17,6 +17,7 @@ import torch
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass.cute.runtime import make_fake_stream
 
+from ....specialized_decode.symm import multicast_rendezvous, peer_rendezvous
 from ..common.host import dynamic_fake, dynamic_view, fake, stream, to_cute
 from ..common.policy import batch_table
 from .consumer import OprojConsumer, OprojFused
@@ -24,15 +25,21 @@ from .producer import OprojProducer, OprojUmma
 
 
 class OprojMailbox:
-    """Sentinel-armed multicast mailbox; defaults to [parity, TP, 64, 7168] BF16."""
+    """Sentinel-armed multicast mailbox; defaults to [parity, TP, 64, 7168] BF16.
+    ``multicast=False``: a peer-store mailbox (``handle.buffer_ptrs`` only, ``mc``
+    0), which spends no NVLink multicast object."""
 
-    def __init__(self, group, device, tp, rank, shape=None):
+    def __init__(self, group, device, tp, rank, shape=None, multicast=True):
         self.tp, self.rank = tp, rank
         shape = (2, tp, 64, 7168) if shape is None else shape
         self.buffer = symm_mem.empty(shape, dtype=torch.bfloat16, device=device)
-        self.handle = handle = symm_mem.rendezvous(self.buffer, group)
-        self.mc = int(handle.multicast_ptr or 0)
-        if not self.mc:  # slot() offsets this address
+        if multicast:
+            self.handle, self.mc = multicast_rendezvous(
+                self.buffer, group, "Kimi K3 o-projection mailbox"
+            )
+        else:
+            self.handle, self.mc = peer_rendezvous(self.buffer, group), 0
+        if multicast and not self.mc:  # slot() offsets this address
             raise RuntimeError(
                 "Kimi K3 specialized o-projection needs multicast memory"
             )

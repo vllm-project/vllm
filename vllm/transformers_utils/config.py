@@ -149,6 +149,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     muse_spark_audio="MuseSparkAudioConfig",
     muse_spark="MuseSparkConfig",
     kimi_k3="KimiK3Config",
+    kimi_k31="KimiK3Config",
     lfm3="Lfm3Config",
     lfm3_audio="Lfm3AudioConfig",
     lfm3_vl="Lfm3VlConfig",
