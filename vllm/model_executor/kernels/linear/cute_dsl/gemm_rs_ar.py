@@ -13,6 +13,7 @@ process-wide workspace through ``maybe_init_gemm_rs_ar`` + ``GemmRsAr.apply``.
 # The MXFP8 path follows the block-scaled SM100 GEMM template from
 # https://github.com/gau-nernst/gn-kernels (sm100_mm_mxfp8.py).
 
+from contextlib import nullcontext
 from functools import cache
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,7 @@ from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -1130,10 +1132,7 @@ def maybe_init_gemm_rs_ar(
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
     parallel_config = vllm_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size
-    if vllm_config.model_config.enable_sleep_mode:
-        # Level-2 sleep discards the weights pool, which holds the multicast buffers.
-        reason = "sleep mode is enabled"
-    elif parallel_config.use_ubatching:
+    if parallel_config.use_ubatching:
         reason = "ubatching is enabled"
     elif vllm_config.model_config.dtype != torch.bfloat16:
         reason = "the model dtype is not BF16"
@@ -1155,11 +1154,18 @@ def maybe_init_gemm_rs_ar(
         return False
 
     try:
-        init_gemm_rs_ar(
-            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-            N=N,
-            all_reduce=all_reduce,
-        )
+        # Level-2 sleep discards the weights pool; the kernel reads the peer pointer
+        # table rendezvous allocates on every call.
+        with (
+            get_mem_allocator_instance().use_memory_pool(tag="runtime")
+            if vllm_config.model_config.enable_sleep_mode
+            else nullcontext()
+        ):
+            init_gemm_rs_ar(
+                max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+                N=N,
+                all_reduce=all_reduce,
+            )
     except RuntimeError as e:
         logger.warning_once(
             "%s is disabled because initialization failed: %s. This may mean "

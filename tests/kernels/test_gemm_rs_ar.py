@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -337,14 +338,46 @@ def test_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
         cleanup_dist_env_and_memory()
 
 
-def test_sleep_mode_disables_gemm_rs_ar() -> None:
-    """Level-2 sleep discards the multicast buffers, so they must never be built."""
+@pytest.mark.parametrize(
+    "sleep_mode,expected",
+    [(True, ["enter runtime", "init"]), (False, ["init"])],
+    ids=["sleep", "no-sleep"],
+)
+def test_rendezvous_survives_level_2_sleep(
+    monkeypatch: pytest.MonkeyPatch, sleep_mode: bool, expected: list[str]
+) -> None:
+    """Level-2 sleep discards the weights pool; the peer table must not be there."""
     gemm_rs_ar = pytest.importorskip(
         "vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar"
     )
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(enable_sleep_mode=True),
-        parallel_config=SimpleNamespace(tensor_parallel_size=2, use_ubatching=False),
+    events: list[str] = []
+
+    @contextmanager
+    def use_memory_pool(tag: str):
+        events.append(f"enter {tag}")
+        yield
+
+    monkeypatch.setattr(
+        gemm_rs_ar,
+        "get_mem_allocator_instance",
+        lambda: SimpleNamespace(use_memory_pool=use_memory_pool),
     )
-    assert not gemm_rs_ar.maybe_init_gemm_rs_ar(config, N=_N, all_reduce=True)
-    assert gemm_rs_ar._gemm_rs_ar is None
+    monkeypatch.setattr(
+        gemm_rs_ar, "init_gemm_rs_ar", lambda **kwargs: events.append("init")
+    )
+    monkeypatch.setattr(
+        gemm_rs_ar,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda=lambda: True, is_device_capability_family=lambda family: True
+        ),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            enable_sleep_mode=sleep_mode, dtype=torch.bfloat16
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2, use_ubatching=False),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
+    )
+    assert gemm_rs_ar.maybe_init_gemm_rs_ar(config, N=_N, all_reduce=True)
+    assert events == expected
