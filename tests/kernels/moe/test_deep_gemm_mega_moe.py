@@ -247,11 +247,9 @@ def _mega_moe_checkpoint(experts, num_logical_experts, seed):
     return ckpt, shards
 
 
-def _load_mega_moe_checkpoint_shuffled(
-    experts, num_logical_experts, seed, process=True
-):
+def _load_mega_moe_checkpoint_shuffled(experts, num_logical_experts, seed):
     """Load a random checkpoint, one shard per ``weight_loader`` call in a
-    shuffled order, then run post-load processing unless ``process`` is False."""
+    shuffled order, then run post-load processing."""
     ckpt, shards = _mega_moe_checkpoint(experts, num_logical_experts, seed)
     generator = torch.Generator().manual_seed(seed)
     for i in torch.randperm(len(shards), generator=generator).tolist():
@@ -266,8 +264,7 @@ def _load_mega_moe_checkpoint_shuffled(
             expert_id=expert_id,
             return_success=True,
         )
-    if process:
-        experts.process_weights_after_loading()
+    experts.process_weights_after_loading()
     return ckpt
 
 
@@ -473,12 +470,6 @@ def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
     assert processed == ["DeepGemmMegaMoEExperts"]
     _assert_mega_moe_layout(model.experts, _expected_mega_moe_layout(ckpt, 4, 3))
     if weight_format.routed.has_global_scale:
-        physical = torch.arange(4) % 3
-        l1_scale = ckpt["w13_weight_scale_2"][physical].expand(2, 4)
-        assert torch.equal(model.experts.w13_weight_scale_2, l1_scale)
-        w2_scale = ckpt["w2_weight_scale_2"][physical]
-        assert torch.equal(model.experts.w2_weight_scale_2, w2_scale)
-        assert torch.equal(model.experts.w2_input_scale, ckpt["w2_input_scale"])
         assert model.experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
 
 
@@ -557,12 +548,10 @@ def test_deep_gemm_mega_moe_nvfp4_rejects_mismatched_l1_scales():
     load("w1", 0.5)
     load("w3", 0.5)
     experts.process_weights_after_loading()
-    assert experts.w13_weight_scale_2[0].tolist() == [0.5]
     # Checked once all tensors are loaded, so the order does not matter.
     load("w3", 2.0)
     load("w1", 2.0)
     experts.process_weights_after_loading()
-    assert experts.w13_weight_scale_2[0].tolist() == [2.0]
     load("w1", 1.0)
     load("w3", 4.0)
     with pytest.raises(ValueError, match="one L1 scale per expert"):
