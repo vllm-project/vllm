@@ -330,27 +330,42 @@ class TestRefusals:
             assert "not validated" in warnings[0][0]
         _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
 
-    def test_online_quantization_refused(self):
-        # finish clears the guard that keeps online quantization from
-        # quantizing its converted bytes again
-        model = _cold_start(_checkpoint())
-        model.proj.quant_method = object.__new__(Fp8PerTensorOnlineLinearMethod)
-        self._assert_begin_refused(model, "online quantization")
-
-    def test_online_shared_experts_refused(self):
-        # post-load processing deletes the staging parameters a reload loads
-        model = _cold_start(_checkpoint())
-        model.proj.shared_expert_online_loader = object()
-        self._assert_begin_refused(model, "online quantization")
-
-    @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
-    def test_humming_refused(self, method_cls):
-        # its post-load processing runs only once per quant method
+    @pytest.mark.parametrize(
+        "kind,match",
+        [
+            # finish clears the guard that keeps online quantization from
+            # quantizing its converted bytes again
+            ("online", "online quantization"),
+            # post-load processing deletes the staging parameters a reload loads
+            ("online-shared-experts", "online quantization"),
+            # its post-load processing runs only once per quant method
+            ("HummingLinearMethod", "humming"),
+            ("HummingMoEMethod", "humming"),
+        ],
+    )
+    def test_quant_method_refused_as_seen_at_cold_start(self, kind, match):
+        # decided on the tree cold start records; post-load processing may
+        # wrap the method afterwards (elastic EP's FusedMoEModularMethod)
         from vllm.model_executor.layers.quantization import humming as humming_mod
+        from vllm.model_executor.model_loader.reload.direct import (
+            record_checkpoint_layout,
+        )
 
-        model = _cold_start(_checkpoint())
-        model.proj.quant_method = object.__new__(getattr(humming_mod, method_cls))
-        self._assert_begin_refused(model, "humming")
+        with _DEVICE:
+            model = _ToyModel()
+        model.load_weights(_checkpoint().items())
+        method = model.proj.quant_method
+        if kind == "online":
+            model.proj.quant_method = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        elif kind == "online-shared-experts":
+            model.proj.shared_expert_online_loader = object()
+        else:
+            model.proj.quant_method = object.__new__(getattr(humming_mod, kind))
+        record_checkpoint_layout(model)  # does not raise: cold start succeeds
+        model.proj.quant_method = method  # the live tree no longer shows it
+        model.proj.__dict__.pop("shared_expert_online_loader", None)
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        self._assert_begin_refused(model, match)
 
     @pytest.mark.parametrize(
         "module_path,cls_name",
@@ -358,6 +373,7 @@ class TestRefusals:
             ("vllm.models.muse_spark.nvidia.mega_moe", "MuseSparkMegaMoEExperts"),
             ("vllm.models.muse_spark.nvidia.hybrid_moe", "MuseSparkHybridMoEExperts"),
             ("vllm.models.deepseek_v4.amd.mega_moe", "DeepseekV4AiterMegaMoEExperts"),
+            ("vllm.models.step5.nvidia.mega_moe", "Step5MegaMoEExperts"),
         ],
     )
     def test_unsupported_component_refused(self, module_path, cls_name):
@@ -384,9 +400,9 @@ class TestRefusals:
         # set on a model instance at runtime (MiniMax-M3 AMD mono decode);
         # False refuses even a validated class
         model = _cold_start(_checkpoint())
-        model.supports_direct_reload = False  # type: ignore[misc]
+        model.supports_direct_reload = False
         if reason is not None:
-            model.direct_reload_unsupported_reason = reason  # type: ignore[misc]
+            model.direct_reload_unsupported_reason = reason
         self._assert_begin_refused(
             model, rf"_ToyModel is not supported \(model\): {match}"
         )

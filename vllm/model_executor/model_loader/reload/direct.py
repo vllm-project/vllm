@@ -85,11 +85,9 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
             yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
-def _check_supported_modules(model: torch.nn.Module) -> None:
-    """Warn for models not validated with direct reload; refuse modules known
-    to reload incorrectly. Runs in `begin`, so a cold start that never
-    reloads is unaffected; config-level refusals:
-    VllmConfig._verify_direct_reload_compat."""
+def _quant_method_refusal(model: torch.nn.Module) -> str | None:
+    """Cold start, before post-load processing (which may wrap quant methods,
+    e.g. elastic EP): why the model's quant methods cannot reload directly."""
     from vllm.model_executor.layers.quantization.humming import (
         HummingLinearMethod,
         HummingMoEMethod,
@@ -98,40 +96,40 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
-    from vllm.model_executor.models.interfaces import supports_direct_reload
 
     for name, module in model.named_modules():
-        # declared broken (SupportsDirectReload), e.g. a one-shot guard the
-        # checks below would not see
-        if getattr(module, "supports_direct_reload", None) is False:
-            reason = getattr(module, "direct_reload_unsupported_reason", None)
-            raise RuntimeError(
-                f"direct reload: {type(module).__name__} is not supported "
-                f"({name or 'model'}): {reason or 'no reason given'}"
-            )
         method = getattr(module, "quant_method", None)
         # also without an online config (experts_int8); fused shared experts
         # quantize staging parameters that post-load processing deletes
         if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
             getattr(module, "shared_expert_online_loader", None) is not None
         ):
-            raise RuntimeError(
-                f"direct reload: online quantization is not supported "
+            return (
+                f"online quantization is not supported "
                 f"({name}: {type(method).__name__})"
             )
         if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
             # the method, not the module): a reload would keep checkpoint bytes
-            raise RuntimeError(f"direct reload: humming is not supported ({name})")
+            return f"humming is not supported ({name})"
+    return None
 
-    if not supports_direct_reload(type(model)):
-        logger.warning_once(
-            "direct reload: %s is not validated with direct reload (it does "
-            "not declare SupportsDirectReload); correctness after a weight "
-            "update is not guaranteed. Use VLLM_RELOAD_MODE=layerwise if "
-            "outputs look wrong.",
-            type(model).__name__,
-        )
+
+def _check_supported_modules(model: torch.nn.Module) -> None:
+    """Refuse modules known to reload incorrectly. Runs in `begin`, so a cold
+    start that never reloads is unaffected; config-level refusals:
+    VllmConfig._verify_direct_reload_compat."""
+    for name, module in model.named_modules():
+        # declared broken (SupportsDirectReload; may change at runtime), e.g. a
+        # one-shot guard the quant-method check would not see
+        if getattr(module, "supports_direct_reload", None) is False:
+            reason = getattr(module, "direct_reload_unsupported_reason", None)
+            raise RuntimeError(
+                f"direct reload: {type(module).__name__} is not supported "
+                f"({name or 'model'}): {reason or 'no reason given'}"
+            )
+    if reason := model.__dict__.get("_direct_reload_refusal"):
+        raise RuntimeError(f"direct reload: {reason}")
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
@@ -142,6 +140,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     Runs once; reloads reuse the cold-start record."""
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
+    model._direct_reload_refusal = _quant_method_refusal(model)
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
@@ -229,11 +228,21 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
-    _check_supported_modules(model)
+    from vllm.model_executor.models.interfaces import supports_direct_reload
+
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    _check_supported_modules(model)
     _check_params_kept(model)
     views = _checkpoint_views(model)
+    if not supports_direct_reload(type(model)):
+        logger.warning_once(
+            "direct reload: %s is not validated with direct reload (it does "
+            "not declare SupportsDirectReload); correctness after a weight "
+            "update is not guaranteed. Use VLLM_RELOAD_MODE=layerwise if "
+            "outputs look wrong.",
+            type(model).__name__,
+        )
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin

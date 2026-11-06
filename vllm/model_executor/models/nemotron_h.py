@@ -725,10 +725,10 @@ class NemotronHForCausalLM(
     SupportsEagle,
     SupportsEagle3,
     IsHybrid,
+    SupportsDirectReload,
     SupportsQuant,
     MixtureOfExperts,
     SupportsReplaySSM,
-    SupportsDirectReload,
 ):
     # Relevant only if self.has_moe is True
     is_non_gated_moe = True

@@ -61,6 +61,8 @@ def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type
     value_names = spec.value_names
 
     class ExpertSubstitutionModel(model_cls):  # type: ignore[valid-type, misc]
+        _wrapped_model_cls = model_cls  # supports_direct_reload reads it
+
         @wraps(model_cls.__init__)  # type: ignore[misc]
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)

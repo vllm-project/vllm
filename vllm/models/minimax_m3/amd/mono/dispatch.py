@@ -147,7 +147,13 @@ class MonoDecode:
 
     def _disable(self, why: str) -> None:
         logger.warning("MiniMax-M3 mono decode off: %s", why)
+        self._turn_off()
+
+    def _turn_off(self) -> None:
         self._enabled = False
+        # without mono decode no stale copy is read: direct reload is allowed
+        self._model.__dict__.pop("supports_direct_reload", None)
+        self._model.__dict__.pop("direct_reload_unsupported_reason", None)
 
     def _ensure_runner(self) -> bool:
         """Build (or rebuild after a KV cache re-bind) the runner outside capture."""
@@ -170,7 +176,7 @@ class MonoDecode:
         except Exception:
             # TP-uniform: every rank fails the same way, so all fall back
             logger.exception("MiniMax-M3 mono decode: runner build failed")
-            self._enabled = False
+            self._turn_off()
             return False
         if self._runner.shared_fp8:
             copy = sum(lw.shared_bytes() for lw in self._runner.sparse)

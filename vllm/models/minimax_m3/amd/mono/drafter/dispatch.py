@@ -63,10 +63,20 @@ class DrafterDecode:
         self._enabled = why is None
         if why is not None:
             logger.info("MiniMax-M3 DSpark drafter kernels off: %s", why)
+        else:
+            # the runner packs the draft weights once
+            model.supports_direct_reload = False
+            model.direct_reload_unsupported_reason = (
+                "the DSpark drafter kernels keep packed weight copies a reload "
+                "does not refresh (VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER)"
+            )
 
     def _disable(self, why: str) -> None:
         logger.warning("MiniMax-M3 DSpark drafter kernels off: %s", why)
         self._enabled = False
+        # no packed copy is read any more: direct reload is allowed
+        self._model.__dict__.pop("supports_direct_reload", None)
+        self._model.__dict__.pop("direct_reload_unsupported_reason", None)
 
     def _ensure_runner(self) -> bool:
         """Build (or rebuild after a KV cache re-bind) the runner outside capture."""

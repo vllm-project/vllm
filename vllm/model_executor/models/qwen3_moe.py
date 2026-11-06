@@ -548,8 +548,8 @@ class Qwen3MoeForCausalLM(
     SupportsEagle,
     SupportsEagle3,
     MixtureOfExperts,
-    SupportsQuant,
     SupportsDirectReload,
+    SupportsQuant,
 ):
     hf_to_vllm_mapper = Qwen3MoeModel.hf_to_vllm_mapper
     packed_modules_mapping = {

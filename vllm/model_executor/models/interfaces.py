@@ -1244,8 +1244,7 @@ class SupportsDirectReload(Protocol):
     """Whether a model or module reloads correctly with direct weight reload
     (``VLLM_RELOAD_MODE=direct``).
 
-    - Validated: a model class lists this protocol among its own bases (or
-      sets ``supports_direct_reload = True`` in its own body). Validated for
+    - Validated: a model class lists this protocol among its own bases, for
       the quantization formats and kernels its tests cover; other paths rely
       on refusals and the runtime checks of the reload. Not inherited: a
       subclass of a validated class is not validated.
@@ -1256,31 +1255,18 @@ class SupportsDirectReload(Protocol):
     - Neither: a direct update warns that correctness is not guaranteed.
     """
 
-    supports_direct_reload: ClassVar[bool] = True
-    direct_reload_unsupported_reason: ClassVar[str | None] = None
+    supports_direct_reload: bool = True
+    direct_reload_unsupported_reason: str | None = None
     """Required when ``supports_direct_reload`` is False."""
 
 
-@overload
-def supports_direct_reload(
-    model: type[object],
-) -> TypeIs[type[SupportsDirectReload]]: ...
-
-
-@overload
-def supports_direct_reload(model: object) -> TypeIs[SupportsDirectReload]: ...
-
-
-def supports_direct_reload(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsDirectReload]] | TypeIs[SupportsDirectReload]:
-    # True is not inherited: subclasses (drafts, wrappers) are validated
-    # separately
-    cls = model if isinstance(model, type) else type(model)
-    return (
-        SupportsDirectReload in cls.__bases__
-        or vars(cls).get("supports_direct_reload") is True
-    )
+def supports_direct_reload(model_cls: type) -> bool:
+    """Whether ``model_cls`` is validated with direct reload: it lists
+    `SupportsDirectReload` among its own bases (not inherited). A class the
+    loader generates around a model class (expert substitution) counts as the
+    class it wraps."""
+    model_cls = vars(model_cls).get("_wrapped_model_cls", model_cls)
+    return SupportsDirectReload in model_cls.__bases__
 
 
 @runtime_checkable

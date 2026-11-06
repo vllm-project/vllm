@@ -717,6 +717,7 @@ class Qwen4ExpForCausalLM(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsDirectReload,
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
@@ -966,8 +967,8 @@ class Qwen4ExpForConditionalGeneration(
     Qwen3_5ForConditionalGeneration,
     HasInnerState,
     SupportsHCSP,
-    Qwen4ExpMixtureOfExperts,
     SupportsDirectReload,
+    Qwen4ExpMixtureOfExperts,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
 
