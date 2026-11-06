@@ -334,7 +334,16 @@ def test_dequant_fp8_weight_bitwise(
     assert got.shape == ref.shape
     assert got.dtype == out_dtype
     assert got.stride() == ref.stride()
-    assert torch.equal(got.view(torch.uint16), ref.view(torch.uint16))
+    if out_dtype == torch.float16 and current_platform.is_rocm():
+        # On gfx942 the kernel's float32 multiply and float16 downcast compile
+        # to v_fma_mixlo_f16, which rounds the exact product once, while the
+        # reference rounds it to float32 first. The two can only differ where
+        # that float32 product lies halfway between two float16 values.
+        prod = weight.to(torch.float32) * scale_bcast.to(torch.float32)
+        diff = got != ref
+        assert torch.equal(got[diff].float() + ref[diff].float(), 2 * prod[diff])
+    else:
+        assert torch.equal(got.view(torch.uint16), ref.view(torch.uint16))
 
     if out_dtype == torch.bfloat16:
         bf16_scale = weight.to(torch.bfloat16) * scale_bcast.to(torch.bfloat16)

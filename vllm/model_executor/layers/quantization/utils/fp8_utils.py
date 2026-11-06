@@ -1633,7 +1633,10 @@ def dequant_fp8_weight(
     Runs a single fused Triton kernel in eager mode on FP8-capable CUDA/ROCm
     GPUs, covering scalar, per-row (``[K]`` or ``[K, 1]``), and per-column/PTPC
     (``[1, N]``) scale layouts. Under ``torch.compile`` and on other platforms,
-    keeps the PyTorch float32 expression with identical output bits.
+    keeps the PyTorch float32 expression with identical output bits. Exception:
+    on gfx942, the kernel rounds float16 output once from the exact product, so
+    it can differ by 1 ulp where the float32 product is halfway between two
+    float16 values.
 
     Args:
         weight: 2D FP8 weight tensor of shape ``[K, N]``.
