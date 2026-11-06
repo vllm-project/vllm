@@ -1,6 +1,6 @@
 # AWS EFA variant of a vllm-openai image. Adds the EFA userspace stack
-# (libfabric, aws-ofi-nccl, hwloc), the EFA Mooncake wheel (x86_64 only),
-# and DeepEP rebuilt from the amazon-contributing fork for NCCL GIN over EFA.
+# (libfabric, aws-ofi-nccl, hwloc) and DeepEP rebuilt from the
+# amazon-contributing fork for NCCL GIN over EFA.
 #
 # The base must be built with INSTALL_KV_CONNECTORS=true (NIXL and Mooncake):
 #   docker build -f docker/Dockerfile.efa \
@@ -10,7 +10,6 @@
 ARG BASE_IMAGE=vllm/vllm-openai:latest
 FROM ${BASE_IMAGE}
 
-ARG TARGETARCH
 ARG EFA_INSTALLER_VERSION=1.51.0
 ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
 
@@ -56,40 +55,6 @@ RUN set -eux; \
 # to run this image on a non-EFA host.
 ENV NCCL_NET_PLUGIN=ofi \
     NCCL_TUNER_PLUGIN=ofi
-
-# Swap in the EFA Mooncake wheel at the base image's Mooncake version. Both
-# wheels own the `mooncake` module; the EFA wheels are published for x86_64 only.
-RUN --mount=type=cache,target=/opt/uv/cache \
-    set -eu; \
-    pkg_version() { python3 -c "import importlib.metadata as m, sys; \
-print(m.version(sys.argv[1]))" "$1" 2>/dev/null; }; \
-    if MOONCAKE_VERSION=$(pkg_version mooncake-transfer-engine-cuda13); then \
-        MOONCAKE_PKG=mooncake-transfer-engine-cuda13; \
-        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa-cuda13; \
-    elif MOONCAKE_VERSION=$(pkg_version mooncake-transfer-engine); then \
-        MOONCAKE_PKG=mooncake-transfer-engine; \
-        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa; \
-    else \
-        echo "No Mooncake wheel in the base image; build it with \
---build-arg INSTALL_KV_CONNECTORS=true" >&2; \
-        exit 1; \
-    fi; \
-    if [ "${TARGETARCH}" != "amd64" ]; then \
-        echo "TARGETARCH=${TARGETARCH}: ${MOONCAKE_EFA_PKG} is x86_64-only, \
-keeping ${MOONCAKE_PKG} (Mooncake EFA protocol unavailable)"; \
-    else \
-        echo "Swapping ${MOONCAKE_PKG}==${MOONCAKE_VERSION} for \
-${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
-        uv pip uninstall --system "${MOONCAKE_PKG}"; \
-        uv pip install --system --no-deps \
-            "${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
-        test "$(pkg_version "${MOONCAKE_EFA_PKG}")" = "${MOONCAKE_VERSION}"; \
-        # `! cmd` is exempt from `set -e`, so check explicitly.
-        if pkg_version "${MOONCAKE_PKG}" >/dev/null; then \
-            echo "${MOONCAKE_PKG} is still installed" >&2; \
-            exit 1; \
-        fi; \
-    fi
 
 # Replace the base image's upstream DeepEP with the amazon-contributing fork,
 # whose deepep_v2 backend carries EP traffic over EFA through NCCL GIN.
