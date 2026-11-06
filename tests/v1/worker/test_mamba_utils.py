@@ -20,6 +20,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
@@ -34,12 +35,13 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.mamba_utils import (
+    _TEMPORAL_TILES,
     MambaSpecDecodeGPUContext,
     _get_mamba_spec_for_layer,
     _reinterpret_u64_as_i64,
-    batch_memcpy,
     get_mamba_group_ids,
     get_mamba_groups,
+    postprocess_mamba_fused_kernel,
 )
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
@@ -145,15 +147,40 @@ def collect_mamba_copy_meta(
     copy_bufs.offset = offset
 
 
+@triton.jit
+def _batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+
+    src_ptr = tl.load(src_ptrs + pid)
+    dst_ptr = tl.load(dst_ptrs + pid)
+    size = tl.load(sizes + pid)
+    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    for i in range(0, size, BLOCK_SIZE):
+        mask = (i + offsets) < size
+
+        curr_src_ptr = (src_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+        curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+
+        data = tl.load(curr_src_ptr, mask=mask)
+        if is_left_overlap:
+            # Preserve each lane's source before a lower-address lane stores
+            # over it. The condition is uniform within the program.
+            tl.debug_barrier()
+        tl.store(curr_dst_ptr, data, mask=mask)
+
+
 def do_mamba_copy_block(copy_bufs: MambaCopyBuffers) -> None:
     """CPU reference: run the queued state copies."""
     n = copy_bufs.offset
     if n == 0:
         return
-    batch_memcpy(
+    _batch_memcpy_kernel[(n,)](
         copy_bufs.src_ptrs.copy_to_gpu(n),
         copy_bufs.dst_ptrs.copy_to_gpu(n),
         copy_bufs.sizes.copy_to_gpu(n),
+        BLOCK_SIZE=1024,
     )
 
 
@@ -520,17 +547,12 @@ def _make_gpu_ctx(
     copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaSpecDecodeGPUContext:
     """Create MambaSpecDecodeGPUContext for the GPU path."""
-
-    def make_buffer(n, dtype):
-        return _MockCpuGpuBuffer(n, dtype, device)
-
     return MambaSpecDecodeGPUContext.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
         copy_funcs=copy_funcs,
         forward_context=forward_context,
         device=device,
-        make_buffer=make_buffer,
     )
 
 
@@ -1092,13 +1114,32 @@ def _run_gpu_postprocess(
         kv_cache_config, forward_context, copy_funcs, [block_table]
     )
     accepted_gpu = t(num_accepted_tokens)
-    gpu_ctx.run_fused_postprocess(
-        num_reqs=len(req_ids),
-        num_accepted_tokens_gpu=accepted_gpu,
-        mamba_state_idx_gpu=t(mamba_state_idx),
-        num_scheduled_tokens_gpu=t([num_scheduled_tokens[r] for r in req_ids]),
-        num_computed_tokens_gpu=t(num_computed_tokens),
-        num_draft_tokens_gpu=t([num_draft_tokens.get(r, 0) for r in req_ids]),
+    num_reqs = len(req_ids)
+    gpu_ctx.num_accepted_tokens_snapshot[:num_reqs].copy_(accepted_gpu)
+    postprocess_mamba_fused_kernel[(num_reqs, gpu_ctx.num_states, _TEMPORAL_TILES)](
+        gpu_ctx.num_accepted_tokens_snapshot,
+        t(mamba_state_idx),
+        t([num_scheduled_tokens[r] for r in req_ids]),
+        t(num_computed_tokens),
+        t([num_draft_tokens.get(r, 0) for r in req_ids]),
+        gpu_ctx.block_table_ptrs,
+        gpu_ctx.block_table_stride_req,
+        gpu_ctx.state_base_addrs,
+        gpu_ctx.state_block_strides,
+        gpu_ctx.state_elem_sizes,
+        gpu_ctx.state_inner_sizes,
+        gpu_ctx.state_conv_widths,
+        gpu_ctx.state_group_indices,
+        gpu_ctx.state_dim_row_count,
+        gpu_ctx.state_dim_row_stride,
+        accepted_gpu,
+        None,  # idx_mapping: these decision arrays are already in req order
+        num_reqs,
+        block_size=gpu_ctx.block_size,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+        SKIP_TEMPORAL_STATE_COPY=gpu_ctx.replayssm is not None,
+        TEMPORAL_TILES=_TEMPORAL_TILES,
     )
     torch.accelerator.synchronize()
     return accepted_gpu
@@ -1115,34 +1156,6 @@ class TestPostprocessMambaFusedKernel:
     @pytest.fixture
     def test_config(self):
         return _TestConfig()
-
-    def test_batch_memcpy_left_overlap_has_memmove_semantics(self, device):
-        batch = 128
-        row_bytes = 32 * 1024
-        shift = 16
-        copy_size = row_bytes - shift
-
-        pattern = (torch.arange(row_bytes, dtype=torch.int32, device=device) % 251).to(
-            torch.uint8
-        )
-        state = pattern.expand(batch, -1).clone()
-        snapshot = state.clone()
-
-        row_stride_bytes = state.stride(0) * state.element_size()
-        row_offsets = (
-            torch.arange(batch, dtype=torch.int64, device=device) * row_stride_bytes
-        )
-        dst_ptrs = (row_offsets + state.data_ptr()).to(torch.uint64)
-        src_ptrs = (row_offsets + state.data_ptr() + shift).to(torch.uint64)
-        sizes = torch.full((batch,), copy_size, dtype=torch.int32, device=device)
-
-        expected = snapshot.clone()
-        expected[:, :copy_size].copy_(snapshot[:, shift:])
-        for _ in range(10):
-            state.copy_(snapshot)
-            batch_memcpy(src_ptrs, dst_ptrs, sizes)
-            torch.accelerator.synchronize()
-            torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """Golden test: GPU kernel produces identical results to Python impl.
