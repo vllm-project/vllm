@@ -419,10 +419,5 @@ Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`
 endpoint is no longer registered.
 
-With EPLB enabled, an error in the async EPLB worker on any rank is also a
-fault: the engines report `unhealthy` and wait for an instruction. `retry`
-resumes expert rebalancing. `scale_down` redistributes the experts onto the
-surviving ranks and then disables further rebalancing. If no instruction
-arrives within
-`engine_recovery_timeout_sec` (set with `--fault-tolerance-config`, default
-120 seconds), the engine raises the original error and exits.
+With EPLB enabled, an async EPLB worker error is also a fault. `retry` resumes
+rebalancing unless an earlier `scale_down` disabled it.

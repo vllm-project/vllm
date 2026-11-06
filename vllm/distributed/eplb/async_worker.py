@@ -81,6 +81,7 @@ def transfer_run_periodically(
 ) -> None:
     rank = get_eplb_group().device_group.rank()
     while True:
+        # Snapshot before the wait too, in case the wait itself raises.
         reset_epoch = state.ft_reset_epoch
         try:
             state.rearrange_event.wait(stream=stream)
@@ -92,8 +93,12 @@ def transfer_run_periodically(
             # Report the failure so step() raises on every rank and FT takes
             # over; keep the thread alive so EPLB can resume after a retry.
             # A failure from a cycle that an FT reset abandoned is stale.
+            # Re-check after the write: a reset can land in between, and this
+            # thread is the only writer.
             if state.ft_reset_epoch == reset_epoch:
                 state.async_worker_error = exc
+                if state.ft_reset_epoch != reset_epoch:
+                    state.async_worker_error = None
             logger.exception(
                 "async loop error (Rank %d); continuing under fault tolerance",
                 rank,

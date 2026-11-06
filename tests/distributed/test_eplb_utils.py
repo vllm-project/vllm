@@ -201,7 +201,11 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
 
 @pytest.fixture
 def eplb_dist_init(tmp_path):
-    """Like ``dist_init``, but with the platform's device backend (XCCL on XPU)."""
+    """Like ``dist_init``, but with the platform's device backend (XCCL on XPU).
+
+    ``dist_init`` always requests NCCL, which falls back to gloo on XPU; it is
+    shared by many Intel CI tests, so it is left unchanged.
+    """
     with ensure_current_vllm_config():
         init_distributed_environment(
             world_size=1,
