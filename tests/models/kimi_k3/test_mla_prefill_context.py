@@ -5,7 +5,8 @@
 The layer owns its own context loop so it can fuse the per-chunk K/V pack and
 skip re-quantizing an already-quantized query. That is only safe if it feeds the
 prefill backend exactly what ``MLACommonBaseImpl._compute_prefill_context``
-would, chunk for chunk.
+would, chunk for chunk. Its NVFP4 new-token cache insert must likewise match the
+fused bf16 one.
 """
 
 from types import SimpleNamespace
@@ -21,9 +22,13 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonPrefillMetadata,
     build_mla_chunked_context_metadata,
 )
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_mla_kv_cache_full_dim
+from vllm.utils.torch_utils import (
+    nvfp4_mla_kv_cache_full_dim,
+    nvfp4_mla_kv_cache_split_views,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Kimi-K3 fused MLA requires CUDA"
@@ -349,6 +354,149 @@ def test_fused_context_rejects_an_unquantized_query() -> None:
         MultiHeadLatentAttention._compute_prefill_context(
             layer, q, SimpleNamespace(prefill=prefill)
         )
+
+
+# --------------------------------------------------------------------------
+# New-token cache insert: the fused epilogues apply RoPE as they write but
+# cannot write the NVFP4 layout, so the NVFP4 path rotates q/k itself.
+# --------------------------------------------------------------------------
+_NEW_TOKENS = 7
+
+
+class _NewTokenPrefillBackend:
+    """Records what the new-token prefill attends with."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    def supports_out(self) -> bool:
+        return False
+
+    def run_prefill_new_tokens(self, *, q, k, v, return_softmax_lse, out=None):
+        assert not return_softmax_lse and out is None
+        self.calls.append((q.clone(), k.clone(), v.clone()))
+        return v
+
+
+class _CacheInsertLayer(_FusedLayer):
+    """Only the attributes K3's new-token cache inserts read."""
+
+    _insert_nvfp4_latent = MultiHeadLatentAttention._insert_nvfp4_latent
+
+    def __init__(self, kv_b_proj, kv_cache, kv_cache_dtype, k_scale, rotary_emb):
+        super().__init__(kv_b_proj, kv_cache, kv_cache_dtype, k_scale)
+        self.rotary_emb = rotary_emb
+        self.qk_rope_head_dim = _QK_ROPE
+
+
+@pytest.mark.parametrize("path", ["decode", "prefill"])
+@pytest.mark.parametrize("use_rope", [False, True], ids=["nope", "rope"])
+@pytest.mark.usefixtures("default_vllm_config")
+@torch.inference_mode()
+def test_nvfp4_insert_matches_fused_bf16_insert(use_rope: bool, path: str) -> None:
+    """On RoPE layers (the DSpark draft's) the NVFP4 cache insert must rotate
+    q_pe and k_pe exactly as the fused bf16 epilogue does; on K3's NoPE layers
+    neither rotates."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("The NVFP4 MLA cache ops require SM100")
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    rotary_emb = get_rope(
+        _QK_ROPE,
+        max_position=4096,
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        is_neox_style=False,
+        dtype=torch.float32,
+    )
+    cos_sin_cache = rotary_emb.cos_sin_cache.to(device) if use_rope else None
+    positions = (
+        torch.randint(0, 4096, (_NEW_TOKENS,), device=device) if use_rope else None
+    )
+    num_blocks = 2
+    slot_mapping = torch.randperm(num_blocks * _BLOCK_SIZE, device=device)[:_NEW_TOKENS]
+    k_scale = torch.full((1,), 0.25, dtype=torch.float32, device=device)
+    kv_b_proj = _KVBProj(device, weight_dtype=torch.bfloat16)
+    q = torch.randn(
+        (_NEW_TOKENS, _NUM_HEADS, _QK_NOPE + _QK_ROPE),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    ql_nope = torch.randn(
+        (_NEW_TOKENS, _NUM_HEADS, _KV_LORA_RANK), device=device, dtype=torch.bfloat16
+    )
+    kv_lora = torch.randn((_NEW_TOKENS, _ENTRY), device=device, dtype=torch.bfloat16)
+
+    def insert(kv_cache_dtype: str, kv_cache: torch.Tensor) -> list[torch.Tensor]:
+        layer = _CacheInsertLayer(
+            kv_b_proj, kv_cache, kv_cache_dtype, k_scale, rotary_emb
+        )
+        # Both inserts rotate in place, so each gets its own strided views.
+        q_run, kv_run = q.clone(), kv_lora.clone()
+        kv_c_normed = kv_run[:, :_KV_LORA_RANK].contiguous()
+        k_pe = kv_run[:, _KV_LORA_RANK:].unsqueeze(1)
+        if path == "decode":
+            mqa_q = MultiHeadLatentAttention._decode_concat_cache(
+                layer,
+                ql_nope,
+                q_run[..., _QK_NOPE:],
+                kv_c_normed,
+                k_pe,
+                positions,
+                cos_sin_cache,
+                slot_mapping,
+            )
+            return [mqa_q]
+        backend = _NewTokenPrefillBackend()
+        prefill = SimpleNamespace(
+            chunked_context=None,
+            q_data_type=torch.bfloat16,
+            prefill_backend=backend,
+        )
+        MultiHeadLatentAttention._forward_prefill_fused(
+            layer,
+            q_run,
+            kv_c_normed,
+            k_pe,
+            positions,
+            cos_sin_cache,
+            slot_mapping,
+            SimpleNamespace(prefill=prefill),
+            torch.empty(
+                (_NEW_TOKENS, _NUM_HEADS * _V_HEAD_DIM),
+                device=device,
+                dtype=torch.bfloat16,
+            ),
+        )
+        return list(backend.calls[0])
+
+    bf16_cache = torch.zeros(
+        (num_blocks, _BLOCK_SIZE, _ENTRY), device=device, dtype=torch.bfloat16
+    )
+    nvfp4_cache = torch.zeros(
+        (num_blocks, _BLOCK_SIZE, nvfp4_mla_kv_cache_full_dim(_ENTRY)),
+        device=device,
+        dtype=torch.uint8,
+    )
+    expected = insert("auto", bf16_cache)
+    actual = insert("nvfp4", nvfp4_cache)
+
+    for name, actual_t, expected_t in zip(
+        ("q" if path == "decode" else "q, k, v").split(", "),
+        actual,
+        expected,
+        strict=True,
+    ):
+        torch.testing.assert_close(
+            actual_t, expected_t, atol=0, rtol=0, msg=lambda m, n=name: f"{n}: {m}"
+        )
+    # The cache keeps the rotated k_pe as E4M3 x / k_scale; k_scale is a power of
+    # two, so it must equal the bf16 cache's k_pe quantized the same way.
+    _, rope, _ = nvfp4_mla_kv_cache_split_views(nvfp4_cache)
+    k_pe_bf16 = bf16_cache.view(-1, _ENTRY)[slot_mapping, _KV_LORA_RANK:]
+    assert torch.equal(
+        rope.reshape(-1, _QK_ROPE)[slot_mapping].view(torch.uint8),
+        (k_pe_bf16.float() / k_scale).to(torch.float8_e4m3fn).view(torch.uint8),
+    )
 
 
 # --------------------------------------------------------------------------

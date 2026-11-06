@@ -234,9 +234,12 @@ def cake_nvfp4_mla_decode(
     # Size the split partials for the plan the call below makes.
     if cum_seq_lens_q is not None:
         assert max_q_len is not None
-        # No request is longer than the packed query. The tighter bound also
-        # keeps tiny batches off Cake's wide route, whose 32-row tiles reject
-        # fewer rows.
+        # Workaround for a Cake bug: the wide program, picked when
+        # max_q_len x heads > 48, fails on calls with fewer than 32 query rows
+        # (tokens x heads) in total. The promised bound (1 + k for spec decode)
+        # can pick it for tiny batches, so tighten it per call with a second
+        # upper bound: no request is longer than the packed query. Under CUDA
+        # graphs this runs at capture, where the token count is fixed per graph.
         max_q_len = min(max_q_len, q.shape[0])
         batch, plan_q_len = cum_seq_lens_q.shape[0] - 1, max_q_len
     else:

@@ -11,10 +11,10 @@ This is a self-contained MLA layer that owns the full attention path:
            prefill: fused key-concat + cache-insert kernel -> run_prefill_new_tokens
                     (+ chunked-context merge, whose per-chunk gather -> kv_b_proj
                     -> fused K/V pack loop this layer owns); dispatched by cache
-                    dtype (bf16 / plain fp8 / fp8_ds_mla / nvfp4; nvfp4 writes
-                    through concat_and_cache_mla)
+                    dtype (bf16 / plain fp8 / fp8_ds_mla / nvfp4; nvfp4 rotates
+                    q/k first, then writes through concat_and_cache_mla)
            decode : W_UK absorb (BMM1) -> fused q-concat + cache-insert kernel
-                    (nvfp4: concat_and_cache_mla + torch.cat)
+                    (nvfp4: RoPE + concat_and_cache_mla + torch.cat)
                     -> impl.forward_mqa -> W_UV up-proj (MQA)
       -> optional output gate
       -> o_proj
@@ -325,12 +325,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype = cache_config.cache_dtype
         else:
             self.kv_cache_dtype = "auto"
-        if use_rope and self.kv_cache_dtype == "nvfp4":
-            raise ValueError(
-                "The Kimi-K3 nvfp4 KV cache supports only NoPE MLA layers, so "
-                "it cannot serve RoPE layers such as the DSpark draft's; use "
-                "--kv-cache-dtype fp8 or auto with DSpark."
-            )
 
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
@@ -750,7 +744,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         """Decode query-concat + latent cache insert, dispatched by cache dtype.
 
         bf16 / plain fp8 / fp8_ds_mla use the fused kernel (fp8 cache -> fp8
-        query, as in prefill); nvfp4 writes through concat_and_cache_mla and
+        query, as in prefill); nvfp4 goes through _insert_nvfp4_latent and
         keeps the bf16 query, which the NVFP4 decode quantizes per row."""
         if self.kv_cache_dtype == "fp8_ds_mla":
             cache = self.kv_cache
@@ -768,14 +762,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 cos_sin_cache=cos_sin_cache,
             )
         if self.kv_cache_dtype == "nvfp4":
-            # NVFP4 layers are NoPE (checked in __init__): no q_pe/k_pe rotation.
-            ops.concat_and_cache_mla(
-                kv_c_normed,
-                k_pe.reshape(k_pe.shape[0], -1),
-                self.kv_cache,
-                slot_mapping,
-                "nvfp4",
-                self._k_scale,
+            self._insert_nvfp4_latent(
+                q_pe, kv_c_normed, k_pe, positions, cos_sin_cache, slot_mapping
             )
             return torch.cat([ql_nope, q_pe], dim=-1)
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -809,6 +797,39 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             positions=positions,
             cos_sin_cache=cos_sin_cache,
+        )
+
+    def _insert_nvfp4_latent(
+        self,
+        q_pe: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Insert the latent into the NVFP4 cache, first rotating ``q_pe`` and
+        ``k_pe`` in place on RoPE layers (the DSpark draft's).
+
+        The fused epilogues rotate as they write, but cannot write this layout,
+        so the same GPT-J rotation runs here on the fp32 cos/sin table."""
+        if positions is not None:
+            assert cos_sin_cache is not None and self.rotary_emb is not None
+            ops.rotary_embedding(
+                positions,
+                q_pe,
+                k_pe,
+                self.qk_rope_head_dim,
+                cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+            )
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.reshape(k_pe.shape[0], -1),
+            self.kv_cache,
+            slot_mapping,
+            "nvfp4",
+            self._k_scale,
         )
 
     def _fused_mla_kv_concat(
@@ -1036,7 +1057,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
           - bf16 cache        -> bf16 prefill query
           - plain fp8 cache   -> fp8 prefill query (unscaled q/k/v; cache _k_scale)
           - fp8_ds_mla cache  -> bf16 prefill query (656B per-tile self-scaled)
-          - nvfp4 cache       -> concat_and_cache_mla, then an fp8 (unscaled
+          - nvfp4 cache       -> RoPE + concat_and_cache_mla, then an fp8 (unscaled
                                  q/k/v) or bf16 prefill query
         """
         prefill = attn_metadata.prefill
@@ -1068,13 +1089,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 cos_sin_cache,
             )
         elif self.kv_cache_dtype == "nvfp4":
-            ops.concat_and_cache_mla(
+            self._insert_nvfp4_latent(
+                q[..., self.qk_nope_head_dim :],
                 kv_c_normed,
-                k_pe.reshape(k_pe.shape[0], -1),
-                self.kv_cache,
+                k_pe,
+                positions,
+                cos_sin_cache,
                 slot_mapping,
-                "nvfp4",
-                self._k_scale,
             )
             if fp8_prefill:
                 # Unscaled fp8 q/k/v as in the plain fp8 arm; the context gather
