@@ -77,9 +77,10 @@ def test_compose_draft_hf_overrides_independent_draft_keeps_own_config():
     assert updated_config.max_position_embeddings == 2048
 
 
-def _spec(model, target_model, model_weights=None):
+def _spec(model, target_model, model_weights=None, method="mtp"):
     return SimpleNamespace(
         model=model,
+        method=method,
         target_model_config=SimpleNamespace(
             model=target_model, model_weights=model_weights
         ),
@@ -105,4 +106,22 @@ def test_draft_shares_target_config_predicate():
     )
     assert not SpeculativeConfig._draft_shares_target_config(
         _spec(None, "/models/qwen3")
+    )
+    # Regression: an independent draft_method spec that happens to be
+    # spelled with the same path as the target (e.g. the
+    # test_draft_model_limits_max_model_len harness) must NOT be treated
+    # as same-checkpoint: the target's dict overrides must not lift the
+    # draft's own trained context limit, or the draft-limits-max-model-len
+    # clamp stops bounding it.
+    assert not SpeculativeConfig._draft_shares_target_config(
+        _spec("vllm-project/llama-68m", "vllm-project/llama-68m",
+              method="draft_model")
+    )
+    assert not SpeculativeConfig._draft_shares_target_config(
+        _spec("/models/qwen3", "/models/qwen3", method="eagle3")
+    )
+    # Same path but no method yet resolved (detected from the draft
+    # checkpoint later): stay conservative and do not forward.
+    assert not SpeculativeConfig._draft_shares_target_config(
+        _spec("/models/qwen3", "/models/qwen3", method=None)
     )

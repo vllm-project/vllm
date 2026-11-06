@@ -1383,6 +1383,15 @@ class SpeculativeConfig:
         target = spec.target_model_config
         if spec.model is None or target is None:
             return False
+        # MTP is the only speculator whose default model is derived from the
+        # target itself (MTPSpeculatorConfig.default_model). Any other method
+        # (draft_model, eagle, eagle3, ...) describes an independent draft
+        # trained against its own checkpoint, even when the model path is
+        # spelled the same as the target's: it must keep its trained context
+        # limit and rope configuration, and the draft-limits-max-model-len
+        # clamp must still bound it.
+        if spec.method != "mtp":
+            return False
 
         def _normalize(path: str) -> str:
             path = path.rstrip("/")
