@@ -287,6 +287,13 @@ def torch_sdpa_wrapper(
     if cu_seqlens is None:
         return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa).contiguous()
 
+    if current_platform.is_cuda_alike() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "TORCH_SDPA reads packed sequence lengths (cu_seqlens) on the host "
+            "and cannot be captured in a CUDA graph. Set another "
+            "--mm-encoder-attn-backend or disable cudagraph_mm_encoder."
+        )
+
     outputs = []
 
     # `torch.split` needs Python int sizes.
