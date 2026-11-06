@@ -353,7 +353,8 @@ def _check_indexer_forwards(config, device, rank, comm):
             ]
         )
         num_tokens = batch.compute_num_tokens()
-        bits = torch.arange(7, device=device)
+        num_page_bits = max(7, (num_pages - 1).bit_length())
+        bits = torch.arange(num_page_bits, device=device)
         page_codes = (
             (torch.arange(num_pages, device=device)[:, None] >> bits) & 1
         ) * 64
@@ -363,7 +364,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             # Page bits dominate the small random row contribution: each head
             # has distinct block scores, with a different ranking per head.
             cache = torch.randint(-4, 5, (num_pages, 128, 128), device=device)
-            cache[:, :, :7] = page_codes[:, None]
+            cache[:, :, :num_page_bits] = page_codes[:, None]
             cache = cache.to(torch.float8_e4m3fn)
             reference.index_cache.bind_kv_cache(cache.unsqueeze(1))
             shard = cache[:, rank::world].contiguous()
@@ -374,7 +375,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             query = (
                 torch.randint(-2, 3, (num_tokens, 4, 128), device=device).float() / 64
             )
-            query[:, :, :7] = (1 << bits) * (
+            query[:, :, :num_page_bits] = (1 << bits) * (
                 1 - 2 * (((head_codes ^ (layer * 7)) >> bits) & 1)
             )
             query[PREFILL_CHUNK_SIZE:] *= -1
