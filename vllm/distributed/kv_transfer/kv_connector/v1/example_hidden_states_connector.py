@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -540,9 +541,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_params.get("include_output_tokens", False):
             # Exclude the final token — it was the model's output, never an
             # input to a forward pass, so its hidden state is not in the cache.
-            token_ids = torch.tensor(list(request.all_token_ids)[:-1])
+            token_ids = token_ids_to_tensor(request._all_token_ids)[:-1]
         elif request.prompt_token_ids is not None:
-            token_ids = torch.tensor(request.prompt_token_ids)
+            token_ids = token_ids_to_tensor(request.prompt_token_ids)
         else:
             logger.warning(
                 "Request %s has no prompt_token_ids (prompt_embeds only). "
