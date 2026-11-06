@@ -604,18 +604,6 @@ def _mock_config_for_cudagraph_sizes(
     return config
 
 
-def test_dspark_prefill_lookahead_tokens_use_full_draft_runway():
-    from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
-
-    speculator_config = DSparkSpeculatorConfig(
-        SimpleNamespace(num_speculative_tokens=5)
-    )
-    config = MagicMock(spec=VllmConfig)
-    config.speculative_config = SimpleNamespace(speculator_config=speculator_config)
-
-    assert VllmConfig.num_prefill_lookahead_tokens.fget(config) == 5
-
-
 _CAPTURE_SIZE_FIELDS = (
     "prefill_cudagraph_capture_token_sizes",
     "max_prefill_cudagraph_capture_tokens",

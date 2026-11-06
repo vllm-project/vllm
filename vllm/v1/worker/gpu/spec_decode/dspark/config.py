@@ -126,11 +126,6 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             return self.num_speculative_tokens
         return super().num_lookahead_tokens
 
-    @property
-    def num_prefill_lookahead_tokens(self) -> int:
-        # DSpark needs the full draft runway at chunked-prefill boundaries.
-        return self.num_speculative_tokens
-
     def hash_factors(self) -> list[Any]:
         # Adaptive verification changes the DSpark draft graph.
         return [self.spec_config.enable_adaptive_verification]
