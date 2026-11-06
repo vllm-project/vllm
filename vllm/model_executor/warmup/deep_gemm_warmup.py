@@ -161,17 +161,21 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 
 # Model construction already imports the model modules. Avoid importing them here.
-def _mega_moe_uses_mega_gate(module: torch.nn.Module) -> "TypeGuard[DeepseekV4MoE]":
-    # DeepSeek-V4 routes with bf16_mega_gate, Kimi K3 and MiniMax M3 with GateLinear.
+def _is_deepseek_v4_moe(module: torch.nn.Module) -> "TypeGuard[DeepseekV4MoE]":
     dsv4 = sys.modules.get("vllm.models.deepseek_v4.nvidia.model")
     return dsv4 is not None and isinstance(module, dsv4.DeepseekV4MoE)
+
+
+def _mega_moe_uses_mega_gate(module: torch.nn.Module) -> bool:
+    return _is_deepseek_v4_moe(module) and module.use_mega_gate
 
 
 def _mega_moe_may_use_deep_gemm(
     module: torch.nn.Module,
 ) -> "TypeGuard[DeepseekV4MoE | KimiMoE | MiniMaxM3MoE]":
-    if _mega_moe_uses_mega_gate(module):
-        return module.use_native_mega_moe
+    if _is_deepseek_v4_moe(module):
+        # This warmup queries DeepGEMM's expert tile sizes and workspace.
+        return module.use_native_mega_moe and not getattr(module, "use_gc_moe", False)
     kimi = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
     minimax = sys.modules.get("vllm.models.minimax_m3.nvidia.model")
     return (
@@ -415,20 +419,20 @@ def _deepgemm_fp8_fp4_mega_moe_warmup(
     # Run the whole layer so the gate sees the same optional inputs as serving.
     for num_tokens in m_values:
         inputs: tuple = (hidden_states[:num_tokens],)
-        if _mega_moe_uses_mega_gate(module):
-            from vllm.models.deepseek_v4.nvidia.model import (
-                prepare_mega_gate_routing_metadata,
-            )
-
+        if _is_deepseek_v4_moe(module):
             ids = input_ids[:num_tokens]
-            inputs += (
-                ids,
-                prepare_mega_gate_routing_metadata(
+            inputs += (ids,)
+            if module.use_mega_gate:
+                from vllm.models.deepseek_v4.nvidia.model import (
+                    prepare_mega_gate_routing_metadata,
+                )
+
+                metadata = prepare_mega_gate_routing_metadata(
                     ids,
                     has_hash_routing=module.gate.tid2eid is not None,
                     image_sentinel_base_id=module.image_sentinel_lo or None,
-                ),
-            )
+                )
+                inputs += (metadata,)
         for offset in offsets:
             forward_context = ForwardContext(
                 no_compile_layers={},

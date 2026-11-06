@@ -156,14 +156,21 @@ def test_mega_moe_m_values_cover_nvfp4_launch_variants(
     assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 5) == expected
 
 
-def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "uses_mega_gate,expected", [(True, [16, 32, 40]), (False, [40])]
+)
+def test_mega_moe_m_values_reach_mega_gate(
+    monkeypatch, uses_mega_gate, expected
+) -> None:
     """Each bf16_mega_gate config is warmed with an M above the GateLinear
     threshold (1 for 128 experts), so the forward actually reaches the kernel."""
     dg = SimpleNamespace(
         get_bf16_mega_gate_config=lambda m, *_: {"num_sms": -(-m // 16)},
     )
     monkeypatch.setattr(deep_gemm_warmup, "_import_deep_gemm", lambda: dg)
-    monkeypatch.setattr(deep_gemm_warmup, "_mega_moe_uses_mega_gate", lambda _: True)
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_mega_moe_uses_mega_gate", lambda _: uses_mega_gate
+    )
     module = SimpleNamespace(
         gate=SimpleNamespace(input_size=4096, output_size=128),
         experts=SimpleNamespace(
@@ -173,4 +180,4 @@ def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
         ),
         use_sequence_parallel=False,
     )
-    assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == [16, 32, 40]
+    assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == expected
