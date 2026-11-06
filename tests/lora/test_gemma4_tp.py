@@ -62,6 +62,7 @@ def test_gemma4_lora(gemma4_vision_lora_files):
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
+        gpu_memory_utilization=0.8,
     )
 
     generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)

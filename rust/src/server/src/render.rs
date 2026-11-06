@@ -15,6 +15,7 @@ use vllm_chat::{
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::model_names::ServedModelNames;
 use crate::{
     HttpListenerMode, ReasoningEffort, TlsConfig,
     listener::{Listener, MaybeTlsListener},
@@ -30,8 +31,14 @@ pub struct RenderConfig {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
+    /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    pub max_n_sequences: i64,
     pub host: String,
     pub port: u16,
     pub tool_call_parser: ParserSelection,
@@ -66,10 +73,12 @@ impl RenderConfig {
 
 pub(crate) struct RenderState {
     pub(crate) model: String,
-    pub(crate) served_model_names: Vec<String>,
+    pub(crate) served_model_names: ServedModelNames,
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    pub(crate) max_n_sequences: i64,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -81,6 +90,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             revision: config.revision.clone(),
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
@@ -94,8 +104,11 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     )
     .await
     .context("failed to load renderer/tokenizer backends")?;
-    let served_model_names =
-        crate::effective_served_model_names(&config.model, &config.served_model_name);
+    let served_model_names = ServedModelNames::new(crate::effective_served_model_names(
+        &config.model,
+        &config.served_model_name,
+    ))
+    .with_accept_any(config.skip_model_name_validation);
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
@@ -117,6 +130,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
+        max_n_sequences: config.max_n_sequences,
         text,
         chat,
     }))
@@ -180,8 +194,11 @@ mod tests {
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
+                skip_tokenizer_init: false,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
+                skip_model_name_validation: false,
+                max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 tool_call_parser: ParserSelection::Auto,

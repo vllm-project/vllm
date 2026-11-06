@@ -85,8 +85,8 @@ tests/quantization/test_gptq_dynamic.py  # CI jobs disabled pending locked torch
 tests/quantization/test_humming_compile.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_ignore.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_mxfp4_block_fp8.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_input_hadamard.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_int8_moe_oracle.py  # CI jobs disabled pending locked torchao transitive dependencies
-tests/quantization/test_keep_param_objects.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_lm_head.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_mixed_precision.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_modelopt.py  # CI jobs disabled pending locked torchao transitive dependencies
@@ -135,6 +135,7 @@ tests/parser/engine/test_plamo3.py  # CI jobs disabled pending locked cmake inst
 tests/parser/engine/test_qwen3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_qwen3_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_replay.py  # CI jobs disabled pending locked cmake installation
+tests/parser/engine/test_ripple.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_seed_oss.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_step3p5.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_token_id_scanner.py  # CI jobs disabled pending locked cmake installation

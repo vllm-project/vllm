@@ -16,8 +16,6 @@ meta:
     rtx_pro_6000: verified
     dgx_station_gb300: verified
     rtx_5090: verified
-    ascend_950dt: verified
-    ascend_910c: verified
     arc_pro_b60: verified
     arc_pro_b70: verified
     mi300x: verified
@@ -102,39 +100,11 @@ variants:
     precision: bf16
     vram_minimum_gb: 65
     description: "Full precision BF16 — fits on 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70, or an Ascend A3 node (TP2+DP8)"
-    tp:
-      ascend_910c: 2
     hardware_overrides:
       rtx_pro_6000:
         extra_args:
           - "--max-num-seqs"
           - "8"
-      ascend_910c:
-        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
-        extra_args:
-          - "--data-parallel-size"
-          - "8"
-          - "--served-model-name"
-          - "qwen3.6"
-          - "--max-num-seqs"
-          - "32"
-          - "--max-model-len"
-          - "133000"
-          - "--max-num-batched-tokens"
-          - "16384"
-          - "--gpu-memory-utilization"
-          - "0.90"
-          - "--no-enable-prefix-caching"
-          - "--compilation-config"
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - "--async-scheduling"
-        extra_env:
-          VLLM_USE_MODELSCOPE: "True"
-          PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-          HCCL_BUFFSIZE: "512"
-          OMP_PROC_BIND: "false"
-          OMP_NUM_THREADS: "1"
-          TASK_QUEUE_ENABLE: "1"
   fp8:
     model_id: "Qwen/Qwen3.6-27B-FP8"
     precision: fp8
@@ -247,90 +217,6 @@ variants:
     label: "FP8 (RedHat)"
     vram_minimum_gb: 33
     description: "RedHatAI FP8 dynamic quantization"
-  ascend_w8a8_mxfp8:
-    model_id: "Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
-    precision: mxfp8
-    label: "W8A8 (Ascend)"
-    vram_minimum_gb: 34
-    supported_hardware: [ascend_950dt]
-    tp: 1
-    min_vllm_version: "0.23.0"
-    default_modes:
-      spec_decoding: qwen3_5_mtp
-    extra_args:
-      - "--distributed-executor-backend"
-      - "mp"
-      - "--data-parallel-size"
-      - "8"
-      - "--quantization"
-      - "ascend"
-      - "--served-model-name"
-      - "qwen3.6"
-      - "--max-num-seqs"
-      - "32"
-      - "--max-model-len"
-      - "262144"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--gpu-memory-utilization"
-      - "0.90"
-      - "--no-enable-prefix-caching"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    extra_env:
-      VLLM_USE_MODELSCOPE: "True"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-    hardware_overrides:
-      ascend_950dt:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-  ascend_w8a8:
-    model_id: "Eco-Tech/Qwen3.6-27B-w8a8"
-    precision: int8
-    label: "W8A8 (Ascend A3)"
-    vram_minimum_gb: 33
-    supported_hardware: [ascend_910c]
-    tp: 2
-    min_vllm_version: "0.23.0"
-    default_modes:
-      spec_decoding: qwen3_5_mtp
-    extra_args:
-      - "--data-parallel-size"
-      - "8"
-      - "--quantization"
-      - "ascend"
-      - "--served-model-name"
-      - "qwen3.6"
-      - "--max-num-seqs"
-      - "32"
-      - "--max-model-len"
-      - "133000"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--gpu-memory-utilization"
-      - "0.90"
-      - "--no-enable-prefix-caching"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--async-scheduling"
-    extra_env:
-      VLLM_USE_MODELSCOPE: "True"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-    hardware_overrides:
-      ascend_910c:
-        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
-    description: "ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C), using TP2+DP8. Requires --quantization ascend."
 
 compatible_strategies:
   - single_node_tp
