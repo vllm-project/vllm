@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.parser.engine.events import EventType
+from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ArgValueExtender,
@@ -33,6 +33,8 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.engine.token_id_scanner import DROP_TERMINAL
 from vllm.tool_parsers.utils import find_tool_properties
 
 if TYPE_CHECKING:
@@ -58,61 +60,94 @@ DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
 )
 
 
-def _param_patterns(
-    param_start: str, param_close: str
-) -> tuple[re.Pattern, re.Pattern]:
-    """Complete and trailing-partial parameter regexes for one DSML dialect.
+_WHITESPACE_RE = re.compile(r"\s*")
+
+
+@functools.cache
+def _param_head_patterns(param_start: str) -> tuple[re.Pattern, re.Pattern, re.Pattern]:
+    """Parameter head, next-head lookahead and unfinished-head regexes.
 
     The ``string`` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
-    The trailing-partial regex captures the open value up to the end of the
-    text; ``_match_open_param`` holds back an unfinished next parameter tag
-    so a streamed string value never includes it.
     """
-    start, close = re.escape(param_start), re.escape(param_close)
-    head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
+    start = re.escape(param_start)
     return (
-        re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
-        re.compile(rf"{head}(.*)\Z", re.DOTALL),
+        re.compile(rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'),
+        re.compile(rf"{start}\s+name="),
+        re.compile(rf"{start}(?:\s[^>]*)?\Z"),
     )
 
 
-_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
+# (name, string attribute, value); an open param adds ``held_back``.
+_Param = tuple[str, str | None, str]
+_OpenParam = tuple[str, str | None, str, bool]
 
 
-def _match_open_param(
-    raw_args: str, pos: int, partial_param_re: re.Pattern, param_start: str
-) -> tuple[str, str | None, str, bool] | None:
-    """Return (name, is_str, value, held_back) for the trailing open param.
+def _split_params(
+    raw_args: str, partial: bool, param_start: str, param_close: str
+) -> tuple[list[_Param], _OpenParam | None]:
+    """Split raw DSML arguments into closed params and the trailing open one.
 
-    An unfinished next parameter tag (``param_start`` with no ``>`` after it)
-    is cut from the value; ``held_back`` reports whether that happened.
+    DSML has no escaping, so a value can contain ``param_close`` itself. A
+    closer ends the value only when what follows is blank or the next
+    parameter head (or, while streaming, a head still being written);
+    otherwise it is part of the value. A value whose closer is missing ends
+    at the next head. The open param is ``(name, is_str, value, held_back)``:
+    an unfinished next parameter tag is cut from its value and ``held_back``
+    reports whether that happened.
     """
-    pm = partial_param_re.search(raw_args, pos)
-    if pm is None:
-        return None
-    value = pm.group(3)
-    cut = value.find(param_start, value.rfind(">") + 1)
-    if cut >= 0:
-        return pm.group(1), pm.group(2), value[:cut], True
-    return pm.group(1), pm.group(2), value, False
+    head_re, next_head_re, open_head_re = _param_head_patterns(param_start)
+    closed: list[_Param] = []
+    pos = 0
+    while m := head_re.search(raw_args, pos):
+        name, is_str, value_start = m.group(1), m.group(2), m.end()
+        next_head = next_head_re.search(raw_args, value_start)
+        search = value_start
+        while True:
+            close = raw_args.find(param_close, search)
+            if next_head is not None and (close < 0 or next_head.start() < close):
+                closed.append((name, is_str, raw_args[value_start : next_head.start()]))
+                pos = next_head.start()
+                break
+            if close < 0:
+                value = raw_args[value_start:]
+                cut = value.find(param_start, value.rfind(">") + 1)
+                if cut >= 0:
+                    return closed, (name, is_str, value[:cut], True)
+                return closed, (name, is_str, value, False)
+            after = close + len(param_close)
+            follow = _WHITESPACE_RE.match(raw_args, after).end()
+            if (
+                follow == len(raw_args)
+                or next_head_re.match(raw_args, follow)
+                or (
+                    partial
+                    and (
+                        open_head_re.match(raw_args, follow)
+                        or param_start.startswith(raw_args[follow:])
+                    )
+                )
+            ):
+                closed.append((name, is_str, raw_args[value_start:close]))
+                pos = after
+                break
+            search = after
+    return closed, None
 
 
 def _dsml_arg_converter(
     raw_args: str,
     partial: bool,
     *,
-    param_re: re.Pattern = _PARAM_RE,
-    partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
     param_start: str = DSML_PARAM_START,
+    param_close: str = DSML_PARAM_CLOSE,
 ) -> str:
     params: dict[str, object] = {}
+    closed, open_param = _split_params(raw_args, partial, param_start, param_close)
 
-    last_end = 0
     # A missing ``string`` attribute is treated like ``string="false"``: try
     # JSON, fall back to the literal text.
-    for m in param_re.finditer(raw_args):
-        name, is_str, value = m.group(1), m.group(2), m.group(3)
+    for name, is_str, value in closed:
         if is_str == "true":
             params[name] = value
         else:
@@ -120,19 +155,14 @@ def _dsml_arg_converter(
                 params[name] = json.loads(value)
             except (json.JSONDecodeError, ValueError):
                 params[name] = value
-        last_end = m.end()
 
-    if partial:
-        open_param = _match_open_param(
-            raw_args, last_end, partial_param_re, param_start
-        )
-        if open_param:
-            name, is_str, value, _ = open_param
-            if is_str == "true":
-                params[name] = value
-            else:
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    params[name] = json.loads(value)
+    if partial and open_param:
+        name, is_str, value, _ = open_param
+        if is_str == "true":
+            params[name] = value
+        else:
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
+                params[name] = json.loads(value)
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -140,8 +170,6 @@ def _dsml_arg_converter(
 def _dsml_arg_value_extender(
     raw_args: str,
     *,
-    param_re: re.Pattern = _PARAM_RE,
-    partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
     param_start: str = DSML_PARAM_START,
     param_close: str = DSML_PARAM_CLOSE,
 ) -> ArgValueExtender | None:
@@ -149,16 +177,11 @@ def _dsml_arg_value_extender(
     # string value would wait for its closing tag. Extend the open trailing
     # ``string="true"`` value instead. The lexer can flush a held partial
     # tag as text, so keep a tail to catch a tag split across deltas.
-    names = set()
-    last_end = 0
-    for m in param_re.finditer(raw_args):
-        names.add(m.group(1))
-        last_end = m.end()
-    open_param = _match_open_param(raw_args, last_end, partial_param_re, param_start)
+    closed, open_param = _split_params(raw_args, True, param_start, param_close)
     if open_param is None:
         return None
     name, is_str, _, held_back = open_param
-    if is_str != "true" or name in names or held_back:
+    if is_str != "true" or held_back or any(p[0] == name for p in closed):
         return None
 
     keep = max(len(param_start), len(param_close)) - 1
@@ -204,6 +227,121 @@ def _unwrap_wrapper_args(
         if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
             return json.dumps(inner, ensure_ascii=False)
     return args_json
+
+
+class DsmlStreamingEngine(StreamingParserEngine):
+    """Keeps a DSML call open while its last parameter value is unclosed.
+
+    A value can contain ``INVOKE_END`` or ``TOOL_END`` text. Inside an open
+    value such a closer is held: a following ``INVOKE_PREFIX``, ``TOOL_END``
+    or the end of output makes it structural (closing the value first), and
+    any other text makes it part of the value.
+    """
+
+    _HELD_TERMINALS = frozenset({"INVOKE_END", "TOOL_END"})
+    _RESOLVING_TERMINALS = frozenset({"INVOKE_PREFIX", "TOOL_END"})
+
+    def reset(self, initial_state: ParserState | None = None) -> None:
+        super().reset(initial_state)
+        self._dsml_args = ""
+        self._dsml_held: tuple[str, str, int] | None = None
+        self._dsml_held_ws = ""
+        self._dsml_held_ws_tokens = 0
+
+    def _value_open(self) -> bool:
+        param_start = self.config.terminal_literal("PARAM_START")
+        param_close = self.config.terminal_literal("PARAM_CLOSE")
+        assert param_start is not None and param_close is not None
+        _, open_param = _split_params(self._dsml_args, True, param_start, param_close)
+        return open_param is not None
+
+    def _emit_args(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        self._dsml_args += text
+        return super()._emit_for_state(text, token_count)
+
+    def _release_held(self) -> list[SemanticEvent]:
+        assert self._dsml_held is not None
+        terminal, value, token_count = self._dsml_held
+        text = (value or self.config.terminal_literal(terminal) or "") + (
+            self._dsml_held_ws
+        )
+        token_count += self._dsml_held_ws_tokens
+        self._clear_held()
+        return self._emit_args(text, token_count)
+
+    def _clear_held(self) -> None:
+        self._dsml_held = None
+        self._dsml_held_ws = ""
+        self._dsml_held_ws_tokens = 0
+
+    def _end_held_call(self) -> list[SemanticEvent]:
+        assert self._dsml_held is not None
+        terminal, value, token_count = self._dsml_held
+        # The whitespace after a structural closer is dropped, as before.
+        self._clear_held()
+        events: list[SemanticEvent] = []
+        if self._value_open():
+            param_close = self.config.terminal_literal("PARAM_CLOSE")
+            assert param_close is not None
+            events.extend(self._emit_args(param_close))
+        events.extend(super()._on_terminal(terminal, value, token_count))
+        return events
+
+    def _apply_transition(
+        self, transition: Transition, value: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
+        if (
+            transition.next_state == ParserState.TOOL_ARGS
+            and self.state != ParserState.TOOL_ARGS
+        ):
+            self._dsml_args = ""
+        return super()._apply_transition(transition, value, token_count)
+
+    def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        if self.state != ParserState.TOOL_ARGS:
+            return super()._emit_for_state(text, token_count)
+        events: list[SemanticEvent] = []
+        if self._dsml_held is not None:
+            if not text.strip():
+                self._dsml_held_ws += text
+                self._dsml_held_ws_tokens += token_count
+                return events
+            events.extend(self._release_held())
+        events.extend(self._emit_args(text, token_count))
+        return events
+
+    def _on_terminal(
+        self, terminal: str, value: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
+        if (
+            self.state != ParserState.TOOL_ARGS
+            or self.skip_tool_parsing
+            or terminal == DROP_TERMINAL
+        ):
+            return super()._on_terminal(terminal, value, token_count)
+        events: list[SemanticEvent] = []
+        if self._dsml_held is not None:
+            if terminal in self._RESOLVING_TERMINALS:
+                events.extend(self._end_held_call())
+                events.extend(self._on_terminal(terminal, value, token_count))
+                return events
+            events.extend(self._release_held())
+        if terminal in self._HELD_TERMINALS and self._value_open():
+            self._dsml_held = (terminal, value, token_count)
+            return events
+        events.extend(super()._on_terminal(terminal, value, token_count))
+        return events
+
+    def finish(self) -> list[SemanticEvent]:
+        events: list[SemanticEvent] = []
+        if self._dsml_held is not None:
+            events.extend(self._process_scanner_items(self._scanner.flush_pending()))
+            events.extend(self._process_lex_tokens(self._lexer.flush()))
+            if self._dsml_held is not None:
+                events.extend(self._end_held_call())
+            self._record_reasoning_tokens(events)
+        events.extend(super().finish())
+        return events
 
 
 @functools.cache
@@ -309,6 +447,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
 
 class DeepSeekV4Parser(ParserEngine):
     parser_config = staticmethod(deepseek_v4_config)
+    streaming_engine_class = DsmlStreamingEngine
 
     def __init__(
         self,
