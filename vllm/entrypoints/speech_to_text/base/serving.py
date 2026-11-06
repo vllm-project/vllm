@@ -7,7 +7,6 @@ import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -32,7 +31,6 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.model_executor.models.interfaces import DiarizedTranscriptionSegment
 from vllm.multimodal.audio import AudioResampler, get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
@@ -359,20 +357,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         return input_len
 
-    def _get_diarized_segments(
-        self, text: str, start_time: float
-    ) -> list[DiarizedTranscriptionSegment]:
-        return [
-            replace(
-                segment,
-                start=segment.start + start_time,
-                end=segment.end + start_time,
-            )
-            for segment in self.model_cls.parse_diarized_transcript(
-                text, self.model_config
-            )
-        ]
-
     def _get_verbose_segments(
         self,
         tokens: tuple,
@@ -622,9 +606,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 [] for _ in list_result_generator
             ]
             chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
-            chunk_diarized_parts: list[list[DiarizedTranscriptionSegment]] = [
-                [] for _ in list_result_generator
-            ]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
@@ -652,9 +633,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     chunk_segment_parts[idx].extend(segments)
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
                 elif request.response_format == "diarized_json":
-                    chunk_diarized_parts[idx].extend(
-                        self._get_diarized_segments(op.outputs[0].text, start_time)
-                    )
+                    chunk_text_parts[idx].append(op.outputs[0].text)
                 else:
                     raw_text = op.outputs[0].text
                     chunk_text_parts[idx].append(
@@ -676,9 +655,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format == "diarized_json":
-                    diarized_segments = [
-                        segment for parts in chunk_diarized_parts for segment in parts
-                    ]
+                    diarized_segments = self.model_cls.parse_diarized_transcript(
+                        text, self.model_config
+                    )
                     if not diarized_segments:
                         return self.create_error_response(
                             "Model output did not contain a valid diarized transcript"
