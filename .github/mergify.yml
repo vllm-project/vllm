@@ -750,6 +750,7 @@ pull_request_rules:
       users:
         - "ovidiusm"
         - "iyastreb"
+        - "mkhazraee"
 
 - name: label-scheduler
   description: Automatically apply scheduler label

@@ -29,7 +29,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
-from vllm.config.utils import hash_factors
+from vllm.config.utils import hash_config, hash_factors
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -241,9 +241,9 @@ def _resolve_cache_prefix(vllm_config: VllmConfig) -> str:
     prefix = "auto-" + hash_factors(
         {
             "build": build,
-            "model": model_config.compute_hash(),
+            "model": hash_config(model_config),
             "hf_commit": getattr(model_config.hf_config, "_commit_hash", None),
-            "cache": vllm_config.cache_config.compute_hash(),
+            "cache": hash_config(vllm_config.cache_config),
         }
     )
     logger.info("MooncakeStore resolved cache_prefix: %s", prefix)

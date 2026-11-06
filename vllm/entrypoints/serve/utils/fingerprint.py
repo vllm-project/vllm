@@ -7,7 +7,7 @@ Four modes, configured via ``--fingerprint-mode``:
 
 * ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>`` — encodes
   server version, any non-trivial parallelism degree (tp/pp/dp/ep), and an
-  8-char prefix of ``vllm_config.compute_hash()`` (covers model identity,
+  8-char prefix of ``hash_config(vllm_config)`` (covers model identity,
   quant config, speculative, attention backend, etc.).
 * ``hash``: ``vllm-<version>-<hash8>`` — parallelism stripped.
 * ``custom``: user-provided literal via ``--fingerprint-value``.
@@ -56,9 +56,10 @@ def build_system_fingerprint(
         return custom_value
 
     from vllm import __version__ as vllm_version
+    from vllm.config.utils import hash_config
 
     try:
-        hash8 = vllm_config.compute_hash()[:8]
+        hash8 = hash_config(vllm_config)[:8]
     except Exception:
         hash8 = "nohash"
 

@@ -304,7 +304,7 @@ def mma_chain(ws, xs, nc):
 
 
 def red_store(red, t, acc, wave, g4, l16):
-    """Wave ``wave``'s partial of tile ``t`` -> red[8 t + wave][row][token]."""
+    """Wave ``wave``'s partial of tile ``t`` -> ``red[8 t + wave][row][token]``."""
     for e in range_constexpr(4):
         fx.ptr_store(acc[e], red + ((t * 8 + wave) * 256 + (g4 * 4 + e) * 16 + l16))
 
@@ -326,7 +326,7 @@ def mx_scale(am):
 
 
 def xq_chunk(x, row, K, wave, g4, l16, c):
-    """bf16 row ``row`` of x [16][K], chunk ``c`` of ``wave``, quantized to MXFP8 in
+    """bf16 row ``row`` of ``x[16][K]``, chunk ``c`` of ``wave``, quantized to MXFP8 in
     the operand layout. A 32-k block is units 2b and 2b + 1, held by lanes 16
     apart. Returns (operand: 8 words, scale of block g)."""
     kw = K // 8
@@ -371,7 +371,7 @@ def norm_w(w, tid):
 
 
 def row_x(x_in, t, tid):
-    """A thread's 16 values of row ``t`` of bf16 x_in [rows][6144]."""
+    """A thread's 16 values of row ``t`` of bf16 ``x_in[rows][6144]``."""
     v0 = ld(x_in, t * 3072 + fx.min(tid, 383) * 8, 4)
     v1 = ld(x_in, t * 3072 + fx.min(tid, 383) * 8 + 4, 4)
     out = []
@@ -437,7 +437,8 @@ def norm_row(v, res, w, add, red, tid, lane, wave):
 
 @traced
 def quant_store(o, t, x8, xs8, tid):
-    """MXFP8 of a thread's 16 values -> e4m3 x8[t][16 tid ..], e8m0 xs8[t][tid / 2]."""
+    """MXFP8 of a thread's 16 values -> e4m3 ``x8[t][16 tid ..]``, e8m0
+    ``xs8[t][tid / 2]``."""
     am = fmath.absf(o[0])
     for e in range_constexpr(1, 16):
         am = fx.max(am, fmath.absf(o[e]))

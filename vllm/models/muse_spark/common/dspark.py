@@ -329,8 +329,6 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             )
         ):
             return
-        if not hasattr(self, "_num_attn_layers"):
-            self._build_fused_kv_buffers()
         num_ctx = context_states.shape[0]
         num_layers = self._num_attn_layers
         all_kv_flat = self._project_muse_context_kv(context_states)

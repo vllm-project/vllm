@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import os
+import random
 import sys
 import tempfile
 import threading
@@ -159,6 +160,16 @@ def _natural_sort_key(filepath: str) -> list:
         int(s) if s.isdigit() else s
         for s in re.split(r"(\d+)", os.path.basename(filepath))
     ]
+
+
+def _shuffle_files(files: list[str]) -> list[str]:
+    """Return *files* shuffled with a rank-dependent seed."""
+    rank = get_world_group().rank
+    # Sort first so the permutation does not depend on the input order
+    shuffled = sorted(files, key=_natural_sort_key)
+    random.Random(rank).shuffle(shuffled)
+    logger.info("Shuffled %d safetensors files with seed %d", len(shuffled), rank)
+    return shuffled
 
 
 def maybe_download_from_modelscope(
@@ -1118,6 +1129,7 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -1195,6 +1207,9 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
+    if shuffle_safetensors_files:
+        sorted_files = _shuffle_files(sorted_files)
+
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,
@@ -1251,12 +1266,16 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
     def _load_file(st_file: str):
         result = load_file(st_file, device="cpu")
         return result
+
+    if shuffle_safetensors_files:
+        hf_weights_files = _shuffle_files(hf_weights_files)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
@@ -1527,18 +1546,20 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run every module's own post-load hook after a full load or reload,
-    each module after all of its submodules.
+def finalize_model_weights(
+    model: torch.nn.Module, target_device: torch.device | None = None
+) -> None:
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
 
-    Quantization methods, the submodules of quantized layers (their quant
-    method processes them) and attention layers are skipped: the loader runs
-    them in its earlier per-layer passes, which later passes may read.
+    Quantization methods and the submodules of quantized layers are skipped:
+    their quant method processes them, in the loader's per-layer pass.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
+    from vllm.model_executor.model_loader.utils import device_loading_context
 
     seen: set[torch.nn.Module] = set()
 
@@ -1554,26 +1575,14 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
         yield module
 
     for module in children_first(model):
-        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
-            module
-        ):
+        if isinstance(module, QuantizeMethodBase):
             continue
         hook = getattr(module, "process_weights_after_loading", None)
         if callable(hook):
-            hook()
-
-
-@torch.no_grad()
-def refresh_derived_weights(model: torch.nn.Module) -> None:
-    """Call ``refresh_derived_weights()`` on every module that defines it, to
-    rebuild tensors kept out of ``state_dict()`` after the weights were
-    overwritten in place. Hooks must be idempotent, write in place and run no
-    collectives.
-    """
-    for module in model.modules():
-        refresh = getattr(module, "refresh_derived_weights", None)
-        if callable(refresh):
-            refresh()
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

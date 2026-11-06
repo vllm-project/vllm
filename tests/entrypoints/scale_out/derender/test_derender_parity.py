@@ -999,7 +999,7 @@ def _assert_inline_parity(coupled: dict, inline: dict) -> None:
         ),
         pytest.param(
             TEXT_MESSAGES[0]["content"],
-            {"n": 2, "temperature": 0.8, "seed": 42},
+            {"n": 2, "temperature": 0.8, "seed": 42, "top_k": 1},
             id="n2",
         ),
     ],
@@ -1143,7 +1143,7 @@ async def _inline_derender_stream(
         ),
         pytest.param(
             TEXT_MESSAGES[0]["content"],
-            {"n": 2, "temperature": 0.8, "seed": 42},
+            {"n": 2, "temperature": 0.8, "seed": 42, "top_k": 1},
             id="n2",
         ),
     ],

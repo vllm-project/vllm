@@ -1824,7 +1824,8 @@ def test_nvfp4_one_sided_sizes_dispatched_activations(
         raise RuntimeError("dispatch layout verified before allocation")
 
     monkeypatch.setattr(
-        nvfp4_oracle, "maybe_make_prepare_finalize", check_dispatch_layout
+        "vllm.model_executor.layers.fused_moe.oracle.base.maybe_make_prepare_finalize",
+        check_dispatch_layout,
     )
     with pytest.raises(
         RuntimeError, match="dispatch layout verified before allocation"

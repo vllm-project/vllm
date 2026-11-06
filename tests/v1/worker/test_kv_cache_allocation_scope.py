@@ -152,8 +152,6 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
         Worker,
         SimpleNamespace(
             sleep_mode_backend=SimpleNamespace(resume=lambda tags: None),
-            _sleep_saved_buffers={},
-            _sleep_saved_draft_buffers={},
             model_runner=runner,
             synchronize_device=lambda: None,
             vllm_config=SimpleNamespace(
