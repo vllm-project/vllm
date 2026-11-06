@@ -876,7 +876,7 @@ class MuseSpark1xDecoderLayer(nn.Module):
 def _drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
     """Keep Quark's per-expert gate/up names unstacked for ``RoutedExperts``."""
     return WeightsMapper(
-        orig_to_new_transform=base.orig_to_new_transform,
+        orig_to_new_renaming=base.orig_to_new_renaming,
         orig_to_new_regex=base.orig_to_new_regex,
         orig_to_new_substr=base.orig_to_new_substr,
         orig_to_new_stacked={

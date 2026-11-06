@@ -62,7 +62,7 @@ def _make_deepseek_v4_vl_weights_mapper(
     if not image_enabled:
         orig_to_new_prefix.update({"vision.": None, "aligner.": None, "image_": None})
     return WeightsMapper(
-        orig_to_new_transform=text_mapper.orig_to_new_transform,
+        orig_to_new_renaming=text_mapper.orig_to_new_renaming,
         orig_to_new_prefix=orig_to_new_prefix,
         orig_to_new_regex=text_mapper.orig_to_new_regex,
         orig_to_new_stacked=text_mapper.orig_to_new_stacked,

@@ -29,8 +29,6 @@ import torch
 from torch import nn
 from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
-from transformers.conversion_mapping import WeightConverter
-from transformers.core_model_loading import ConversionOps
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -54,59 +52,20 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.falcon import RWConfig
 
 from .interfaces import SupportsPP
 from .utils import (
     AutoWeightsLoader,
-    WeightsMapper,
+    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
 
 FalconConfig: TypeAlias = HF_FalconConfig | RWConfig
-
-
-class DeinterleaveQKV(ConversionOps):
-    """Reorder a fused QKV stored as `[q_0..q_{g-1}, k, v]` per KV head to `[Q|K|V]`.
-
-    Weights without a parameter on this rank, or whose parameter has no `output_dim`,
-    are left unchanged.
-    """
-
-    def __init__(self, num_heads: int, num_kv_heads: int):
-        self.num_q_per_kv = num_heads // num_kv_heads
-        self.num_kv_heads = num_kv_heads
-
-    def convert(
-        self,
-        input_dict: dict[str, list[torch.Tensor]],
-        source_patterns: list[str],
-        target_patterns: list[str],
-        *,
-        model: nn.Module | None,
-        full_layer_name: str,
-        **kwargs,
-    ) -> dict[str, torch.Tensor]:
-        if model is None:
-            raise ValueError("`DeinterleaveQKV` needs the model to find `output_dim`")
-        ((tensor,),) = input_dict.values()
-        try:
-            param = model.get_parameter(full_layer_name)
-        except AttributeError:
-            return {target_patterns[0]: tensor}
-        if (output_dim := getattr(param, "output_dim", None)) is None:
-            return {target_patterns[0]: tensor}
-
-        before, after = tensor.shape[:output_dim], tensor.shape[output_dim + 1 :]
-        group = (self.num_kv_heads, self.num_q_per_kv + 2, -1)
-        q, k, v = tensor.view(*before, *group, *after).split(
-            [self.num_q_per_kv, 1, 1], dim=output_dim + 1
-        )
-        parts = (x.reshape(*before, -1, *after) for x in (q, k, v))
-        return {target_patterns[0]: torch.cat(tuple(parts), dim=output_dim)}
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -463,6 +422,61 @@ class FalconModel(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        total_num_heads = self.config.num_attention_heads
+        if self.config.new_decoder_architecture:
+            total_num_kv_heads = self.config.num_kv_heads
+        elif self.config.multi_query:
+            total_num_kv_heads = 1
+        else:
+            total_num_kv_heads = total_num_heads
+        num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+            if "query_key_value" in name:
+                output_dim = getattr(param, "output_dim", None)
+                loaded_weight_shape = loaded_weight.shape
+                if output_dim is not None:
+                    loaded_weight = loaded_weight.view(
+                        loaded_weight_shape[:output_dim]
+                        + (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1)
+                        + loaded_weight_shape[output_dim + 1 :]
+                    )
+                    wq = loaded_weight.narrow(
+                        output_dim + 1, 0, num_query_heads_per_kv_head
+                    ).reshape(
+                        *loaded_weight_shape[:output_dim],
+                        -1,
+                        *loaded_weight_shape[output_dim + 1 :],
+                    )
+                    wk = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head, 1
+                    ).reshape(
+                        *loaded_weight_shape[:output_dim],
+                        -1,
+                        *loaded_weight_shape[output_dim + 1 :],
+                    )
+                    wv = loaded_weight.narrow(
+                        output_dim + 1, num_query_heads_per_kv_head + 1, 1
+                    ).reshape(
+                        *loaded_weight_shape[:output_dim],
+                        -1,
+                        *loaded_weight_shape[output_dim + 1 :],
+                    )
+                    loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
+
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class FalconForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
@@ -475,21 +489,6 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        if config.new_decoder_architecture:
-            num_kv_heads = config.num_kv_heads
-        elif config.multi_query:
-            num_kv_heads = 1
-        else:
-            num_kv_heads = config.num_attention_heads
-        self.hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_transform=[
-                WeightConverter(
-                    "query_key_value",
-                    "query_key_value",
-                    [DeinterleaveQKV(config.num_attention_heads, num_kv_heads)],
-                )
-            ]
-        )
         self.transformer = FalconModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
@@ -538,4 +537,4 @@ class FalconForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights)

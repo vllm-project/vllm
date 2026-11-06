@@ -25,7 +25,6 @@
 
 from collections.abc import Iterable
 
-import regex as re
 import torch
 import torch.nn as nn
 
@@ -141,11 +140,6 @@ class ErnieMultiTokenPredictor(nn.Module):
         return logits
 
 
-# Checkpoint bundles the full base model; only MTP, embed_tokens and lm_head weights
-# belong to this module.
-_NON_MTP_WEIGHT = re.compile(r"^(?!.*(?:mtp|embed_tokens|lm_head))")
-
-
 class ErnieMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -155,7 +149,6 @@ class ErnieMTP(nn.Module):
         # checkpoint; rewrite them into `model.layers.{spec_layer}.*`.
         spec_layer = self.config.num_hidden_layers
         self.hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_regex={_NON_MTP_WEIGHT: None},
             orig_to_new_substr={
                 "model.mtp_emb_norm.0.": f"model.layers.{spec_layer}.mtp_emb_norm.",
                 "model.mtp_hidden_norm.0.": (
@@ -212,5 +205,14 @@ class ErnieMTP(nn.Module):
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Checkpoint bundles the full base model; only MTP, embed_tokens and
+        # lm_head weights belong to this module.
+        def _filter(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if any(k in name for k in ("mtp", "embed_tokens", "lm_head")):
+                    yield name, weight
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)

@@ -36,7 +36,7 @@ from vllm.utils.torch_utils import (
 
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
-    from transformers.conversion_mapping import WeightTransform
+    from transformers.conversion_mapping import WeightRenaming
 
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
@@ -61,14 +61,9 @@ class WeightsMapper:
     If a key maps to a value of `None`, the corresponding weight is ignored.
 
     ``weights_transforms`` rewrite the raw weight stream in list order before
-    any name mapping.
+    any name mapping."""
 
-    `orig_to_new_transform` then takes Transformers `WeightTransform`s, in list order:
-    a `WeightRenaming` renames a weight and a one-to-one `WeightConverter` also runs
-    its operations on the tensor.
-    """
-
-    orig_to_new_transform: list["WeightTransform"] = field(default_factory=list)
+    orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
@@ -81,9 +76,9 @@ class WeightsMapper:
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
-            orig_to_new_transform=[
-                *self.orig_to_new_transform,
-                *other.orig_to_new_transform,
+            orig_to_new_renaming=[
+                *self.orig_to_new_renaming,
+                *other.orig_to_new_renaming,
             ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
@@ -124,8 +119,8 @@ class WeightsMapper:
                 "k_scale to v_scale"
             )
 
-        for transform in self.orig_to_new_transform:
-            key, _ = transform.rename_source_key(key)
+        for renaming in self.orig_to_new_renaming:
+            key, _ = renaming.rename_source_key(key)
 
         for pattern, new_key in self.orig_to_new_regex.items():
             if pattern.search(key):
@@ -163,36 +158,8 @@ class WeightsMapper:
 
         return key, shard_id
 
-    def _convert(
-        self, key: str, data: torch.Tensor, out_name: str, model: nn.Module | None
-    ) -> torch.Tensor:
-        """Run the operations of each `WeightConverter` matching `key`."""
-        for transform in self.orig_to_new_transform:
-            key, matched = transform.rename_source_key(key)
-            if matched is None:
-                continue
-            operations = getattr(transform, "operations", ())
-            sources, targets = transform.source_patterns, transform.target_patterns
-            if operations and (len(sources) != 1 or len(targets) != 1):
-                raise ValueError(f"Only one-to-one conversions work: {transform!r}")
-            for op in operations:
-                converted = op.convert(
-                    {matched: [data]},
-                    source_patterns=sources,
-                    target_patterns=targets,
-                    full_layer_name=out_name,
-                    model=model,
-                    config=getattr(model, "config", None),
-                )
-                data = next(iter(converted.values()))
-                data = data[0] if isinstance(data, list) else data
-        return data
-
     def apply(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-        *,
-        model: nn.Module | None = None,
+        self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for transform in self.weights_transforms:
             weights = transform(weights)
@@ -201,7 +168,6 @@ class WeightsMapper:
             if result is None:
                 continue
             out_name, shard_id = result
-            data = self._convert(name, data, out_name, model)
             if shard_id is None:
                 yield out_name, data
                 continue
@@ -521,7 +487,7 @@ class AutoWeightsLoader:
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
 
-        weights = mapper.apply(weights, model=self.module)
+        weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
