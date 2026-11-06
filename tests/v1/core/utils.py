@@ -87,6 +87,8 @@ def create_scheduler(
     kv_cache_spec: KVCacheSpec | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
+    cache_aware_admission_window: int = 0,
+    cache_aware_admission_threshold: float = 0.5,
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
@@ -139,6 +141,8 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        cache_aware_admission_window=cache_aware_admission_window,
+        cache_aware_admission_threshold=cache_aware_admission_threshold,
         prefill_schedule_interval=prefill_schedule_interval,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
@@ -269,6 +273,7 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    sampling_params: SamplingParams | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -276,12 +281,13 @@ def create_requests(
         _none_hash_initialized = True
 
     block_hasher = get_request_block_hasher(block_size, sha256)
-    sampling_params = SamplingParams(
-        ignore_eos=ignore_eos,
-        max_tokens=max_tokens,
-        stop_token_ids=stop_token_ids,
-        prompt_logprobs=prompt_logprobs,
-    )
+    if sampling_params is None:
+        sampling_params = SamplingParams(
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            stop_token_ids=stop_token_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
