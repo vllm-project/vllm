@@ -396,6 +396,7 @@ def test_indexer_preserves_deepseek_v41_mla_block_size():
 
 def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(
@@ -425,6 +426,7 @@ def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
         lambda: SimpleNamespace(rank_in_group=2),
     )
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(sparse_mla_shard_q=False),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(compress_ratios=[32], index_kpool=32)
