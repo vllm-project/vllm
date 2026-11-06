@@ -52,7 +52,7 @@ def test_protected_steps_after_prefill(interval: int):
     for i in range(interval - 1):
         assert delayer.decide(full._replace(prefill_ran=int(i == 0))) == (
             False,
-            "protected",
+            "hold_protected",
         )
     assert delayer.decide(full._replace(prefill_ran=int(interval == 1))) == (
         True,
@@ -86,7 +86,7 @@ def test_unaligned_hold_until_bound(partial: int, bound: int, reason: str):
     delayer = PrefillDelayer(DP_SIZE, BUDGET, 1)
     state = _state(prefillable=1, partial=partial)
     for _ in range(bound):
-        assert delayer.decide(state) == (False, "align")
+        assert delayer.decide(state) == (False, "hold_align")
     assert delayer.decide(state) == (True, reason)
 
 
@@ -94,7 +94,7 @@ def test_unaligned_stall_fires_only_for_unreachable_peer():
     delayer = PrefillDelayer(DP_SIZE, BUDGET, 1)
     state = _state(prefillable=1, unreachable=1)
     for _ in range(STALL_STEPS):
-        assert delayer.decide(state) == (False, "align")
+        assert delayer.decide(state) == (False, "hold_align")
     assert delayer.decide(state) == (True, "stall")
 
 
@@ -102,9 +102,9 @@ def test_arrivals_restart_stall():
     """Capped pending tokens can stay flat while requests keep arriving."""
     delayer = PrefillDelayer(DP_SIZE, BUDGET, 1)
     for _ in range(3 * STALL_STEPS):
-        assert delayer.decide(_state(arrived=1)) == (False, "fill")
+        assert delayer.decide(_state(arrived=1)) == (False, "hold_fill")
     for _ in range(STALL_STEPS - 1):
-        assert delayer.decide(_state()) == (False, "fill")
+        assert delayer.decide(_state()) == (False, "hold_fill")
     assert delayer.decide(_state()) == (True, "stall")
 
 
@@ -114,7 +114,7 @@ def test_reset_ends_hold_episode():
     for _ in range(MAX_HOLD_STEPS):
         delayer.decide(state)
     delayer.reset()
-    assert delayer.decide(state) == (False, "align")
+    assert delayer.decide(state) == (False, "hold_align")
     assert delayer.hold_budget == MAX_HOLD_STEPS - 1
 
 
