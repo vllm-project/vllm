@@ -36,7 +36,6 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
 from .mm_preprocess import IMAGE, IMAGE_END, IMAGE_NEW_LINE, IMAGE_START
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.config.multimodal import MultiModalConfig
     from vllm.models.deepseek_v4.common.vision import (
         DeepseekV4Aligner,
@@ -140,20 +139,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             out_hidden_size=self.config.hidden_size,
             padding_logics={"cu_seqlens": pad_cu_seqlens},
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config: "VllmConfig",
-    ) -> tuple[int, int]:
-        # Min: comfortably above the smallest possible image span (4 tokens
-        # for a 1x1 grid); also sets max_batch_size = 64 via the manager's
-        # auto-inference (max_batch_size <= min_budget invariant).
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
 
     def get_encoder_cudagraph_item_specs(
         self,

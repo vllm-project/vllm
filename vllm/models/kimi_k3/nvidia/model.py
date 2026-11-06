@@ -1713,16 +1713,6 @@ class KimiK3ForConditionalGeneration(
             out_hidden_size=self.hidden_size,
         )
 
-    def get_encoder_cudagraph_budget_range(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int]:
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return min_budget, max_budget
-
     @staticmethod
     def _get_grid_thws(mm_kwargs: dict[str, Any]) -> list[list[int]]:
         grid_thws = mm_kwargs["grid_thws"]

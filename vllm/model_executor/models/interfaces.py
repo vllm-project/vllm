@@ -1894,7 +1894,15 @@ class SupportsEncoderCudaGraph(Protocol):
         ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
         specified by the user.
         """
-        ...
+        # Min: a 224x224 image with patch_size=14 and a 2x2 merge gives
+        # 8x8 = 64 output tokens.
+        return (
+            64,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            ),
+        )
 
     def get_encoder_cudagraph_item_specs(
         self,

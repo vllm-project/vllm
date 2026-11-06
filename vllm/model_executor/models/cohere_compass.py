@@ -24,7 +24,7 @@
 """Inference-only Cohere Compass model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
 from typing import Annotated, Any, Literal, TypeAlias
@@ -108,15 +108,14 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.torch_utils import async_tensor_h2d
 from .commandr import CohereForCausalLM, CohereMLP, LayerNorm
+from .encoder_cudagraph_utils import GridThwEncoderCudaGraphMixin
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
     SupportsEagle3,
-    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -1301,7 +1300,7 @@ class CohereCompassMultiModalProcessor(
 class CohereCompassForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    SupportsEncoderCudaGraph,
+    GridThwEncoderCudaGraphMixin,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
@@ -1505,188 +1504,30 @@ class CohereCompassForConditionalGeneration(
             return "image"
         raise AssertionError("This line should be unreachable.")
 
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config,
-    ) -> tuple[int, int]:
-        # Min: estimated smallest possible encoder input.
-        # 224x224 image → 16x16 patches (patch_size=14)
-        #                 spatial_merge_size=2 → 8x8 = 64 tokens
-        min_budget = 64
-        # Max: capped by max_num_batched_tokens
-        # TODO(shen-shanshan): the max_budget auto-infer needs to be optimized later.
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
-
-    def _get_pixel_values_by_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        modality = self.get_input_modality(mm_kwargs)
-        if modality == "image":
-            return mm_kwargs["pixel_values"]
-        raise AssertionError("This line should be unreachable.")
-
-    def _get_grid_thw_by_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[list[int]]:
-        grid_thw_key = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
-        grid_thw = mm_kwargs[grid_thw_key]
-        if not isinstance(grid_thw, list):
-            grid_thw = grid_thw.tolist()
-        return grid_thw
-
-    def get_encoder_cudagraph_item_specs(
-        self,
-        mm_kwargs: dict[str, Any],
-    ):
-        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
-
-        m = self.visual.spatial_merge_size
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [
-            EncoderItemSpec(
-                input_size=t * h * w,
-                output_tokens=t * (h // m) * (w // m),
-            )
-            for t, h, w in grid_thw
-        ]
-
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "image_grid_thw": [],
-            }
-
-        # Compute cumulative patch offsets for slicing pixel_values
-        patches_per_item = [t * h * w for t, h, w in grid_thw]
-        cum_patches = [0]
-        for p in patches_per_item:
-            cum_patches.append(cum_patches[-1] + p)
-
-        selected_pv = torch.cat(
-            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-        )
-        selected_grid = [grid_thw[i] for i in indices]
-
-        return {
-            "pixel_values": selected_pv,
-            "image_grid_thw": selected_grid,
-        }
-
-    def prepare_encoder_cudagraph_capture_inputs(
+    def _get_encoder_cudagraph_capture_grid(
         self,
         token_budget: int,
         max_batch_size: int,
         max_frames_per_batch: int,
+    ) -> list[list[int]]:
+        m = self.visual.spatial_merge_size
+        per_item_output = self._get_encoder_cudagraph_per_item_output(
+            token_budget, max_batch_size
+        )
+        return [[1, m, per_item_output * m] for _ in range(max_batch_size)]
+
+    def _get_encoder_cudagraph_dummy_pixel_values(
+        self,
+        num_patches: int,
         device: torch.device,
         dtype: torch.dtype,
-        path: str = "default",
-        axis_keys: tuple[Hashable, ...] | None = None,
-    ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphCaptureInputs,
-        )
-
-        spatial_merge_size = self.visual.spatial_merge_size
-        # Ceil so the buffer fits the worst case of one item using the full
-        # budget. Floor under-allocates when budget is not a multiple of
-        # max_batch_size.
-        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
-
-        # Image-format grid_config (T=1).
-        grid_config = [
-            [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
-            for _ in range(max_batch_size)
-        ]
-
-        # Create dummy pixel_values
-        patch_embed = self.visual.patch_embed
-        in_channels = patch_embed.proj.in_channels
-        patch_size = patch_embed.patch_size
-        temporal_patch_size = patch_embed.temporal_patch_size
-        total_patches = sum(t * h * w for t, h, w in grid_config)
-        flattened_patch_size = (
-            in_channels * temporal_patch_size * patch_size * patch_size
-        )
-        dummy_pixel_values = torch.randn(
-            total_patches, flattened_patch_size, device=device, dtype=dtype
-        )
-
-        # Override max_seqlen with a safe upper bound for capture.
-        # max_seqlen.item() gets baked into the CUDA graph (not replayed),
-        # so the capture value must cover any replay scenario.
-        # Worst case: 1 item consuming the full budget ->
-        # seq_len = token_budget * spatial_merge_size^2.
-        metadata = self.visual.prepare_encoder_metadata(
-            grid_config,
-            max_batch_size=max_batch_size,
-            max_frames_per_batch=max_frames_per_batch,
-            max_seqlen_override=token_budget * (spatial_merge_size**2),
+    ) -> torch.Tensor:
+        return torch.randn(
+            num_patches,
+            self._get_encoder_cudagraph_patch_dim(),
             device=device,
+            dtype=dtype,
         )
-
-        # Just use image-modality dummy input_buffer for capturing
-        values = metadata | {
-            "pixel_values": dummy_pixel_values,
-        }
-
-        return EncoderCudaGraphCaptureInputs(
-            values=values,
-        )
-
-    def prepare_encoder_cudagraph_replay_buffers(
-        self,
-        mm_kwargs: dict[str, Any],
-        max_batch_size: int,
-        max_frames_per_batch: int,
-        path: str = "default",
-    ) -> EncoderCudaGraphReplayBuffers:
-        modality = self.get_input_modality(mm_kwargs)
-        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
-
-        if modality == "image":
-            metadata = self.visual.prepare_encoder_metadata(
-                grid_thw_list,
-                max_batch_size=max_batch_size,
-            )
-        else:
-            raise AssertionError("This line should be unreachable.")
-
-        values = metadata | {
-            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
-        }
-        return EncoderCudaGraphReplayBuffers(values=values)
-
-    def encoder_cudagraph_forward(
-        self,
-        values: dict[str, torch.Tensor],
-        path: str = "default",
-    ) -> torch.Tensor:
-        pixel_values = values.pop("pixel_values")
-        metadata = values
-        return self.visual(pixel_values, None, encoder_metadata=metadata)
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
