@@ -12,6 +12,7 @@ addressing it checks.
 import itertools
 import types
 
+import numpy as np
 import pytest
 import torch
 
@@ -37,6 +38,7 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     plan_gather_launches,
     plan_prefill_chunks,
 )
+from vllm.v1.attention.ops import rocm_aiter_mla_sparse
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
@@ -201,9 +203,11 @@ def _block_maxima(scores):
 def _forward_context(monkeypatch, metadata):
     context = types.SimpleNamespace(
         attn_metadata={"indexer": metadata},
+        no_compile_layers={"indexer": types.SimpleNamespace(gather_shardq_topk=True)},
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
-    monkeypatch.setattr(ops, "get_forward_context", lambda: context)
+    for module in (ops, rocm_aiter_mla_sparse):
+        monkeypatch.setattr(module, "get_forward_context", lambda: context)
 
 
 def _decode_metadata(case, rows, ratio, query_lens):
@@ -238,8 +242,10 @@ def _decode_metadata(case, rows, ratio, query_lens):
 
 
 def _prefill_metadata(
-    case, rows, ratio, chunk_bounds, query_start_loc, gather_rows, gather
+    case, rows, ratio, chunk_bounds, query_start_loc, gather_rows, gather, split=None
 ):
+    """``split``: (ShardQ split, this rank's token indices) when ``rows`` and
+    the bounds are a rank's tokens, numbered compactly."""
     chunks = []
     for req_lo, req_hi, t0, t1 in chunk_bounds:
         ends = torch.tensor(
@@ -257,6 +263,7 @@ def _prefill_metadata(
                 token_start=t0,
                 token_end=t1,
                 num_reqs=req_hi - req_lo,
+                req_start=req_lo,
             )
         )
     seq_lens = torch.tensor(case.seq_lens)
@@ -279,7 +286,11 @@ def _prefill_metadata(
         num_decode_tokens=0,
         num_prefills=len(case.seq_lens),
         num_prefill_tokens=len(rows),
-        prefill=types.SimpleNamespace(chunks=chunks),
+        prefill=types.SimpleNamespace(
+            chunks=chunks,
+            shardq_split=split and split[0],
+            shardq_gather_indices=split and split[1],
+        ),
         prefill_plans=plans,
         gather_launches=plan_gather_launches(chunks, plans, gather_rows),
     )
@@ -646,3 +657,101 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
         )
         agree.append(_recall(out[mine], ref))
     assert torch.cat(agree).mean().item() >= 0.99
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("gather", [True, False], ids=["gather", "dense"])
+def test_prefill_shardq_split_matches_replicated(monkeypatch, world, gather):
+    """Each TP rank scores its ShardQ tokens: the ratio-2 layer, the candidate
+    source, and a consumer whose candidate rows of other ranks hold junk must
+    select what the replicated run selects for them, and the exchange puts
+    every row back in token order. Rows compare as sets: the top-k order
+    within a row depends on the batch shape."""
+    from vllm.v1.attention.ops.shardq import ShardQSplit, zigzag_split
+
+    set_random_seed(0)
+    # The first request is too short to reach every rank.
+    seq_lens, new_tokens = [1400, 900, 1600], [2, 500, 1600]
+    chunk_bounds = [(0, 2, 0, 502), (2, 3, 502, 1302), (2, 3, 1302, 2102)]
+    case = _Case(seq_lens, 128)
+    rows = [
+        (req, n - q + i)
+        for req, (n, q) in enumerate(zip(seq_lens, new_tokens))
+        for i in range(q)
+    ]
+    num_rows = len(rows)
+    query_start_loc = [0, *itertools.accumulate(new_tokens)]
+    q, q_scale, weights, _ = _queries(num_rows)
+    hidden = torch.empty(num_rows, 1, device=DEVICE)
+    token_ids, counts = zigzag_split(np.array(new_tokens), world)
+    split = ShardQSplit(0, token_ids, counts)
+
+    def layers(tokens, pool):
+        """The three layers over ``tokens`` (all rows when None)."""
+        meta_rows, bounds, qsl, shardq = rows, chunk_bounds, query_start_loc, None
+        if tokens is not None:
+            meta_rows = [rows[t] for t in tokens]
+            compact = np.searchsorted(tokens, [b[2:] for b in chunk_bounds])
+            bounds = [
+                (lo, hi, t0, t1)
+                for (lo, hi, _, _), (t0, t1) in zip(chunk_bounds, compact)
+                if t1 > t0
+            ]
+            qsl = np.searchsorted(tokens, query_start_loc).tolist()
+            shardq = (split, torch.from_numpy(tokens).to(DEVICE))
+
+        def run(op, ratio, *args, **kwargs):
+            metadata = _prefill_metadata(
+                case, meta_rows, ratio, bounds, qsl, 128, gather, shardq
+            )
+            _forward_context(monkeypatch, metadata)
+            out = torch.full((num_rows, TOPK), 7, dtype=torch.int32, device=DEVICE)
+            op(hidden, "indexer", case.cache[ratio], q, q_scale, weights, TOPK,
+               HEAD_DIM, MAX_LEN // ratio, out, *args, **kwargs)  # fmt: skip
+            return out
+
+        return (
+            run(ops.rocm_mxfp4_sparse_attn_indexer, 2, compress_ratio=2),
+            run(
+                ops.rocm_mxfp4_sparse_attn_indexer,
+                1,
+                compress_ratio=1,
+                candidate_blocks=pool,
+                candidate_block_size=CAND_BLOCK,
+                candidate_write=True,
+            ),
+            run(
+                ops.rocm_mxfp4_sparse_mqa_indexer,
+                1,
+                1,
+                pool,
+                CAND_BLOCK,
+                POOL_BLOCKS * CAND_BLOCK,
+            ),
+        )
+
+    def sets(t):
+        return t.sort(dim=-1).values
+
+    ref_pool = torch.empty(num_rows, POOL_BLOCKS, dtype=torch.int32, device=DEVICE)
+    ref = layers(None, ref_pool)
+    for rank in range(world):
+        start = counts[:rank].sum()
+        tokens = token_ids[start : start + counts[rank]]
+        mine = torch.from_numpy(tokens).to(DEVICE)
+        gathered = []
+
+        def all_gatherv(local, dim, sizes, gathered=gathered):
+            gathered.append(local.clone())
+            # The other ranks' rows, so the exchange can be checked whole.
+            return ref[len(gathered) - 1][torch.from_numpy(token_ids).to(DEVICE)]
+
+        group = types.SimpleNamespace(rank_in_group=rank, all_gatherv=all_gatherv)
+        monkeypatch.setattr(rocm_aiter_mla_sparse, "get_tp_group", lambda g=group: g)
+        pool = torch.randint(0, 200, ref_pool.shape, dtype=torch.int32, device=DEVICE)
+        outs = layers(tokens, pool)
+        assert len(gathered) == 3
+        for local, out, want in zip(gathered, outs, ref):
+            assert torch.equal(sets(local), sets(want[mine]))
+            assert torch.equal(sets(out), sets(want))
+        assert torch.equal(sets(pool[: len(tokens)]), sets(ref_pool[mine]))

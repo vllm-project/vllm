@@ -32,7 +32,7 @@ from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
 )
 
 
-def _chunk(block_table, token_start, token_end, row_ends):
+def _chunk(block_table, req_start, token_start, token_end, row_ends):
     ends = torch.tensor(row_ends, dtype=torch.int32)
     return DeepseekV32IndexerPrefillChunkMetadata(
         block_table=block_table,
@@ -45,6 +45,7 @@ def _chunk(block_table, token_start, token_end, row_ends):
         token_start=token_start,
         token_end=token_end,
         num_reqs=block_table.shape[0],
+        req_start=req_start,
     )
 
 
@@ -54,9 +55,9 @@ QUERY_START_LOC = [0, 1, 4, 7, 12, 18]
 SEQ_LENS = torch.tensor([40, 10, 12, 21, 64])
 BLOCK_TABLE = torch.arange(20, dtype=torch.int32).view(5, 4)
 CHUNKS = [
-    _chunk(BLOCK_TABLE[1:4], 1, 12, list(range(11))),
-    _chunk(BLOCK_TABLE[4:5], 12, 15, [29, 30, 30]),
-    _chunk(BLOCK_TABLE[4:5], 15, 18, [31, 31, 32]),
+    _chunk(BLOCK_TABLE[1:4], 1, 1, 12, list(range(11))),
+    _chunk(BLOCK_TABLE[4:5], 4, 12, 15, [29, 30, 30]),
+    _chunk(BLOCK_TABLE[4:5], 4, 15, 18, [31, 31, 32]),
 ]
 
 

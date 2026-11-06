@@ -13,12 +13,20 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    async_tensor_h2d,
+    direct_register_custom_op,
+)
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillMetadata,
+)
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -1299,6 +1307,38 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
 
 
+def _gathers_shardq_topk(k_cache_prefix: str) -> bool:
+    layer = get_forward_context().no_compile_layers.get(k_cache_prefix)
+    return getattr(layer, "gather_shardq_topk", False)
+
+
+def reserve_shardq_exchange(k_cache_prefix: str, *gathered: torch.Tensor) -> None:
+    """Profiling run: the layer's ShardQ gathers, live together."""
+    if _gathers_shardq_topk(k_cache_prefix):
+        _ = [torch.empty_like(t) for t in gathered]
+
+
+def exchange_shardq_topk(
+    k_cache_prefix: str,
+    prefill_metadata: DeepseekV32IndexerPrefillMetadata,
+    topk_buffer: torch.Tensor,
+    width: int,
+) -> None:
+    """Each TP rank scored only its ShardQ slice of the prefill tokens, written
+    compactly after the decode rows; for layers with ``gather_shardq_topk``,
+    gather every rank's rows back into token order."""
+    split = prefill_metadata.shardq_split
+    if split is None or not _gathers_shardq_topk(k_cache_prefix):
+        return
+    start = split.num_decode_tokens
+    sizes = split.num_tokens_per_rank.tolist()
+    group = get_tp_group()
+    local = topk_buffer[start : start + sizes[group.rank_in_group], :width]
+    gathered = group.all_gatherv(local.contiguous(), dim=0, sizes=sizes)
+    rows = async_tensor_h2d(split.token_ids + start, device=topk_buffer.device)
+    topk_buffer[:, :width].index_copy_(0, rows, gathered)
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -1389,6 +1429,8 @@ def rocm_aiter_sparse_attn_indexer(
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
+        if topk_indices_buffer is not None:
+            reserve_shardq_exchange(k_cache_prefix, q_fp8, weights, topk_indices_buffer)
 
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
@@ -1446,6 +1488,11 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, head_dim), FP8_DTYPE),
             ((total_seq_lens, 4), torch.uint8),
         )
+        # Under ShardQ the chunks index the shardq_gather_indices tokens. The
+        # candidate source and consumers keep their rows in that order too.
+        prefill_q, prefill_weights = q_fp8, weights
+        if (indices := prefill_metadata.shardq_gather_indices) is not None:
+            prefill_q, prefill_weights = q_fp8[indices], weights[indices]
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
@@ -1461,9 +1508,9 @@ def rocm_aiter_sparse_attn_indexer(
                 ),
             )
             logits = rocm_fp8_mqa_logits(
-                q_fp8[chunk.token_start : chunk.token_end],
+                prefill_q[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
-                weights[chunk.token_start : chunk.token_end],
+                prefill_weights[chunk.token_start : chunk.token_end],
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
@@ -1522,6 +1569,10 @@ def rocm_aiter_sparse_attn_indexer(
                     logits.stride(1),
                     topk_tokens,
                 )
+
+        exchange_shardq_topk(
+            k_cache_prefix, prefill_metadata, topk_indices_buffer, topk_tokens
+        )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode

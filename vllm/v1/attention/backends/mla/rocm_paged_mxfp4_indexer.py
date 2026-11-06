@@ -12,13 +12,13 @@ a subclass sets their size. DeepSeek-V4.1's builder does, and with
 candidate consumers share.
 """
 
-import bisect
 from dataclasses import dataclass, field, fields
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -176,7 +176,7 @@ def plan_prefill_chunks(
     plans = []
     for chunk in chunks:
         t0, t1 = chunk.token_start, chunk.token_end
-        first = bisect.bisect_right(query_start_loc, t0) - 1
+        first = chunk.req_start
         requests = []
         for req in range(chunk.num_reqs):
             lo = max(query_start_loc[first + req], t0) - t0
@@ -444,15 +444,19 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             )
         if base.prefill is not None:
             assert cm.seq_lens_cpu_upper_bound is not None
+            qsl, qsl_cpu = cm.query_start_loc, cm.query_start_loc_cpu
+            if (shardq_qsl := base.prefill.shardq_query_start_loc_cpu) is not None:
+                # The chunks are over the ShardQ-gathered tokens.
+                qsl, qsl_cpu = async_tensor_h2d(shardq_qsl, self.device), shardq_qsl
             metadata.prefill_plans = plan_prefill_chunks(
                 base.prefill.chunks,
-                cm.query_start_loc_cpu.tolist(),
+                qsl_cpu.tolist(),
                 cm.seq_lens_cpu_upper_bound,
                 context_lens,
                 self.compress_ratio,
                 self.candidate_block_size,
                 self.min_gather_width,
-                cm.query_start_loc,
+                qsl,
             )
         return metadata
 

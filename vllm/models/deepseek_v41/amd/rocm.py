@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -80,6 +80,18 @@ def _trust_dsv4_extra_cache_nan_free(
         and kv_cache_dtype == "fp8_ds_mla"
         and not has_kv_transfer
         and has_extra_cache
+    )
+
+
+def _indexer_shardq_enabled(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        vllm_config.attention_config.sparse_mla_shard_q
+        and parallel.tensor_parallel_size > 1
+        and parallel.decode_context_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
     )
 
 
@@ -594,6 +606,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "are not supported."
                 )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        if self.indexer is not None and _indexer_shardq_enabled(vllm_config):
+            # The indexer scores this rank's ShardQ tokens, then gathers the
+            # top-k back into token order: attention stays head-sharded.
+            k_cache = self.indexer.k_cache
+            k_cache.use_shardq = k_cache.gather_shardq_topk = True
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None

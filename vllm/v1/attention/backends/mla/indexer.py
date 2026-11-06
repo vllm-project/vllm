@@ -423,6 +423,8 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_start: int
     token_end: int
     num_reqs: int
+    # The batch index of the chunk's first request.
+    req_start: int = 0
     skip_kv_gather: bool = False
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
@@ -686,6 +688,10 @@ class DeepseekV32IndexerPrefillMetadata:
     # tokens, gathered compactly in the order their top-k is written: the
     # indices of those tokens.
     shardq_gather_indices: torch.Tensor | None = None
+    # The split behind shardq_gather_indices and the requests' query ranges
+    # over those tokens.
+    shardq_split: ShardQSplit | None = None
+    shardq_query_start_loc_cpu: torch.Tensor | None = None
 
 
 @dataclass
@@ -1557,7 +1563,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
-            positions = shardq_gather_indices = None
+            positions = shardq_gather_indices = split = None
             if self.use_shardq and (
                 split := build_shardq_split(common_attn_metadata, self.vllm_config)
             ):
@@ -1665,6 +1671,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     else 0
                 ),
                 shardq_gather_indices=shardq_gather_indices,
+                shardq_split=split,
+                shardq_query_start_loc_cpu=query_start_loc_cpu
+                if split is not None
+                else None,
             )
 
         decode_metadata = None
@@ -2050,6 +2060,7 @@ def build_prefill_chunk_metadata(
         token_start=token_start,
         token_end=token_end,
         num_reqs=num_reqs,
+        req_start=start_idx,
         skip_kv_gather=skip_kv_gather,
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,

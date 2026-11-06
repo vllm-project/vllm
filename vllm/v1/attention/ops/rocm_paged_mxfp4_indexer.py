@@ -30,6 +30,8 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _apply_candidate_mask_strided,
     _max_decode_logits_rows,
+    exchange_shardq_topk,
+    reserve_shardq_exchange,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -436,6 +438,11 @@ def _layer(
     )
     kv = _kv_view(kv_cache, head_dim)
     num_heads = q_values.shape[1]
+    # Under ShardQ the prefill chunks index the shardq_gather_indices tokens,
+    # which begin with the decode rows.
+    prefill = metadata.prefill
+    if prefill is not None and (indices := prefill.shardq_gather_indices) is not None:
+        q_values, q_scale, weights = (t[indices] for t in (q_values, q_scale, weights))
     return _Layer(
         metadata=metadata,
         kv=kv,
@@ -681,6 +688,9 @@ def rocm_mxfp4_sparse_attn_indexer(
             max_model_len,
             candidate_block_size if candidate_write else 0,
         )
+        reserve_shardq_exchange(
+            k_cache_prefix, q_values, q_scale, weights, topk_indices_buffer
+        )
         return topk_indices_buffer
     layer = _layer(
         k_cache_prefix,
@@ -700,6 +710,9 @@ def rocm_mxfp4_sparse_attn_indexer(
     if metadata.prefill is not None:
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             _dense_prefill(layer, chunk, plan, candidate_write)
+        exchange_shardq_topk(
+            k_cache_prefix, metadata.prefill, topk_indices_buffer, topk_tokens
+        )
     if metadata.decode is not None:
         _dense_decode(layer, max_model_len, candidate_write)
     return topk_indices_buffer
@@ -731,6 +744,9 @@ def rocm_mxfp4_sparse_mqa_indexer(
             gather_block_size=candidate_block_size,
             num_candidate_cols=num_candidate_cols,
         )
+        reserve_shardq_exchange(
+            k_cache_prefix, q_values, q_scale, weights, topk_indices_buffer
+        )
         return topk_indices_buffer
     layer = _layer(
         k_cache_prefix,
@@ -753,6 +769,9 @@ def rocm_mxfp4_sparse_mqa_indexer(
                 _dense_prefill(layer, chunk, plan, candidate_write=False)
         for launch in metadata.gather_launches:
             _gather_prefill(layer, launch, num_candidate_cols)
+        exchange_shardq_topk(
+            k_cache_prefix, metadata.prefill, topk_indices_buffer, topk_tokens
+        )
     if metadata.decode is not None:
         # A FULL graph cannot follow the per-step gate; the gather is the side
         # that stays flat in the context length.
