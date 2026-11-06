@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import importlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Literal
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
@@ -67,6 +68,12 @@ class SleepModeBackend(ABC):
         (e.g. ``["weights"]`` or ``["kv_cache"]``).
         """
         raise NotImplementedError
+
+    def keep_all_but(self, rewritten: Collection[int]) -> None:
+        """Before a level-2 ``suspend``: keep the weights it would discard except
+        the tensors at these addresses, which the caller rewrites after ``resume``.
+        """
+        return None
 
     def state(self) -> SleepModeState:
         """Current lifecycle state. Lets ``/health`` distinguish a healthy-idle
@@ -135,6 +142,12 @@ class CuMemBackend(SleepModeBackend):
         if level == 1:
             offload_tags = ("weights", *offload_tags)
         allocator.sleep(offload_tags=offload_tags)
+
+    def keep_all_but(self, rewritten: Collection[int]) -> None:
+        if current_platform.is_cuda_alike():
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            CuMemAllocator.get_instance().keep_all_but("weights", rewritten)
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance

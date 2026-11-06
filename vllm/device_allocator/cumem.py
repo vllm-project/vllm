@@ -11,7 +11,7 @@
 import atexit
 import gc
 import mmap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -320,6 +320,18 @@ class CuMemAllocator:
             unmap_and_release(data.handle)
         finally:
             data.is_asleep = True
+
+    def keep_all_but(self, tag: str, rewritten: Collection[int]) -> None:
+        """Move ``tag`` allocations to the runtime tag, which every sleep offloads,
+        unless each live tensor in them starts at an address in ``rewritten``."""
+        for pool, _ in self.allocator_and_pools.get(tag, []):
+            for allocation in pool.snapshot():
+                data = self.pointer_to_data.get(allocation["address"])
+                if data is not None and any(
+                    block["state"] != "inactive" and block["address"] not in rewritten
+                    for block in allocation["blocks"]
+                ):
+                    data.tag = "runtime"
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""

@@ -340,6 +340,13 @@ class Worker(WorkerBase):
         if level == 2:
             model = self.model_runner.model
             self._save_sleep_parameters(model)
+            # Level 2 discards only what the weight update rewrites: parameters.
+            self.sleep_mode_backend.keep_all_but(
+                {
+                    parameter.untyped_storage().data_ptr()
+                    for parameter in self._get_sleep_parameters(model).values()
+                }
+            )
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }

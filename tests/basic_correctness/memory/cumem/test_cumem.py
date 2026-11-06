@@ -536,6 +536,30 @@ def test_runtime_state_survives_sleep(level):
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_level2_keeps_what_the_update_does_not_rewrite():
+    """Only allocations holding nothing but rewritten tensors are discarded."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weight = torch.zeros(32 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+        small_weight = torch.zeros(4096, dtype=torch.uint8, device=DEVICE_TYPE)
+        table = torch.arange(4096, device=DEVICE_TYPE)
+
+    backend = CuMemBackend()
+    backend.keep_all_but({weight.data_ptr(), small_weight.data_ptr()})
+    # ``weight`` has its own allocation; ``table`` shares one with ``small_weight``.
+    assert allocator.pointer_to_data[weight.data_ptr()].tag == "weights"
+    assert {d.tag for d in allocator.pointer_to_data.values()} == {"weights", "runtime"}
+
+    backend.suspend(level=2)
+    assert mapped_usage(allocator) == 0
+    backend.resume()
+    assert torch.equal(table, torch.arange(4096, device=DEVICE_TYPE))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
     """Discarded weights-tag memory is remapped; ROCm zeroes it over stale pages."""
     allocator = get_mem_allocator_instance()
