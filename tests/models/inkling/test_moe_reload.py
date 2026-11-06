@@ -104,6 +104,7 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     model = _cold_start(_checkpoint(seed=0))
     experts = model.mlp.experts.routed_experts
+    ptrs = {n: t.data_ptr() for n, t in experts.state_dict(keep_vars=True).items()}
     # EPLB views every expert weight as [E, -1]; the [1] amax must not be one.
     assert all(w.shape[0] == E for w in experts.get_expert_weights())
 
@@ -121,6 +122,9 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
         finish_reload(model, _MODEL_CONFIG, torch.device("cuda"))
 
         actual = _state(model)
+        assert ptrs == {
+            n: t.data_ptr() for n, t in experts.state_dict(keep_vars=True).items()
+        }
         expected = _state(_cold_start(new, scales_from_loader=True))
         for projection in ("w13", "w2"):
             amax = actual.pop(f"{projection}_input_amax")

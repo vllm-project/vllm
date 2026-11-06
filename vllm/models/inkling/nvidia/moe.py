@@ -588,7 +588,11 @@ class InklingMoE(nn.Module):
             # Through .data like the other expert loads, which layerwise
             # reload doesn't track.
             amax.data.copy_(weight)
-            return [f"experts.routed_experts.{projection}_input_amax"]
+            # Post-load processing derives the input scale from it.
+            return [
+                f"experts.routed_experts.{projection}_input_amax",
+                f"experts.routed_experts.{projection}_input_scale",
+            ]
 
         param = getattr(experts, key)
         slots = self._local_expert_slots()
@@ -637,12 +641,7 @@ class InklingMoE(nn.Module):
     def finalize_load(self) -> list[str]:
         """Post-load fixups for zeroed padding experts."""
         experts = self.experts.routed_experts
-        # Post-load processing derives the input scales from the amax.
-        out = [
-            f"experts.routed_experts.{projection}_input_scale"
-            for projection in ("w13", "w2")
-            if hasattr(experts, f"{projection}_input_amax")
-        ]
+        out: list[str] = []
         # Zero the EP-alignment padding experts (if any) so their
         # (never-routed) slots hold defined values.
         slots = self._local_expert_slots()
