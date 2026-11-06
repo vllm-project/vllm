@@ -419,7 +419,9 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                         prefixes,
                         total_q=end - start,
                         max_query_len=end - start,
-                        max_seq_len=indexer.max_model_len,
+                        max_seq_len=min(
+                            indexer.max_model_len, block_table.shape[1] * PAGE_SIZE
+                        ),
                     )
                     local_chunks.append(
                         MiniMaxM3IndexerMSAPrefillChunk(
