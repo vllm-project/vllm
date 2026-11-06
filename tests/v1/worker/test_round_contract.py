@@ -37,12 +37,12 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
 from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     PlanLayout,
     arange_table,
+    check_accept_result,
 )
 from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
     TargetTokens,
     VerifyPlan,
-    check_accept_result,
 )
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.utils import AttentionGroup
@@ -341,8 +341,8 @@ def test_mrope_tree_positions(last_parent):
 
 
 def _check(parent, counts, path, path_len):
-    """``check_accept_result`` on CPU: a failed device assert would end a GPU
-    process."""
+    """``check_accept_result`` on CPU (the Triton interpreter): a failed device
+    assert would end a GPU process."""
     cpu = torch.device("cpu")
     row_start = torch.tensor(np.concatenate([[0], np.cumsum(counts)]), device=cpu)
     tokens = torch.zeros(int(row_start[-1]), dtype=torch.int64)
@@ -361,12 +361,26 @@ def _check(parent, counts, path, path_len):
 _TREE = [[-1, 0, 0, 1], [-1, 0, 1, 2]]
 
 
-def test_check_accept_result():
-    """A root-to-row path of the plan passes, padding past path_len ignored; a
-    path through a row that is not its parent's child fails."""
+@pytest.mark.skipif(
+    os.environ.get("TRITON_INTERPRET") != "1",
+    reason="a failed device assert would end a GPU process",
+)
+@pytest.mark.parametrize(
+    "path, path_len",
+    [
+        ([[0, 2, 3, 0], [0, 1, 0, 0]], [3, 2]),  # row 3 is not a child of row 2
+        ([[1, 3, 0, 0], [0, 1, 0, 0]], [2, 2]),  # does not start at the root
+        ([[0, 1, 3, 0], [0, 1, 2, 3]], [3, 4]),  # past the request's 3 rows
+        ([[0, 1, 3, 0], [0, 0, 0, 0]], [3, 0]),  # commits nothing
+        ([[0, 1, 3, 0], [0, -1, 0, 0]], [3, 2]),  # a negative row
+    ],
+)
+def test_check_accept_result(path, path_len):
+    """A root-to-row path of the plan passes, padding past path_len ignored;
+    each bad path fails."""
     _check(_TREE, [4, 3], [[0, 1, 3, 9], [0, 1, 2, 9]], [3, 3])
     with pytest.raises(RuntimeError, match="not in the plan"):
-        _check(_TREE, [4, 3], [[0, 2, 3, 0], [0, 1, 0, 0]], [3, 2])
+        _check(_TREE, [4, 3], path, path_len)
 
 
 def _random_paths(gen, parent, counts, to_last=False):

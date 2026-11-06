@@ -8,7 +8,11 @@ attention backend's to derive from the parents."""
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    TargetTokens,
+    VerifyPlan,
+)
 
 
 def arange_table(
@@ -148,3 +152,73 @@ class PlanLayout:
         if self.applied:
             positions[:num_tokens].copy_(self.chain_positions[:num_tokens])
             self.applied = False
+
+
+@triton.jit
+def _check_path_kernel(
+    parent_ptr,  # [R, C] int32, by batch row
+    stride_parent,
+    row_start_ptr,  # [num_reqs + 1] int32
+    path_ptr,  # [R, C] int32
+    stride_path,
+    path_len_ptr,  # [R] int32
+    ok_ptr,  # [1] int32 out: 1 iff every request's path is in the plan
+    num_reqs,
+    C: tl.constexpr,
+    CP: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
+    cols = tl.arange(0, CP)[None, :]
+    num_bad = 0
+    for block in range(0, num_reqs, BLOCK_R):
+        reqs = block + tl.arange(0, BLOCK_R)
+        live = reqs < num_reqs
+        rows = tl.load(row_start_ptr + reqs + 1, mask=live, other=1) - tl.load(
+            row_start_ptr + reqs, mask=live, other=0
+        )
+        path_len = tl.load(path_len_ptr + reqs, mask=live, other=1)
+        on_path = live[:, None] & (cols < path_len[:, None]) & (cols < C)
+        path = tl.load(path_ptr + reqs[:, None] * stride_path + cols, mask=on_path)
+        prev = tl.load(
+            path_ptr + reqs[:, None] * stride_path + cols - 1,
+            mask=on_path & (cols > 0),
+            other=-1,
+        )
+        in_rows = (path >= 0) & (path < rows[:, None]) & (path < C)
+        parent = tl.load(
+            parent_ptr + reqs[:, None] * stride_parent + path,
+            mask=on_path & in_rows,
+            other=-2,
+        )
+        # Row 0 is the root; every later row is a child of the row before it.
+        step_ok = ~on_path | tl.where(cols == 0, path == 0, in_rows & (parent == prev))
+        req_ok = (path_len >= 1) & (path_len <= rows)
+        req_ok = req_ok & (tl.min(step_ok.to(tl.int32), axis=1) == 1)
+        num_bad += tl.sum((live & ~req_ok).to(tl.int32))
+    tl.store(ok_ptr, (num_bad == 0).to(tl.int32))
+
+
+def check_accept_result(
+    plan: VerifyPlan, target: TargetTokens, result: AcceptResult
+) -> None:
+    """Assert on device, without a host sync, that ``result`` is a path of
+    ``plan``: it starts at the root, each row's parent is the row before it,
+    and ``path_len`` is in ``[1, rows]``. One kernel and one async assert."""
+    num_reqs = target.row_start.shape[0] - 1
+    width = plan.parent.shape[1]
+    ok = torch.empty(1, dtype=torch.int32, device=result.path.device)
+    _check_path_kernel[(1,)](
+        plan.parent,
+        plan.parent.stride(0),
+        target.row_start,
+        result.path,
+        result.path.stride(0),
+        result.path_len,
+        ok,
+        num_reqs,
+        C=width,
+        CP=triton.next_power_of_2(width),
+        BLOCK_R=32,
+        num_warps=1,
+    )
+    torch._assert_async(ok, "tree_accept returned a path that is not in the plan")

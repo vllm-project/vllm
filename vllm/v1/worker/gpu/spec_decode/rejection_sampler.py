@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.plan_kernels import check_accept_result
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -31,7 +32,6 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
     TargetTokens,
     VerifyPlan,
-    check_accept_result,
 )
 
 # The speculator's tree_accept: (plan, target tokens, width) -> accepted paths.
