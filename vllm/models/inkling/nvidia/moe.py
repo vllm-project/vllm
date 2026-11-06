@@ -37,6 +37,7 @@ from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.modelopt import (
     NVFP4_INPUT_SCALE_DENOMINATOR,
+    ModelOptNvFp4FusedMoE,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
@@ -462,7 +463,7 @@ class InklingMoE(nn.Module):
         # The checkpoint stores each projection's activation amax instead of
         # its input scale; post-load processing derives the scale from it.
         routed_experts = self.experts.routed_experts
-        if getattr(routed_experts, "w13_input_scale", None) is not None:
+        if isinstance(routed_experts.quant_method, ModelOptNvFp4FusedMoE):
             for projection in ("w13", "w2"):
                 amax = Parameter(
                     torch.empty(1, dtype=torch.bfloat16), requires_grad=False

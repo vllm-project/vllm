@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
@@ -84,6 +85,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    FLOAT4_E2M1_MAX,
     dequantize_nvfp4_moe_weights,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
@@ -138,7 +140,7 @@ logger = init_logger(__name__)
 # layout, so retain it as a checkpoint-compatibility alias.
 _BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
 # NVFP4 input_scale = activation amax / (FP8 E4M3 max * FP4 E2M1 max).
-NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
+NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * FLOAT4_E2M1_MAX
 
 # Single source of truth for the ModelOpt linear algos.
 #
@@ -1081,11 +1083,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             retire_parameter(layer, f"{prefix}_input_amax")
             if is_weights_pre_processed():
                 continue
-            amax = amax.float().max()
-            if not (torch.isfinite(amax) and amax > 0):
-                raise ValueError(f"bad {prefix} input_amax: {amax.item()}")
+            value = amax.max().item()
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(f"bad {prefix} input_amax: {value}")
             getattr(layer, f"{prefix}_input_scale").fill_(
-                amax / NVFP4_INPUT_SCALE_DENOMINATOR
+                value / NVFP4_INPUT_SCALE_DENOMINATOR
             )
 
         if is_weights_pre_processed():
