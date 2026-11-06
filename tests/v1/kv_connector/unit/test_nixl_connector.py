@@ -2744,18 +2744,19 @@ def test_hisparse_dram_rank0_only_read_keeps_device_part(recv_worker):
         local_block_descs_ids=np.array([0, 2]),
         remote_block_descs_ids=np.array([5, 7]),
         notif_agent="prefill",
-        notif_id=b"request:1",
+        remote_request_id="request",
+        expected_consumers=1,
     )
 
     (device_read,) = worker.nixl_wrapper.make_prepped_xfer.call_args_list
     assert device_read.args[:2] == ("READ", 20)
     np.testing.assert_array_equal(device_read.args[2], [0])
     np.testing.assert_array_equal(device_read.args[4], [7])
+    # Only the device transfer is issued, so this reader declares one.
+    assert device_read.kwargs["notif_msg"] == b"request:1:1"
 
     assert worker.get_finished() == (set(), {"request"})
-    worker.nixl_wrapper.send_notif.assert_called_once_with(
-        "prefill", notif_msg=b"request:1"
-    )
+    worker.nixl_wrapper.send_notif.assert_not_called()
 
 
 def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
@@ -2775,14 +2776,15 @@ def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
         local_block_descs_ids=np.array([0, 1]),
         remote_block_descs_ids=np.array([5, 6]),
         notif_agent="prefill",
-        notif_id=b"request:1",
+        remote_request_id="request",
+        expected_consumers=1,
     )
 
     worker.nixl_wrapper.make_prepped_xfer.assert_not_called()
-    assert worker.get_finished() == (set(), {"request"})
     worker.nixl_wrapper.send_notif.assert_called_once_with(
-        "prefill", notif_msg=b"request:1"
+        "prefill", notif_msg=b"request:1:0"
     )
+    assert worker.get_finished() == (set(), {"request"})
 
 
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
