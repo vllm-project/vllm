@@ -25,18 +25,19 @@ if TYPE_CHECKING:
     from vllm.inputs import PromptType
 
 
-def _decode(text: str, model_config: "ModelConfig", return_format: str) -> Any:
+def _decode(text: str, model_config: "ModelConfig", **options: Any) -> Any:
     """Parse the raw model output with the HF processor, if it knows how to."""
     processor = cached_processor_from_config(model_config)
-    if "return_format" not in inspect.signature(processor.decode).parameters:
+    supported = inspect.signature(processor.decode).parameters
+    if not (options := {k: v for k, v in options.items() if k in supported}):
         return text
     ids = processor.tokenizer.encode(text, add_special_tokens=False)
-    return processor.decode(ids, return_format=return_format)
+    return processor.decode([ids], **options)[0]
 
 
 class TranscriptionMixin(SupportsTranscription, Base):
     supports_diarized_transcription = True
-    # HF processors take no language, so whether one works is up to the model
+    # Whether a language works is up to the model
     supported_languages = LANGUAGES
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
@@ -96,13 +97,14 @@ class TranscriptionMixin(SupportsTranscription, Base):
 
     @classmethod
     def post_process_output(cls, text: str, model_config: "ModelConfig") -> str:
-        return _decode(text, model_config, "transcription_only").strip()
+        options = dict(return_format="transcription_only", strip_prefix=True)
+        return _decode(text, model_config, **options).strip()
 
     @classmethod
     def parse_diarized_transcript(
         cls, text: str, model_config: "ModelConfig"
     ) -> list[DiarizedTranscriptionSegment]:
-        segments = _decode(text, model_config, "parsed")
+        segments = _decode(text, model_config, return_format="parsed")
         # Unparsable output comes back as a string
         if not isinstance(segments, list):
             return []

@@ -256,6 +256,16 @@ def test_qwen3_asr_config_follows_the_checkpoint_format():
     assert not hasattr(native_config, "audio_config")
 
 
+def test_transcription_output_strips_a_generated_prefix():
+    model_config = ModelConfig(
+        model="nvidia/audio-flamingo-3-hf", model_impl="transformers"
+    )
+    model_cls = get_model_cls(model_config)
+    text = "The spoken content of the audio is 'Hello there.'."
+
+    assert model_cls.post_process_output(text, model_config) == "Hello there."
+
+
 VIBEVOICE_OUTPUT = (
     'assistant\n[{"Start":0.0,"End":1.5,"Speaker":0,"Content":"Hello there."},'
     '{"Start":1.62,"End":3,"Speaker":1,"Content":"Hi!"},'
