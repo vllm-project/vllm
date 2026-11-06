@@ -16,7 +16,7 @@ import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import GenerationConfig, PreTrainedConfig
+from transformers import GenerationConfig, PreTrainedConfig, Qwen3ASRConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -170,7 +170,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
     step5="Step5Config",
     step5_vl="Step5VLConfig",
-    qwen3_asr="Qwen3ASRConfig",
     ricursive="RicursiveConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
@@ -344,6 +343,18 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
     )
 
 
+def _flatten_qwen3_asr_config(config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Convert an original Qwen3-ASR `config.json` to the Transformers layout."""
+    thinker_config = config_dict["thinker_config"]
+    audio_config = {**thinker_config["audio_config"], "model_type": "qwen3_asr_encoder"}
+    config_dict = {**thinker_config, **config_dict, "audio_config": audio_config}
+    del config_dict["thinker_config"]
+    if thinker_config["model_type"] == "qwen3_forced_aligner":
+        config_dict["architectures"] = ["Qwen3ASRForcedAlignerForTokenClassification"]
+        config_dict["num_labels"] = config_dict.pop("classify_num")
+    return config_dict
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -413,6 +424,10 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
+            kwargs.setdefault("name_or_path", str(model))
+            config_dict = _flatten_qwen3_asr_config(config_dict)
+            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
 
