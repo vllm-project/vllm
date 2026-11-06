@@ -244,7 +244,8 @@ def test_scoped_max_split_ignores_async_allocator(monkeypatch):
     set_settings.assert_not_called()
 
 
-def test_memory_profile_bounds_decode_logits_rows(monkeypatch):
+@pytest.mark.parametrize("kv_cache_memory_bytes", [None, 1])
+def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_bytes):
     """ROCm decode workspace uses max_num_seqs during startup profiling."""
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
@@ -267,7 +268,7 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch):
     worker = SimpleNamespace(
         vllm_config=config,
         randomize_dummy_inputs=True,
-        cache_config=SimpleNamespace(kv_cache_memory_bytes=None),
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
         model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
         init_snapshot=SimpleNamespace(free_memory=2),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
