@@ -46,8 +46,8 @@
 #endif
 
 // Defined unconditionally: a TU that already has a different LDS_SIZE (e.g.
-// skinny_gemms_int4.cu, which uses 64 KiB and no gfx950 case) must not silently
-// size these kernels' LDS window from it.
+// skinny_gemms_int4.cuh, which uses 64 KiB and no gfx950 case) must not
+// silently size these kernels' LDS window from it.
 #ifdef LDS_SIZE
   #error "LDS_SIZE already defined"
 #endif
@@ -2034,7 +2034,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
 }
 #endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
 
-// Do not leak this into the including translation units: skinny_gemms_int4.cu
+// Do not leak this into the including translation units: skinny_gemms_int4.cuh
 // defines its own LDS_SIZE (64 KiB, no gfx950 case), so a shared TU must
 // never pick up one definition from the other by accident.
 #undef LDS_SIZE
