@@ -85,7 +85,7 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import bf16_mega_gate
+from vllm.utils.deep_gemm import bf16_mega_gate, is_bf16_mega_gate_supported
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -226,7 +226,9 @@ class DeepseekV4MoE(nn.Module):
         self.use_sequence_parallel = use_sequence_parallel
         self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
+        self.use_gc_moe = moe_backend == "gc_moe"
         self.use_native_mega_moe = moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        self.use_mega_gate = self.use_native_mega_moe and is_bf16_mega_gate_supported()
         if (
             self.use_native_mega_moe
             and not vllm_config.parallel_config.enable_expert_parallel
@@ -379,7 +381,12 @@ class DeepseekV4MoE(nn.Module):
             and (self.use_sequence_parallel or self.tp_size == 1)
         )
 
-        self.experts = DeepGemmMegaMoEExperts(
+        experts_cls = DeepGemmMegaMoEExperts
+        if self.use_gc_moe:
+            from vllm.model_executor.layers.fused_moe.gc_moe import GcMoEExperts
+
+            experts_cls = GcMoEExperts
+        self.experts = experts_cls(
             vllm_config,
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
@@ -467,7 +474,7 @@ class DeepseekV4MoE(nn.Module):
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if hidden_states.shape[0] <= gate_threshold:
+        if not self.use_mega_gate or hidden_states.shape[0] <= gate_threshold:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
@@ -834,6 +841,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
+        self.use_mega_gate = self.use_native_mega_moe and is_bf16_mega_gate_supported()
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -986,7 +994,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = sp_shard(input_ids)
 
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=self.has_local_hash_moe,

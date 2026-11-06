@@ -95,6 +95,7 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.deep_gemm import is_bf16_mega_gate_supported
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -747,6 +748,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
+        self.use_mega_gate = self.use_native_mega_moe and is_bf16_mega_gate_supported()
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -1184,7 +1186,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def _mega_gate_metadata(
         self, input_ids: torch.Tensor | None
     ) -> MegaGateRoutingMetadata | None:
-        if not self.use_native_mega_moe:
+        if not self.use_mega_gate:
             return None
         assert input_ids is not None
         return prepare_mega_gate_routing_metadata(
