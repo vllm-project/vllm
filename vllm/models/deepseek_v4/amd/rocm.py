@@ -1116,12 +1116,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     )
                 if type(kernel) is not AiterFp8BlockScaledMMKernel:
                     continue
-                if not kernel.use_triton:
-                    continue
-                kernel._gfx1151_skinny_blockscale_n = output_size
-                kernel._gfx1151_skinny_cu_count = torch.cuda.get_device_properties(
-                    linear.weight.device
-                ).multi_processor_count
+                if linear.weight.shape[0] != output_size:
+                    raise ValueError(
+                        "DeepSeek V4 gfx1151 skinny blockscale opt-in expected "
+                        f"output size {output_size}, got {linear.weight.shape[0]}"
+                    )
+                kernel.enable_gfx1151_skinny_blockscale(output_size)
             return
 
         if not rocm_aiter_ops.is_enabled():
