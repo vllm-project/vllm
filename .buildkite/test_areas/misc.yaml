@@ -1117,3 +1117,19 @@ steps:
       - vllm/v1/spec_decode/
       - tests/v1/spec_decode/test_acceptance_length.py
       - vllm/platforms/rocm.py
+
+- label: CMake CUDA architecture selection
+  key: cmake-cuda-archs
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 10
+  device: cpu-small
+  working_dir: /vllm-workspace/tests
+  source_file_dependencies:
+  - CMakeLists.txt
+  - cmake/cuda_archs.cmake
+  - cmake/utils.cmake
+  - tests/test_cuda_archs.py
+  commands:
+  - uv pip install --system cmake==4.4.0
+  - pytest -v -s --noconftest test_cuda_archs.py
