@@ -34,7 +34,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     Qwen3DSparkForCausalLM,
     Qwen3DSparkModel,
 )
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.models.minimax_m3.common.ops.dspark_context_kv import (
     DSparkContextKVWriter,
     rotary_dims_supported,
@@ -336,6 +336,20 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
                 )
 
                 self._mono_drafter = DrafterDecode(self, vllm_config)
+            if self.use_aux_hidden_state:
+                # each rank multiplies a quarter of fc's input columns and the
+                # partials are all-reduced, instead of every rank reading the
+                # whole replicated weight
+                self.fc = RowParallelLinear(
+                    self.fc.input_size,
+                    self.fc.output_size,
+                    bias=False,
+                    input_is_parallel=False,
+                    params_dtype=self.fc.params_dtype,
+                    quant_config=self.quant_config,
+                    prefix=maybe_prefix(prefix, "fc"),
+                    return_bias=False,
+                )
 
     def __call__(self, *args, **kwargs):
         # ahead of torch.compile's wrapper: the kernels launch outside the graph
