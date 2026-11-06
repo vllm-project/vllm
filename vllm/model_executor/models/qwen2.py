@@ -35,7 +35,7 @@ from transformers import Qwen2Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -71,6 +71,7 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_pp_stage,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -362,10 +363,11 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
+        self.pp_stage = get_pp_stage()
 
         if (
-            get_pp_group().is_first_rank
-            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            self.pp_stage.is_first_rank
+            or (config.tie_word_embeddings and self.pp_stage.is_last_rank)
             or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
@@ -391,7 +393,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        if get_pp_group().is_last_rank:
+        if self.pp_stage.is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
@@ -406,7 +408,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if get_pp_group().is_first_rank:
+        if self.pp_stage.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -420,7 +422,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
-        if get_pp_group().is_first_rank:
+        if self.pp_stage.is_first_rank:
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
@@ -433,7 +435,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
 
-        if not get_pp_group().is_last_rank:
+        if not self.pp_stage.is_last_rank:
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -463,6 +465,7 @@ class Qwen2ForCausalLM(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+    supports_single_pp_stage = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -476,7 +479,7 @@ class Qwen2ForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        if get_pp_group().is_last_rank:
+        if get_pp_stage().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,

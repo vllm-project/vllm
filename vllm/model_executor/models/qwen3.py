@@ -32,7 +32,7 @@ from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
@@ -57,7 +57,13 @@ from .interfaces import (
 )
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    get_pp_stage,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -289,6 +295,7 @@ class Qwen3ForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
+    supports_single_pp_stage = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -303,7 +310,7 @@ class Qwen3ForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        if get_pp_group().is_last_rank:
+        if get_pp_stage().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,

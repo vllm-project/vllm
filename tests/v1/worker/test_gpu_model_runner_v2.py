@@ -545,7 +545,6 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     ("draft_moe", "draft_attn"),
     [(None, None), ("triton", AttentionBackendEnum.TRITON_ATTN)],
 )
-@pytest.mark.usefixtures("dist_init")
 def test_standalone_draft_kv_dtype_override(
     monkeypatch, draft_dtype, expected_dtype, data_parallel_index, draft_moe, draft_attn
 ):

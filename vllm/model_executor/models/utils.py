@@ -1038,12 +1038,12 @@ def make_layers(
         Tuple of (start_layer, end_layer, modules).
 
     """
-    from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
     from vllm.model_executor.offloader import get_offloader
 
+    pp_stage = get_pp_stage()
     start_layer, end_layer = get_pp_indices(
-        num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
+        num_hidden_layers, pp_stage.rank_in_group, pp_stage.world_size
     )
 
     modules = torch.nn.ModuleList(
