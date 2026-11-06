@@ -94,8 +94,21 @@ def _builder(backend: str, num_spec: int = 0):
     return cfg, builder
 
 
+class _LayerShim(types.SimpleNamespace):
+    """Layer state stand-in that binds the real ``QwenGatedDeltaNetAttention``
+    instance methods on access (data attributes come from the namespace), so
+    new helper methods used by ``_forward_core`` resolve to the real class
+    instead of needing to be listed here."""
+
+    def __getattr__(self, name):
+        attr = getattr(QwenGatedDeltaNetAttention, name, None)
+        if callable(attr):
+            return types.MethodType(attr, self)
+        raise AttributeError(name)
+
+
 def _layer(cfg, weights, conv_state, ssm_state, packed_decode=False):
-    layer = types.SimpleNamespace(
+    layer = _LayerShim(
         prefix=PREFIX,
         enable_packed_recurrent_decode=packed_decode,
         tp_size=1,
@@ -108,9 +121,8 @@ def _layer(cfg, weights, conv_state, ssm_state, packed_decode=False):
         activation="silu",
         A_log=weights["A_log"],
         dt_bias=weights["dt_bias"],
-        conv1d=types.SimpleNamespace(
-            weight=weights["conv_weight"], bias=weights["conv_bias"]
-        ),
+        # Production conv1d is ColumnParallelLinear(bias=False).
+        conv1d=types.SimpleNamespace(weight=weights["conv_weight"], bias=None),
         kv_cache=(conv_state, ssm_state),
         _checkpoint_buffer_spec=((64, HV, V, K), torch.float32),
         _checkpoint_exporter=MambaPrefillCheckpointExporter(state_len=CONV_KERNEL - 1),
@@ -118,14 +130,6 @@ def _layer(cfg, weights, conv_state, ssm_state, packed_decode=False):
     with set_current_vllm_config(cfg):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
     layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
-    for name in (
-        "rearrange_mixed_qkv",
-        "_forward_core",
-        "_forward_core_decode_non_spec",
-        "_forward_flashinfer_prefill",
-    ):
-        method = getattr(QwenGatedDeltaNetAttention, name)
-        setattr(layer, name, types.MethodType(method, layer))
     return layer
 
 
@@ -173,11 +177,23 @@ def _setup(seq_lens, query_lens, state_dtype, gen):
         A_log=randn(HV, dtype=torch.float32),
         dt_bias=randn(HV, dtype=torch.float32),
         conv_weight=randn(CONV_DIM, 1, CONV_KERNEL),
-        conv_bias=randn(CONV_DIM),
     )
     num_tokens = sum(query_lens)
     inputs = (randn(num_tokens, CONV_DIM), randn(num_tokens, HV), randn(num_tokens, HV))
     return common, weights, inputs, conv_state0, ssm_state0
+
+
+def _assert_same_run(run, ref_run, num_actual, tol):
+    """Two runs agree on outputs and cache states. Outputs compare over the
+    actual rows only: padding rows behind num_actual_tokens are uninitialized
+    by contract."""
+    out, conv, ssm = run
+    ref_out, ref_conv, ref_ssm = ref_run
+    torch.testing.assert_close(
+        out[:num_actual], ref_out[:num_actual], atol=tol, rtol=tol
+    )
+    torch.testing.assert_close(conv, ref_conv, atol=0, rtol=0)
+    torch.testing.assert_close(ssm, ref_ssm, atol=tol, rtol=tol)
 
 
 # (decode seq lens, prefill seq lens, prefill query lens, expected mode)
@@ -224,24 +240,11 @@ def test_flashinfer_prefill_routes_match(case, state_dtype):
     for out, _, _ in runs.values():
         assert not out[:num_actual].isnan().any(), "unwritten output rows"
 
-    out, conv_state, ssm_state = runs["pool"]
     # The pool route changes only where FlashInfer reads/writes states.
-    # Outputs are compared over the actual rows only: padding rows behind
-    # num_actual_tokens are uninitialized by contract.
-    gather_out, gather_conv, gather_ssm = runs["gather"]
-    torch.testing.assert_close(
-        out[:num_actual], gather_out[:num_actual], atol=1e-3, rtol=1e-3
-    )
-    torch.testing.assert_close(conv_state, gather_conv, atol=0, rtol=0)
-    torch.testing.assert_close(ssm_state, gather_ssm, atol=1e-3, rtol=1e-3)
+    _assert_same_run(runs["pool"], runs["gather"], num_actual, tol=1e-3)
     # Different chunk kernels: tolerances of the kernel-level parity tests.
     tol = 2e-2 if state_dtype == torch.float32 else 6e-2
-    ref_out, ref_conv, ref_ssm = runs["cutedsl"]
-    torch.testing.assert_close(
-        out[:num_actual], ref_out[:num_actual], atol=tol, rtol=tol
-    )
-    torch.testing.assert_close(conv_state, ref_conv, atol=0, rtol=0)
-    torch.testing.assert_close(ssm_state, ref_ssm, atol=tol, rtol=tol)
+    _assert_same_run(runs["pool"], runs["cutedsl"], num_actual, tol)
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
@@ -266,17 +269,11 @@ def test_pool_route_with_spec_decode_configured(state_dtype):
     with set_current_vllm_config(ref_cfg):
         meta_ref = ref_builder.build(common_prefix_len=0, common_attn_metadata=common)
 
-    out, conv, ssm = _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0)
-    assert not out[:num_actual].isnan().any(), "unwritten output rows"
-    ref_out, ref_conv, ref_ssm = _run(
-        ref_cfg, meta_ref, weights, inputs, conv_state0, ssm_state0
-    )
+    run = _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0)
+    assert not run[0][:num_actual].isnan().any(), "unwritten output rows"
+    ref_run = _run(ref_cfg, meta_ref, weights, inputs, conv_state0, ssm_state0)
     tol = 2e-2 if state_dtype == torch.float32 else 6e-2
-    torch.testing.assert_close(
-        out[:num_actual], ref_out[:num_actual], atol=tol, rtol=tol
-    )
-    torch.testing.assert_close(conv, ref_conv, atol=0, rtol=0)
-    torch.testing.assert_close(ssm, ref_ssm, atol=tol, rtol=tol)
+    _assert_same_run(run, ref_run, num_actual, tol)
 
 
 @pytest.mark.parametrize("use_cp", ["auto", False])
@@ -335,16 +332,7 @@ def test_flashinfer_checkpointed_prefill_pool_matches_gather(
     ):
         out, conv, ssm = _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0)
         meta_gather = dataclasses.replace(meta, prefill_initial_state_mode="mixed")
-        ref_out, ref_conv, ref_ssm = _run(
-            fi_cfg, meta_gather, weights, inputs, conv_state0, ssm_state0
-        )
-    # Actual rows only: padding rows behind num_actual_tokens are
-    # uninitialized by contract.
-    num_actual = sum(query_lens)
-    torch.testing.assert_close(
-        out[:num_actual], ref_out[:num_actual], atol=1e-3, rtol=1e-3
-    )
-    torch.testing.assert_close(conv, ref_conv, atol=0, rtol=0)
-    torch.testing.assert_close(ssm, ref_ssm, atol=1e-3, rtol=1e-3)
+        ref_run = _run(fi_cfg, meta_gather, weights, inputs, conv_state0, ssm_state0)
+    _assert_same_run((out, conv, ssm), ref_run, sum(query_lens), tol=1e-3)
     for slot in slots[num_decodes:]:
         assert ssm[slot].ne(ssm_state0[slot]).any(), "checkpoint not exported"
