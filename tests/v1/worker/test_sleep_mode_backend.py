@@ -48,7 +48,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     calls: list[tuple[str, object]] = []
 
     class Backend:
-        def suspend(self, level: int = 1, rewritten=()) -> None:
+        def suspend(self, level: int = 1, discardable=()) -> None:
             calls.append(("backend.suspend", level))
 
         def resume(self, tags: list[str] | None = None) -> None:
@@ -132,7 +132,7 @@ def test_suspend_resume_state_transitions():
 class DummyBackend(SleepModeBackend):
     """A no-GPU backend used to exercise lifecycle + registration in CPU tests."""
 
-    def suspend(self, level: int = 1, rewritten=()) -> None:
+    def suspend(self, level: int = 1, discardable=()) -> None:
         self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:

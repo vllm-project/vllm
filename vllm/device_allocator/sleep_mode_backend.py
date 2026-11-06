@@ -51,12 +51,12 @@ class SleepModeBackend(ABC):
         self._state: SleepModeState = "RUNNING"
 
     @abstractmethod
-    def suspend(self, level: int = 1, rewritten: Collection[int] = ()) -> None:
+    def suspend(self, level: int = 1, discardable: Collection[int] = ()) -> None:
         """Free GPU state.
 
         ``level`` follows existing sleep-mode semantics: level 1 offloads
         weights to host RAM (restorable in-process); level 2 discards the
-        tensors at the ``rewritten`` addresses, which the caller reloads from
+        tensors at the ``discardable`` addresses, which the caller reloads from
         the model source on resume, and keeps everything else.
         """
         raise NotImplementedError
@@ -126,7 +126,7 @@ class CuMemBackend(SleepModeBackend):
     are allocated outside the allocator pool).
     """
 
-    def suspend(self, level: int = 1, rewritten: Collection[int] = ()) -> None:
+    def suspend(self, level: int = 1, discardable: Collection[int] = ()) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
@@ -137,7 +137,7 @@ class CuMemBackend(SleepModeBackend):
             from vllm.device_allocator.cumem import CuMemAllocator
 
             CuMemAllocator.get_instance().sleep(
-                ("weights", "runtime", "cudagraph"), rewritten
+                ("weights", "runtime", "cudagraph"), discardable
             )
         else:
             allocator.sleep(offload_tags=("weights", "runtime", "cudagraph"))

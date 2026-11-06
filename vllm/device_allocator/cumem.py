@@ -268,7 +268,7 @@ class CuMemAllocator:
     def sleep(
         self,
         offload_tags: tuple[str, ...] | str | None = None,
-        rewritten: Collection[int] = (),
+        discardable: Collection[int] = (),
     ) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -277,7 +277,7 @@ class CuMemAllocator:
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
-            rewritten: Addresses of tensors the caller rewrites after waking.
+            discardable: Addresses of tensors the caller rewrites after waking.
                 Weights allocations holding nothing else are discarded too.
 
         """
@@ -293,7 +293,7 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
-        discarded = self._only_holding(rewritten) if rewritten else set()
+        discarded = self._only_holding(discardable) if discardable else set()
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
@@ -419,7 +419,7 @@ class CuMemAllocator:
         # sleep mode (see https://github.com/pytorch/pytorch/issues/147851).
         # If the user has enabled expandable segments, temporarily disable
         # them for the duration of the memory pool context and restore on
-        # exit. The whole config string is rewritten, not just this one
+        # exit. The whole config string is discardable, not just this one
         # field: torch resets every option that is absent from the string it
         # is handed, so a bare "expandable_segments:False" would also drop
         # max_split_size_mb, garbage_collection_threshold and

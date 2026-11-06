@@ -537,7 +537,7 @@ def test_runtime_state_survives_sleep(level):
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_keeps_what_the_update_does_not_rewrite():
-    """Only allocations holding nothing but rewritten tensors are discarded."""
+    """Only allocations holding nothing but discardable tensors are discarded."""
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
 
     allocator = get_mem_allocator_instance()
@@ -549,7 +549,7 @@ def test_level2_keeps_what_the_update_does_not_rewrite():
     # ``weight`` has its own allocation; ``table`` shares one with ``small_weight``.
     weight_data = allocator.pointer_to_data[weight.data_ptr()]
     backend = CuMemBackend()
-    backend.suspend(level=2, rewritten={weight.data_ptr(), small_weight.data_ptr()})
+    backend.suspend(level=2, discardable={weight.data_ptr(), small_weight.data_ptr()})
     assert mapped_usage(allocator) == 0
     assert weight_data.cpu_backup_tensor is None
     assert any(
