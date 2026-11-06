@@ -13,7 +13,6 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.utils import weights_already_processed
 
-from .direct import check_direct_reload_support, direct_reload_enabled
 from .lifecycle import finish_reload, start_reload
 
 logger = init_logger(__name__)
@@ -57,9 +56,6 @@ def reload_weights(
     """
     # TODO(@kylesayrs): generalize to all runners and loaders
     # argument validation
-    if direct_reload_enabled():
-        # before model_config changes; kernel-format reloads skip `begin`
-        check_direct_reload_support(model)
     if weights_iterator is None and not is_checkpoint_format:
         logger.warning(
             "Reloading from disk means that weights will be in checkpoint format. "
@@ -75,7 +71,7 @@ def reload_weights(
     }
     counter_before_reloading = time.perf_counter()
 
-    # load weights from disk if none are provided
+    model_loader = None
     if weights_iterator is None:
         model_loader = get_model_loader(load_config)
         if not hasattr(model_loader, "get_all_weights"):
@@ -83,6 +79,13 @@ def reload_weights(
                 f"Model reloading with `{load_config.load_format}` format"
             )
 
+    logger.info_once("Reloading weights inplace...")
+    if is_checkpoint_format:
+        # may refuse the reload: before model_config points at the new weights
+        start_reload(model)
+
+    # load weights from disk if none are provided
+    if model_loader is not None:
         if weights_path is not None:
             # The revision and any object-storage `model_weights` source
             # belong to the model we are reloading away from, so they must
@@ -92,13 +95,11 @@ def reload_weights(
             model_config.revision = None
         weights_iterator = model_loader.get_all_weights(model_config, model)
         weights_iterator = cast(Iterable[tuple[str, torch.Tensor]], weights_iterator)
+    assert weights_iterator is not None
 
-    # begin loading weights
-    logger.info_once("Reloading weights inplace...")
     if is_checkpoint_format:
         # load weights from checkpoint/ original model format
         device = torch.device(load_config.device or vllm_config.device_config.device)
-        start_reload(model)
         loaded_weights = model.load_weights(weights_iterator)
         finish_reload(model, model_config, device)
 

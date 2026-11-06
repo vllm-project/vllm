@@ -376,6 +376,11 @@ class HummingLayerQuantizationConfig(HummingConfig):
 
 
 class HummingLinearMethod(LinearMethodBase):
+    # post-load processing runs once per quant method (a guard on the method,
+    # not the module): a reload would keep checkpoint bytes
+    supports_direct_reload = False
+    direct_reload_unsupported_reason = "humming post-load processing runs once"
+
     def __init__(self, quant_config: HummingLayerQuantizationConfig):
         self.quant_config = quant_config
         self.weight_schema = quant_config.weight_schema
@@ -626,6 +631,9 @@ class HummingLinearMethod(LinearMethodBase):
 
 
 class HummingMoEMethod(FusedMoEMethodBase):
+    supports_direct_reload = False  # see HummingLinearMethod
+    direct_reload_unsupported_reason = "humming post-load processing runs once"
+
     def __init__(
         self, quant_config: HummingLayerQuantizationConfig, moe: "FusedMoEConfig"
     ) -> None:

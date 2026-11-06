@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import VllmConfig, WeightTransferConfig
+from vllm.config import LoadConfig, VllmConfig, WeightTransferConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
+    check_direct_reload_support,
     finish_direct_reload,
 )
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
@@ -349,6 +350,11 @@ class TestRefusals:
             ("vllm.models.muse_spark.nvidia.hybrid_moe", "MuseSparkHybridMoEExperts"),
             ("vllm.models.deepseek_v4.amd.mega_moe", "DeepseekV4AiterMegaMoEExperts"),
             ("vllm.models.step5.nvidia.mega_moe", "Step5MegaMoEExperts"),
+            # its rows are views of the cold-start checkpoint files
+            (
+                "vllm.models.qwen4_exp.nvidia.ngram_embedding",
+                "Qwen4ExpPLEDiskOffloadEmbedding",
+            ),
         ],
     )
     def test_unsupported_component_refused(self, module_path, cls_name):
@@ -394,11 +400,11 @@ class TestRefusals:
         assert "_direct_reload_begun" not in model.__dict__
 
 
-def _worker(model, draft=None):
+def _worker(model, draft=None, **config):
     from vllm.v1.worker.gpu_worker import Worker
 
     worker = object.__new__(Worker)
-    worker.vllm_config = SimpleNamespace(parallel_config=None, model_config=None)
+    worker.vllm_config = _config(parallel_config=None, **config)
     worker.device = _DEVICE
     worker.model_runner = SimpleNamespace(
         get_model=lambda: model, get_draft_model=lambda: draft
@@ -409,7 +415,7 @@ def _worker(model, draft=None):
 def _reload_config(**model_config) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=SimpleNamespace(**vars(_MODEL_CONFIG), **model_config),
-        load_config=SimpleNamespace(device=None, load_format="auto"),
+        load_config=LoadConfig(),
         device_config=SimpleNamespace(device=_DEVICE),
         lora_config=None,
     )
@@ -421,17 +427,19 @@ def _refused(model):
     return model
 
 
-class TestCheckedEarly:
-    """The model check also runs when the weight-transfer engine is created and
-    at the top of `reload_weights`, not only in `begin`."""
+class TestCallSites:
+    """The check runs when the weight-transfer engine is created and in
+    `begin`, which caches only a pass."""
 
-    @pytest.mark.parametrize("refused", ["target", "draft"])
+    @pytest.mark.parametrize("refused", ["target", "draft", "lora"])
     def test_refused_model_fails_engine_creation(self, refused):
         # at startup, before a trainer connects and waits in a collective
         target, draft = _cold_start(_checkpoint()), _cold_start(_checkpoint())
-        _refused(target if refused == "target" else draft)
-        worker = _worker(target, draft)
-        with pytest.raises(RuntimeError, match="weight copies are built once"):
+        if refused != "lora":
+            _refused(target if refused == "target" else draft)
+        lora = {"lora_config": object()} if refused == "lora" else {}
+        worker = _worker(target, draft, **lora)
+        with pytest.raises(RuntimeError, match="built once|LoRA"):
             worker._create_weight_transfer_engine(WeightTransferConfig(backend="ipc"))
         assert not hasattr(worker, "weight_transfer_engine")
 
@@ -441,22 +449,47 @@ class TestCheckedEarly:
         worker._create_weight_transfer_engine(WeightTransferConfig(backend="ipc"))
         assert worker.weight_transfer_engine is not None
 
-    @pytest.mark.parametrize("is_checkpoint_format", [True, False])
-    def test_reload_weights_refused_before_config_changes(self, is_checkpoint_format):
+    def test_sparse_nccl_warns_and_is_not_checked(self, caplog_vllm):
+        # its patches skip begin/finish: nothing to check, a warning instead
+        worker = _worker(_refused(_cold_start(_checkpoint())))
+        worker._create_weight_transfer_engine(
+            WeightTransferConfig(backend="sparse_nccl")
+        )
+        assert worker.weight_transfer_engine is not None
+        assert any(
+            "skip the direct-reload lifecycle" in r.getMessage()
+            for r in caplog_vllm.records
+        )
+
+    def test_begin_caches_only_a_pass(self, monkeypatch):
+        from vllm.model_executor.model_loader.reload import direct
+
+        calls = []
+        check = direct.check_direct_reload_support
+
+        def counted(model):
+            calls.append(model)
+            check(model)
+
+        monkeypatch.setattr(direct, "check_direct_reload_support", counted)
+        model = _refused(_cold_start(_checkpoint()))
+        for _ in range(2):  # a refusal is not cached
+            with pytest.raises(RuntimeError, match="built once"):
+                begin_direct_reload(model)
+        del model.supports_direct_reload  # e.g. mono decode turned off
+        _reload(model, _checkpoint(1.01))
+        _reload(model, _checkpoint(1.02))  # the pass is cached: no walk
+        assert len(calls) == 3
+        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.02))))
+
+    def test_reload_weights_refused_before_config_changes(self):
         model = _refused(_cold_start(_checkpoint()))
         config = _reload_config(model="old", model_weights="w", revision="r")
         before = _state(model)
         with pytest.raises(RuntimeError, match="weight copies are built once"):
-            reload_weights(
-                config,
-                model,
-                None if is_checkpoint_format else iter(_checkpoint(1.01).items()),
-                "new" if is_checkpoint_format else None,
-                is_checkpoint_format,
-            )
-        assert vars(config.model_config) == vars(
-            _reload_config(model="old", model_weights="w", revision="r").model_config
-        )
+            reload_weights(config, model, None, "new", True)
+        cfg = config.model_config
+        assert (cfg.model, cfg.model_weights, cfg.revision) == ("old", "w", "r")
         _assert_same(_state(model), before, addresses=True)
 
     @pytest.mark.parametrize("marked", [True, False])
@@ -627,14 +660,17 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     assert model.proj.weight._ckpt == ckpt
 
 
-def _config(**overrides) -> SimpleNamespace:
-    offload = SimpleNamespace(
-        offload_backend="auto",
-        prefetch=SimpleNamespace(offload_group_size=0),
-        uva=SimpleNamespace(cpu_offload_gb=0),
+def _offload(backend="auto", group_size=0, cpu_offload_gb=0) -> SimpleNamespace:
+    return SimpleNamespace(
+        offload_backend=backend,
+        prefetch=SimpleNamespace(offload_group_size=group_size),
+        uva=SimpleNamespace(cpu_offload_gb=cpu_offload_gb),
     )
+
+
+def _config(**overrides) -> SimpleNamespace:
     fields = dict(
-        offload_config=offload,
+        offload_config=_offload(),
         model_config=SimpleNamespace(quantization=None),
         quant_config=None,
         lora_config=None,
@@ -648,79 +684,26 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
 
 
 @pytest.mark.parametrize(
-    "mode,overrides,match",
+    "overrides,match",
     [
-        ("direct", {}, None),
-        ("layerwise", {"lora_config": object()}, None),
+        ({}, None),
+        ({"offload_config": _offload(backend="uva")}, "weight offloading"),
+        ({"offload_config": _offload(group_size=2)}, "weight offloading"),
+        ({"offload_config": _offload(cpu_offload_gb=1)}, "weight offloading"),
+        ({"model_config": SimpleNamespace(quantization="torchao")}, "torchao"),
+        ({"quant_config": _ONLINE}, "online quantization"),
         (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="uva",
-                    prefetch=SimpleNamespace(offload_group_size=0),
-                    uva=SimpleNamespace(cpu_offload_gb=0),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="auto",
-                    prefetch=SimpleNamespace(offload_group_size=2),
-                    uva=SimpleNamespace(cpu_offload_gb=0),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="auto",
-                    prefetch=SimpleNamespace(offload_group_size=0),
-                    uva=SimpleNamespace(cpu_offload_gb=1),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {"model_config": SimpleNamespace(quantization="torchao")},
-            "torchao",
-        ),
-        ("direct", {"quant_config": _ONLINE}, "online quantization"),
-        (
-            "direct",
             {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
             "online quantization",
         ),
-        ("direct", {"lora_config": object()}, "LoRA"),
+        ({"lora_config": object()}, "LoRA"),
         (
-            "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
-        ),
-        (
-            "direct",
-            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
-            "sharded_rdt",
-        ),
-        (
-            "direct",
-            {"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")},
-            "sparse_nccl",
-        ),
-        (
-            "layerwise",
-            {"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")},
-            None,
         ),
     ],
     ids=[
         "defaults",
-        "layerwise-lora",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
@@ -729,14 +712,32 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
         "online-composed",
         "lora",
         "draft-lm-head-quant",
-        "sharded-rdt",
-        "sparse-nccl",
-        "layerwise-sparse-nccl",
     ],
 )
-def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+def test_config_refused_by_the_check_not_at_startup(overrides, match):
+    # refused where the check runs (weight transfer, begin); a server that
+    # never updates starts in direct mode
     config = _config(**overrides)
+    VllmConfig._verify_direct_reload_compat(config)
+    model = _cold_start(_checkpoint())
+    if match is None:
+        check_direct_reload_support(model, config)
+    else:
+        with pytest.raises(RuntimeError, match=match):
+            check_direct_reload_support(model, config)
+
+
+@pytest.mark.parametrize(
+    "mode,backend,match",
+    [
+        ("direct", "sharded_rdt", "sharded_rdt"),
+        ("layerwise", "sharded_rdt", None),
+        ("direct", "sparse_nccl", None),  # its engine warns instead
+    ],
+)
+def test_verify_direct_reload_compat(monkeypatch, mode, backend, match):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    config = _config(weight_transfer_config=SimpleNamespace(backend=backend))
     if match is None:
         VllmConfig._verify_direct_reload_compat(config)
     else:

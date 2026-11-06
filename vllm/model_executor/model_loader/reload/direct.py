@@ -19,7 +19,7 @@ from collections.abc import Iterator
 import torch
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
@@ -86,52 +86,84 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
             yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
-def check_direct_reload_support(model: torch.nn.Module) -> None:
-    """Raise if ``model`` is known to reload incorrectly with direct reload;
-    warn once per class if it is not validated (`SupportsDirectReload`).
+def _config_refusal(vllm_config: VllmConfig) -> str | None:
+    """Why ``vllm_config`` cannot reload directly. Checked with the model, so
+    a server that never updates its weights starts with any of these."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
 
-    Called when the weight-transfer engine is created, at the top of
-    `reload_weights` and in `begin_direct_reload`. Not cached: runtime flags
+    offload = vllm_config.offload_config
+    if (
+        offload.offload_backend != "auto"
+        or offload.prefetch.offload_group_size > 0
+        or offload.uva.cpu_offload_gb > 0
+    ):
+        # CPU/UVA offload gives parameters new storage on every post-load
+        # processing; prefetch offload shares one buffer between layers
+        return "weight offloading is not supported"
+    model_config = vllm_config.model_config
+    if model_config is not None and model_config.quantization == "torchao":
+        # its load_weights runs a layerwise reload, and its post-load
+        # processing replaces the weight parameter
+        return "torchao quantization is not supported"
+    quant_config = vllm_config.quant_config
+    if isinstance(quant_config, OnlineQuantizationConfig) or (
+        getattr(quant_config, "online_quantization_config", None) is not None
+    ):
+        # `finish` clears the guard that keeps online quantization from
+        # quantizing its already-quantized bytes again
+        return "online quantization is not supported"
+    if vllm_config.lora_config is not None:
+        # LoRA wraps layers after cold start; their wrappers forward
+        # `quant_method`, so a rerun would process each base layer twice
+        return "LoRA is not supported"
+    spec = vllm_config.speculative_config
+    if spec is not None and spec.draft_lm_head_quantization is not None:
+        # after `begin` the draft's quantized lm_head is a view of the target
+        # lm_head's storage: post-load processing would write it there
+        return "draft_lm_head_quantization is not supported"
+    return None
+
+
+def check_direct_reload_support(
+    model: torch.nn.Module, vllm_config: VllmConfig | None = None
+) -> None:
+    """Raise if ``model`` (or ``vllm_config``, by default the current one) is
+    known to reload incorrectly with direct reload; warn once per class if the
+    model is not validated (`SupportsDirectReload`).
+
+    Called when the weight-transfer engine is created and in
+    `begin_direct_reload`. A refusal is read fresh each time: runtime flags
     may change after load (specialized decode built later, mono decode turned
-    off). Config-level refusals: VllmConfig._verify_direct_reload_compat."""
+    off). Config-time refusal: sharded_rdt, in VllmConfig."""
     from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
         FusedMoEModularMethod,
     )
-    from vllm.model_executor.layers.quantization.humming import (
-        HummingLinearMethod,
-        HummingMoEMethod,
-    )
-    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-    from vllm.model_executor.layers.quantization.online.moe_base import (
-        OnlineMoEMethodBase,
-    )
     from vllm.model_executor.models.interfaces import supports_direct_reload
 
+    vllm_config = vllm_config or get_current_vllm_config_or_none()
+    if vllm_config is not None and (reason := _config_refusal(vllm_config)):
+        raise RuntimeError(f"direct reload: {reason}")
     for name, module in model.named_modules():
-        # declared broken (SupportsDirectReload; may change at runtime), e.g. a
-        # one-shot guard the quant-method checks below would not see
-        if getattr(module, "supports_direct_reload", None) is False:
-            reason = getattr(module, "direct_reload_unsupported_reason", None)
-            raise RuntimeError(
-                f"direct reload: {type(module).__name__} is not supported "
-                f"({name or 'model'}): {reason or 'no reason given'}"
-            )
         method = getattr(module, "quant_method", None)
         if isinstance(method, FusedMoEModularMethod):  # elastic EP wraps it
             method = method.old_quant_method
-        # also without an online config (experts_int8); fused shared experts
-        # quantize staging parameters that post-load processing deletes
-        if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
-            getattr(module, "shared_expert_online_loader", None) is not None
-        ):
+        # declared broken (SupportsDirectReload / QuantizeMethodBase; may change
+        # at runtime), e.g. a one-shot guard
+        for obj in (module, method):
+            if getattr(obj, "supports_direct_reload", None) is False:
+                reason = getattr(obj, "direct_reload_unsupported_reason", None)
+                raise RuntimeError(
+                    f"direct reload: {type(obj).__name__} is not supported "
+                    f"({name or 'model'}): {reason or 'no reason given'}"
+                )
+        # fused shared experts quantized online under a pre-quantized method:
+        # post-load processing deletes the staging parameters a reload loads
+        if getattr(module, "shared_expert_online_loader", None) is not None:
             raise RuntimeError(
-                f"direct reload: online quantization is not supported "
-                f"({name}: {type(method).__name__})"
+                f"direct reload: online quantization is not supported ({name})"
             )
-        if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
-            # its post-load processing runs once per quant method (a guard on
-            # the method, not the module): a reload would keep checkpoint bytes
-            raise RuntimeError(f"direct reload: humming is not supported ({name})")
     if not supports_direct_reload(type(model)):
         logger.warning_once(
             "direct reload: %s is not validated with direct reload (it does "
@@ -241,9 +273,10 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
     _check_params_kept(model)
     views = _checkpoint_views(model)
-    # also run by engine creation and reload_weights; here for engines that
-    # call start_reload directly
-    check_direct_reload_support(model)
+    if not model.__dict__.get("_direct_reload_supported"):
+        # cache a pass only: a refusal may clear (mono decode turned off)
+        check_direct_reload_support(model)
+        model._direct_reload_supported = True
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
