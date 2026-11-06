@@ -52,6 +52,18 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     return need_sampled_mask if need_sampled_mask.any() else None
 
 
+def _alloc_combined(num_reqs: int, device: torch.device) -> torch.Tensor:
+    """Allocate the (2, N) int32 buffer broadcast alongside sampled tokens.
+
+    The inner dim is padded to a multiple of 4 so that both `unbind` views
+    stay 16-byte aligned for any `num_reqs`: triton specializes on pointer
+    alignment, and a misaligned `num_rejected` would JIT-compile a second
+    `_post_update_kernel` variant at serving time. The padding is broadcast
+    but never read. Sender and receiver must both use this allocation.
+    """
+    return torch.empty(2, -(-num_reqs // 4) * 4, dtype=torch.int32, device=device)
+
+
 class PPHandler:
     """Runs the PP sampled-token broadcast/recv on a side stream so the
     default stream isn't gated by the matching peer call. Step T's recv is
@@ -97,6 +109,14 @@ class PPHandler:
         # Whether sampled tokens were broadcast this step.
         self.sampled_tokens_broadcast = False
         self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
+
+        # Warmup steps run the pipeline with synthetic batches whose outputs are
+        # discarded; the sampled-token broadcast is disabled there so its
+        # side-stream NCCL ops cannot overlap the next step's activation p2p.
+        self.disabled = False
+
+    def set_disabled(self, disabled: bool) -> None:
+        self.disabled = disabled
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
@@ -149,9 +169,13 @@ class PPHandler:
             if exclude_mask.all():
                 # No states require update anymore.
                 return None
-            # Filter excluded request indices.
+            # Filter excluded request indices. Match the serving path's int64
+            # idx_mapping so this cannot spawn another `_post_update_kernel`
+            # specialization mid-serving.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=torch.int64
+            )
 
         self.main_stream.wait_event(slot.event)
         return dict(
@@ -178,6 +202,8 @@ class PPHandler:
         requests in the batch. `recv_drafts` must match whether the last rank
         calls `broadcast_drafts` for this step."""
         assert not self.is_last_rank
+        if self.disabled:
+            return False
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:
             # Leave this step's reserved slot as None.
@@ -194,7 +220,7 @@ class PPHandler:
             sampled_tokens = torch.empty(
                 num_reqs, sample_len, dtype=torch.int64, device=self.device
             )
-            combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
+            combined = _alloc_combined(num_reqs, self.device)
             torch.distributed.broadcast(
                 sampled_tokens, src=self.last_rank, group=self.broadcast_group
             )
@@ -209,6 +235,7 @@ class PPHandler:
                 torch.distributed.broadcast(
                     draft_tokens, src=self.last_rank, group=self.broadcast_group
                 )
+
             event = self.broadcast_stream.record_event()
             num_sampled, num_rejected = combined.unbind(dim=0)
             # Must record_stream since these were allocated on broadcast stream but
@@ -238,12 +265,18 @@ class PPHandler:
         input_batch: InputBatch,
     ) -> None:
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
+        if self.disabled:
+            self.sampled_tokens_broadcast = False
+            return
+        mask = compute_need_sampled_mask(input_batch)
+        if mask is None:
             # No request needs sampled outputs for a subsequent decode step.
             self.sampled_tokens_broadcast = False
             return
 
         assert sampled_token_ids.dtype == torch.int64
+        assert num_sampled.dtype == torch.int32
+        assert num_rejected.dtype == torch.int32
         self.sampled_tokens_broadcast = True
 
         if current_platform.is_xpu():
@@ -258,7 +291,9 @@ class PPHandler:
                 src=self.last_rank,
                 group=self.broadcast_group,
             )
-            combined = torch.stack((num_sampled, num_rejected), dim=0)
+            combined = _alloc_combined(num_sampled.shape[0], self.device)
+            combined[0, : num_sampled.shape[0]] = num_sampled
+            combined[1, : num_sampled.shape[0]] = num_rejected
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )

@@ -117,7 +117,12 @@ class BaseSpeculator(ABC):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
+        """Propose draft tokens for the batch.
+
+        Returns None on a prefill-only PD producer (DSpark), which stores the
+        draft context KV for transfer instead of drafting.
+        """
         pass
 
     def prepare_watermarking(
@@ -218,6 +223,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         self.enable_adaptive_verification = (
             self.speculative_config.enable_adaptive_verification
+            and not self.speculative_config.is_dspark_prefill_only()
         )
         self.use_acceptance_estimator = self.enable_adaptive_verification
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
@@ -227,6 +233,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_logits: DraftLogitsCache | None = None
         self.use_draft_logits = (
             self.speculative_config.draft_sample_method == "probabilistic"
+            and not self.speculative_config.is_dspark_prefill_only()
         )
 
         self.draft_watermarker: DraftWatermarker | None = None
