@@ -940,6 +940,8 @@ class MessageQueue:
         if self.shutting_down:
             raise RuntimeError("cancelled")
         if self._is_local_reader:
+            if self._event_queue is not None:
+                return self._event_queue.endpoint.readable()
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 return self._is_readable(metadata_buffer)
         if self._is_remote_reader:
@@ -955,6 +957,14 @@ class MessageQueue:
         """
         if self._is_remote_reader:
             self.remote_socket.poll(timeout=REMOTE_POLL_WAIT_MS)
+            return
+        if self._event_queue is not None:
+            # This active-output wait must also observe caller-owned pending work.
+            # Ordinary idle dequeues still park in the native futex acquire.
+            while not pending and time.monotonic() < deadline:
+                if self.readable():
+                    return
+                sched_yield()
             return
         read_flag_idx = self.local_reader_rank + 1
         monotonic = time.monotonic

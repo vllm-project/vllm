@@ -750,13 +750,17 @@ def test_acquire_read_releases_slot_when_reader_raises():
         reader.shutdown()
 
 
-def test_readable_reports_pending_message_without_consuming():
+@pytest.mark.parametrize("backend", ["stock", "futex"])
+def test_readable_reports_pending_message_without_consuming(monkeypatch, backend):
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", backend)
     writer = MessageQueue(
         n_reader=1,
         n_local_reader=1,
         max_chunk_bytes=1024 * 1024,
         max_chunks=2,
     )
+    assert (writer.export_handle().event_handle is not None) is (backend == "futex")
     reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
     try:
         writer.wait_until_ready()
@@ -781,13 +785,17 @@ def test_readable_reports_pending_message_without_consuming():
         reader.shutdown()
 
 
-def test_spin_until_readable_returns_on_each_condition():
+@pytest.mark.parametrize("backend", ["stock", "futex"])
+def test_spin_until_readable_returns_on_each_condition(monkeypatch, backend):
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", backend)
     writer = MessageQueue(
         n_reader=1,
         n_local_reader=1,
         max_chunk_bytes=1024 * 1024,
         max_chunks=2,
     )
+    assert (writer.export_handle().event_handle is not None) is (backend == "futex")
     reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
     try:
         writer.wait_until_ready()

@@ -267,6 +267,15 @@ static PyObject *endpoint_cancel(Endpoint *e, PyObject *unused) {
     if (error) return failure(error);
     Py_RETURN_NONE;
 }
+static PyObject *endpoint_readable(Endpoint *e, PyObject *unused) {
+    if (!e->h || e->rank < 0 || e->busy || e->acquired) {
+        PyErr_SetString(PyExc_RuntimeError, "readability requires an idle reader endpoint"); return NULL;
+    }
+    unsigned lagging = 0;
+    int ready = readiness(e, &lagging);
+    if (ready < 0) return failure(-ready);
+    return PyBool_FromLong(ready);
+}
 static PyObject *endpoint_snapshot(Endpoint *e, PyObject *unused) {
     if (!e->h) { PyErr_SetString(PyExc_RuntimeError, "uninitialized endpoint"); return NULL; }
     return Py_BuildValue("{sK,sI,sI,sI,sI}", "published", (unsigned long long)atomic_load(&e->h->published),
@@ -278,6 +287,7 @@ static PyMethodDef methods[] = {
     {"acquire", (PyCFunction)(void(*)(void))endpoint_acquire, METH_VARARGS|METH_KEYWORDS, "Reserve next slot; wait without polling."},
     {"release", (PyCFunction)endpoint_release, METH_VARARGS, "Publish/acknowledge; false aborts writer publication."},
     {"cancel", (PyCFunction)endpoint_cancel, METH_NOARGS, "Close local participant and wake affected peers."},
+    {"readable", (PyCFunction)endpoint_readable, METH_NOARGS, "Check reader readiness without reserving or consuming a slot."},
     {"snapshot", (PyCFunction)endpoint_snapshot, METH_NOARGS, "Diagnostic only; no hot-path sampling."},
     {NULL, NULL, 0, NULL}
 };

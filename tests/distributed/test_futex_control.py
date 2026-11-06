@@ -146,6 +146,44 @@ class NativeControlTests(unittest.TestCase):
         with self.assertRaises(BrokenPipeError):
             self.writer.acquire(timeout=0)
 
+    def test_native_readable_does_not_reserve_or_consume(self):
+        self.assertFalse(self.reader.readable())
+        self.writer.acquire(timeout=0)
+        self.writer.release(False)
+        self.assertFalse(self.reader.readable())
+        self.writer.acquire(timeout=0)
+        self.writer.release()
+        self.assertTrue(self.reader.readable())
+        self.assertTrue(self.reader.readable())
+        self.assertEqual(self.reader.acquire(timeout=0), 0)
+        self.reader.release()
+        self.assertFalse(self.reader.readable())
+
+    def test_native_readable_preserves_close_and_drain_semantics(self):
+        self.writer.acquire(timeout=0)
+        self.writer.release()
+        self.writer.cancel()
+        self.assertTrue(self.reader.readable())
+        self.reader.acquire(timeout=0)
+        self.reader.release()
+        with self.assertRaises(BrokenPipeError):
+            self.reader.readable()
+        self.reader.cancel()
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            self.reader.readable()
+
+    def test_native_readable_rejects_writer_and_acquired_reader(self):
+        with self.assertRaisesRegex(RuntimeError, "idle reader"):
+            self.writer.readable()
+        self.writer.acquire(timeout=0)
+        self.writer.release()
+        self.reader.acquire(timeout=0)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "idle reader"):
+                self.reader.readable()
+        finally:
+            self.reader.release()
+
     def test_native_cancel_wakes_blocked_reader(self):
         errors = []
 
