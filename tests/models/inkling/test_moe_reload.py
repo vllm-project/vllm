@@ -74,9 +74,16 @@ def _checkpoint(seed: int) -> dict[str, torch.Tensor]:
     return weights
 
 
-def _cold_start(weights) -> _Model:
+def _cold_start(weights, *, scales_from_loader: bool = False) -> _Model:
     model = _Model()
     model.load_weights(weights.items())
+    if scales_from_loader:
+        # The reference: input scales set as the loader used to, no amax.
+        experts = model.mlp.experts.routed_experts
+        for projection in ("w13", "w2"):
+            amax = float(weights[f"experts.{projection}_weight.input_amax"].max())
+            getattr(experts, f"{projection}_input_scale").fill_(amax / (448.0 * 6.0))
+            del experts._parameters[f"{projection}_input_amax"]
     process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cuda"))
     return model
 
@@ -92,7 +99,7 @@ def _state(model: _Model) -> dict[str, torch.Tensor]:
 def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
     """``input_amax`` is copied as is, so the plan loads it directly, and
     post-load processing rederives the input scales from it on every update,
-    leaving the experts as a cold start on the new weights would."""
+    leaving the experts as the loader-derived scales did at cold start."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     model = _cold_start(_checkpoint(seed=0))
     experts = model.mlp.experts.routed_experts
@@ -112,7 +119,13 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
         load_planned(model, plan, list(new.items()))
         finish_reload(model, _MODEL_CONFIG, torch.device("cuda"))
 
-        actual, expected = _state(model), _state(_cold_start(new))
+        actual = _state(model)
+        expected = _state(_cold_start(new, scales_from_loader=True))
+        for projection in ("w13", "w2"):
+            amax = actual.pop(f"{projection}_input_amax")
+            assert torch.equal(
+                amax.cpu(), new[f"experts.{projection}_weight.input_amax"]
+            )
         assert actual.keys() == expected.keys()
         for name, tensor in actual.items():
             assert torch.equal(
