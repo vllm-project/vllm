@@ -199,13 +199,10 @@ class EncoderOnlyModelState(DefaultModelState):
         else:
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        # A FULL graph is captured on a dummy batch that spreads its tokens over
-        # many requests but replays any split, e.g. one long prompt: use the
-        # max_query_len the batch promises (as the default model state does),
-        # or the kernels bake in the dummy's short query length.
-        max_query_len = input_batch.max_query_len
-        if max_query_len is None:
-            max_query_len = int(input_batch.num_scheduled_tokens.max())
+        # Use the promised max_query_len so FULL graphs don't bake in the dummy's.
+        max_query_len = input_batch.max_query_len or int(
+            input_batch.num_scheduled_tokens.max()
+        )
         if for_capture:
             max_seq_len = self.max_model_len
         else:
