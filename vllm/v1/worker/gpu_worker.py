@@ -178,6 +178,25 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
     return torch_reserved
 
 
+def charge_memory_retained_by_graph_profiling(
+    profile_result: MemoryProfilingResult, after_graph_profile: MemorySnapshot
+) -> None:
+    """Charge memory left allocated by CUDA graph profiling, such as attention
+    workspaces, as consumed.
+
+    The later snapshot is adopted only when free memory dropped, so
+    ``total_consumed`` stays the drop from ``before_create`` to ``after_profile``
+    that the ROCm fallback and the profiling assertion both rely on.
+    """
+    retained = (
+        profile_result.after_profile.free_memory - after_graph_profile.free_memory
+    )
+    if retained > 0:
+        profile_result.total_consumed += retained
+        profile_result.non_kv_cache_memory += retained
+        profile_result.after_profile = after_graph_profile
+
+
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -798,6 +817,9 @@ class Worker(WorkerBase):
             or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            charge_memory_retained_by_graph_profiling(
+                profile_result, MemorySnapshot(device=self.device)
+            )
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
