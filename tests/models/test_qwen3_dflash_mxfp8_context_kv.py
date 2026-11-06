@@ -100,6 +100,8 @@ def _build_model(mode: str, has_bias: bool) -> tuple[DFlashQwen3Model, list]:
         model._context_kv_proj = model._make_mxfp8_context_kv_proj(attentions)
         for i, tensors in enumerate(checkpoint):
             for name, tensor in tensors.items():
+                if name == "weight_scale":  # as a trainer that holds E8M0 sends
+                    tensor = tensor.view(torch.float8_e8m0fnu)
                 model._load_context_kv(i, "k", name, tensor[Q_SIZE : Q_SIZE + KV_SIZE])
                 model._load_context_kv(i, "v", name, tensor[Q_SIZE + KV_SIZE :])
     return model, attentions

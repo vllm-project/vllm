@@ -543,6 +543,32 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     assert plan.get_dest("layer.weight") is not None
 
 
+@pytest.mark.parametrize(
+    "sent,held",
+    [
+        (torch.float8_e8m0fnu, torch.uint8),
+        (torch.uint8, torch.float8_e8m0fnu),
+        (torch.int8, torch.uint8),
+        (torch.uint8, torch.int8),
+        (torch.float4_e2m1fn_x2, torch.uint8),
+    ],
+    ids=str,
+)
+def test_byte_containers_stay_direct(sent, held):
+    """Byte containers sent as another container dtype (E8M0 scales into
+    uint8 or back, int8 experts into uint8, packed FP4): the loader's copy
+    keeps the bytes, so the name is direct and the planned update writes the
+    sent bytes."""
+    name, scales = "layer.weight", torch.arange(256).to(torch.uint8)
+    make, _ = _single(None, shape=(256,), dtype=held)
+    model = _cold_start(make, {name: scales.flip(0).view(sent)})
+    start_reload(model)
+    plan = _plan(model, {name: ((256,), sent)})
+    assert plan.get_dest(name) is not None
+    _planned_reload(model, plan, {name: scales.view(sent)})
+    assert torch.equal(model.layer.weight.view(torch.uint8), scales)
+
+
 def test_tensors_sharing_one_storage():
     """Two checkpoint tensors on one storage: each write lands in its own
     tensor, whichever tensor names the storage."""
