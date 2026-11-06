@@ -337,7 +337,6 @@ class Worker(WorkerBase):
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
         discardable: set[int] = set()
 
-        # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
             self._save_sleep_parameters(model)
@@ -346,14 +345,17 @@ class Worker(WorkerBase):
                 parameter.untyped_storage().data_ptr()
                 for parameter in self._get_sleep_parameters(model).values()
             }
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
-            draft = self.get_draft_model()
-            if draft is not None:
-                self._sleep_saved_draft_buffers = {
-                    name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
+            # XPU still discards the whole weights pool.
+            if current_platform.is_xpu():
+                self._sleep_saved_buffers = {
+                    name: buffer.cpu().clone() for name, buffer in model.named_buffers()
                 }
+                draft = self.get_draft_model()
+                if draft is not None:
+                    self._sleep_saved_draft_buffers = {
+                        name: buffer.cpu().clone()
+                        for name, buffer in draft.named_buffers()
+                    }
 
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()

@@ -857,7 +857,8 @@ class LLM(
                            sleeping and waking up the engine to run the same
                            model again. Please make sure there's enough CPU
                            memory to store the model weights.
-                - Level 2: Discard all GPU memory (weights + KV cache).
+                - Level 2: Discard model parameters and KV cache, and offload
+                           the rest of the model's GPU state to CPU.
                            Good for sleeping and waking up the engine to run
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
