@@ -25,3 +25,11 @@ def test_count_reasoning_tokens_stops_at_think_end(step3_parser):
 def test_count_reasoning_tokens_without_think_end(step3_parser):
     """Step3 treats output as reasoning until </think> appears."""
     assert step3_parser.count_reasoning_tokens([11, 12, 13]) == 3
+
+
+def test_extract_content_ids(step3_parser):
+    end = step3_parser.think_end_token_id
+    assert step3_parser.extract_content_ids([11, 12, end, 13, 14]) == [13, 14]
+    assert step3_parser.extract_content_ids([11, 12, end]) == []
+    assert step3_parser.extract_content_ids([11, 12, 13]) == []
+    assert step3_parser.extract_content_ids([end, 13]) == [13]
