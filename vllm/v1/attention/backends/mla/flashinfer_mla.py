@@ -33,7 +33,6 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec, is_quantized_kv_cache
 
@@ -124,17 +123,18 @@ def _get_multi_ctas_kv_counter_buffer(
 
 
 _CAKE_BACKEND_NAMES = (
-    "WIDE_MIN_ROWS",
     "mla_nvfp4_query_buffers",
     "plan_mla_nvfp4_paged_decode",
     "query_workspace_bytes",
-    "use_wide_route",
     "workspace_bytes",
 )
+# The two-CTA route of the first Cake build (more than 48 (token, head) rows
+# per request) zeroed V blocks whose E4M3 scale is below 2^-3.
+_CAKE_UNFIXED_WIDE_PROGRAM = "cake_mla_nvfp4_paged_decode_e7cb458f5e586352cfcb"
 
 
 def _cake_nvfp4_mla_decode_unsupported_reason() -> str | None:
-    """Why FlashInfer's Cake NVFP4 MLA decode (flashinfer #6242) cannot run here."""
+    """Why FlashInfer's Cake NVFP4 MLA decode cannot run here."""
     try:
         from flashinfer.experimental.cake_mla_nvfp4_paged_decode import (
             cake_backend,
@@ -152,10 +152,17 @@ def _cake_nvfp4_mla_decode_unsupported_reason() -> str | None:
         toolkit_ok = all(
             cake_jit.toolkit_supports(p) for p in cake_jit.KERNELS.values()
         )
-    except (ImportError, AttributeError):
+        wide_route_fixed = cake_jit.KERNELS["main_wide"] != _CAKE_UNFIXED_WIDE_PROGRAM
+    except (ImportError, AttributeError, KeyError):
         return (
             "kv_cache_dtype='nvfp4' needs a FlashInfer build with the Cake "
-            "NVFP4 MLA decode (flashinfer-ai/flashinfer#6242)"
+            "NVFP4 MLA decode"
+        )
+    if not wide_route_fixed:
+        return (
+            "kv_cache_dtype='nvfp4' needs a newer FlashInfer: this build's Cake "
+            "NVFP4 MLA decode is wrong for more than 48 (token, head) query "
+            "rows per request"
         )
     if not toolkit_ok:
         return (
@@ -227,6 +234,10 @@ def cake_nvfp4_mla_decode(
     # Size the split partials for the plan the call below makes.
     if cum_seq_lens_q is not None:
         assert max_q_len is not None
+        # No request is longer than the packed query. The tighter bound also
+        # keeps tiny batches off Cake's wide route, whose 32-row tiles reject
+        # fewer rows.
+        max_q_len = min(max_q_len, q.shape[0])
         batch, plan_q_len = cum_seq_lens_q.shape[0] - 1, max_q_len
     else:
         batch, plan_q_len = q.shape[0], q.shape[1]
@@ -492,24 +503,6 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         if kv_cache_dtype == "nvfp4":
             # The Cake decode quantizes the BF16 query itself (per-row NVFP4).
             self.supports_quant_query_input = False
-            from flashinfer.experimental.cake_mla_nvfp4_paged_decode import (
-                cake_backend,
-            )
-
-            # Cake's two-CTA route, taken above WIDE_MIN_ROWS (token, head) rows
-            # per request, zeroes V blocks whose E4M3 scale is below 2^-3
-            # (flashinfer-ai/flashinfer#7163).
-            q_len = max_decode_query_len(get_current_vllm_config())
-            rows = num_heads * self.dcp_world_size * q_len
-            if cake_backend.use_wide_route(rows):
-                raise NotImplementedError(
-                    "kv_cache_dtype='nvfp4' MLA decode supports at most "
-                    f"{cake_backend.WIDE_MIN_ROWS} query rows per request, got "
-                    f"{rows} ({num_heads} heads x decode context parallel size "
-                    f"{self.dcp_world_size} x {q_len} query tokens); use fewer "
-                    "speculative tokens, a smaller decode context parallel size, "
-                    "more tensor parallelism or --kv-cache-dtype fp8."
-                )
 
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None

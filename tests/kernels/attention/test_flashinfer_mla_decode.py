@@ -395,6 +395,7 @@ def test_flashinfer_mla_decode_workspace_supports_autotune():
 @pytest.mark.parametrize("kv_magnitude", [1.0, 0.05])
 @pytest.mark.parametrize("dcp", [1, 2])
 @pytest.mark.parametrize("cuda_graph", [False, True])
+@pytest.mark.parametrize("wide", [False, True])
 @requires_sm10x
 def test_flashinfer_mla_nvfp4_cake_decode(
     bs: int,
@@ -403,6 +404,7 @@ def test_flashinfer_mla_nvfp4_cake_decode(
     kv_magnitude: float,
     dcp: int,
     cuda_graph: bool,
+    wide: bool,
 ):
     """The NVFP4 MLA cache feeds FlashInfer's Cake decode.
 
@@ -413,10 +415,11 @@ def test_flashinfer_mla_nvfp4_cake_decode(
     mapping or output scaling is then far outside the E4M3 P/V error.
     ``spec_decode`` sends the packed causal batch FlashInferMLAImpl builds for
     speculative decoding: ragged query lengths under the ``1 + k`` bound.
-    ``kv_magnitude`` 0.05 puts the cache's block scales below 2^-3, which Cake's
-    wide route (more than 48 rows per request, rejected by FlashInferMLAImpl)
-    would zero. ``dcp`` 2 splits the cache over two decode context parallel
-    ranks as vLLM lays it out and merges the ranks' outputs by their LSE.
+    ``wide`` sends more than 48 (token, head) rows per request, which Cake runs
+    on its two-CTA route; ``kv_magnitude`` 0.05 puts the cache's block scales
+    below 2^-3, which the first Cake build's two-CTA route zeroed.
+    ``dcp`` 2 splits the cache over two decode context parallel ranks as vLLM
+    lays it out and merges the ranks' outputs by their LSE.
     ``cuda_graph`` plans the decode for a long ``max_seq_len`` and captures it,
     as vLLM's FULL CUDA graphs do, then replays it with other query values and
     lengths.
@@ -440,12 +443,20 @@ def test_flashinfer_mla_nvfp4_cake_decode(
 
     torch.set_default_device("cuda")
     torch.manual_seed(42)
-    # Kimi-K3 at TP8 has 12 heads per GPU, gathered from every DCP rank; spec
-    # decode keeps 12 to stay within Cake's 48 rows per request.
-    num_heads = 12 if spec_decode else 12 * dcp
+    # Kimi-K3 at TP8 has 12 heads per GPU, gathered from every DCP rank. The
+    # wide cases are DeepSeek-V3 at TP1 (128 heads) and 16 heads with 4-token
+    # spec-decode queries.
+    if wide:
+        num_heads = 16 if spec_decode else 128
+    else:
+        num_heads = 12 if spec_decode else 12 * dcp
     k_scale = 0.25
     max_q_len = 4 if spec_decode else 1
     q_lens = [3, 1, 2][:bs] if spec_decode else [1] * bs
+    if wide and spec_decode and bs == 1:
+        # One 1-token request under the 4-token bound: fewer rows than the
+        # wide route's 32-row tiles.
+        q_lens = [1]
     total_q = sum(q_lens)
 
     _, kv, block_tables, seq_lens, max_seq_len = _make_decode_inputs(

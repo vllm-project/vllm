@@ -45,8 +45,7 @@ You can configure how the quantization scales are computed in vLLM using three d
 
 On dense MLA models (e.g. DeepSeek-V3, Kimi-K3), `kv_cache_dtype="nvfp4"` stores the 512 latent dims as NVFP4 and the 64 RoPE dims as FP8: 352 bytes per token per layer, instead of 576 for FP8.
 
-- **Requirements:** the `FLASHINFER_MLA` backend, an SM100/SM103 GPU, BF16 activations (FP8- and NVFP4-weight checkpoints are fine), a FlashInfer build with the Cake NVFP4 MLA decode ([flashinfer#6242](https://github.com/flashinfer-ai/flashinfer/pull/6242)) and a CUDA 13.4+ toolkit at runtime.
-- **At most 48 query rows per decode request:** heads per GPU × decode context parallel size × the longest decode query (1 + speculative tokens, or 1 + 2 × speculative tokens with parallel drafting on model runner V1). For example, DeepSeek-V3 (128 heads) needs a tensor-parallel size of at least 4 (data parallelism does not change heads per GPU), allows neither speculative decoding nor decode context parallelism at TP4, and allows at most 2 speculative tokens at TP8.
+- **Requirements:** the `FLASHINFER_MLA` backend, an SM100/SM103 GPU, BF16 activations (FP8- and NVFP4-weight checkpoints are fine), a FlashInfer build with the Cake NVFP4 MLA decode, and a CUDA 13.4+ toolkit at runtime.
 - **Scales:** each 16-value block gets an E4M3 scale when the cache is written. The per-tensor KV scale (`k_scale`, which the stored values are divided by) is loaded from the checkpoint as for FP8, and is 1.0 when the checkpoint has none, so no calibration is needed.
 - **Not supported (refused at startup):** the Kimi-K3 DSpark draft model, whose MLA layers use RoPE; Kimi-K3's latency-specialized decode (`decode_backend: latency_specialized` in `--additional-config`); `--kv-cache-dtype-skip-layers` on hybrid MLA models such as Kimi-K3; and, under FP8 prefill, an MLA draft model whose `kv_cache_dtype` mixes `nvfp4` and `fp8` with the target's.
 
