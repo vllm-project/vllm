@@ -237,6 +237,9 @@ class OffloadingEventsTracker:
                     mm_features=[
                         replace(feature, data=None) for feature in request.mm_features
                     ],
+                    # Retain the tensor for cache misses; the hash helper skips
+                    # even cached digests if it is None. This keeps it alive for
+                    # the context's lifetime, including undrained store events.
                     prompt_embeds=request.prompt_embeds,
                     _prompt_embeds_per_block_hashes=request._prompt_embeds_per_block_hashes,
                     resumable=request.resumable,
