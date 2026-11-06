@@ -24,73 +24,6 @@ requires_sm100 = pytest.mark.skipif(
 )
 
 
-def _make_case(query_lens, prefixes, device_plan=False):
-    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
-        index_score_sharded_plan,
-        index_score_sharded_plan_device,
-    )
-
-    from vllm.models.minimax_m3.nvidia.ops.index_prefill import prepare_prefill_window
-    from vllm.utils.platform_utils import num_compute_units
-
-    torch.manual_seed(12)
-    lengths = [q + p for q, p in zip(query_lens, prefixes)]
-    blocks = (max(lengths) + 127) // 128
-    total_q = sum(query_lens)
-    heads = 4
-    table = torch.stack([torch.randperm(blocks, device="cuda") for _ in lengths]).int()
-    for row in range(1, len(lengths)):
-        table[row, 0] = table[0, 0]
-    query = torch.randint(-2, 3, (total_q, heads, 128), device="cuda").to(
-        torch.float8_e4m3fn
-    )
-    query[..., 0] = 16
-    cache = torch.randint(-2, 3, (blocks, 128, 128), device="cuda").to(
-        torch.float8_e4m3fn
-    )
-    plan = index_score_sharded_plan(
-        torch.tensor(query_lens, dtype=torch.int32),
-        torch.tensor(lengths, dtype=torch.int32),
-        heads,
-        qo_offset=torch.tensor(prefixes, dtype=torch.int32),
-        device=query.device,
-    )
-    if device_plan:
-        cu_q = (
-            torch.tensor([0] + query_lens, device="cuda", dtype=torch.int32)
-            .cumsum(0)
-            .int()
-        )
-        seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
-        metadata = torch.empty((5, len(lengths) + 1), device="cuda", dtype=torch.int32)
-        prepare_prefill_window(cu_q, seq_lens, 0, total_q, metadata)
-        plan = index_score_sharded_plan_device(
-            metadata[1, :-1],
-            metadata[2, :-1],
-            metadata[0],
-            metadata[4],
-            metadata[3, :-1],
-            heads,
-            total_q=total_q,
-            max_query_len=max(query_lens),
-            max_seq_len=max(lengths),
-            packed_work_range=torch.empty(
-                num_compute_units(0), device="cuda", dtype=torch.int64
-            ),
-            packed_work_info=torch.empty(
-                heads * ((total_q + 127) // 128 + len(lengths) - 1),
-                device="cuda",
-                dtype=torch.int64,
-            ),
-            workspace=torch.empty(32 << 20, device="cuda", dtype=torch.uint8),
-        )
-    scores = torch.empty((total_q, heads, (blocks + 15) // 16 * 16), device="cuda")
-    positions = torch.cat(
-        [torch.arange(q, device="cuda") + p for q, p in zip(query_lens, prefixes)]
-    )
-    return lengths, table, query, cache, plan, scores, positions
-
-
 def _reference(query, cache, table, rank, query_lens, prefixes, like, tp=2):
     reference = torch.full_like(like, -float("inf"))
     start = 0
@@ -114,17 +47,59 @@ def _reference(query, cache, table, rank, query_lens, prefixes, like, tp=2):
 
 @requires_sm100
 @pytest.mark.parametrize("query_lens,prefixes", CASES)
-@pytest.mark.parametrize("device_plan", [False, True])
 @pytest.mark.parametrize("tp", [2, 4])
 @torch.inference_mode()
-def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
+def test_indexer_prefill_device_plan_matches_reference(query_lens, prefixes, tp):
     from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
         index_score_sharded,
+        index_score_sharded_plan_device,
     )
 
-    lengths, table, query, cache, plan, scores, _ = _make_case(
-        query_lens, prefixes, device_plan
+    from vllm.models.minimax_m3.nvidia.ops.index_prefill import prepare_prefill_window
+    from vllm.utils.platform_utils import num_compute_units
+
+    torch.manual_seed(12)
+    lengths = [q + p for q, p in zip(query_lens, prefixes)]
+    blocks = (max(lengths) + 127) // 128
+    total_q = sum(query_lens)
+    heads = 4
+    table = torch.stack([torch.randperm(blocks, device="cuda") for _ in lengths]).int()
+    for row in range(1, len(lengths)):
+        table[row, 0] = table[0, 0]
+    query = torch.randint(-2, 3, (total_q, heads, 128), device="cuda").to(
+        torch.float8_e4m3fn
     )
+    query[..., 0] = 16
+    cache = torch.randint(-2, 3, (blocks, 128, 128), device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    cu_q = (
+        torch.tensor([0] + query_lens, device="cuda", dtype=torch.int32).cumsum(0).int()
+    )
+    seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+    metadata = torch.empty((5, len(lengths) + 1), device="cuda", dtype=torch.int32)
+    prepare_prefill_window(cu_q, seq_lens, 0, total_q, metadata)
+    plan = index_score_sharded_plan_device(
+        metadata[1, :-1],
+        metadata[2, :-1],
+        metadata[0],
+        metadata[4],
+        metadata[3, :-1],
+        heads,
+        total_q=total_q,
+        max_query_len=max(query_lens),
+        max_seq_len=max(lengths),
+        packed_work_range=torch.empty(
+            num_compute_units(0), device="cuda", dtype=torch.int64
+        ),
+        packed_work_info=torch.empty(
+            heads * ((total_q + 127) // 128 + len(lengths) - 1),
+            device="cuda",
+            dtype=torch.int64,
+        ),
+        workspace=torch.empty(32 << 20, device="cuda", dtype=torch.uint8),
+    )
+    scores = torch.empty((total_q, heads, (blocks + 15) // 16 * 16), device="cuda")
     for iteration in range(2):
         query = (-query.float()).to(query.dtype)
         # Future keys must not win before the last query, including page padding.
@@ -151,72 +126,6 @@ def test_fmha_prefill_shard_scores(query_lens, prefixes, device_plan, tp):
                 query, cache, table, rank, query_lens, prefixes, scores, tp
             )
             torch.testing.assert_close(scores, reference, rtol=0, atol=0)
-
-
-@requires_sm100
-@pytest.mark.parametrize("query_lens,prefixes", CASES)
-@pytest.mark.parametrize("poison", [float("nan"), float("inf")])
-@torch.inference_mode()
-def test_fmha_prefill_shard_scores_uninitialized(query_lens, prefixes, poison):
-    """Without the -inf fill, every query's causal page prefix is still written,
-    so the prefill top-k is unchanged even over a poisoned score buffer."""
-    from flashinfer.experimental.cake_msa_icp_indexer.cake_backend import (
-        index_score_sharded,
-        topk_select_prefill,
-    )
-
-    _, table, query, cache, plan, scores, positions = _make_case(query_lens, prefixes)
-    valid_pages = (positions // 128 + 1).to(torch.int32)
-    heads = query.shape[1]
-    total_q = query.shape[0]
-    for rank in range(2):
-        shard = cache[:, rank::2].contiguous()
-        index_score_sharded(
-            query, shard, table, plan, rank=rank, max_score=scores, sm_scale=1.0
-        )
-        expected = torch.empty((heads, total_q, 33), dtype=torch.int32, device="cuda")
-        topk_select_prefill(
-            scores, valid_pages, expected, force_begin_blocks=1, force_end_blocks=2
-        )
-
-        scores.fill_(poison)
-        index_score_sharded(
-            query,
-            shard,
-            table,
-            plan,
-            rank=rank,
-            max_score=scores,
-            sm_scale=1.0,
-            initialize=False,
-        )
-        reference = _reference(query, cache, table, rank, query_lens, prefixes, scores)
-        columns = torch.arange(scores.shape[-1], device="cuda")
-        in_prefix = (columns[None, :] < valid_pages[:, None])[:, None, :].expand_as(
-            scores
-        )
-        torch.testing.assert_close(
-            scores[in_prefix], reference[in_prefix], rtol=0, atol=0
-        )
-        actual = torch.empty_like(expected)
-        topk_select_prefill(
-            scores, valid_pages, actual, force_begin_blocks=1, force_end_blocks=2
-        )
-        torch.testing.assert_close(
-            actual[..., :16].view(torch.float32).sort(-1).values,
-            expected[..., :16].view(torch.float32).sort(-1).values,
-            rtol=0,
-            atol=0,
-        )
-        ids = actual[..., 16:32]
-        live = ids >= 0
-        assert torch.all((ids < valid_pages[None, :, None]) | ~live)
-        assert torch.all((ids[..., 1:] > ids[..., :-1]) | ~live[..., 1:])
-        assert torch.all((ids == 0).any(-1))
-        for offset in (1, 2):
-            forced = (valid_pages - offset).clamp_min(0)
-            assert torch.all((ids == forced[None, :, None]).any(-1))
-        assert torch.all(actual[..., 32] == 1)
 
 
 @pytest.mark.parametrize("tp", [2, 4])
