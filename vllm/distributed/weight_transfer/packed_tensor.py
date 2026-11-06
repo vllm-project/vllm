@@ -233,6 +233,11 @@ def packed_nccl_broadcast_consumer(
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     caller_stream = torch.accelerator.current_stream()
+    # Receives and loads run on the slot streams, so order them after work the
+    # caller queued before this call, such as the zero-fill of padded params at
+    # the start of a direct reload, which would otherwise erase loaded weights.
+    for stream in streams:
+        stream.wait_stream(caller_stream)
     prev_received: torch.Event | None = None
     slot_done: list[torch.Event | None] = [None] * num_buffers
 

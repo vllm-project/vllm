@@ -395,6 +395,47 @@ class TestPackedBroadcastDeferredConsumer:
         )
         torch.testing.assert_close(observed, torch.full_like(observed, expected))
 
+    def test_loads_ordered_after_caller_stream_work(self):
+        """Loads must follow work the caller queued before the receive, e.g.
+        direct reload zero-filling padded params at begin."""
+        numel = 4
+        param = torch.full((numel,), -1.0, device="cuda")
+        load_enqueued_before_fill: list[bool] = []
+
+        def run(sleep: bool) -> float:
+            expected = float(torch.randint(1, 2**20, ()).item())
+            if sleep:
+                # The caller's fill lands only after a GPU sleep.
+                torch.cuda._sleep(SLEEP_CYCLES)
+            param.zero_()
+            filled = torch.Event()
+            filled.record()
+
+            def post_unpack_func(tensor_list):
+                [(_, tensor)] = tensor_list
+                if sleep:
+                    load_enqueued_before_fill.append(not filled.query())
+                param.copy_(tensor)
+
+            packed_nccl_broadcast_consumer(
+                iterator=iter([("w", ([numel], torch.float32))]),
+                group=SentinelBroadcastGroup([expected]),
+                src=0,
+                post_unpack_func=post_unpack_func,
+                num_buffers=2,
+            )
+            torch.accelerator.synchronize()
+            return expected
+
+        # Warm up streams and kernels so the timed run enqueues in time.
+        run(sleep=False)
+        expected = run(sleep=True)
+
+        assert load_enqueued_before_fill == [True], (
+            "the caller's fill finished before the load was enqueued"
+        )
+        torch.testing.assert_close(param, torch.full_like(param, expected))
+
     @pytest.mark.parametrize(
         ("num_buffers", "packs_per_layer"), [(2, 4), (2, 5), (3, 5)]
     )
