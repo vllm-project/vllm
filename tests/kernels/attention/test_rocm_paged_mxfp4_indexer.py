@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     RocmMxfp4IndexerMetadata,
+    RocmMxfp4VarlenDecode,
     native_decode,
     plan_gather_launches,
     plan_prefill_chunks,
@@ -206,7 +207,7 @@ def _forward_context(monkeypatch, metadata):
     monkeypatch.setattr(ops, "get_forward_context", lambda: context)
 
 
-def _decode_metadata(case, rows, ratio, query_lens):
+def _decode_metadata(case, rows, ratio, query_lens, varlen=False):
     lens = torch.tensor([(p + 1) // ratio for _, p in rows], dtype=torch.int32)
     lens = lens.to(DEVICE)
     block_table = case.block_table[[req for req, _ in rows]].contiguous()
@@ -214,6 +215,15 @@ def _decode_metadata(case, rows, ratio, query_lens):
     next_n = max(query_lens)
     context_lens = (torch.tensor(case.seq_lens, dtype=torch.int32) // ratio).to(DEVICE)
     native = native_decode(lens, block_table, query_lens, next_n, context_lens)
+    decode_varlen = None
+    if varlen and native is None:
+        starts = [0, *itertools.accumulate(query_lens)]
+        decode_varlen = RocmMxfp4VarlenDecode(
+            next_n,
+            torch.tensor(starts, dtype=torch.int32, device=DEVICE),
+            context_lens,
+            case.block_table[: len(query_lens)].contiguous(),
+        )
     schedule = torch.empty(
         ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries, next_n),
         dtype=torch.int32,
@@ -231,8 +241,16 @@ def _decode_metadata(case, rows, ratio, query_lens):
         decode_row_lens=lens,
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
         decode_native=native,
+        decode_varlen=decode_varlen,
         decode_schedule=ops.build_rocm_mxfp4_decode_schedule(
-            lens, HEADS, HEAD_DIM, entries, schedule, MAX_LEN // ratio, native
+            lens,
+            HEADS,
+            HEAD_DIM,
+            entries,
+            schedule,
+            MAX_LEN // ratio,
+            native,
+            varlen=decode_varlen,
         ),
     )
 
@@ -454,6 +472,80 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
         rows,
         lambda r, gather=False: _decode_metadata(case, rows, r, query_lens),
     )
+
+
+@BLOCKS
+@pytest.mark.parametrize(
+    "query_lens",
+    # Adaptive verification: requests of 1 to next_n rows, launched as varlen
+    # sequences. A request slot past the step's requests has no rows.
+    [[2, 1, 2], [6, 1, 3, 6], [6, 3, 1, 0]],
+    ids=["ragged2", "ragged6", "empty_slot"],
+)
+def test_varlen_decode_layers_match_reference(monkeypatch, block, query_lens):
+    set_random_seed(0)
+    case = _Case([q and n for q, n in zip(query_lens, [900, 333, 610, 1200])], block)
+    rows = [
+        (req, n - q + j)
+        for req, (n, q) in enumerate(zip(case.seq_lens, query_lens))
+        for j in range(q)
+    ]
+    assert _decode_metadata(case, rows, 1, query_lens, True).decode_varlen is not None
+    _run_layers(
+        monkeypatch,
+        case,
+        rows,
+        lambda r, gather=False: _decode_metadata(case, rows, r, query_lens, True),
+    )
+
+    # The varlen launches select the same entries as the per-row ones they
+    # replace, on a dense layer and on the candidate source; a row's top-k
+    # order is not fixed.
+    q, q_scale, weights, _ = _queries(len(rows))
+    hidden = torch.empty(len(rows), 1, device=DEVICE)
+    outs = []
+    for varlen in (False, True):
+        out = torch.full((len(rows), TOPK), 7, dtype=torch.int32, device=DEVICE)
+        _forward_context(
+            monkeypatch, _decode_metadata(case, rows, 2, query_lens, varlen)
+        )
+        ops.rocm_mxfp4_sparse_attn_indexer(
+            hidden,
+            "indexer",
+            case.cache[2],
+            q,
+            q_scale,
+            weights,
+            TOPK,
+            HEAD_DIM,
+            MAX_LEN // 2,
+            out,
+            compress_ratio=2,
+        )
+        source = torch.full((len(rows), TOPK), 7, dtype=torch.int32, device=DEVICE)
+        pool = torch.full((len(rows), POOL_BLOCKS), 5, dtype=torch.int32, device=DEVICE)
+        _forward_context(
+            monkeypatch, _decode_metadata(case, rows, 1, query_lens, varlen)
+        )
+        ops.rocm_mxfp4_sparse_attn_indexer(
+            hidden,
+            "indexer",
+            case.cache[1],
+            q,
+            q_scale,
+            weights,
+            TOPK,
+            HEAD_DIM,
+            MAX_LEN,
+            source,
+            compress_ratio=1,
+            candidate_blocks=pool,
+            candidate_block_size=CAND_BLOCK,
+            candidate_write=True,
+        )
+        outs.append((out, source, pool))
+    for rowwise, varlen in zip(*outs):
+        assert torch.equal(rowwise.sort(dim=1).values, varlen.sort(dim=1).values)
 
 
 @pytest.mark.parametrize(

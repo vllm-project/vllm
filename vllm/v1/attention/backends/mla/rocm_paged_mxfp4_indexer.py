@@ -5,7 +5,8 @@
 Extends the dense indexer metadata with what aiter's paged MXFP4 MQA-logits
 kernel needs to read the cache in place: each prefill chunk as its requests,
 packed through query_start_loc into one launch, and the decode rows as
-next_n-row sequences on uniform steps. `RocmMxfp4IndexerMetadataBuilder` plans
+next_n-row sequences on uniform steps or, under adaptive verification, as
+varlen sequences of 1 to next_n rows. `RocmMxfp4IndexerMetadataBuilder` plans
 this for any model's indexer, and a two-level indexer's candidate blocks once
 a subclass sets their size. DeepSeek-V4.1's builder does, and with
 ``AttentionConfig.indexer_sparse_logits`` adds the per-step state the
@@ -104,6 +105,23 @@ class RocmMxfp4NativeDecode:
     """[requests, max_blocks] int32, each request's first flattened row."""
 
 
+@dataclass
+class RocmMxfp4VarlenDecode:
+    """A decode step whose requests carry 1 to next_n query rows (adaptive
+    verification), as the kernel's varlen sequences: a workgroup walks a KV
+    tile once for a request's rows. next_n plans the launch, so a request with
+    every row is one row block. Request slots past the step's requests have
+    no rows: query_start_loc repeats the step's token count there."""
+
+    next_n: int
+    query_start_loc: torch.Tensor
+    """[requests + 1] int32 first row of each request, on the device."""
+    context_lens: torch.Tensor
+    """[requests] int32 compressed context of each request."""
+    block_table: torch.Tensor
+    """[requests, max_blocks] int32 block table of each request."""
+
+
 def native_decode(
     row_lens: torch.Tensor,
     row_block_table: torch.Tensor,
@@ -143,6 +161,9 @@ class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     pool."""
     decode_native: RocmMxfp4NativeDecode | None = None
     """The same rows as next_n-row sequences, for the dense launches."""
+    decode_varlen: RocmMxfp4VarlenDecode | None = None
+    """The same rows as varlen sequences, for the dense launches, where the
+    requests' row counts differ."""
     decode_schedule: torch.Tensor | None = None
     """The dense decode launches' work schedule, built once for the step."""
     decode_use_gather: bool = False
@@ -369,9 +390,13 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         )
         spec_config = vllm_config.speculative_config
         # Adaptive verification replays a FULL graph on drafts reallocated
-        # across requests, so a step's shape does not fix its query lengths.
+        # across requests, so a step's shape does not fix its query lengths:
+        # the dense decode launches take its requests as varlen sequences of 1
+        # to next_n rows instead of next_n-row ones, so a workgroup still walks
+        # a KV tile once for a request's rows.
         adaptive = spec_config is not None and spec_config.enable_adaptive_verification
         self.native_next_n = 1 if adaptive else self.num_speculative_tokens + 1
+        self.varlen_next_n = self.num_speculative_tokens + 1 if adaptive else 1
         # The indexer's logits width, which the decode schedule sizes slices by.
         max_model_len = vllm_config.model_config.max_model_len
         self.logits_width = max_model_len // self.compress_ratio
@@ -379,7 +404,10 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         # page geometry, so the step builds their schedule once, not per layer.
         self.decode_schedule_buffer = torch.empty(
             rocm_mxfp4_decode_schedule_words(
-                num_heads, head_dim, self.page_entries, self.native_next_n
+                num_heads,
+                head_dim,
+                self.page_entries,
+                max(self.native_next_n, self.varlen_next_n),
             ),
             dtype=torch.int32,
             device=device,
@@ -433,6 +461,13 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 self.native_next_n,
                 context_lens,
             )
+            if metadata.decode_native is None and self.varlen_next_n > 1:
+                metadata.decode_varlen = RocmMxfp4VarlenDecode(
+                    self.varlen_next_n,
+                    cm.query_start_loc[: base.num_decodes + 1],
+                    context_lens[: base.num_decodes],
+                    cm.block_table_tensor[: base.num_decodes],
+                )
             metadata.decode_schedule = build_rocm_mxfp4_decode_schedule(
                 lengths,
                 self.num_heads,
@@ -441,6 +476,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 self.decode_schedule_buffer,
                 self.logits_width,
                 metadata.decode_native,
+                metadata.decode_varlen,
             )
         if base.prefill is not None:
             assert cm.seq_lens_cpu_upper_bound is not None
