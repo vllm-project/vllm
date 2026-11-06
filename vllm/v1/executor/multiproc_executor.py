@@ -10,8 +10,8 @@ import time
 import traceback
 import weakref
 from collections import deque
-from collections.abc import Callable, Sequence
-from concurrent.futures import Future, InvalidStateError
+from collections.abc import Callable, Sequence, Sized
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -95,10 +95,18 @@ class FutureWrapper(Future):
         futures_queue: deque["FutureWrapper"],
         get_response: Callable[[], Any],
         aggregate: Callable = lambda x: x,
+        response_ready: Callable[[], bool] | None = None,
+        wait_for_response: Callable[[Sized, float], None] | None = None,
     ):
         self.futures_queue = futures_queue
         self.get_response = get_response
         self.aggregate = aggregate
+        # Non-blocking check for whether get_response() can return without
+        # waiting. If None, poll() treats the response as ready (and blocks).
+        self.response_ready = response_ready
+        # Spins until get_response() is ready, the given collection is non-empty
+        # or time.monotonic() reaches the given deadline.
+        self.wait_for_response = wait_for_response
         super().__init__()
         self.futures_queue.appendleft(self)
 
@@ -111,6 +119,22 @@ class FutureWrapper(Future):
             future = self.futures_queue.pop()
             future._wait_for_response()
         return super().result()
+
+    def poll(self) -> bool:
+        while not self.done():
+            future = self.futures_queue[-1]
+            if future.response_ready is not None and not future.response_ready():
+                return False
+            self.futures_queue.pop()
+            future._wait_for_response()
+        return True
+
+    def wait_briefly(self, pending: Sized, deadline: float) -> None:
+        """Wait for the oldest uncollected response, until `pending` is non-empty
+        or time.monotonic() reaches `deadline`. Call after poll() returns False."""
+        wait_for_response = self.futures_queue[-1].wait_for_response
+        if wait_for_response is not None:
+            wait_for_response(pending, deadline)
 
     def _wait_for_response(self):
         try:
@@ -201,26 +225,35 @@ class MultiprocExecutor(Executor):
 
             # For CPU backend only, to setup OpenMP threads affinity
             cpu_omp_manager = OMPProcessManager(self.vllm_config)
-            for local_rank in range(self.local_world_size):
+
+            def start_worker(local_rank: int) -> UnreadyWorkerProcHandle:
                 global_rank = global_start_rank + local_rank
-                is_driver_worker = self._is_driver_worker(global_rank)
                 with cpu_omp_manager.configure_omp_envs(
                     rank=global_rank, local_rank=local_rank
                 ):
-                    unready_worker_handle = WorkerProc.make_worker_process(
+                    return WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
                         local_rank=local_rank,
                         rank=global_rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
+                        is_driver_worker=self._is_driver_worker(global_rank),
                         inherited_fds=inherited_fds,
                     )
-                unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+
+            if self._can_start_workers_concurrently(inherited_fds):
+                # Start workers in parallel to overlap their slow spawn imports.
+                self._start_workers_concurrently(start_worker, unready_workers)
+            else:
+                for local_rank in range(self.local_world_size):
+                    unready_worker_handle = start_worker(local_rank)
+                    unready_workers.append(unready_worker_handle)
+                    if inherited_fds is not None:
+                        death_writer = unready_worker_handle.death_writer
+                        assert death_writer is not None
+                        inherited_fds.append(death_writer.fileno())
+                        inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -309,6 +342,48 @@ class MultiprocExecutor(Executor):
 
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
+
+    def _can_start_workers_concurrently(self, inherited_fds: list[int] | None) -> bool:
+        """Whether the local workers can be started from parallel threads.
+
+        Only safe with spawn (fork passes inherited fds from one worker to the
+        next) and when nothing changes process-global state around each start:
+        OpenMP env setup on the CPU backend and the NUMA numactl wrapper both
+        patch os.environ / the multiprocessing executable per worker.
+        """
+        return (
+            inherited_fds is None
+            and self.local_world_size > 1
+            and not current_platform.is_cpu()
+            and not self.parallel_config.numa_bind
+        )
+
+    def _start_workers_concurrently(
+        self,
+        start_worker: Callable[[int], "UnreadyWorkerProcHandle"],
+        unready_workers: list["UnreadyWorkerProcHandle"],
+    ) -> None:
+        """Start all local workers from threads, raising the first failure.
+
+        Every worker that did start is appended to `unready_workers` in rank
+        order, even if another one failed or the caller was interrupted, so
+        that cleanup terminates it.
+        """
+        started: list[UnreadyWorkerProcHandle | None] = [None] * self.local_world_size
+
+        def start_and_record(local_rank: int) -> None:
+            started[local_rank] = start_worker(local_rank)
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.local_world_size) as pool:
+                futures = [
+                    pool.submit(start_and_record, local_rank)
+                    for local_rank in range(self.local_world_size)
+                ]
+        finally:
+            unready_workers.extend(h for h in started if h is not None)
+        for future in futures:
+            future.result()
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
@@ -498,8 +573,18 @@ class MultiprocExecutor(Executor):
 
             return responses[0] if output_rank is not None else responses
 
+        def wait_for_response(pending: Sized, deadline: float) -> None:
+            for mq in response_mqs:
+                if not mq.readable():
+                    mq.spin_until_readable(pending, deadline)
+                    return
+
         future = FutureWrapper(
-            self.futures_queue, get_response=get_response, aggregate=aggregate
+            self.futures_queue,
+            get_response=get_response,
+            aggregate=aggregate,
+            response_ready=lambda: all(mq.readable() for mq in response_mqs),
+            wait_for_response=wait_for_response,
         )
 
         return future if non_block else future.result()

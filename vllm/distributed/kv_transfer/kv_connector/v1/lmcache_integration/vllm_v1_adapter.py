@@ -52,7 +52,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils impo
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
 from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype, token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
@@ -202,7 +202,7 @@ class RequestTracker:
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute],
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
@@ -415,7 +415,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
                 model_config.hf_config, "num_nextn_predict_layers", 0
             )
 
-        elif vllm_config.speculative_config.use_eagle():
+        elif vllm_config.speculative_config.uses_target_hidden_states:
             try:
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 num_mtp_layers = draft_model_config.get_num_layers(
@@ -1184,7 +1184,7 @@ class LMCacheConnectorV1Impl:
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
             # TODO(Jiayi): Optimize this
-            token_ids_tensor = torch.tensor(request.prompt_token_ids)
+            token_ids_tensor = token_ids_to_tensor(request.prompt_token_ids or [])
             apply_mm_hashes_to_token_ids(token_ids_tensor, mm_hashes, mm_positions)
             token_ids = token_ids_tensor.tolist()
 

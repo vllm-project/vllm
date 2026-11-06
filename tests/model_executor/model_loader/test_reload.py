@@ -6,6 +6,7 @@ import inspect
 import sys
 import types
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
@@ -16,11 +17,19 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, ModelConfig
+from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+    SparseNCCLWeightTransferEngine,
+)
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+    CheckpointWeightPatch,
+    load_checkpoint_weight_patches,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -40,9 +49,29 @@ from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
+    finalize_model_weights,
     load_attention_sink,
+    safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
+
+
+def test_preserve_placement_remapping_until_checkpoint_iteration_finishes():
+    """Deferred reload keeps loaders installed through trailing checkpoint entries."""
+    layer = torch.nn.Linear(2, 2, bias=False)
+    record_metadata_for_reloading(layer)
+    initialize_layerwise_reload(layer, defer_processing=True)
+    checkpoint = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    loader = layer.weight.weight_loader
+    loader(layer.weight, checkpoint)
+    assert layer.weight.is_meta
+    assert layer.weight.weight_loader is loader
+    loader(layer.weight, checkpoint + 1)
+    assert layer.weight.is_meta
+    finalize_layerwise_reload(layer, model_config=None)
+    assert torch.equal(layer.weight, checkpoint + 1)
+    assert not reload_layerwise.get_layerwise_info(layer).defer_processing
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -72,6 +101,7 @@ def test_attention_sink_model_loading_shards_once(
     model = cls.__new__(cls)
     torch.nn.Module.__init__(model)
     model.hf_to_vllm_mapper = WeightsMapper()
+    model._context_kv_proj = None  # set by DFlashQwen3Model.__init__
     model.model = torch.nn.Module()
     model.model.mtp = torch.nn.Module()
     sink = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
@@ -324,7 +354,7 @@ class _ReloadableMMEncoderAttention(MMEncoderAttention):
         self.weight.weight_loader = default_weight_loader
         self.post_load_called = False
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         self.post_load_called = True
 
 
@@ -344,7 +374,7 @@ class _ReloadableAttentionLayer(
     def get_kv_cache_spec(self, vllm_config):
         return None
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         self.post_load_called = True
 
 
@@ -481,7 +511,7 @@ def _stub_marlin_ops(monkeypatch):
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
-        lambda w, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+        lambda w, size_k, size_n, num_bits: torch.zeros(
             size_k // 16, size_n * 2, dtype=torch.int32
         ),
     )
@@ -568,7 +598,7 @@ def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
-        lambda b_q_weight, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+        lambda b_q_weight, size_k, size_n, num_bits: torch.zeros(
             size_k // 16, size_n * 2, dtype=torch.int32
         ),
     )
@@ -707,6 +737,13 @@ def test_padded_moe_reload_releases_each_layer(
         UnquantizedFusedMoEMethod,
     )
 
+    # Fresh allocations hold garbage; padding must not inherit it.
+    empty_strided = torch.empty_strided
+    monkeypatch.setattr(
+        torch,
+        "empty_strided",
+        lambda *a, **k: empty_strided(*a, **k).fill_(float("nan")),
+    )
     hidden, intermediate, experts = 4, 3, 2
     stored_hidden, stored_intermediate = (8, 8) if padded else (hidden, intermediate)
     config = SimpleNamespace(
@@ -716,6 +753,7 @@ def test_padded_moe_reload_releases_each_layer(
         has_bias=has_bias,
         tp_rank=tp_rank,
         tp_shard_with_padding=False,
+        num_experts=experts,
         moe_parallel_config=SimpleNamespace(tp_size=2),
     )
     model = torch.nn.ModuleList()
@@ -731,9 +769,11 @@ def test_padded_moe_reload_releases_each_layer(
         layer.moe_config = config
         layer.quant_config = None
         layer.quant_method = method
-        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+        layer.expert_map_manager = SimpleNamespace(
+            map_global_to_local=lambda i: i, num_fused_shared_experts=0
+        )
         layer._loaded_expert_biases = set()
-        layer._fused_shared_expert_quantizer = None
+        layer.shared_expert_online_loader = None
         method.create_weights(
             layer,
             experts,
@@ -795,9 +835,9 @@ def test_padded_moe_reload_releases_each_layer(
             assert all(source() is None for source in inputs)
             for name, original in original_params[layer_index].items():
                 assert getattr(layer, name) is original
-                # Kernel-specific tests cover padding, which is not checkpoint data.
                 mask = torch.isfinite(expected[name])
                 assert torch.equal(original[mask], expected[name][mask])
+                assert torch.count_nonzero(original[~mask]) == 0
 
 
 def test_get_numel_loaded():
@@ -971,6 +1011,70 @@ def test_online_processing_waits_for_late_registered_bias():
     layer.bias.weight_loader(layer.bias, loaded_bias)
     assert quant_method.bias_at_process is not None
     assert torch.equal(quant_method.bias_at_process, loaded_bias)
+
+
+@pytest.mark.parametrize("num_heads", [96, 128])
+@pytest.mark.parametrize("tp_rank", [0, 3])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_kda_online_loading_releases_sources_and_zeros_padding(
+    monkeypatch, default_vllm_config, num_heads, tp_rank, reverse
+):
+    """Finish KDA's merged projection after six inputs, before model finalization."""
+    from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: SimpleNamespace(world_size=8, rank_in_group=tp_rank),
+    )
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.float32)
+    config = KimiLinearConfig(
+        hidden_size=16,
+        linear_attn_config={
+            "kda_layers": [0],
+            "full_attn_layers": [],
+            "head_dim": 128,
+            "num_heads": num_heads,
+            "short_conv_kernel_size": 4,
+            "use_full_rank_gate": True,
+        },
+    )
+    attention = KimiK3DeltaAttention(
+        config, default_vllm_config, prefix="model.layers.0.self_attn"
+    )
+    projection = attention.in_proj_qkvgfab
+    # Exercise online loading on CPU without selecting a GPU quantization kernel.
+    projection.weight = to_meta_tensor(projection.weight)
+    projection.quant_method = None
+    initialize_online_processing(projection)
+
+    empty_strided = torch.empty_strided
+
+    def poisoned_empty(*args, **kwargs):
+        return empty_strided(*args, **kwargs).fill_(float("nan"))
+
+    monkeypatch.setattr(torch, "empty_strided", poisoned_empty)
+    widths = [128 * num_heads] * 4 + [128, num_heads]
+    expected = {}
+    sources = []
+    for shard in reversed(range(6)) if reverse else range(6):
+        source = torch.arange(widths[shard] * 16, dtype=torch.float32).reshape(-1, 16)
+        sources.append(ref(source))
+        local_width = widths[shard] if shard == 4 else widths[shard] // 8
+        start = 0 if shard == 4 else tp_rank * local_width
+        expected[shard] = source[start : start + local_width].clone()
+        assert projection.weight.is_meta
+        projection.weight.weight_loader(projection.weight, source, shard)
+        del source
+
+    assert not projection.weight.is_meta
+    assert all(source() is None for source in sources)
+    expected_weight = torch.cat([expected[shard] for shard in range(6)])
+    torch.testing.assert_close(
+        projection.weight[: len(expected_weight)], expected_weight
+    )
+    padding = projection.weight[len(expected_weight) :]
+    assert torch.equal(padding, torch.zeros_like(padding))
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
@@ -1351,6 +1455,8 @@ def test_reload_weights(
         enable_prefix_caching=False,
         max_model_len=16,
         max_num_seqs=1,
+        # Reloading without a pause that empties the KV cache needs headroom.
+        gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
     ) as llm:
         # Reloading must update tensors in place: captured graphs keep pointers.
         ptrs = llm.collective_rpc(_device_tensor_ptrs)
@@ -1365,6 +1471,66 @@ def test_reload_weights(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def _reload_with_lora_expert_names(worker) -> None:
+    """Reload the checkpoint under the names that LoRA-wrapped experts load."""
+
+    def lora_name(name: str) -> str:
+        parts = name.split(".")
+        if "experts" in parts[:-2] and parts[parts.index("experts") + 1].isdigit():
+            parts.insert(parts.index("experts") + 3, "base_layer")
+        return ".".join(parts)
+
+    path = Path(hf_api().snapshot_download(worker.vllm_config.model_config.model))
+    files = sorted(str(f) for f in path.glob("*.safetensors"))
+    weights = safetensors_weights_iterator(files, use_tqdm_on_load=False)
+    worker.reload_weights(
+        weights_iterator=((lora_name(name), weight) for name, weight in weights)
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
+)
+def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    lora_path = hf_api().snapshot_download(
+        repo_id="vllm-project/qwen3-moe-text2sql-spider"
+    )
+    prompts = [
+        "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+    ]
+
+    def prompt_logprobs(llm, lora_id):
+        lora_request = LoRARequest("sql", lora_id, lora_path) if lora_id else None
+        output = llm.generate_greedy_logprobs(
+            prompts,
+            max_tokens=1,
+            num_logprobs=None,
+            num_prompt_logprobs=0,
+            lora_request=lora_request,
+        )[0]
+        return [next(iter(token.values())).logprob for token in output[3][1:]]
+
+    with vllm_runner(
+        model_name="RedHatAI/Qwen3-30B-A3B-quantized.w4a16",
+        enable_lora=True,
+        max_lora_rank=8,
+        max_loras=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=64,
+        max_num_seqs=1,
+    ) as llm:
+        before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
+        assert before[0] != before[1]
+        llm.collective_rpc(_reload_with_lora_expert_names)
+        after = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 2)]
+    assert after == before
 
 
 def test_kv_scale_reload(vllm_runner):
@@ -1460,3 +1626,169 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+class _TwoLayerModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.a = torch.nn.Linear(2, 2, bias=False)
+        self.b = torch.nn.Linear(2, 2, bias=False)
+        self.hook_saw: list[tuple[float, float]] = []
+
+    def load_weights(self, weights) -> set[str]:
+        params = dict(self.named_parameters())
+        loaded = set()
+        for name, tensor in weights:
+            param = params[name]
+            getattr(param, "weight_loader", default_weight_loader)(param, tensor)
+            loaded.add(name)
+        return loaded
+
+    def process_weights_after_loading(self) -> None:
+        a, b = self.a.weight.mean().item(), self.b.weight.mean().item()
+        self.hook_saw.append((a, b))
+
+
+def _full(value: float) -> torch.Tensor:
+    return torch.full((2, 2), value)
+
+
+class _LoggedHookModule(torch.nn.Module):
+    def __init__(self, name: str, log: list[str], *children: torch.nn.Module):
+        super().__init__()
+        self.name, self.log = name, log
+        self.kids = torch.nn.ModuleList(children)
+
+    def process_weights_after_loading(self) -> None:
+        self.log.append(self.name)
+
+
+class _QuantMethodModule(torch.nn.Module, QuantizeMethodBase):
+    def create_weights(self, *args, **kwargs) -> None:
+        pass
+
+    def apply(self, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        raise AssertionError("quant methods run in the per-layer pass")
+
+
+def test_finalize_runs_every_module_hook_after_its_submodules():
+    log: list[str] = []
+    shared = _LoggedHookModule("shared", log)
+    model = _LoggedHookModule(
+        "root",
+        log,
+        _LoggedHookModule("a", log, _LoggedHookModule("a.x", log), shared),
+        _LoggedHookModule("b", log, shared),
+    )
+    model.attn = _ReloadableAttentionLayer()
+    model.quantized = torch.nn.Module()
+    model.quantized.quant_method = _QuantMethodModule()
+    # owned by the quant method, which processes it in the per-layer pass
+    model.quantized.transform = _LoggedHookModule("transform", log)
+
+    finalize_model_weights(model)
+
+    assert sorted(log) == ["a", "a.x", "b", "root", "shared"]
+    for child, parent in [("a.x", "a"), ("shared", "a"), ("shared", "b")]:
+        assert log.index(child) < log.index(parent)
+    assert log[-1] == "root"
+    # attention-like layers run in the same traversal
+    assert model.attn.post_load_called
+
+
+class _TransformReadingAttention(_ReloadableAttentionLayer):
+    def __init__(self, read) -> None:
+        super().__init__()
+        self.read, self.seen = read, None
+
+    def process_weights_after_loading(self) -> None:
+        self.seen = self.read()
+
+
+def test_attention_post_load_reads_normalized_transform(dist_init):
+    """MLA absorbs kv_b_proj, transforms included, in the attention pass, so a
+    quantized layer's Hadamard transform must be normalized before it."""
+    # transform.linear is imported by compressed_tensors and imports it back
+    import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors  # noqa: F401, E501
+    from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
+        CompressedTensorsLinearTransformMethod,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.transform.module import (  # noqa: E501
+        HadamardTransform,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.parameter import SharedWeightParameter
+
+    transform = HadamardTransform.__new__(HadamardTransform)
+    torch.nn.Module.__init__(transform)
+    transform.weight = SharedWeightParameter(weight_loader=default_weight_loader)
+    transform.weight.add_partition(0, object(), (4, 4))
+    transform.weight.partitions[0].data.fill_(1.0)
+
+    method = CompressedTensorsLinearTransformMethod.__new__(
+        CompressedTensorsLinearTransformMethod
+    )
+    method.quant_method = SimpleNamespace(process_weights_after_loading=lambda _: None)
+    linear = torch.nn.Module()
+    linear.quant_method = method
+    linear.transform = transform
+
+    model = torch.nn.Module()
+    model.kv_b_proj = linear
+    model.attn = _TransformReadingAttention(
+        lambda: transform.weight.partitions[0].data[0, 0].item()
+    )
+    config = SimpleNamespace(
+        dtype=torch.float32,
+        quantization=None,
+        word_embeddings_untied_by_checkpoint=False,
+    )
+
+    process_weights_after_loading(model, config, torch.device("cpu"))
+
+    # normalized by 1/sqrt(4) before the attention pass, and only once
+    assert model.attn.seen == 0.5
+    assert transform.weight.partitions[0].data[0, 0].item() == 0.5
+
+
+def _loaded_model() -> _TwoLayerModel:
+    model = _TwoLayerModel()
+    model.load_weights([("a.weight", _full(1.0)), ("b.weight", _full(2.0))])
+    return model
+
+
+class TestModelHookOnSplitLoad:
+    def test_layerwise_reload(self):
+        model = _loaded_model()
+        record_metadata_for_reloading(model)
+        config = SimpleNamespace(dtype=torch.float32)
+
+        initialize_layerwise_reload(model)
+        model.load_weights([("a.weight", _full(3.0))])
+        model.load_weights([("b.weight", _full(4.0))])
+        assert model.hook_saw == []
+        finalize_layerwise_reload(model, config)
+        assert model.hook_saw == [(3.0, 4.0)]
+
+        # Partial update: the untouched layer is restored before the hook runs.
+        initialize_layerwise_reload(model)
+        model.load_weights([("a.weight", _full(5.0))])
+        finalize_layerwise_reload(model, config)
+        assert model.hook_saw == [(3.0, 4.0), (5.0, 4.0)]
+
+    def test_sparse_update(self):
+        model = _loaded_model()
+        engine = object.__new__(SparseNCCLWeightTransferEngine)
+        engine.model = model
+
+        engine.start_weight_update()
+        for name, value in (("a.weight", 5.0), ("b.weight", 6.0)):
+            values, indices = torch.full((4,), value), torch.arange(4)
+            patch = CheckpointWeightPatch(name, (2, 2), torch.float32, values, indices)
+            load_checkpoint_weight_patches(model, [patch])
+        assert model.hook_saw == []
+        engine.finish_weight_update()
+        assert model.hook_saw == [(5.0, 6.0)]
