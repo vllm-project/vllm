@@ -92,6 +92,7 @@ steps:
   source_file_dependencies:
   - vllm/config/vllm.py
   - vllm/envs.py
+  - vllm/distributed/eplb/
   - vllm/model_executor/model_loader/
   - vllm/model_executor/kernels/linear/
   - vllm/model_executor/layers/fused_moe/
@@ -104,11 +105,43 @@ steps:
   - vllm/model_executor/utils.py
   - vllm/model_executor/models/utils.py
   - vllm/model_executor/models/deepseek_v2.py
-  - vllm/model_executor/models/falcon_h1.py
+  - vllm/model_executor/models/nemotron_h.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
+  - vllm/model_executor/models/qwen3_moe.py
   - vllm/v1/attention/backends/flashinfer.py
   - tests/model_executor/model_loader/test_reload.py
   - tests/model_executor/model_loader/test_reload_refit.py
   commands:
-  - pytest -v -s model_executor/model_loader/test_reload_refit.py
+  - pytest -v -s model_executor/model_loader/test_reload_refit.py -k tp1
+
+- label: ":nvidia: (2xB200) Weight Reload Refit"
+  device: b200-k8s
+  num_devices: 2
+  key: weight-reload-refit-2gpu
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/config/vllm.py
+  - vllm/envs.py
+  - vllm/distributed/eplb/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/parameter.py
+  - vllm/model_executor/utils.py
+  - vllm/model_executor/models/utils.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/models/qwen3.py
+  - vllm/model_executor/models/qwen3_moe.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - tests/model_executor/model_loader/test_reload.py
+  - tests/model_executor/model_loader/test_reload_refit.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_reload_refit.py -k "not tp1"
