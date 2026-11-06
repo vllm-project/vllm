@@ -150,6 +150,12 @@ class ForwardContext:
     for each microbatch.
     Set dynamically for each forward pass
     """
+    vllm_config: VllmConfig | None = None
+    """
+    Active vLLM configuration for this forward pass. This is available to
+    low-level helper paths that run under forward context but outside a
+    `set_current_vllm_config()` context.
+    """
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
@@ -245,6 +251,7 @@ def create_forward_context(
         all_moe_layers = None
 
     return ForwardContext(
+        vllm_config=vllm_config,
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
         attn_metadata=attn_metadata,

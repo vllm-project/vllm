@@ -6,7 +6,7 @@ import copy
 import gc
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
@@ -27,6 +27,14 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator.alloc_conf import (
+    ALLOC_CONF_ENV_VARS,
+    EXPANDABLE_SEGMENTS,
+    conf_flag_enabled,
+    current_alloc_conf,
+    set_alloc_conf,
+    with_conf_flag,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -149,6 +157,56 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
         and spec_config.uses_separate_workspace_lane
         else 1
     )
+
+
+def _rocm_expandable_segments_should_disable_after_graph_capture() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_gfx1151
+
+    if not on_gfx1151():
+        return False
+
+    return conf_flag_enabled(current_alloc_conf(), EXPANDABLE_SEGMENTS)
+
+
+def _disable_rocm_expandable_segments_after_graph_capture() -> None:
+    if not _rocm_expandable_segments_should_disable_after_graph_capture():
+        return
+
+    conf = current_alloc_conf()
+    if not conf_flag_enabled(conf, EXPANDABLE_SEGMENTS):
+        return
+    updated_conf = with_conf_flag(conf, EXPANDABLE_SEGMENTS, False)
+
+    logger.info_once(
+        "Disabling PyTorch expandable segments after ROCm gfx1151 graph capture; "
+        "startup/profile allocations were kept intact, while steady-state "
+        "serving avoids the VMM page-table growth path."
+    )
+    set_alloc_conf(updated_conf)
+
+    authoritative_env = next(
+        (name for name in ALLOC_CONF_ENV_VARS if os.environ.get(name)),
+        ALLOC_CONF_ENV_VARS[0],
+    )
+    os.environ[authoritative_env] = updated_conf
+
+    from vllm.distributed.device_communicators.base_device_communicator import (
+        set_rocm_expandable_segments_steady_state_disabled,
+    )
+
+    set_rocm_expandable_segments_steady_state_disabled()
+
+
+@contextmanager
+def _rocm_steady_state_allocator_after_graph_capture(
+    capture_context: AbstractContextManager[None],
+) -> Iterator[None]:
+    with capture_context:
+        yield
+    _disable_rocm_expandable_segments_after_graph_capture()
 
 
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
@@ -1307,16 +1365,21 @@ class Worker(WorkerBase):
         """Let the configured profiler observe CUDA graph capture."""
         if not self.use_v2_model_runner:
             return nullcontext()
+        model_runner = cast("GPUModelRunnerV2", self.model_runner)
+        if not model_runner.needs_cudagraph_capture():
+            return nullcontext()
         if self.profiler is None:
-            model_runner = cast("GPUModelRunnerV2", self.model_runner)
-            if not model_runner.needs_cudagraph_capture():
-                return nullcontext()
             self.profiler = create_graph_capture_profiler(
                 self.profiler_config, global_rank=self.rank
             )
-            if self.profiler is None:
-                return nullcontext()
-        return self.profiler.capture_cuda_graphs()
+        capture_context = (
+            nullcontext()
+            if self.profiler is None
+            else self.profiler.capture_cuda_graphs()
+        )
+        return _rocm_steady_state_allocator_after_graph_capture(
+            capture_context
+        )
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
