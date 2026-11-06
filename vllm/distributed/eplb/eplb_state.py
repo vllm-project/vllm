@@ -294,9 +294,13 @@ class EplbState:
         """
         self.ft_reset_epoch: int = 0
         """
-        Incremented by FT recovery (reset_eplb_async_state). The async worker
-        snapshots it when a transfer cycle starts; a change in the value means
-        a recovery happened, so the cycle is abandoned.
+        Incremented by FT recovery (reset_eplb_async_state). A transfer cycle
+        is tagged with the value from when it was signalled; a change in the
+        value means a recovery happened, so the cycle is abandoned.
+        """
+        self.rearrange_epoch: int = 0
+        """
+        ``ft_reset_epoch`` when ``rearrange_event`` was last recorded.
         """
         self.async_worker: threading.Thread | None = None
         """
@@ -1030,6 +1034,7 @@ class EplbState:
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
+            self.rearrange_epoch = self.ft_reset_epoch
             self.rearrange_event.record()
         return None
 

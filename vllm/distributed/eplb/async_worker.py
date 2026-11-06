@@ -85,7 +85,11 @@ def transfer_run_periodically(
         reset_epoch = state.ft_reset_epoch
         try:
             state.rearrange_event.wait(stream=stream)
-            reset_epoch = state.ft_reset_epoch
+            # A signal recorded before an FT reset belongs to the abandoned
+            # epoch, even if this thread only picks it up afterwards.
+            reset_epoch = state.rearrange_epoch
+            if reset_epoch != state.ft_reset_epoch:
+                continue
             _transfer_cycle(state, stream, is_profile, reset_epoch)
         except Exception as exc:
             if not state.parallel_config.enable_fault_tolerance:

@@ -220,7 +220,7 @@ def eplb_dist_init(tmp_path):
 
 
 def _start_ft_async_eplb_with_failing_worker(
-    monkeypatch, reset_during_transfer: bool = False
+    monkeypatch, reset_during_transfer: bool = False, start: bool = True
 ):
     """Start single-rank async EPLB under fault tolerance whose worker fails
     every layer transfer. On one rank the EP group stands in for the EPLB group.
@@ -271,7 +271,8 @@ def _start_ft_async_eplb_with_failing_worker(
     state.expert_rearrangement_step_interval = interval
     state.expert_rearrangement_step = interval - 1
     state.model_states = {"m": model_state}
-    state.start_async_loop()
+    if start:
+        state.start_async_loop()
     return state, model_state, failures
 
 
@@ -337,3 +338,44 @@ def test_fault_tolerance_drops_failure_from_abandoned_cycle(
     assert failures, "the injected transfer failure never ran"
     assert state.async_worker_error is None
     state.step()
+
+
+def test_fault_tolerance_drops_rearrangement_signalled_before_reset(
+    eplb_dist_init, monkeypatch
+):
+    """A rearrangement signalled before an FT reset, but picked up by the
+    worker after it, belongs to the abandoned epoch and must not run.
+    """
+    state, _, _ = _start_ft_async_eplb_with_failing_worker(monkeypatch, start=False)
+    cycle_started, release = threading.Event(), threading.Event()
+    cycle_epochs: list[int] = []
+
+    def blocking_cycle(state, stream, is_profile, reset_epoch):
+        cycle_epochs.append(reset_epoch)
+        cycle_started.set()
+        release.wait(timeout=30)
+
+    monkeypatch.setattr(async_worker, "_transfer_cycle", blocking_cycle)
+    num_waits = 0
+    real_wait = state.rearrange_event.wait
+
+    def counting_wait(*args, **kwargs):
+        nonlocal num_waits
+        num_waits += 1
+        real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(state.rearrange_event, "wait", counting_wait)
+    state.start_async_loop()
+
+    state.rearrange_event.record()
+    assert cycle_started.wait(timeout=30)
+    # Queued while the worker is busy, then an FT reset lands before pickup.
+    state.rearrange_event.record()
+    state.ft_reset_epoch += 1
+    release.set()
+
+    deadline = time.monotonic() + 30
+    while num_waits < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert num_waits == 3, "the worker never went back to waiting"
+    assert cycle_epochs == [0]
