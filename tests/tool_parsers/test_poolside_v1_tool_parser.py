@@ -23,15 +23,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers.poolside_v1_tool_parser import PoolsideV1ToolParser
 
 
 def _write_file_tool() -> dict[str, Any]:
-    """Tool with a string arg (``content``) and a non-string arg (``mode``)."""
+    """Tool with string (``content``), integer and nullable string args."""
     return {
         "type": "function",
         "function": {
@@ -42,6 +44,7 @@ def _write_file_tool() -> dict[str, Any]:
                 "properties": {
                     "content": {"type": "string"},
                     "mode": {"type": "integer"},
+                    "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
                 "required": ["content"],
             },
@@ -99,6 +102,9 @@ class _StubTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return {"<tool_call>": 151_657, "</tool_call>": 151_658}
+
+    def tokenize(self, text: str) -> list[str]:
+        return []
 
 
 def _make_parser(request: ChatCompletionRequest) -> PoolsideV1ToolParser:
@@ -217,7 +223,7 @@ def test_non_string_arg_still_deserialized() -> None:
 
 def test_responses_extract_tool_calls_with_flat_tools() -> None:
     # required/named Responses calls route into extract_tool_calls with flat
-    # FunctionTool (.name); _is_string_type must not raise.
+    # FunctionTool (.name); _allowed_types must not raise.
     request = _build_responses_request(tool_choice="required")
     parser = PoolsideV1ToolParser(_StubTokenizer(), tools=request.tools)
 
@@ -364,3 +370,21 @@ def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
     result = _stream_partial_start_token(request)
     assert result is not None
     assert result.content == ""
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(" 1.10\n", " 1.10\n"), (" null ", None)]
+)
+def test_nullable_string_keeps_raw_text(raw: str, expected: Any, stream: bool) -> None:
+    request = _build_chat_request(tool_choice="auto")
+    parser = _make_parser(request)
+    output = (
+        "<tool_call>write_file\n<arg_key>note</arg_key>"
+        f"<arg_value>{raw}</arg_value></tool_call>"
+    )
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(output), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(output, request).tool_calls
+    assert [json.loads(c.function.arguments) for c in calls] == [{"note": expected}]

@@ -41,6 +41,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
+    "MingV3ASRConfig": "vllm.transformers_utils.configs.ming_v3_asr",
     "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3TextConfig": "vllm.transformers_utils.configs.minimax_m3",
@@ -50,9 +51,13 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MossTranscribeDiarizeConfig": (
         "vllm.transformers_utils.configs.moss_transcribe_diarize"
     ),
+    "Nemotron3_5TranscribeConfig": (
+        "vllm.transformers_utils.configs.nemotron3_5_transcribe"
+    ),
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
+    "Lfm3Config": "vllm.transformers_utils.configs.lfm3",
     "MuseSpark1xTextConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
     "MuseSparkVisionConfig": "vllm.transformers_utils.configs.muse_spark",
@@ -65,6 +70,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
     "RadioConfig": "vllm.transformers_utils.configs.radio",
+    "RicursiveConfig": "vllm.transformers_utils.configs.ricursive",
     "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
     "UnlimitedOCRConfig": "vllm.transformers_utils.configs.unlimited_ocr",
@@ -113,6 +119,7 @@ __all__ = [
     "IsaacConfig",
     "RWConfig",
     "MiDashengLMConfig",
+    "MingV3ASRConfig",
     "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
     "MiniMaxM3TextConfig",
@@ -120,10 +127,12 @@ __all__ = [
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
     "MossTranscribeDiarizeConfig",
+    "Nemotron3_5TranscribeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
     "Kimi_K25Config",
+    "Lfm3Config",
     "MuseSpark1xTextConfig",
     "MuseSparkTextConfig",
     "MuseSparkVisionConfig",
@@ -136,6 +145,7 @@ __all__ = [
     "OvisConfig",
     "PixelShuffleSiglip2VisionConfig",
     "RadioConfig",
+    "RicursiveConfig",
     "SpeculatorsConfig",
     "UltravoxConfig",
     "UnlimitedOCRConfig",
