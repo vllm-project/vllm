@@ -32,7 +32,7 @@ import torch.nn.functional as F
 from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950, on_mi3xx
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -847,8 +847,8 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
 
 
 @pytest.mark.skipif(
-    not (on_gfx942() or on_gfx950()),
-    reason="AITER tkw1 asm MoE is gfx942/gfx950 only",
+    not on_mi3xx(),
+    reason="AITER tkw1 asm MoE is MI300/MI350 only",
 )
 def test_aiter_fp8_channel_tkw1_metadata_token_counts():
     """Metadata without expert token counts (e.g. DeepEP v2 under CUDA graphs)
