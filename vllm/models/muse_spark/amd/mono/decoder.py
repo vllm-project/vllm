@@ -8,7 +8,7 @@ checked at attach, the batch shape and the attention metadata counts.
 """
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
@@ -44,6 +44,13 @@ HEALTH_POLL_INTERVAL = 64
 # Other builds and layer 1 run vLLM's attention op.
 FUSED_ATTENTION = {8: ("swa", "full"), 16: ("swa", "full"), 32: ("swa", "full")}
 SLIDING_WINDOW = (2047, 0)
+# Other launches' health checks (the DSpark drafter's), run by poll_health.
+_HEALTH_CHECKS: dict[int, Callable[[], None]] = {}
+
+
+def register_health_check(key: int, check: Callable[[], None]) -> None:
+    _HEALTH_CHECKS[key] = check
+
 
 # The model shape the K3 build is specialized for.
 KERNEL_CONFIG: dict[str, float] = {
@@ -996,6 +1003,8 @@ class MuseSparkMono:
         """
         if torch.cuda.is_current_stream_capturing():
             return
+        for check in _HEALTH_CHECKS.values():
+            check()
         self._steps += 1
         if self._health_event is not None and self._health_event.query():
             self._health_event = None
