@@ -692,13 +692,6 @@ namespace gfx942 {
 
 using F2 = float __attribute__((ext_vector_type(2)));
 
-// gfx942 converts FNUZ only. An OCP byte is twice the FNUZ value of the same
-// bits, except 0x80 (OCP -0, FNUZ NaN), which is cleared first.
-__device__ __forceinline__ uint32_t ocp_as_fnuz(uint32_t bits) {
-  const uint32_t nonzero = ((bits & 0x7f7f7f7fu) + 0x7f7f7f7fu) & 0x80808080u;
-  return bits & (nonzero | 0x7f7f7f7fu);
-}
-
 // Two waves per CTA own 16 heads: wave h takes QK steps 16 h + [0, 16), i.e.
 // FP8 scale groups 0-3, or groups 4-6 plus RoPE, which keeps each wave under
 // 256 registers so two waves share a SIMD. Lane (lr, lg) loads the 16-dim
@@ -737,7 +730,7 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
     const __bf16* q, Source src, const float* sink, const Position* positions,
     const float* cos_sin, __bf16* out, int64_t q_stride_t, int64_t q_stride_h,
     int64_t out_stride_t, int64_t out_stride_h, int64_t num_positions,
-    int heads, float sm_scale) {
+    int heads, float sm_scale, bool rotate_q) {
 #if defined(__gfx942__)
   __shared__ F4 exchange[2][2][64];
   const int half = __builtin_amdgcn_readfirstlane(threadIdx.x / 64);
@@ -866,6 +859,25 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       }
     BF16x4 qr[4] = {};
     if constexpr (kHalf == 1) {
+      // GPT-J RoPE on Q, rounded to BF16, with the FMAs the Q prep in
+      // fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert compiles to, so the
+      // rotated Q matches it bit for bit. Lane (lr, lg) holds RoPE dims
+      // 16 lg + 8 i + [0, 8), i.e. pairs 8 lg + 4 i + [0, 4).
+      if (rotate_q && valid_pos) {
+        const float* cs = cos_sin + rope_pos * kRopeDim;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+          BF16x8& x = qv[2 * kGroups + i];
+#pragma unroll
+          for (int j = 0; j < 4; ++j) {
+            const int pair = 8 * lg + 4 * i + j;
+            const float cos = cs[pair], sin = cs[kRopeDim / 2 + pair];
+            const float even = float(x[2 * j]), odd = float(x[2 * j + 1]);
+            x[2 * j] = static_cast<__bf16>(fmaf(even, cos, -(odd * sin)));
+            x[2 * j + 1] = static_cast<__bf16>(fmaf(odd, cos, even * sin));
+          }
+        }
+      }
 #pragma unroll
       for (int i = 0; i < 2; ++i) {
         qr[2 * i] = qv[2 * kGroups + i].lo;
@@ -895,22 +907,9 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       const uint32_t valid_keys = uint32_t(__ballot(slot_cur >= 0)) & 0xffffu;
 
       // NoPE K stays FP8 and the MFMAs read it as FNUZ: an OCP byte is half
-      // its value there, so its scale byte gets +1, and OCP -0 is cleared.
-      const uint64_t fnuz_lanes = __ballot(frag.fnuz);
-      auto fix = [&](auto fnuz) {
-#pragma unroll
-        for (int m = 0; m < kGroups; ++m)
-#pragma unroll
-          for (int t = 0; t < 4; ++t)
-            if (!fnuz) frag.nope[m][t] = ocp_as_fnuz(frag.nope[m][t]);
-        if (!fnuz) frag.scales += 0x01010101u;
-      };
-      if (fnuz_lanes == ~0ull)
-        fix(std::true_type{});
-      else if (fnuz_lanes == 0)
-        fix(std::false_type{});
-      else
-        fix(frag.fnuz);
+      // its value there, so its scale byte gets +1. OCP -0 (0x80) would be
+      // the FNUZ NaN; the compressed-cache writer stores +0 on FNUZ platforms.
+      if (!frag.fnuz) frag.scales += 0x01010101u;
       auto kfp8 = [&](int m, int h) {
         return __builtin_bit_cast(
             long, U32x2{frag.nope[m][2 * h], frag.nope[m][2 * h + 1]});
@@ -1184,7 +1183,8 @@ template <typename Source>
 void launch_paged_attn_bf16(const at::Tensor& q, const Source& src,
                             const std::optional<at::Tensor>& attn_sink,
                             double sm_scale, const at::Tensor& positions,
-                            const at::Tensor& cos_sin_cache, at::Tensor& out) {
+                            const at::Tensor& cos_sin_cache, bool rotate_q,
+                            at::Tensor& out) {
   if (q.size(0) == 0) return;
   TORCH_CHECK(q.stride(0) % 8 == 0 && q.stride(1) % 8 == 0 &&
                   reinterpret_cast<uintptr_t>(q.data_ptr()) % 16 == 0,
@@ -1206,7 +1206,7 @@ void launch_paged_attn_bf16(const at::Tensor& q, const Source& src,
       positions.data_ptr<POSITION_TYPE>(), cos_sin_cache.data_ptr<float>(),  \
       reinterpret_cast<__bf16*>(out.data_ptr<c10::BFloat16>()), q.stride(0), \
       q.stride(1), out.stride(0), out.stride(1), cos_sin_cache.size(0),      \
-      int(q.size(1)), sm_scale
+      int(q.size(1)), sm_scale, rotate_q
 #define LAUNCH(POSITION_TYPE, ALIGNED)                           \
   gfx942::paged_attn_bf16_kernel<POSITION_TYPE, Source, ALIGNED> \
       <<<grid, 128, 0, stream>>>(ARGS(POSITION_TYPE))
@@ -1507,7 +1507,7 @@ void fused_norm_rope_attn_rope_prefill_bf16_rocm(
     const at::Tensor& gather_lens, int64_t window_size, int64_t compress_ratio,
     const std::optional<at::Tensor>& attn_sink, double sm_scale,
     const at::Tensor& positions, const at::Tensor& cos_sin_cache,
-    bool main_use_fnuz, at::Tensor& out) {
+    bool main_use_fnuz, bool rotate_q, at::Tensor& out) {
   check_query_inputs(q, attn_sink, sm_scale, positions, cos_sin_cache, 0.0);
   check_bf16_output(q, out);
   TORCH_CHECK(on_arch(q, "gfx942"),
@@ -1517,5 +1517,5 @@ void fused_norm_rope_attn_rope_prefill_bf16_rocm(
       query_start_loc, seq_lens, gather_lens, window_size, compress_ratio,
       main_use_fnuz);
   launch_paged_attn_bf16(q, src, attn_sink, sm_scale, positions, cos_sin_cache,
-                         out);
+                         rotate_q, out);
 }

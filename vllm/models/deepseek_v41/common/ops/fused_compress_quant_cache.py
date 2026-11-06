@@ -13,6 +13,10 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
+# The CDNA3 prefill attention reads OCP NoPE bytes as FNUZ, where OCP -0
+# (0x80) is NaN, so FNUZ platforms store +0 instead.
+_CLEAR_NEGATIVE_ZERO = current_platform.is_fp8_fnuz()
+
 # The ring and raw rows a ratio-2 request program pools are not adjacent, so
 # reading them as one tile means joining two pointers. ROCm's Triton fails to
 # legalize `tt.join` on pointers, so there the two rows are loaded separately.
@@ -332,6 +336,8 @@ def rope_quant_insert(
         assert kernel is not None, (
             f"unsupported paged KV record width {kv_cache.shape[-1]}"
         )
+        if kernel is _rope_quant_insert_kernel:
+            launch_kwargs["CLEAR_NEGATIVE_ZERO"] = _CLEAR_NEGATIVE_ZERO
         kernel[(num_tokens,)](
             latent,
             positions,
@@ -384,6 +390,7 @@ def _rope_quant_insert_kernel(
     CACHE_BLOCK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     SANITIZE_CACHE_NANS: tl.constexpr,
+    CLEAR_NEGATIVE_ZERO: tl.constexpr = False,
 ):
     t = tl.program_id(0)
     slot = tl.load(cache_slots + t)
@@ -404,6 +411,8 @@ def _rope_quant_insert_kernel(
     scaled = quant * tl.reshape(tl.exp2(-exponent), (8, 1))
     fp8 = tl.clamp(scaled, -448.0, 448.0).to(tl.float8e4nv)
     packed = tl.reshape(fp8.to(tl.uint8, bitcast=True), (512,))
+    if CLEAR_NEGATIVE_ZERO:
+        packed = tl.where(packed == 0x80, 0, packed)
     tl.store(values + d, packed, d < 448)
     s = tl.arange(0, 8)
     max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0

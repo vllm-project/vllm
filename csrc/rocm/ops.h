@@ -91,7 +91,7 @@ void fused_norm_rope_attn_rope_prefill_bf16_rocm(
     const at::Tensor& gather_lens, int64_t window_size, int64_t compress_ratio,
     const std::optional<at::Tensor>& attn_sink, double sm_scale,
     const at::Tensor& positions, const at::Tensor& cos_sin_cache,
-    bool main_use_fnuz, at::Tensor& out);
+    bool main_use_fnuz, bool rotate_q, at::Tensor& out);
 
 // RDNA3.5 only: Fused Gated Delta Net prefill kernel.
 // Mutates `out` and `final_state` in place.

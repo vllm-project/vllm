@@ -108,7 +108,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor query_start_loc, Tensor seq_lens, Tensor gather_lens, "
       "int window_size, int compress_ratio, Tensor? attn_sink, float sm_scale, "
       "Tensor positions, Tensor cos_sin_cache, bool main_use_fnuz, "
-      "Tensor(a!) out) -> ()");
+      "bool rotate_q, Tensor(a!) out) -> ()");
   rocm_ops.impl("fused_norm_rope_attn_rope_prefill_bf16", torch::kCUDA,
                 &fused_norm_rope_attn_rope_prefill_bf16_rocm);
 

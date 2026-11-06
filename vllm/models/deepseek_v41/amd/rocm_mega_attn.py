@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 import torch
 
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v41.amd.rocm import (
     DeepseekV41ROCMAiterMLAAttention,
     DeepseekV41ROCMAiterMLASparseBackend,
@@ -24,10 +27,15 @@ class DeepseekV41ROCMAiterMLAMegaAttnBackend(DeepseekV41ROCMAiterMLASparseBacken
 class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
     """ROCm mega-attention layer for DeepSeek V4.1.
 
-    Q preparation still applies RoPE and uses the ordinary head-major layout.
-    Prefill reads ROCm's paged 584-byte cache records directly and fuses
-    sparse attention with inverse RoPE: MXFP8 output on gfx950, BF16 output
-    on gfx942. Decode uses the ordinary ROCm sparse attention path.
+    Q keeps the ordinary head-major layout. Prefill reads ROCm's paged
+    584-byte cache records directly and fuses sparse attention with inverse
+    RoPE: MXFP8 output on gfx950, BF16 output on gfx942. Decode uses the
+    ordinary ROCm sparse attention path.
+
+    The Q preparation applies RoPE, except on gfx942 for batches larger than
+    any CUDA graph: there it only inserts KV, the prefill kernel rotates its
+    Q rows, and ``forward_mqa`` rotates the decode rows. Both run in the
+    eager attention region, where the step's decode/prefill split is known.
     """
 
     backend_cls = DeepseekV41ROCMAiterMLAMegaAttnBackend
@@ -79,6 +87,77 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
             and n_local_heads % n_local_groups == 0
         )
 
+    def __init__(self, *args, **kwargs):
+        vllm_config = args[0] if args else kwargs["vllm_config"]
+        super().__init__(*args, **kwargs)
+        # Batches a CUDA graph can capture keep Q RoPE in the prep, since a
+        # graph would replay one step's decode/prefill split. The prep and
+        # forward_mqa decide on the same row count.
+        captured = vllm_config.compilation_config.max_cudagraph_capture_size or 0
+        self._attn_rotates_q_from = (
+            max(captured, 512) + 1 if get_cdna_version() == 3 else None
+        )
+        self._prefill_rotate_q = False
+
+    def _attn_rotates_q(self, q: torch.Tensor) -> bool:
+        threshold = self._attn_rotates_q_from
+        return threshold is not None and q.shape[0] >= threshold
+
+    def _fused_qnorm_rope_kv_insert(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: Any,
+    ) -> torch.Tensor:
+        if not self._attn_rotates_q(q):
+            return super()._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+        if isinstance(attn_metadata, dict):
+            swa_metadata = attn_metadata[self.swa_cache_layer.prefix]
+            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                kv,
+                self.swa_cache_layer.kv_cache,
+                swa_metadata.slot_mapping,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                swa_metadata.block_size,
+                None,
+                self.kv_mxfp8,
+            )
+        return q
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        output: Any,
+    ) -> None:
+        attn_metadata = get_forward_context().attn_metadata
+        self._prefill_rotate_q = self._attn_rotates_q(q)
+        if self._prefill_rotate_q and isinstance(attn_metadata, dict):
+            swa_metadata = attn_metadata[self.swa_cache_layer.prefix]
+            n = swa_metadata.num_decode_tokens
+            if n:
+                cache = self.swa_cache_layer.kv_cache
+                # An empty slot mapping skips the KV half: rotate Q only.
+                q[:n] = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+                    q[:n],
+                    kv[:n],
+                    cache.view(cache.shape[0], -1),
+                    swa_metadata.slot_mapping[:0],
+                    positions[:n],
+                    self.rotary_emb.cos_sin_cache,
+                    self.padded_heads,
+                    self.eps,
+                    swa_metadata.block_size,
+                    False,
+                    self.kv_mxfp8,
+                    True,
+                    False,
+                )
+        super().forward_mqa(q, kv, positions, output)
+
     def _forward_prefill(
         self,
         q: torch.Tensor,
@@ -128,7 +207,7 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
         if mxfp8_out is None:
             assert output is not None
             torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(
-                *args, output[:tokens]
+                *args, self._prefill_rotate_q, output[:tokens]
             )
         else:
             torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_prefill(

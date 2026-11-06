@@ -43,6 +43,26 @@ def inverse_rope_reference(x, positions, cos_sin):
     return out
 
 
+def rope_q(layer, q, positions):
+    """Q after the RoPE the ordinary Q prep applies; CDNA3 mega takes Q before."""
+    cache = layer.swa_cache_layer.kv_cache
+    return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        q,
+        torch.zeros(q.shape[0], HEAD_DIM, dtype=q.dtype, device=q.device),
+        cache.view(cache.shape[0], -1),
+        torch.empty(0, dtype=torch.int64, device=q.device),
+        positions,
+        layer.rotary_emb.cos_sin_cache,
+        q.shape[1],
+        layer.eps,
+        BLOCK,
+        False,
+        False,
+        True,
+        False,
+    )
+
+
 def make_cache(rows, device, use_fnuz=False):
     blocks = math.ceil(rows / BLOCK)
     cache = torch.zeros(blocks, BLOCK, RECORD_BYTES, dtype=torch.uint8, device=device)
@@ -55,6 +75,10 @@ def make_cache(rows, device, use_fnuz=False):
         bytes_per_token=RECORD_BYTES,
         use_fnuz=use_fnuz,
     )
+    if not use_fnuz and current_platform.is_fp8_fnuz():
+        # As the compressed-cache writer stores OCP records on FNUZ platforms.
+        nope = cache.view(blocks, -1)[:, : BLOCK * 576].view(blocks, BLOCK, 576)
+        nope[..., :448].masked_fill_(nope[..., :448] == 0x80, 0)
     return cache
 
 
@@ -94,6 +118,11 @@ class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
         self.head_dim, self.rope_head_dim = HEAD_DIM, ROPE_DIM
         self.nope_head_dim = HEAD_DIM - ROPE_DIM
         self.scale = HEAD_DIM**-0.5
+        self.eps = 1e-6
+        self.kv_mxfp8 = False
+        # As with CUDA graphs capped at 512 tokens.
+        self._attn_rotates_q_from = 513 if get_cdna_version() == 3 else None
+        self._prefill_rotate_q = False
         self.window_size = WINDOW
         self.compress_ratio = ratio if topk else 0
         self.max_model_len = seq_len
@@ -154,6 +183,7 @@ class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
             num_prefills=int(bool(n_prefill)),
             num_prefill_tokens=n_prefill,
             block_size=BLOCK,
+            slot_mapping=torch.empty(0, device=device, dtype=torch.int64),
             block_table=table,
             decode_swa_indices=swa_indices,
             decode_swa_lens=swa_lens,
@@ -300,18 +330,25 @@ def bench_case(n_decode, n_prefill, args, device):
             ),
             torch.arange(layer.prefill_start, layer.max_model_len, device=device),
         ))
+        kv = torch.zeros(n_tokens, HEAD_DIM, device=device, dtype=torch.bfloat16)
+        # On large CDNA3 batches mega rotates Q itself, decode rows in place;
+        # otherwise, and for the baseline and the reference, Q is after RoPE.
+        raw_q = layer._attn_rotates_q(q)
+        q_rope = rope_q(layer, q, positions) if raw_q else q
         outputs = [layer._alloc_attn_out(n_tokens, q) for _ in range(2)]
-        expected = attention_reference(layer, q, positions)
+        expected = attention_reference(layer, q_rope, positions)
         for arm, method in enumerate(
             (DeepseekV41ROCMAiterMegaAttnAttention.forward_mqa, baseline_forward_mqa)
         ):
+            arm_q = q if arm == 0 else q_rope
+            restore = arm_q[:n_decode].clone() if raw_q and arm == 0 else None
             output = outputs[arm]
             buffers = output_buffers(output)
             dummy = ForwardContext(
                 no_compile_layers={}, attn_metadata=None, slot_mapping={}
             )
             with override_forward_context(dummy):
-                method(layer, q, q[:, 0], positions, output)
+                method(layer, arm_q, kv, positions, output)
             for buffer in buffers:
                 assert torch.count_nonzero(buffer.float()).item() == 0
             buffers[0].fill_(float("nan"))
@@ -319,12 +356,16 @@ def bench_case(n_decode, n_prefill, args, device):
             def call(
                 method=method,
                 layer=layer,
-                q=q,
+                q=arm_q,
+                kv=kv,
+                restore=restore,
                 positions=positions,
                 output=outputs[arm],
             ):
+                if restore is not None:
+                    q[: restore.shape[0]].copy_(restore)
                 with override_forward_context(layer.context):
-                    method(layer, q, q[:, 0], positions, output)
+                    method(layer, q, kv, positions, output)
 
             call()
             actual = dequant_output(outputs[arm])

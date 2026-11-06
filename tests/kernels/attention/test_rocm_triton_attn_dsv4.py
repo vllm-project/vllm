@@ -206,6 +206,11 @@ def _pack_fp8_ds_mla_cache(
         block_size=block_size,
         use_fnuz=use_fnuz,
     )
+    if not use_fnuz and current_platform.is_fp8_fnuz():
+        # As the compressed-cache writer stores OCP records on FNUZ platforms.
+        records = cache.view(num_blocks, -1)[:, : block_size * 576]
+        nope = records.view(num_blocks, block_size, 576)[..., :448]
+        nope.masked_fill_(nope == 0x80, 0)
     return cache
 
 
@@ -1587,6 +1592,17 @@ def test_hip_mega_prefill_mxfp8_output(
     assert torch.all(scale[:, width // 32 :] == 17)
 
 
+def _rope_q(q: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
+    """GPT-J RoPE on the last 64 dims in FP32, rounded to BF16, as the Q prep
+    applies it."""
+    cos, sin = cos_sin[positions.long(), None].chunk(2, dim=-1)
+    x = q.float()
+    even, odd = x[..., 448::2].clone(), x[..., 449::2].clone()
+    x[..., 448::2] = even * cos - odd * sin
+    x[..., 449::2] = even * sin + odd * cos
+    return x.bfloat16()
+
+
 def _mega_paged_prefill_case(
     heads: int,
     request_repeats: int,
@@ -1594,9 +1610,11 @@ def _mega_paged_prefill_case(
     with_extra: bool,
     main_use_fnuz: bool,
     with_sink: bool,
+    rope_q: bool = False,
 ) -> SimpleNamespace:
     """Paged prefill inputs with request boundaries, causal top-k and SWA
-    replay, plus the inverse-RoPE'd reference rows."""
+    replay, plus the inverse-RoPE'd reference rows. With ``rope_q`` the
+    reference rotates Q first, for a kernel that takes Q before RoPE."""
     device = torch.device("cuda")
     torch.manual_seed(23)
     tokens = 5
@@ -1652,7 +1670,7 @@ def _mega_paged_prefill_case(
     cos_sin = _random_cos_sin_cache(16, device)
     ref = (
         _ref_sparse_decode_ragged(
-            q,
+            _rope_q(q, positions, cos_sin) if rope_q else q,
             main,
             main_rows,
             HEAD_DIM**-0.5,
@@ -1791,6 +1809,7 @@ def test_hip_mega_paged_prefill_mxfp8_output(
 
 @requires_cdna3
 @_MEGA_PAGED_PREFILL_CASES
+@pytest.mark.parametrize("rotate_q", [False, True])
 @torch.inference_mode()
 def test_hip_mega_paged_prefill_bf16_output(
     heads: int,
@@ -1799,10 +1818,18 @@ def test_hip_mega_paged_prefill_bf16_output(
     with_extra: bool,
     main_use_fnuz: bool,
     with_sink: bool,
+    rotate_q: bool,
 ) -> None:
-    """The CDNA3 fused prefill stores BF16 rows with inverse RoPE applied."""
+    """The CDNA3 fused prefill applies Q RoPE when asked and stores BF16 rows
+    with inverse RoPE applied."""
     case = _mega_paged_prefill_case(
-        heads, request_repeats, cache_padding, with_extra, main_use_fnuz, with_sink
+        heads,
+        request_repeats,
+        cache_padding,
+        with_extra,
+        main_use_fnuz,
+        with_sink,
+        rope_q=rotate_q,
     )
     device, tokens = case.ref.device, case.tokens
     # Pad heads and rows so out-of-view writes show up.
@@ -1815,7 +1842,9 @@ def test_hip_mega_paged_prefill_bf16_output(
     out = buffer[1:-1, :heads, :HEAD_DIM]
 
     def run():
-        torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(*case.args, out)
+        torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(
+            *case.args, rotate_q, out
+        )
 
     run()
     torch.testing.assert_close(out.float(), case.ref, atol=3e-3, rtol=0.02)
@@ -1866,6 +1895,7 @@ def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
         extra, torch.arange(extra_rows, device=device), block, False
     )
     window_rows = positions[:, None] - window + 1 + torch.arange(window, device=device)
+    q_rope = _rope_q(q, positions, cos_sin).float()
     ref = torch.empty(tokens, heads, HEAD_DIM, device=device)
     mag = torch.empty(tokens, device=device)
     for s in range(0, tokens, 128):
@@ -1873,7 +1903,7 @@ def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
             [main_kv[window_rows[s : s + 128]], extra_kv[topk[s : s + 128]]], 1
         )
         mag[s : s + 128] = kv.abs().amax((1, 2))
-        scores = torch.einsum("thd,tkd->thk", q[s : s + 128].float(), kv) * scale
+        scores = torch.einsum("thd,tkd->thk", q_rope[s : s + 128], kv) * scale
         scores = torch.cat([scores, sink[None, :, None].expand(len(kv), -1, 1)], -1)
         probs = torch.softmax(scores, -1)[..., :-1]
         ref[s : s + 128] = torch.einsum("thk,tkd->thd", probs, kv)
@@ -1901,6 +1931,7 @@ def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
         positions,
         cos_sin,
         False,
+        True,
         out,
     )
     mag = mag[:, None, None]

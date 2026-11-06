@@ -408,7 +408,11 @@ def test_v41_fused_save_compress_and_insert(
             page, row = divmod(slot, cache_block)
             values = expected_cache[page, row * 576 : (row + 1) * 576]
             quantized, scales = _ue8m0_reference(latent[t, :448], 64, 448.0)
-            values[:448] = quantized.view(torch.uint8)
+            nope = quantized.view(torch.uint8)
+            if current_platform.is_fp8_fnuz():
+                # FNUZ platforms store OCP -0 as +0.
+                nope = torch.where(nope == 0x80, 0, nope)
+            values[:448] = nope
             c, s = cos_sin[pos // compress_ratio * compress_ratio].chunk(2)
             rope_input = latent[t, 448:].float()
             rotated = (
@@ -508,6 +512,33 @@ def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
         expected[page, row * 528 + 512 : (row + 1) * 528] = scales
 
     torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_fp8_fnuz(), reason="FNUZ platforms only")
+def test_v41_fp8_ds_mla_record_has_no_negative_zero():
+    """The CDNA3 prefill attention reads the OCP NoPE bytes as FNUZ, where OCP
+    -0 (0x80) is NaN, so the 584-byte writer stores +0 in its place."""
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    device = "cuda"
+    num_tokens = 4
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    # -0, and negatives that round to zero under the block's scale.
+    latent[:, 0:448:3] = -1e-30
+    latent[:, 1:448:7] = -0.0
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    angles = torch.randn(num_tokens, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    cache = torch.full((1, 64, 584), 0x80, dtype=torch.uint8, device=device)
+
+    rope_quant_insert(latent, positions, cos_sin, cache, positions, 1)
+
+    nope = cache.flatten()[: num_tokens * 576].view(num_tokens, 576)[:, :448]
+    assert torch.all(nope[:, 0:448:3] == 0)
+    assert torch.all(nope[:, 1:448:7] == 0)
+    assert not torch.any(nope == 0x80)
 
 
 @pytest.mark.skipif(
