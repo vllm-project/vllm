@@ -24,6 +24,9 @@ import torch
 
 from vllm.config import LoadConfig, VllmConfig, WeightTransferConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
@@ -320,6 +323,8 @@ class TestRefusals:
             # its post-load processing runs only once per quant method
             ("HummingLinearMethod", "humming"),
             ("HummingMoEMethod", "humming"),
+            # Quark online rotation deletes input_rotation after loading
+            ("InputHadamardLinearMethod", "input_rotation"),
         ],
     )
     def test_quant_method_refused(self, kind, match):
@@ -338,6 +343,8 @@ class TestRefusals:
         elif kind == "online-shared-experts":
             model.proj.shared_expert_online_loader = object()
             method = model.proj.quant_method
+        elif kind == "InputHadamardLinearMethod":
+            method = object.__new__(InputHadamardLinearMethod)
         else:
             method = object.__new__(getattr(humming_mod, kind))
         model.proj.__dict__["quant_method"] = method
