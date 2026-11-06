@@ -63,28 +63,24 @@ def test_disabling_extensible_cache_keeps_fallback_budget(
     assert worker.requested_memory == requested
 
 
-def test_sleep_preservation_restores_private_draft_not_shared_target():
+def _storage(parameter: torch.nn.Parameter) -> int:
+    return parameter.untyped_storage().data_ptr()
+
+
+def test_sleep_preservation_keeps_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
     draft.private = torch.nn.Linear(2, 2, bias=False)
     draft.shared = target.weight
-    expected = draft.private.weight.detach().clone()
-    pointer = draft.private.weight.data_ptr()
     worker = object.__new__(gpu_worker.Worker)
     worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
-    assert set(worker._get_sleep_parameters(target)) == {
-        "weight",
-        "draft.private.weight",
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
+    assert worker._discardable_parameters(target) == {
+        _storage(target.weight),
+        _storage(draft.private.weight),
     }
-    worker._sleep_saved_parameters = {"draft.private.weight": expected}
-    with torch.no_grad():
-        target.weight.fill_(3.0)
-        draft.private.weight.zero_()
-    worker._restore_sleep_parameters(target)
-    torch.testing.assert_close(draft.private.weight, expected)
-    assert draft.private.weight.data_ptr() == pointer
-    assert torch.all(target.weight == 3.0)
-    assert worker._sleep_saved_parameters == {}
+    worker.model_config.sleep_preserve_parameter_names = ["draft.*"]
+    assert worker._discardable_parameters(target) == {_storage(target.weight)}
 
 
 @pytest.mark.parametrize("has_shared_draft", [False, True])
@@ -98,11 +94,10 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
     worker = object.__new__(gpu_worker.Worker)
     worker.get_draft_model = lambda: draft  # type: ignore[method-assign]
     worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["draft.*"])
-    worker._save_sleep_parameters(target)
-    assert worker._sleep_saved_parameters == {}
+    assert worker._discardable_parameters(target) == {_storage(target.weight)}
     worker.model_config.sleep_preserve_parameter_names = ["missing"]
     with pytest.raises(ValueError, match="No parameter matches sleep retention"):
-        worker._save_sleep_parameters(target)
+        worker._discardable_parameters(target)
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
@@ -382,7 +377,7 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
 def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
     """The minimal Worker surface the startup-plan entry points touch."""
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(compute_hash=lambda: config_hash),
+        vllm_config=SimpleNamespace(compile_factors=lambda: {"id": config_hash}),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
