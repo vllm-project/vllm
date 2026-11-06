@@ -9,7 +9,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -54,7 +54,8 @@ from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.config import MultiModalConfig
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -438,7 +439,7 @@ def _run_flashinfer_autotune_mm_encoder(
     if budget.get_encoder_budget() <= 0 or not budget.mm_max_toks_per_item:
         return
 
-    encoder_runner = runner.model_state.encoder_runner
+    encoder_runner = cast("GPUModelRunnerV2", runner).model_state.encoder_runner
 
     # Data-parallel towers can run different shapes on each rank. Keep the
     # whole encoder call local, including any tensor-parallel projectors.
@@ -553,7 +554,7 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     return loaded
 
 
-def flashinfer_autotune(runner: Any, *, skip_attn: bool = False) -> None:
+def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
