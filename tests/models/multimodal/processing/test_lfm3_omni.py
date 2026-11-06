@@ -5,7 +5,7 @@ import pytest
 from vllm.transformers_utils.configs.lfm3_omni import Lfm3OmniConfig
 
 LAYER_TYPES = ["conv", "conv", "full_attention"] * 5 + ["full_attention"] * 2
-ENCODER = {"num_mel_bins": 128, "conv_channels": 256, "hidden_size": 768}
+ENCODER = {"num_mel_bins": 128, "conv_channels": 256}
 LFM2_ENCODER = {
     "model_type": "lfm2",
     "vocab_size": 2,

@@ -126,7 +126,6 @@ class Lfm3OmniMultiModalProcessor(Qwen3VLMultiModalProcessor):
         return {
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             "input_features": MultiModalFieldConfig.batched("audio"),
-            "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "audio_embeds": MultiModalFieldConfig.batched("audio"),
         }
 
@@ -225,9 +224,9 @@ class Lfm3OmniMultiModalProcessor(Qwen3VLMultiModalProcessor):
             if (embeds := item.get("audio_embeds")) is not None:
                 count = len(embeds.data)
             else:
-                mask = item["feature_attention_mask"].data
-                assert isinstance(mask, torch.Tensor)
-                count = extractor.num_encoder_tokens(int(mask.sum()))
+                features = item["input_features"].data
+                assert isinstance(features, torch.Tensor)
+                count = extractor.num_encoder_tokens(features.shape[-1])
             return wrapped(processor.audio_token_id, count)
 
         def video_replacement(item_idx: int) -> PromptUpdateDetails:
@@ -386,21 +385,21 @@ class Lfm3OmniForConditionalGeneration(Lfm3VlForConditionalGeneration):
                 config, prefix=maybe_prefix(prefix, "audio_projector")
             )
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
-        audio_embeds = kwargs.get("audio_embeds")
-        if isinstance(audio_embeds, (torch.Tensor, list)):
-            return list(audio_embeds)
-        input_features = kwargs.get("input_features")
-        if not isinstance(input_features, (torch.Tensor, list)):
+    _parse_and_validate_audio_input = (
+        Lfm3AudioForConditionalGeneration._parse_and_validate_audio_input
+    )
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is None:
             return super().embed_multimodal(**kwargs)
-        masks = kwargs["feature_attention_mask"]
-        assert isinstance(masks, (torch.Tensor, list))
+        if audio_input["type"] == "audio_embeds":
+            return list(audio_input["audio_embeds"])
         dtype = self.audio_encoder.downsample.conv_in.weight.dtype
-        embeddings = []
-        for features, mask in zip(input_features, masks):
-            features = features[None, :, : int(mask.sum())].to(dtype)
-            embeddings.append(self.audio_projector(self.audio_encoder(features)[0]))
-        return embeddings
+        return [
+            self.audio_projector(self.audio_encoder(features[None].to(dtype))[0])
+            for features in audio_input["input_features"]
+        ]
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return suppress_speech_mode(self.config, super().compute_logits(hidden_states))
