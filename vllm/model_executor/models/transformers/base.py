@@ -190,7 +190,7 @@ class Base(
             self.model: PreTrainedModel = self._create_model()
 
         if getattr(self.model.get_decoder(), "hidden_size_per_layer_input", 0):
-            self.check_version("5.19.0", "per-layer input models")
+            self.check_version("5.21.0", "per-layer input models")
             self.requires_raw_input_tokens = True
 
         # Create weight name to module qualname mapper
