@@ -109,9 +109,11 @@ def test_tp2_ar_rms_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
     model_kwargs["disable_custom_all_reduce"] = False
-    if current_platform.is_rocm() and "llama-3" in model_name_lower:
+    if current_platform.is_rocm() and (
+        "llama-3" in model_name_lower or "qwen" in model_name_lower
+    ):
         model_kwargs.update(
             gpu_memory_utilization=0.01,
             kv_cache_memory_bytes=64 * 1024**2,
@@ -200,7 +202,7 @@ def test_tp2_ar_rms_fp4_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
     model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(
@@ -278,7 +280,7 @@ def test_tp2_ar_rms_fusions(
     model_kwargs["load_format"] = "dummy"
     model_kwargs["model_impl"] = model_impl
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
     model_kwargs["disable_custom_all_reduce"] = False
 
     compilation_config = dict(

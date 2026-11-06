@@ -561,7 +561,8 @@ class TestParseDelta:
                 request=chat_request,
                 finished=False,
             )
-            assert delta.reasoning or delta.content == "thinking"
+            assert delta is not None
+            assert (delta.reasoning or delta.content) == "thinking"
             assert not delta.tool_calls
 
         last_delta = parser.parse_delta(
@@ -654,6 +655,8 @@ class TestParseDelta:
             finished=False,
         )
 
+        assert delta_a is not None
+        assert delta_b is not None
         assert [tool.function.name for tool in tool_call_headers(delta_a)] == [
             "get_weather"
         ]
@@ -871,6 +874,15 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+    def test_malformed_token_does_not_raise(self, harmony_parser):
+        malformed = encode_output(
+            "<|channel|>analysis<|message|>think<|end|><|return|>"
+            "<|start|>assistant<|channel|>final<|message|>answer<|return|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        assert "".join(s.delta for s in result.segments if s.delta) == "thinkanswer"
 
 
 class TestCountReasoningTokens:

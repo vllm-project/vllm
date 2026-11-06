@@ -47,6 +47,18 @@ def hisparse_host_pool_gib(
     return host_pool_gib
 
 
+# Connectors that register the device KV cache with an RDMA engine whatever
+# their buffer device; NIXL is checked separately as it can stage through host.
+_KV_CACHE_REGISTERING_CONNECTORS = frozenset(
+    {
+        "MooncakeConnector",
+        "MooncakeStoreConnector",
+        "MoRIIOConnector",
+        "UMBPStoreConnector",
+    }
+)
+
+
 def kv_buffer_device_default_factory() -> str:
     from vllm.platforms import current_platform
 
@@ -68,24 +80,10 @@ class KVTransferConfig:
     """The device used by kv connector to buffer the KV cache. Choices are
     'cuda', 'cpu' and 'xpu'."""
 
-    kv_buffer_size: float = 1e9
-    """The buffer size for TorchDistributedConnector. Measured in number of
-    bytes. Recommended value: 1e9 (about 1GB)."""
-
     kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
-
-    kv_rank: int | None = None
-    """The rank of this vLLM instance in the KV cache transfer. Typical value:
-    0 for prefill instance, 1 for decode instance.
-    Currently only 1P1D is supported."""
-
-    kv_parallel_size: int = 1
-    """The number of parallel instances for KV cache transfer."""
-
-    kv_ip: str = "127.0.0.1"
-    """The KV connector ip, used to build distributed connection."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'. With MultiConnector, the
+    roles of its connectors decide this instead."""
 
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
@@ -144,14 +142,53 @@ class KVTransferConfig:
 
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVProducer)
+        return any(role in get_args(KVProducer) for role in self._connector_roles())
 
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
+        return any(role in get_args(KVConsumer) for role in self._connector_roles())
+
+    def _connector_roles(self) -> list[str | None]:
+        """The kv_role of each connector. MultiConnector does not pass its own
+        kv_role to its connectors, so only theirs count."""
+        if self.kv_connector is None:
+            return []
+        if self.kv_connector == "MultiConnector":
+            return [
+                child.get("kv_role")
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return [self.kv_role]
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
+
+    def uses_custom_mem_pool(self) -> bool:
+        """Whether a connector allocates the KV cache from its own memory pool
+        (custom_mem_pool), directly or in MultiConnector."""
+        configs = [self.kv_connector_extra_config]
+        if self.kv_connector == "MultiConnector":
+            configs += [
+                child.get("kv_connector_extra_config", {})
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return any(config.get("custom_mem_pool") for config in configs)
+
+    def registers_kv_cache_memory(self) -> bool:
+        """Whether a connector registers the device KV cache itself with UCX or
+        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector. NIXL with
+        a CPU kv_buffer_device registers only its host staging buffers."""
+        children = [{"kv_connector": self.kv_connector}]
+        if self.kv_connector == "MultiConnector":
+            children = self.kv_connector_extra_config.get("connectors", [])
+        for child in children:
+            name = child.get("kv_connector") or ""
+            if name in _KV_CACHE_REGISTERING_CONNECTORS:
+                return True
+            buffer_device = child.get("kv_buffer_device", self.kv_buffer_device)
+            if name.startswith("Nixl") and buffer_device != "cpu":
+                return True
+        return False
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether ``connector_name`` is configured, directly or in MultiConnector."""

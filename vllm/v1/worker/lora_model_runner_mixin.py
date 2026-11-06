@@ -3,7 +3,7 @@
 """Define LoRA functionality mixin for model runners."""
 
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -11,11 +11,13 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
@@ -53,7 +55,15 @@ class LoRAModelRunnerMixin:
             device,
             model.embedding_modules,
         )
-        return self.lora_manager.create_lora_manager(model, vllm_config)
+        # Keep LoRA state out of the weights pool, which level-2 sleep discards.
+        pool = (
+            get_mem_allocator_instance().use_memory_pool(tag="runtime")
+            if vllm_config.model_config.enable_sleep_mode
+            and current_platform.is_cuda_alike()
+            else nullcontext()
+        )
+        with pool:
+            return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def _set_active_loras(
         self,
