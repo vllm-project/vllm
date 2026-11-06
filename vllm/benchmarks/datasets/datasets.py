@@ -307,6 +307,14 @@ class BenchmarkDataset(ABC):
 
         """
         if no_oversample:
+            if len(requests) < num_requests:
+                logger.warning(
+                    "num_requests (%d) exceeds the number of available dataset "
+                    "samples (%d); only %d requests will be sent.",
+                    num_requests,
+                    len(requests),
+                    len(requests),
+                )
             logger.info("Skipping oversampling. Total samples: %d.", len(requests))
             return
 
