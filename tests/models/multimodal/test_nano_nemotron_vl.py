@@ -60,7 +60,7 @@ def test_nemotron_resized_normalization_matches_reference(
 
     if not do_cpu_normalize:
         assert output.dtype == torch.uint8
-        model = object.__new__(NemotronH_Nano_VL_V2)
+        model = _uninitialized_model()
         nn.Module.__init__(model)
         model.input_norm = FusedMMInputNorm(
             mean.flatten().tolist(), std.flatten().tolist(), 1.0 / 255.0
@@ -89,7 +89,7 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference(
     shape = (1, 7, 3 * 16 * 16)
     pixels = torch.randint(0, 256, shape, dtype=torch.uint8)
 
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = FusedMMInputNorm(image_mean, image_std, 1.0 / 255.0).to(_DEVICE)
     model.llm_dtype = torch.bfloat16
@@ -107,7 +107,7 @@ def test_nemotron_dynamic_device_normalization_matches_cpu_reference(
 
 def test_nemotron_cpu_normalized_pixels_bypass_input_norm():
     pixels = torch.randn(1, 3, 16, 16)
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = None
 
@@ -175,7 +175,7 @@ def test_nemotron_processor_defers_normalization_to_device(
     # Normalizing on the device hands the encoder the same dtype as the CPU
     # path. Values differ only where the uint8 resize rounds or clips the
     # bicubic overshoot: a few elements by several levels, tiny on average.
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = FusedMMInputNorm(
         config.norm_mean, config.norm_std, 1.0 / 255.0
@@ -202,9 +202,13 @@ def test_nemotron_processor_rejects_partial_normalization():
         )
 
 
+def _uninitialized_model() -> NemotronH_Nano_VL_V2:
+    return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
+
+
 @pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
 def test_precomputed_multimodal_embeddings(input_key: str):
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     embeds = torch.randn(2, 4, 8)
 
     outputs = model.embed_multimodal(**{input_key: embeds})
@@ -260,21 +264,8 @@ class _VisionModel:
         self.loaded_weights = list(weights)
 
 
-class _FakeTensor:
-    """Sentinel stand-in for torch.Tensor in load_weights tests. Supports the
-    .detach().clone() chain used by load_weights for buffered mm weights;
-    both methods return self so identity (and the existing equality
-    assertions) are preserved through cloning."""
-
-    def detach(self):
-        return self
-
-    def clone(self):
-        return self
-
-
 def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     language_model = _LanguageModel()
     object.__setattr__(model, "model_config", _ModelConfig())
     object.__setattr__(model, "language_model", language_model)
@@ -283,15 +274,15 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     object.__setattr__(model, "vision_final_layernorm", _MissingMultiModalModule())
     object.__setattr__(model, "sound_encoder", None)
 
-    language_weight = object()
+    language_weight = torch.tensor(1.0)
     model.load_weights(
         [
             ("language_model.layers.0.weight", language_weight),
-            ("mlp1.0.weight", object()),
-            ("vision_model.radio_model.encoder.weight", object()),
-            ("sound_encoder.encoder.weight", object()),
-            ("vision_projector.vision_final_layernorm.weight", object()),
-            ("vision_projector.vision_final_layernorm.bias", object()),
+            ("mlp1.0.weight", torch.empty(0)),
+            ("vision_model.radio_model.encoder.weight", torch.empty(0)),
+            ("sound_encoder.encoder.weight", torch.empty(0)),
+            ("vision_projector.vision_final_layernorm.weight", torch.empty(0)),
+            ("vision_projector.vision_final_layernorm.bias", torch.empty(0)),
         ]
     )
 
@@ -299,7 +290,7 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
 
 
 def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     language_model = _LanguageModel()
     vision_model = _VisionModel()
     object.__setattr__(model, "model_config", _ImageOnlyModelConfig())
@@ -309,8 +300,8 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     object.__setattr__(model, "vision_final_layernorm", None)
     object.__setattr__(model, "sound_encoder", None)
 
-    language_weight = object()
-    vision_weight = _FakeTensor()
+    language_weight = torch.tensor(1.0)
+    vision_weight = torch.tensor([2.0, 3.0])
     model.load_weights(
         [
             ("language_model.layers.0.weight", language_weight),
@@ -319,13 +310,16 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     )
 
     assert language_model.loaded_weights == [("layers.0.weight", language_weight)]
-    assert vision_model.loaded_weights == [
-        ("radio_model.encoder.weight", vision_weight)
-    ]
+    assert len(vision_model.loaded_weights) == 1
+    name, loaded_weight = vision_model.loaded_weights[0]
+    assert name == "radio_model.encoder.weight"
+    assert isinstance(loaded_weight, torch.Tensor)
+    torch.testing.assert_close(loaded_weight, vision_weight)
+    assert loaded_weight is not vision_weight
 
 
 def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     language_model = _LanguageModel()
     vision_model = _VisionModel()
     object.__setattr__(model, "model_config", _ImageOnlyModelConfig())
@@ -336,11 +330,11 @@ def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
     object.__setattr__(model, "sound_encoder", None)
 
     with pytest.raises(AssertionError):
-        model.load_weights([("sound_encoder.encoder.weight", object())])
+        model.load_weights([("sound_encoder.encoder.weight", torch.empty(0))])
 
 
 def _vision_norm_model(use_layernorm=True):
-    model = object.__new__(NemotronH_Nano_VL_V2)
+    model = _uninitialized_model()
     torch.nn.Module.__init__(model)
     model.model_config = _ImageOnlyModelConfig()
     model.language_model = _LanguageModel()

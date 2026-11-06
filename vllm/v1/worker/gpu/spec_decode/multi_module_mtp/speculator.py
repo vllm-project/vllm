@@ -15,11 +15,11 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
@@ -100,7 +100,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # Compiled piecewise graphs do not specialize the Python module index.
         if (
             cudagraph_mode.has_piecewise_cudagraphs()
-            and not is_breakable_cudagraph_enabled()
+            and not is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
         ):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY
@@ -111,7 +111,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
         )
 
     def capture(self) -> None:
@@ -121,7 +123,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.last_token_indices.zero_()
         assert self.cudagraph_manager is not None
         if self.cudagraph_manager.use_breakable_cg:
-            num_layers = self.draft_model_config.hf_config.num_nextn_predict_layers
+            num_layers = self.speculative_config.num_mtp_modules()
             self.cudagraph_manager.init_breakable_cg_runner(
                 self.model,
                 key_fn=lambda **kwargs: kwargs["spec_step_idx"] % num_layers,
@@ -214,6 +216,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
