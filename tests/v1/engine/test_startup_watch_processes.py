@@ -14,6 +14,7 @@ import zmq
 
 import vllm.platforms as platforms
 from vllm.config import ParallelConfig, WatchdogConfig
+from vllm.config.utils import hash_config
 from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
@@ -350,7 +351,7 @@ def _engine_config_hash(**overrides) -> str:
     config = ParallelConfig(data_parallel_size=2, data_parallel_size_local=2)
     for name, value in overrides.items():
         setattr(config, name, value)
-    return config.compute_hash()
+    return hash_config(config)
 
 
 def _run_dp_startup_handshake(engine_hashes: list[str]) -> list[CoreEngine]:
