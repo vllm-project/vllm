@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
 from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.hashing import safe_hash
-from vllm.utils.import_utils import LazyLoader, has_arctic_inference
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
     SpeculatorConfig,
@@ -532,11 +532,11 @@ class SpeculativeConfig:
     sharing a KV store and external consumers of KV cache events must use the
     same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
-    """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
-    MTP). "fp8" uses per-row weight and per-token activation scales on the
-    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
-    W4A16 kernel. The target verifies with its own head, so only the
-    acceptance length can change. Model Runner V2 only."""
+    """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
+    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
+    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    weight-only on the platform's W4A16 kernel. The target verifies with its
+    own head, so only the acceptance length can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -598,6 +598,12 @@ class SpeculativeConfig:
     exceeded, will trigger eviction in FIFO order. If set to 0, the global
     suffix tree is disabled and past responses are not cached (prompt trees
     are still used)."""
+
+    suffix_decoding_corpus_tokens: int = 1 << 20
+    """Model Runner V2 only: token capacity of the GPU corpus of finished
+    responses used for cross-request matching. Oldest responses are
+    overwritten first. Set 0 (or `suffix_decoding_max_cached_requests` to 0)
+    to match only within each request's own prompt and output."""
 
     suffix_decoding_max_spec_factor: float = 1.0
     """The maximum spec factor for suffix decoding. The spec factor controls
@@ -772,6 +778,12 @@ class SpeculativeConfig:
         ):
             # Qwen3 DSpark drafts reuse the DeepSeek-V4 DSpark architecture name.
             hf_config.update({"architectures": ["Qwen3DSparkModel"]})
+            return hf_config
+        if initial_architecture == "DFlash2DraftModel" and getattr(
+            hf_config, "no_rope_layers", None
+        ):
+            # Ripple's DFlash2 drafter is the one with NoPE layers.
+            hf_config.update({"architectures": ["DFlash2RicursiveDraftModel"]})
             return hf_config
         if initial_architecture == "Gemma4DSparkModel":
             # Normalize the Gemma4 DSpark draft's config keys to DSpark's.
@@ -1419,43 +1431,6 @@ class SpeculativeConfig:
     def uses_separate_workspace_lane(self) -> bool:
         """See `SpeculatorConfig.uses_separate_workspace_lane`."""
         return self.speculator_config.uses_separate_workspace_lane
-
-    def _validate_suffix_decoding(self):
-        # V1 model runner only, to be removed with it.
-        if not has_arctic_inference():
-            raise ImportError(
-                "Arctic Inference is required for suffix decoding. "
-                "Install via `pip install arctic-inference==0.1.1`."
-            )
-        if self.num_speculative_tokens is None:
-            # Suffix decoding decides the actual number of speculative tokens
-            # dynamically and treats num_speculative_tokens as a maximum limit.
-            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
-            logger.warning(
-                "Defaulted num_speculative_tokens to %s for suffix decoding.",
-                self.num_speculative_tokens,
-            )
-        # Validate values
-        if self.suffix_decoding_max_tree_depth < 1:
-            raise ValueError(
-                f"suffix_decoding_max_tree_depth="
-                f"{self.suffix_decoding_max_tree_depth} must be >= 1"
-            )
-        if self.suffix_decoding_max_cached_requests < 0:
-            raise ValueError(
-                f"suffix_decoding_max_cached_requests="
-                f"{self.suffix_decoding_max_cached_requests} must be >= 0"
-            )
-        if self.suffix_decoding_max_spec_factor < 0:
-            raise ValueError(
-                f"suffix_decoding_max_spec_factor="
-                f"{self.suffix_decoding_max_spec_factor} must be >= 0"
-            )
-        if not 0 <= self.suffix_decoding_min_token_prob <= 1:
-            raise ValueError(
-                f"suffix_decoding_min_token_prob="
-                f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
-            )
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
