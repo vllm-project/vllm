@@ -13,6 +13,7 @@ import torch.types
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import in_wsl
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
 
@@ -111,7 +112,10 @@ def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
     """
     free_memory, total_memory = torch.accelerator.get_memory_info(device)
     index = torch.device(device).index if device is not None else None
-    if current_platform.is_integrated_gpu(index):
+    # WSL guest RAM does not describe CUDA's memory allocation budget.
+    if current_platform.is_integrated_gpu(index) and not (
+        current_platform.is_cuda() and in_wsl()
+    ):
         free_memory, total_memory = current_platform.get_integrated_gpu_memory_info(
             index, free_memory, total_memory
         )
