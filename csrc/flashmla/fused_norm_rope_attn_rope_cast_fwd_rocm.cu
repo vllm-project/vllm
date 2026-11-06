@@ -442,9 +442,9 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
   // MFMA step 2g+h contracts dims g*64 + lg*16 + h*8 + [0, 8): sixteen
   // contiguous FP8 bytes per lane share one scale group.
   BF16x8 qf[16];
-#pragma unroll
+  #pragma unroll
   for (int g = 0; g < 8; ++g) {
-#pragma unroll
+  #pragma unroll
     for (int h = 0; h < 2; ++h) {
       qf[2 * g + h] = head < heads ? *(Global<BF16x8>)(q + token * q_stride_t +
                                                        head * q_stride_h +
@@ -455,7 +455,7 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
 
   constexpr int kSlotsPerThread = kMaxKeys / (kWaves * 64);
   int indices[kSlotsPerThread];
-#pragma unroll
+  #pragma unroll
   for (int r = 0; r < kSlotsPerThread; ++r)
     indices[r] = src.prefetch(token, tid + r * kWaves * 64);
   const KeySpan span = src.span(token);
@@ -464,14 +464,14 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
   __bf16* kv =
       reinterpret_cast<__bf16*>(stage) + wave * 2 * kTileKeys * kKStride;
   F4 acc[32];
-#pragma unroll
+  #pragma unroll
   for (int d = 0; d < 32; ++d) acc[d] = F4{};
   float row_max = -INFINITY, row_sum = 0.0f;
 
   // Scores one 16-key half and stages its K rows for the PV step.
   auto score = [&](const RowFragment& rows, int half) {
     BF16x8 k[16];
-#pragma unroll
+  #pragma unroll
     for (int g = 0; g < 7; ++g) {
       const uint32_t bits =
           ((g < 4 ? rows.scales.x : rows.scales.y) >> (8 * (g % 4))) & 0xff;
@@ -484,10 +484,10 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
 
     // Four independent accumulators keep the MFMA pipe full.
     F4 s[4] = {};
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; ++i) s[i % 4] = mfma_k32(k[i], qf[i], s[i % 4]);
     __bf16* row = kv + (half * kTileKeys + lr) * kKStride;
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; ++i)
       *(Local<BF16x8>)(row + swizzle_chunk(lr, (i / 2) * 8 + lg * 2 + i % 2) *
                                  8) = k[i];
@@ -502,7 +502,7 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
     const I32x4 lo_slots = *(Local<I32x4>)(slots + key);
     const I32x4 hi_slots = *(Local<I32x4>)(slots + key + kTileKeys);
     float logit[8], step_max = -INFINITY;
-#pragma unroll
+  #pragma unroll
     for (int e = 0; e < 4; ++e) {
       logit[e] =
           key + e < n && lo_slots[e] >= 0 ? lo[e] * scale_log2 : -INFINITY;
@@ -510,7 +510,7 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
                          ? hi[e] * scale_log2
                          : -INFINITY;
     }
-#pragma unroll
+  #pragma unroll
     for (int e = 0; e < 8; ++e) step_max = fmaxf(step_max, logit[e]);
     step_max = fmaxf(step_max, __shfl_xor(step_max, 16));
     step_max = fmaxf(step_max, __shfl_xor(step_max, 32));
@@ -519,7 +519,7 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
     const float alpha = __builtin_amdgcn_exp2f(row_max - base);
     BF16x8 p;
     float step_sum = 0.0f;
-#pragma unroll
+  #pragma unroll
     for (int e = 0; e < 8; ++e) {
       const float value = __builtin_amdgcn_exp2f(logit[e] - base);
       p[e] = static_cast<__bf16>(value);
@@ -528,22 +528,22 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
     row_sum = row_sum * alpha + step_sum;
     row_max = next_max;
     if (__any(alpha != 1.0f)) {
-#pragma unroll
+  #pragma unroll
       for (int d = 0; d < 32; ++d) acc[d] *= alpha;
     }
 
     // ds_read_tr16_b64 hands lane (lr, lg) V[4*lg + e][16*d + lr].
-#if defined(__gfx950__)
+  #if defined(__gfx950__)
     const int v_row = 4 * lg + lr / 4;
     const __bf16* v_base = kv + v_row * kKStride + 4 * (lr % 2);
-#endif
+  #endif
     constexpr int kBatch = 8;
-#pragma unroll
+  #pragma unroll
     for (int d0 = 0; d0 < 32; d0 += kBatch) {
       BF16x8 v[kBatch];
-#pragma unroll
+  #pragma unroll
       for (int d = 0; d < kBatch; ++d) {
-#if defined(__gfx950__)
+  #if defined(__gfx950__)
         const int chunk = swizzle_chunk(v_row, 2 * (d0 + d) + (lr % 4) / 2) * 8;
         const auto lo_v = __builtin_amdgcn_ds_read_tr16_b64_v4i16(
             (Local<Short4>)(v_base + chunk));
@@ -552,16 +552,16 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
         v[d] = __builtin_bit_cast(
             BF16x8,
             __builtin_shufflevector(lo_v, hi_v, 0, 1, 2, 3, 4, 5, 6, 7));
-#else
-  #pragma unroll
+  #else
+    #pragma unroll
         for (int e = 0; e < 8; ++e)
           v[d][e] =
               kv[((e / 4) * kTileKeys + 4 * lg + e % 4) * kKStride +
                  swizzle_chunk(4 * lg + e % 4, 2 * (d0 + d) + lr / 8) * 8 +
                  lr % 8];
-#endif
+  #endif
       }
-#pragma unroll
+  #pragma unroll
       for (int d = 0; d < kBatch; ++d)
         acc[d0 + d] = mfma_k32(v[d], p, acc[d0 + d]);
       // Keep the batch's LDS reads ahead of its MFMAs.
@@ -575,14 +575,14 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
     if (chunk) __syncthreads();
     // Issue every index load, then every table load, before waiting.
     int keys[kSlotsPerThread], logical[kSlotsPerThread];
-#pragma unroll
+  #pragma unroll
     for (int r = 0; r < kSlotsPerThread; ++r) {
       if (chunk)
         indices[r] = src.prefetch(token, chunk + tid + r * kWaves * 64);
       keys[r] = chunk + min(tid + r * kWaves * 64, n - 1);
       logical[r] = src.logical(token, span, keys[r], indices[r]);
     }
-#pragma unroll
+  #pragma unroll
     for (int r = 0; r < kSlotsPerThread; ++r) {
       const int slot = src.resolve(span, keys[r], logical[r]);
       if (tid + r * kWaves * 64 < n) slots[tid + r * kWaves * 64] = slot;
@@ -618,13 +618,13 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
   const float sink_log2 =
       sink && head < heads ? sink[head] * kLog2e : -INFINITY;
   float final_max = sink_log2;
-#pragma unroll
+  #pragma unroll
   for (int w = 0; w < kWaves; ++w)
     final_max = fmaxf(final_max, wave_max[w][lr]);
   float total = isfinite(sink_log2)
                     ? __builtin_amdgcn_exp2f(sink_log2 - final_max)
                     : 0.0f;
-#pragma unroll
+  #pragma unroll
   for (int w = 0; w < kWaves; ++w) {
     if (wave_max[w][lr] != -INFINITY)
       total +=
@@ -638,12 +638,12 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
   float* merged = reinterpret_cast<float*>(stage);
   float* mine = merged + ((wave % 2) * 16 + lr) * kOStride + 4 * lg;
   if (wave < 2) {
-#pragma unroll
+  #pragma unroll
     for (int d = 0; d < 32; ++d) *(Local<F4>)(mine + d * 16) = acc[d] * factor;
   }
   __syncthreads();
   if (wave >= 2) {
-#pragma unroll
+  #pragma unroll
     for (int d = 0; d < 32; ++d) *(Local<F4>)(mine + d * 16) += acc[d] * factor;
   }
   __syncthreads();
@@ -748,7 +748,7 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
     const bool valid_pos = rope_pos >= 0 && rope_pos < num_positions;
 
     BF16x8 qv[kSteps2 / 2];
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < kSteps2 / 2; ++i)
       qv[i] = head < heads ? *(Global<BF16x8>)(q + token * q_stride_t +
                                                head * q_stride_h +
@@ -791,12 +791,12 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       const uint8_t* row = valid ? page + offset * 576 : kZeroRecord;
       const uint8_t* scales = valid ? page + cache.block_size * 576 + offset * 8
                                     : kZeroRecord + 576;
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < kGroups; ++m)
         f.nope[m] =
             load_global<Aligned, U32x4>(row + 64 * (4 * kHalf + m) + 16 * lg);
       if constexpr (kHalf == 1) {
-#pragma unroll
+  #pragma unroll
         for (int h = 0; h < 2; ++h)
           f.rope[h] = load_global<Aligned, U32x4>(row + 448 + 32 * lg + 16 * h);
       }
@@ -816,9 +816,9 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
     // patterns with the sign cleared.
     using U16x2 = uint16_t __attribute__((ext_vector_type(2)));
     U16x2 q_bits = {};
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 2 * kGroups; ++i)
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 4; ++j)
         q_bits = __builtin_elementwise_max(
             q_bits,
@@ -832,19 +832,21 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
     const float q_inv = __builtin_ldexpf(1.0f, 7 - q_exp);
     const float q_scale = __builtin_ldexpf(1.0f, q_exp - 7);
     long qhi[kGroups][2], qlo[kGroups][2];
-#pragma unroll
+  #pragma unroll
     for (int m = 0; m < kGroups; ++m)
-#pragma unroll
+  #pragma unroll
       for (int h = 0; h < 2; ++h) {
         uint32_t hw[2], lw[2];
         const U32x4 qw = __builtin_bit_cast(U32x4, qv[2 * m + h]);
-#pragma unroll
+  #pragma unroll
         for (int w = 0; w < 2; ++w) {
           const uint32_t w0 = qw[2 * w], w1 = qw[2 * w + 1];
-          const F2 x0 = F2{__uint_as_float(w0 << 16),
-                           __uint_as_float(w0 & 0xffff0000u)} * q_inv;
-          const F2 x1 = F2{__uint_as_float(w1 << 16),
-                           __uint_as_float(w1 & 0xffff0000u)} * q_inv;
+          const F2 x0 =
+              F2{__uint_as_float(w0 << 16), __uint_as_float(w0 & 0xffff0000u)} *
+              q_inv;
+          const F2 x1 =
+              F2{__uint_as_float(w1 << 16), __uint_as_float(w1 & 0xffff0000u)} *
+              q_inv;
           int hb = __builtin_amdgcn_cvt_pk_fp8_f32(x0.x, x0.y, int(w0), false);
           hb = __builtin_amdgcn_cvt_pk_fp8_f32(x1.x, x1.y, hb, true);
           const F2 r0 = x0 - __builtin_amdgcn_cvt_pk_f32_fp8(hb, false);
@@ -865,10 +867,10 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       // 16 lg + 8 i + [0, 8), i.e. pairs 8 lg + 4 i + [0, 4).
       if (rotate_q && valid_pos) {
         const float* cs = cos_sin + rope_pos * kRopeDim;
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 2; ++i) {
           BF16x8& x = qv[2 * kGroups + i];
-#pragma unroll
+  #pragma unroll
           for (int j = 0; j < 4; ++j) {
             const int pair = 8 * lg + 4 * i + j;
             const float cos = cs[pair], sin = cs[kRopeDim / 2 + pair];
@@ -878,7 +880,7 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
           }
         }
       }
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 2; ++i) {
         qr[2 * i] = qv[2 * kGroups + i].lo;
         qr[2 * i + 1] = qv[2 * kGroups + i].hi;
@@ -886,18 +888,18 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
     }
 
     F4 acc[kSteps2];
-#pragma unroll
+  #pragma unroll
     for (int d = 0; d < kSteps2; ++d) acc[d] = F4{};
     float row_max = -INFINITY, row_sum = 0.0f;
 
     BF16x4 identity;
-#pragma unroll
+  #pragma unroll
     for (int e = 0; e < 4; ++e)
       identity[e] = static_cast<__bf16>(4 * lg + e == lr ? 1.0f : 0.0f);
     // FNUZ selection: K (16 keys x 32 dims) times sel[par] hands lane (lr, lg)
     // dim 16 (lr / 4) + 4 par + lr % 4 of the 8-byte half, keys 4 lg + [0, 4).
     long sel[2];
-#pragma unroll
+  #pragma unroll
     for (int par = 0; par < 2; ++par)
       sel[par] = lg == lr / 4 ? long(0x40ull << (8 * (4 * par + lr % 4))) : 0l;
 
@@ -916,14 +918,14 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       };
       BF16x4 kr[4] = {};
       if constexpr (kHalf == 1) {
-#pragma unroll
+  #pragma unroll
         for (int t = 0; t < 4; ++t)
           kr[t] = __builtin_bit_cast(
               BF16x4, t % 2 ? frag.rope[t / 2].zw : frag.rope[t / 2].xy);
       }
       // Scale words of keys 4 lg + e: the keys of this lane's S^T and P.
       uint32_t ws[4];
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) ws[e] = __shfl(frag.scales, 4 * lg + e);
       auto kscale = [&](int m, int e) {
         return __uint_as_float((ws[e] >> (8 * m) & 0xffu) << 23);
@@ -934,28 +936,28 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       next = fetch(step + 2, slot_next2);
 
       F4 nope = {};
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < kGroups; ++m) {
         F4 c = {};
-#pragma unroll
+  #pragma unroll
         for (int h = 0; h < 2; ++h) {
           c = mfma_fp8(kfp8(m, h), qhi[m][h], c);
           c = mfma_fp8(kfp8(m, h), qlo[m][h], c);
         }
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e) nope[e] = fmaf(c[e], kscale(m, e), nope[e]);
       }
       F4 part;
       if constexpr (kHalf == 1) {
         F4 sr[2] = {};
-#pragma unroll
+  #pragma unroll
         for (int t = 0; t < 4; ++t)
           sr[t % 2] = mfma_k16(kr[t], qr[t], sr[t % 2]);
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e)
           part[e] = fmaf(nope[e], q_scale, sr[0][e] + sr[1][e]);
       } else {
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; ++e) part[e] = nope[e] * q_scale;
       }
       // Both waves add the halves in the same order, so they see the same
@@ -968,7 +970,7 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
 
       // This lane holds S^T for keys 4*lg + [0, 4) of head lr.
       float logit[4], local_max = -INFINITY;
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int key = 4 * lg + e;
         logit[e] = valid_keys >> key & 1 ? score[e] * scale_log2 : -INFINITY;
@@ -987,12 +989,12 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
             row_max - (next_max == -INFINITY ? 0.0f : next_max));
         row_sum *= alpha;
         row_max = next_max;
-#pragma unroll
+  #pragma unroll
         for (int d = 0; d < kSteps2; ++d) acc[d] *= alpha;
       }
       const float base = row_max == -INFINITY ? 0.0f : row_max;
       BF16x4 p;
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) {
         p[e] = static_cast<__bf16>(__builtin_amdgcn_exp2f(logit[e] - base));
         row_sum += float(p[e]);
@@ -1001,31 +1003,30 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
       // K sel (FP8) or K I (RoPE) hands lane (lr, lg) keys 4 lg + [0, 4) of
       // QK step d's dim lr, unscaled; group m's per-key scales ride on P.
       constexpr int kBatch = 4;
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < kSteps2 / kBatch; ++m) {
         F4 t[kBatch];
         BF16x4 pm;
         if (m < kGroups) {
-#pragma unroll
+  #pragma unroll
           for (int d = 0; d < kBatch; ++d)
             t[d] = mfma_fp8(kfp8(m, d / 2), sel[d % 2], F4{});
           pm = __builtin_bit_cast(
-              BF16x4,
-              (U32x2{pack_bf16(float(p[0]) * kscale(m, 0),
-                               float(p[1]) * kscale(m, 1)),
-                     pack_bf16(float(p[2]) * kscale(m, 2),
-                               float(p[3]) * kscale(m, 3))}));
+              BF16x4, (U32x2{pack_bf16(float(p[0]) * kscale(m, 0),
+                                       float(p[1]) * kscale(m, 1)),
+                             pack_bf16(float(p[2]) * kscale(m, 2),
+                                       float(p[3]) * kscale(m, 3))}));
         } else {
-#pragma unroll
+  #pragma unroll
           for (int d = 0; d < kBatch; ++d)
             t[d] = mfma_k16(kr[d], identity, F4{});
           pm = p;
         }
-#pragma unroll
+  #pragma unroll
         for (int d = 0; d < kBatch; ++d) {
-          const BF16x4 v = __builtin_bit_cast(
-              BF16x4, (U32x2{pack_bf16(t[d][0], t[d][1]),
-                             pack_bf16(t[d][2], t[d][3])}));
+          const BF16x4 v =
+              __builtin_bit_cast(BF16x4, (U32x2{pack_bf16(t[d][0], t[d][1]),
+                                                pack_bf16(t[d][2], t[d][3])}));
           acc[kBatch * m + d] = mfma_k16(v, pm, acc[kBatch * m + d]);
         }
         __builtin_amdgcn_sched_group_barrier(0x008, kBatch, 0);
@@ -1065,15 +1066,15 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
     // acc[d] holds dims wave_dim(lg, kFirst + d) + [0, 4) of head lr: two
     // RoPE pairs.
     __bf16* row = out + token * out_stride_t + head * out_stride_h;
-#pragma unroll
+  #pragma unroll
     for (int d = 0; d < kSteps2; ++d) {
       const int dim = wave_dim(lg, kFirst + d);
       float o[4];
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e)
         o[e] = float(static_cast<__bf16>(acc[d][e] * factor));
       if (dim >= kHeadDim - kRopeDim && valid_pos) {
-#pragma unroll
+  #pragma unroll
         for (int e = 0; e < 4; e += 2) {
           const int pair = (dim + e - (kHeadDim - kRopeDim)) / 2;
           const float cos = cos_sin[rope_pos * kRopeDim + pair];
@@ -1084,7 +1085,7 @@ __global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
         }
       }
       BF16x4 r;
-#pragma unroll
+  #pragma unroll
       for (int e = 0; e < 4; ++e) r[e] = static_cast<__bf16>(o[e]);
       *reinterpret_cast<BF16x4*>(row + dim) = r;
     }
@@ -1278,8 +1279,8 @@ void check_query_output(const at::Tensor& q,
   TORCH_CHECK(out.device() == q.device() &&
                   out.scalar_type() == at::kFloat8_e4m3fn && out.dim() > 0 &&
                   out.stride(-1) == 1 && out_scale.device() == q.device() &&
-                  out_scale.scalar_type() == at::kByte &&
-                  out_scale.dim() > 0 && out_scale.stride(-1) == 1,
+                  out_scale.scalar_type() == at::kByte && out_scale.dim() > 0 &&
+                  out_scale.stride(-1) == 1,
               "out and out_scale have an incorrect device, dtype or stride");
   TORCH_CHECK(out.dim() == 2 && out.size(0) == tokens &&
                   out.size(1) == heads * kHeadDim && out_scale.dim() == 2 &&
@@ -1298,21 +1299,23 @@ void check_bf16_output(const at::Tensor& q, const at::Tensor& out) {
                   out.size(0) == q.size(0) && out.size(1) == q.size(1) &&
                   out.size(2) == kHeadDim && out.stride(2) == 1,
               "out must be a BF16 tensor [tokens, heads, 512]");
-  TORCH_CHECK(out.stride(1) >= kHeadDim &&
-                  out.stride(0) >= out.size(1) * out.stride(1),
-              "output rows must not overlap");
+  TORCH_CHECK(
+      out.stride(1) >= kHeadDim && out.stride(0) >= out.size(1) * out.stride(1),
+      "output rows must not overlap");
   TORCH_CHECK(out.stride(0) % 4 == 0 && out.stride(1) % 4 == 0 &&
                   reinterpret_cast<uintptr_t>(out.data_ptr()) % 8 == 0,
               "out rows must be 8-byte aligned");
 }
 
-PrefillSource prefill_source(
-    const at::Tensor& q, const at::Tensor& main_cache,
-    const at::Tensor& main_table, const std::optional<at::Tensor>& extra_cache,
-    const std::optional<at::Tensor>& extra_table, const at::Tensor& topk,
-    const at::Tensor& query_start_loc, const at::Tensor& seq_lens,
-    const at::Tensor& gather_lens, int64_t window_size, int64_t compress_ratio,
-    bool main_use_fnuz) {
+PrefillSource prefill_source(const at::Tensor& q, const at::Tensor& main_cache,
+                             const at::Tensor& main_table,
+                             const std::optional<at::Tensor>& extra_cache,
+                             const std::optional<at::Tensor>& extra_table,
+                             const at::Tensor& topk,
+                             const at::Tensor& query_start_loc,
+                             const at::Tensor& seq_lens,
+                             const at::Tensor& gather_lens, int64_t window_size,
+                             int64_t compress_ratio, bool main_use_fnuz) {
   const auto requests = seq_lens.numel();
   TORCH_CHECK(window_size > 0 &&
                   window_size <= std::numeric_limits<int>::max() &&
@@ -1491,10 +1494,10 @@ void fused_norm_rope_attn_rope_cast_prefill_rocm(
     bool main_use_fnuz, at::Tensor& out, at::Tensor& out_scale) {
   check_query_output(q, attn_sink, sm_scale, positions, cos_sin_cache, 0.0, out,
                      out_scale);
-  const PrefillSource src = prefill_source(
-      q, main_cache, main_table, extra_cache, extra_table, topk,
-      query_start_loc, seq_lens, gather_lens, window_size, compress_ratio,
-      main_use_fnuz);
+  const PrefillSource src =
+      prefill_source(q, main_cache, main_table, extra_cache, extra_table, topk,
+                     query_start_loc, seq_lens, gather_lens, window_size,
+                     compress_ratio, main_use_fnuz);
   launch_paged_attn<true>(q, src, attn_sink, sm_scale, positions, cos_sin_cache,
                           out, out_scale);
 }
@@ -1512,10 +1515,10 @@ void fused_norm_rope_attn_rope_prefill_bf16_rocm(
   check_bf16_output(q, out);
   TORCH_CHECK(on_arch(q, "gfx942"),
               "the BF16 mega-attention prefill is gfx942-only");
-  const PrefillSource src = prefill_source(
-      q, main_cache, main_table, extra_cache, extra_table, topk,
-      query_start_loc, seq_lens, gather_lens, window_size, compress_ratio,
-      main_use_fnuz);
+  const PrefillSource src =
+      prefill_source(q, main_cache, main_table, extra_cache, extra_table, topk,
+                     query_start_loc, seq_lens, gather_lens, window_size,
+                     compress_ratio, main_use_fnuz);
   launch_paged_attn_bf16(q, src, attn_sink, sm_scale, positions, cos_sin_cache,
                          rotate_q, out);
 }
