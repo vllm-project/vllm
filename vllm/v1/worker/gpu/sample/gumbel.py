@@ -41,7 +41,7 @@ def _temperature_kernel(
 
     logits = tl.load(logits_ptr + token_idx * logits_stride + block, mask=mask)
     logits = logits.to(tl.float32)
-    logits = logits / temperature
+    logits = tl.div_rn(logits, temperature)
     tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
@@ -188,8 +188,12 @@ def gumbel_noised_argmax(
     """
     if temp != 0.0 and APPLY_TEMPERATURE:
         # Match the behavior of _temperature_kernel: if that kernel uses
-        # tl.div_rn, this must too.
-        logits = logits / temp
+        # tl.div_rn, this must too. tl.div_rn takes fp32 only; an fp64 `/` is
+        # already correctly rounded.
+        if logits.dtype == tl.float64:
+            logits = logits / temp
+        else:
+            logits = tl.div_rn(logits, temp)
 
     # fp32 is the default reduction dtype; fp64 is ~1/32-1/64x the throughput
     # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
