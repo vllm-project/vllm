@@ -208,7 +208,7 @@ class AnthropicJsonOutputFormat(BaseModel):
 
 
 AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
-# reasoning_effort sent to the chat template for thinking.type=disabled.
+# reasoning_effort sent to the chat template when upfront thinking is disabled.
 AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
 AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
 AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
@@ -246,10 +246,22 @@ class AnthropicThinkingConfigAdaptive(BaseModel):
     display: AnthropicThinkingDisplay | None = None
 
 
+class AnthropicThinkingConfigBetweenTools(BaseModel):
+    """Thinking that is off up front but may resume between tool calls.
+
+    vLLM maps this to disabled thinking. It cannot force a model to emit
+    progress notes between tool calls; any reasoning the model emits is still
+    returned as thinking blocks.
+    """
+
+    type: Literal["between_tools"]
+
+
 AnthropicThinkingConfig = Annotated[
     AnthropicThinkingConfigEnabled
     | AnthropicThinkingConfigDisabled
-    | AnthropicThinkingConfigAdaptive,
+    | AnthropicThinkingConfigAdaptive
+    | AnthropicThinkingConfigBetweenTools,
     Field(discriminator="type"),
 ]
 
@@ -316,6 +328,13 @@ class AnthropicMessagesRequest(BaseModel):
         default=None,
         description=(
             "Whether to apply the engine's configured watermark to this request."
+        ),
+    )
+    min_tokens: int = Field(
+        default=0,
+        description=(
+            "Minimum number of tokens to generate before EOS or a stop "
+            "sequence can end the response."
         ),
     )
     kv_transfer_params: dict[str, Any] | None = Field(

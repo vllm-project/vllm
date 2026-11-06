@@ -75,7 +75,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import refill_derived
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+)
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
@@ -157,7 +161,6 @@ class DeepseekV4MLP(nn.Module):
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
         )
-        from vllm.model_executor.utils import replace_parameter
 
         w = getattr(self.gate_up_proj, "weight", None)
         ws = get_fp8_block_weight_scale(self.gate_up_proj)
@@ -169,13 +172,18 @@ class DeepseekV4MLP(nn.Module):
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
         # Skip when the linear kernel already B-preshuffled this weight.
-        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+        if not (
+            getattr(self.gate_up_proj, "aiter_bpreshuffled", False)
+            or is_weights_pre_processed()
+        ):
             replace_parameter(
                 self.gate_up_proj,
                 "weight",
                 rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
             )
-        self._gateup_scale = ws
+        # A plain tensor (the scale Parameter would register a second time on
+        # this module), refilled in place on reloads for captured CUDA graphs.
+        refill_derived(self, "_gateup_scale", ws.detach())
 
     def forward(self, x):
         if self._gateup_scale is not None and x.dim() == 2:

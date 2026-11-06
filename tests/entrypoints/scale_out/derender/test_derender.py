@@ -21,12 +21,13 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
-def server():
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+def server(request):
+    args = getattr(request, "param", [])
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -1101,10 +1102,11 @@ async def _e2e_render_chat(
     client: httpx.AsyncClient,
     model: str,
     messages: list[dict],
+    **extra,
 ) -> dict:
     resp = await client.post(
         "/v1/chat/completions/render",
-        json={"model": model, "messages": messages},
+        json={"model": model, "messages": messages, **extra},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -1385,6 +1387,62 @@ async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
     )
     assert resp.status_code == 400
     assert "chat_request" in resp.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# E2E: Qwen3 reasoning parser, which reads the prompt
+# ---------------------------------------------------------------------------
+
+QWEN3_MODEL = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def qwen3_server():
+    args = ["--reasoning-parser", "qwen3"]
+    with RemoteLaunchRenderServer(QWEN3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def qwen3_client(qwen3_server):
+    async with httpx.AsyncClient(
+        base_url=qwen3_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
+    """The parser reads the caller's prompt_token_ids, so output after a
+    prompt that already closes reasoning is content. Generate omits
+    prompt_token_ids unless return_token_ids is set."""
+    messages = [
+        {"role": "user", "content": "What is 6*7?"},
+        {"role": "assistant", "content": "<think>\nEasy.\n</think>\n\nThe answer"},
+    ]
+    continuation = {"add_generation_prompt": False, "continue_final_message": True}
+    gen_req = await _e2e_render_chat(
+        qwen3_client, QWEN3_MODEL, messages, **continuation
+    )
+    output_ids = _encode(get_tokenizer(QWEN3_MODEL), " is 42.")
+
+    resp = await qwen3_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": QWEN3_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": {
+                "model": QWEN3_MODEL,
+                "messages": messages,
+                **continuation,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert message["content"] == " is 42."
+    assert message["reasoning"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1913,3 +1971,54 @@ async def test_derender_completion_preserves_requested_token_ids(
         )
     assert choices[0].token_ids == (token_ids if return_token_ids else None)
     assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "server_flag"),
+    [([], False), (["--return-tokens-as-token-ids"], True)],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("endpoint", ["chat", "completion"])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_derender_logprob_override(
+    client, tokenizer, server_flag, endpoint, override
+):
+    """An explicit false must override a true render-server default."""
+    token_id = tokenizer.convert_tokens_to_ids("▁true")
+    logprobs = _make_generate_logprobs(token_id)
+    logprobs["content"][0]["top_logprobs"][0]["token_id"] = token_id
+    generated = _make_generate_response(
+        [token_id], finish_reason="length", logprobs=logprobs
+    )
+    original = (
+        {"messages": [], "logprobs": True, "top_logprobs": 1}
+        if endpoint == "chat"
+        else {"prompt": "Hi", "logprobs": 1}
+    )
+    if override is not None:
+        original["return_tokens_as_token_ids"] = override
+    payload = (
+        {"chat_request": original, "generate_response": generated}
+        if endpoint == "chat"
+        else {"completion_request": original, "generate_responses": [generated]}
+    )
+    response = await client.post(
+        f"/v1/{'chat/completions' if endpoint == 'chat' else 'completions'}/derender",
+        json=payload,
+    )
+    response.raise_for_status()
+    placeholders = server_flag if override is None else override
+    expected = f"token_id:{token_id}" if placeholders else " true"
+    choice = response.json()["choices"][0]
+    if endpoint == "chat":
+        entry = choice["logprobs"]["content"][0]
+        assert (entry["token"], entry["bytes"]) == (
+            expected,
+            None if placeholders else list(b" true"),
+        )
+        assert entry["top_logprobs"][0]["token"] == expected
+    else:
+        assert choice["logprobs"]["tokens"] == [expected]
+        assert choice["logprobs"]["top_logprobs"] == [{expected: -2.0}]
