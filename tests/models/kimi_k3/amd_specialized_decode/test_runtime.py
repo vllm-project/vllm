@@ -404,15 +404,14 @@ def test_unserved_steps_are_refused(on_mi355x, dcp, seqs, k, reason):
 
 
 @pytest.mark.parametrize("over, env", _NO_AITER_MLA)
-def test_dcp1_without_aiter_mla_is_refused(on_mi355x, monkeypatch, over, env):
-    """M1 reads AITER MLA's decode metadata: DCP1 without it is refused at
-    startup, not an AttributeError at the first verify step."""
+def test_dcp1_without_aiter_mla_runs_mla_ops(on_mi355x, monkeypatch, over, env):
+    """M1 reads AITER MLA's decode metadata: without it, DCP1 is served with the
+    MLA layers on vLLM's ops (M1 off), not refused."""
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     cfg = _vllm_config(**over, **{"parallel_config.decode_context_parallel_size": 1})
-    reasons = runtime.unsupported(cfg)
-    assert len(reasons) == 1, reasons
-    assert "DCP1 without M1 (the ROCM_AITER_MLA attention backend)" in reasons[0]
+    assert "the ROCM_AITER_MLA attention backend" in runtime.m1_reasons(cfg)
+    assert runtime.unsupported(cfg) == []
 
 
 def test_aiter_mla_backend_is_served(on_mi355x):
@@ -422,18 +421,15 @@ def test_aiter_mla_backend_is_served(on_mi355x):
     assert runtime.m1_reasons(cfg) == []
 
 
-def test_dcp1_without_m1_is_refused(on_mi355x):
-    """DCP1 runs M1c, which needs M1 (at DCP8 vLLM's ops run instead)."""
-    cfg = _vllm_config(
-        **{
-            "parallel_config.decode_context_parallel_size": 1,
-            "cache_config.cache_dtype": "auto",
-        }
-    )
-    reasons = runtime.unsupported(cfg)
-    assert (
-        len(reasons) == 1 and "DCP1 without M1 (an fp8 (E4M3) KV cache)" in reasons[0]
-    )
+@pytest.mark.parametrize("seqs", [1, 2, 4])
+def test_dcp1_without_m1_runs_mla_ops(on_mi355x, seqs):
+    """Without M1 (here: no fp8 E4M3 KV, as Kimi-K3.1's fp8_ds_mla DSA cache),
+    DCP1 runs the MLA layers on vLLM's ops, then K2, as DCP8 does; M1c's
+    request limits do not apply."""
+    cfg = _step(1, seqs, 3)
+    cfg.cache_config.cache_dtype = "auto"
+    assert "an fp8 (E4M3) KV cache" in runtime.m1_reasons(cfg)
+    assert runtime.unsupported(cfg) == []
 
 
 def test_every_refusal_is_reported_at_once(monkeypatch):
