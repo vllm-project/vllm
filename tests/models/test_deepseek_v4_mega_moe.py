@@ -234,9 +234,6 @@ def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
 def test_deepseek_v4_mega_gate_hash_routing_correctness(
     v41_moe_config, monkeypatch, num_tokens
 ):
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("DeepGEMM Mega Gate requires SM100")
-
     config = v41_moe_config.model_config.hf_config
     config.hidden_size = 256
     config.num_hash_layers = 1
@@ -283,10 +280,14 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(
 
     monkeypatch.setattr(moe.experts, "forward", check_routing)
     monkeypatch.setattr(moe.shared_experts, "forward", torch.zeros_like)
-    metadata = prepare_mega_gate_routing_metadata(
-        input_ids,
-        has_hash_routing=True,
-        image_sentinel_base_id=None,
+    metadata = (
+        prepare_mega_gate_routing_metadata(
+            input_ids,
+            has_hash_routing=True,
+            image_sentinel_base_id=None,
+        )
+        if moe.use_mega_gate
+        else None
     )
     torch.testing.assert_close(moe(hidden_states, input_ids, metadata), hidden_states)
 

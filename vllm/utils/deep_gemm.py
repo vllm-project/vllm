@@ -548,6 +548,15 @@ def cublaslt_gemm_nt(*args, **kwargs):
     return _cublaslt_gemm_nt_impl(*args, **kwargs)
 
 
+@functools.cache
+def is_bf16_mega_gate_supported() -> bool:
+    """Whether the current GPU and DeepGEMM build support Mega Gate."""
+    if not current_platform.is_device_capability_family(100):
+        return False
+    _lazy_init()
+    return _bf16_mega_gate_impl is not None
+
+
 def bf16_mega_gate(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1171,6 +1180,7 @@ __all__ = [
     "mqa_logits_use_mx_scales",
     "native_next_n_supported",
     "per_block_cast_to_fp8",
+    "is_bf16_mega_gate_supported",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "mega_mhc",

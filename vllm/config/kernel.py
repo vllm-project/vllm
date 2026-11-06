@@ -125,6 +125,7 @@ MoEBackend = Literal[
     "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
+    "gc_moe",
     "cutlass",
     "flashinfer_trtllm",
     "flashinfer_cutlass",
@@ -161,9 +162,9 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
 PASSTHROUGH_ALL2ALL_BACKEND: Final = "passthrough"
 
 # "Native" here meaning that the backend does not use the fused MoE path.
-# Currently only relevant for the vLLM provided DeepGEMM MegaMoE.,
+# Used by the DeepGEMM and GC MoE native model integrations.
 # TODO: migrate to the fused MoE path ultimately.
-NATIVE_MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"})
+NATIVE_MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe", "gc_moe"})
 
 # Every megakernel backend. The FlashInfer variants run through the standard
 # fused-MoE model path; the quantization method binds the kernel.
@@ -323,6 +324,7 @@ class KernelConfig:
       activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
+    - "gc_moe": Use GC MoE SM90 kernels with fused shared experts
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
