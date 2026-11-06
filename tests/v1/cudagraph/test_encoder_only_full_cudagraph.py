@@ -4,9 +4,6 @@
 replayed through a graph captured on a many-request dummy batch must give the
 same result as eager execution."""
 
-import shutil
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -74,20 +71,13 @@ def model_path(request, tmp_path_factory) -> str:
     arch = request.param
     if arch == "llama":
         return LLAMA
-    from huggingface_hub import snapshot_download
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     path = tmp_path_factory.mktemp(f"tiny-{arch}")
     torch.manual_seed(0)
     model = AutoModelForCausalLM.from_config(_tiny_config(arch), dtype=torch.float32)
     model.save_pretrained(path)
-    tokenizer_files = ["tokenizer*", "special_tokens_map.json"]
-    tokenizer_dir = snapshot_download(LLAMA, allow_patterns=tokenizer_files)
-    # The snapshot dir may also hold the Llama weights from another test: copy
-    # only the tokenizer files.
-    for pattern in tokenizer_files:
-        for file in Path(tokenizer_dir).glob(pattern):
-            shutil.copy(file, path)
+    AutoTokenizer.from_pretrained(LLAMA).save_pretrained(path)
     return str(path)
 
 
@@ -113,9 +103,11 @@ def _last_logprobs(
     out = []
     for prompt in prompts:  # one request per step: each replays a FULL graph
         (result,) = llm.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)
-        out.append([lp.logprob for lp in result.outputs[0].logprobs[0].values()])
+        logprobs = result.outputs[0].logprobs
+        assert logprobs is not None
+        out.append([lp.logprob for lp in logprobs[0].values()])
     del llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     return out
 
 
