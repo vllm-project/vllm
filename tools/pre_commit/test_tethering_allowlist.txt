@@ -101,6 +101,7 @@ tests/quantization/test_trtllm_nvfp4_hidden_dim_padding.py  # CI jobs disabled p
 tests/quantization/test_turboquant.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/rocm/test_moe_padding.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/rocm/test_moe_weight_replay.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/rocm/test_rocm_rtld_global_skip.py  # ROCm-specific unit test; run manually on ROCm hardware with vllm dev env installed
 
 # Temporary gaps from disabling jobs with unpinned install environments.
 tests/device_allocator/test_alloc_conf.py  # CI jobs disabled pending locked cmake installation
