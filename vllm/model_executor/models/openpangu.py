@@ -1169,10 +1169,8 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
 class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config = vllm_config.model_config.hf_config
 
         # Set MoE hyperparameters
-        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = 1
 
         self.moe_layers = []
@@ -1186,6 +1184,8 @@ class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
 
         if example_moe is None:
             raise RuntimeError("No MOE layer found in model.layers.")

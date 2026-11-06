@@ -569,7 +569,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExper
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
-        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = config.n_group
 
         self.moe_layers = []
@@ -587,6 +586,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExper
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

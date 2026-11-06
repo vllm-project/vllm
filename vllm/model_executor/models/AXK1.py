@@ -1113,8 +1113,8 @@ class AXK1ForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
-        self.num_moe_layers = _get_mlp_layer_types(self.config).count("sparse")
         self.set_moe_parameters()
+        self.num_moe_layers = len(self.moe_layers)
 
     def set_moe_parameters(self):
         self.num_expert_groups = getattr(self.config, "n_group", 1)

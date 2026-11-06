@@ -1065,7 +1065,7 @@ class MixtureOfExperts(Protocol):
     """
 
     num_moe_layers: int
-    """Number of MoE layers in this model."""
+    """Number of MoE layers on this pipeline stage, i.e. `len(moe_layers)`."""
 
     num_expert_groups: int
     """Number of expert groups in this model."""

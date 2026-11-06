@@ -550,16 +550,6 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
         )
 
         # Set MoE hyperparameters
-        moe_layers_indices = [
-            i
-            for i in range(config.num_hidden_layers)
-            if (
-                i >= config.moe_layer_start_index
-                and i <= config.moe_layer_end_index
-                and (i + 1) % config.moe_layer_interval == 0
-            )
-        ]
-        self.num_moe_layers = len(moe_layers_indices)
         self.num_expert_groups = 1
 
         self.moe_layers: list[MoERunner] = []
@@ -572,6 +562,8 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
             if isinstance(layer.mlp, Ernie4_5_MoeMoE):
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
 
         if example_moe is None:
             logger.warning("No Ernie4_5_MoeMoE layer found in model.layers.")
