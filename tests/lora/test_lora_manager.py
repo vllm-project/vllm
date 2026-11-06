@@ -289,7 +289,10 @@ def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
     )
 
 
-def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_model):
+@pytest.mark.parametrize("runner_first", [False, True])
+def test_dedup_shared_module_across_paths(
+    default_vllm_config, dist_init, dummy_model, monkeypatch, runner_first
+):
     """A module reachable from two attribute paths (e.g. a MoE gate held
     both directly on the block and inside its inner runner) must produce a
     single LoRA wrapper. Both paths must end up pointing to that same
@@ -299,21 +302,22 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
     """
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
+    # Holds the SAME gate instance under another path. This mirrors how
+    # MoERunner.runner.gate references the block's gate in qwen3_moe.
+    class _Runner(nn.Module):
+        def __init__(self, g):
+            super().__init__()
+            self.gate = g  # alias path: "moe.runner.gate"
+
     class AliasContainer(nn.Module):
         def __init__(self, gate: nn.Module):
             super().__init__()
             self.gate = gate  # canonical path: "moe.gate"
-
-            # Inner submodule holding the SAME gate instance under another
-            # path. This mirrors how MoERunner.runner.gate references the
-            # block's gate in qwen3_moe.
-            class _Runner(nn.Module):
-                def __init__(self, g):
-                    super().__init__()
-                    self.gate = g  # alias path: "moe.runner.gate"
-
             self.runner = _Runner(gate)
+            if runner_first:
+                self._modules["gate"] = self._modules.pop("gate")
 
+    monkeypatch.setattr("vllm.lora.model_manager.MoERunner", _Runner)
     gate = ReplicatedLinear(10, 4, bias=False)
     model = dummy_model
     model.add_module("moe", AliasContainer(gate))
@@ -345,52 +349,6 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
     # canonical entry already populated the weights.
     assert "moe.gate" in manager.modules
     assert "moe.runner.gate" not in manager.modules
-
-
-def test_moe_runner_alias_does_not_shadow_block_path(
-    default_vllm_config, dist_init, dummy_model, monkeypatch
-):
-    """Adapters target `moe.shared.up`, so that path must be the tracked one even
-    when the runner holding its alias comes first in the module tree.
-    """
-    from vllm.model_executor.layers.linear import ReplicatedLinear
-
-    class Shared(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.up = ReplicatedLinear(10, 4, bias=False)
-
-    class Runner(nn.Module):
-        def __init__(self, shared: nn.Module):
-            super().__init__()
-            self.layer = shared
-
-    class Block(nn.Module):
-        def __init__(self):
-            super().__init__()
-            shared = Shared()
-            self.experts = Runner(shared)
-            self.shared = shared
-
-    monkeypatch.setattr("vllm.lora.model_manager.MoERunner", Runner)
-    model = dummy_model
-    model.add_module("moe", Block())
-
-    manager = LoRAModelManager(
-        model,
-        1,
-        1,
-        1,
-        LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
-        ),
-        torch.device(DEVICES[0]),
-        default_vllm_config,
-    )
-
-    assert "moe.shared.up" in manager.modules
-    assert "moe.experts.layer.up" not in manager.modules
-    assert manager.model.moe.experts.layer.up is manager.model.moe.shared.up
 
 
 def test_lm_head_exempt_from_dedup(default_vllm_config, dist_init, dummy_model):
