@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -49,6 +50,49 @@ class GraniteReasoningParser(ReasoningParser):
         self.longest_think_start = max(
             len(think_start) for think_start in self.valid_think_starts
         )
+        # Every token of a response marker holds at least one of its
+        # characters, so its length also bounds the tokens it spans.
+        self.longest_response_start = max(
+            len(response_start) for response_start in self.valid_response_starts
+        )
+
+        # The chat template only asks for a thought section with `thinking`.
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        self.thinking_enabled = bool(chat_kwargs.get("thinking", False))
+
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        if not self.thinking_enabled:
+            return True
+        # Every chat turn ends with EOS. Only the current turn counts: the
+        # thinking system prompt and earlier answers carry the markers too.
+        start = rfind_tokens(input_ids, (self.model_tokenizer.eos_token_id,)) + 1
+        text = self.model_tokenizer.decode(list(input_ids[start:]))
+        return self.reasoning_regex.search(text) is not None
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        if not self.thinking_enabled:
+            return True
+        # The markers are text whose token ids depend on the character before
+        # them, so decode only the ids that can hold one ending in `delta_ids`.
+        num_delta = len(list(delta_ids))
+        start = max(0, len(input_ids) - num_delta - self.longest_response_start)
+        tail = list(input_ids[start:])
+        return self._has_response_start(tail) and not self._has_response_start(
+            tail[: len(tail) - num_delta]
+        )
+
+    def _has_response_start(self, token_ids: list[int]) -> bool:
+        text = self.model_tokenizer.decode(token_ids)
+        return re.search(self.response_start_expr, text) is not None
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        # Called on the delta that ends the response marker; its content text
+        # comes from extract_reasoning_streaming.
+        # shortcut: drops the ids of content sharing that delta, split them
+        # out if a consumer ever needs those ids.
+        return []
 
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"

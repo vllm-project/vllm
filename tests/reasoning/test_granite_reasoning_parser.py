@@ -4,6 +4,8 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import DeltaMessage, run_reasoning_extraction
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "granite"
@@ -342,3 +344,146 @@ def test_streaming_subcases(param_dict):
         assert isinstance(response, DeltaMessage)
         assert param_dict["reasoning"] == response.reasoning
         assert param_dict["content"] == response.content
+
+
+def _thinking_parser() -> ReasoningParser:
+    return ReasoningParserManager.get_reasoning_parser(parser_name)(
+        tokenizer, chat_template_kwargs={"thinking": True}
+    )
+
+
+def _ids(text: str) -> list[int]:
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+END_DETECTION_OUTPUTS = [
+    pytest.param(SIMPLE_REASONING["output"], id="simple_reasoning"),
+    pytest.param(MULTIPLE_LINES["output"], id="multiple_lines"),
+    pytest.param(
+        "Here's my thought process:\nThink.\n\nHere's my response:\nDone.",
+        id="heres_with_newlines",
+    ),
+    pytest.param(
+        "Here is my thought process: a: b. Here's my response: c",
+        id="mixed_spellings",
+    ),
+]
+
+
+@pytest.mark.parametrize("output", END_DETECTION_OUTPUTS)
+def test_reasoning_end_matches_extraction(output: str):
+    """The structured-output manager sees only token ids, so the reasoning end
+    must fire on the token where extraction finds the response marker."""
+    ids = _ids(output)
+    parser = _thinking_parser()
+    extraction_end = next(
+        i
+        for i in range(1, len(ids) + 1)
+        if parser.extract_reasoning(tokenizer.decode(ids[:i]), None)[0] is not None
+    )
+
+    gate_steps = [
+        i
+        for i in range(1, len(ids) + 1)
+        if parser.is_reasoning_end_streaming(ids[:i], ids[i - 1 : i])
+    ]
+    assert gate_steps == [extraction_end]
+    assert parser.is_reasoning_end(ids[: extraction_end - 1]) is False
+    assert parser.is_reasoning_end(ids[:extraction_end]) is True
+
+
+def test_is_reasoning_end_streaming_multi_token_delta():
+    ids = _ids(SIMPLE_REASONING["output"])
+    end = len(_ids(COMPLETE_REASONING["output"]))
+    assert ids[:end] == _ids(COMPLETE_REASONING["output"])
+    parser = _thinking_parser()
+
+    # Several tokens accepted at once, e.g. speculative decoding.
+    assert parser.is_reasoning_end_streaming(ids[:end], iter(ids[end - 3 : end]))
+    assert not parser.is_reasoning_end_streaming(ids[: end + 2], ids[end : end + 2])
+
+    # A delta holding the whole marker.
+    marker = _ids(START_RESPONSE)
+    assert parser.is_reasoning_end_streaming(marker, marker)
+
+    # The marker started in an earlier step and ends early in a long delta.
+    ids = _ids(f"{COMPLETE_REASONING['output']}{' and then' * 12}")
+    delta = ids[end - 2 : end + 12]
+    assert parser.is_reasoning_end_streaming(ids[: end + 12], delta)
+
+
+def test_is_reasoning_end_ignores_earlier_turns_in_prompt():
+    """Granite's chat template ends every turn with EOS. The thinking system
+    prompt quotes both markers and earlier answers can carry them too."""
+    eos = tokenizer.eos_token
+    system = (
+        "Write your thoughts after 'Here is my thought process:' and write your "
+        "response after 'Here is my response:' for each user query."
+    )
+    prompt = (
+        f"<|start_of_role|>system<|end_of_role|>{system}{eos}\n"
+        f"<|start_of_role|>user<|end_of_role|>hi{eos}\n"
+        f"<|start_of_role|>assistant<|end_of_role|>{SIMPLE_REASONING['output']}{eos}\n"
+        f"<|start_of_role|>user<|end_of_role|>again{eos}\n"
+        "<|start_of_role|>assistant<|end_of_role|>"
+    )
+    prompt_ids = _ids(prompt)
+    assert prompt_ids.count(tokenizer.eos_token_id) == 4
+    parser = _thinking_parser()
+
+    assert parser.is_reasoning_end(prompt_ids) is False
+    assert parser.is_reasoning_end(prompt_ids + _ids(START_REASONING)) is False
+    assert (
+        parser.is_reasoning_end(prompt_ids + _ids(COMPLETE_REASONING["output"])) is True
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"chat_template_kwargs": None}, {"chat_template_kwargs": {"thinking": False}}],
+)
+def test_reasoning_ended_from_start_without_thinking(kwargs: dict):
+    """Without `thinking`, Granite's chat template asks for no thought section,
+    so the whole output is the response."""
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        tokenizer, **kwargs
+    )
+    ids = _ids("{}")
+
+    assert parser.is_reasoning_end([]) is True
+    assert parser.is_reasoning_end_streaming(ids, ids) is True
+
+
+@pytest.mark.parametrize("tokens_per_delta", [1, 3])
+def test_parse_delta_switches_to_content_at_response(tokens_per_delta: int):
+    """The chat frontend leaves the reasoning phase when
+    `is_reasoning_end_streaming` fires and keeps streaming the content."""
+
+    class ReasoningOnlyParser(DelegatingParser):
+        reasoning_parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+
+    parser = ReasoningOnlyParser(tokenizer, chat_template_kwargs={"thinking": True})
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "hi"}]
+    )
+    ids = _ids(SIMPLE_REASONING["output"])
+    deltas = [
+        ids[i : i + tokens_per_delta] for i in range(0, len(ids), tokens_per_delta)
+    ]
+
+    reasoning = content = ""
+    prompt_token_ids: list[int] | None = []
+    for delta_ids in deltas:
+        message = parser.parse_delta(
+            tokenizer.decode(delta_ids),
+            delta_ids,
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
+        )
+        prompt_token_ids = None
+        reasoning += (message.reasoning or "") if message else ""
+        content += (message.content or "") if message else ""
+
+    assert reasoning == SIMPLE_REASONING["reasoning"]
+    assert content == SIMPLE_REASONING["content"]
