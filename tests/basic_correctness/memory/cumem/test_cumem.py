@@ -87,12 +87,14 @@ def sleep_and_check_backups(llm, level: int) -> dict[int, tuple]:
     state, host_after = llm.collective_rpc(backup_state)[0]
     assert host_after == host_before
     for tag, size, backup_ptr, backup_bytes, pinned in state.values():
-        if tag in OFFLOAD_TAGS[level]:
+        # Level 2 keeps the weights allocations holding more than parameters.
+        if tag in OFFLOAD_TAGS[level] or (tag == "weights" and backup_ptr is not None):
             assert backup_ptr is not None
             assert (backup_bytes, pinned) == (size, PIN_MEMORY)
         else:
             assert backup_ptr is None
-    assert any(tag == "weights" for tag, *_ in state.values())
+    weights_backed_up = [s[2] is not None for s in state.values() if s[0] == "weights"]
+    assert weights_backed_up and (level == 1 or not all(weights_backed_up))
     return {ptr: s for ptr, s in state.items() if s[2] is not None}
 
 
