@@ -38,8 +38,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
 
