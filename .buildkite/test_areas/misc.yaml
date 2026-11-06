@@ -152,6 +152,28 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H200 MIG 18GB) V1 KV Events"
+  device: h200_18gb
+  key: v1-kv-events
+  timeout_in_minutes: 30
+  source_file_dependencies: &v1-kv-events-deps
+    - vllm/config/kv_events.py
+    - vllm/distributed/kv_events.py
+    - vllm/v1/core/
+    - tests/v1/kv_events
+  commands:
+    - pytest -v -s v1/kv_events/test_consumer_e2e.py
+
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] V1 KV Events Layouts"
+  device: h200_18gb
+  key: v1-kv-events-layouts
+  # Nightly only: one `vllm serve` per cache layout, about 15 minutes.
+  optional: true
+  timeout_in_minutes: 45
+  source_file_dependencies: *v1-kv-events-deps
+  commands:
+    - pytest -v -s v1/kv_events/test_layout_matrix.py
+
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
