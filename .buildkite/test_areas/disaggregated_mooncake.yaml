@@ -61,8 +61,6 @@ steps:
     - vllm/v1/core/encoder_cache_manager.py
     - vllm/v1/core/sched/
     - vllm/v1/engine/
-    - vllm/v1/worker/ec_connector_model_runner_mixin.py
-    - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
     - vllm/v1/worker/gpu/ec_connector.py
     - vllm/v1/worker/gpu/model_runner.py
@@ -115,8 +113,6 @@ steps:
       - vllm/v1/core/encoder_cache_manager.py
       - vllm/v1/core/sched/
       - vllm/v1/engine/
-      - vllm/v1/worker/ec_connector_model_runner_mixin.py
-      - vllm/v1/worker/gpu_model_runner.py
       - vllm/v1/worker/gpu_worker.py
       - vllm/v1/worker/gpu/ec_connector.py
       - vllm/v1/worker/gpu/model_runner.py

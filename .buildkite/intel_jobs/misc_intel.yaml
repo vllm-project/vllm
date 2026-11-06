@@ -219,7 +219,6 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/
-    - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
     - vllm/platforms/xpu.py
   commands:
@@ -243,7 +242,6 @@ steps:
   source_file_dependencies:
     - vllm/distributed/ec_transfer/
     - vllm/distributed/kv_transfer/
-    - vllm/v1/worker/ec_connector_model_runner_mixin.py
     - vllm/platforms/xpu.py
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/integration/
