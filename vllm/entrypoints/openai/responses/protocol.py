@@ -819,14 +819,15 @@ class ResponsesRequest(OpenAIBaseModel):
             normalized_item["summary"] = []
 
         # OpenResponses schema treats ``annotations`` as optional for
-        # output_text content, but the openai SDK requires it.
+        # output_text content, but the openai SDK requires it. An explicit
+        # null counts as missing.
         if item_type == "message" and isinstance(normalized_item.get("content"), list):
             normalized_content = []
             for content_item in normalized_item["content"]:
                 if (
                     isinstance(content_item, dict)
                     and content_item.get("type") == "output_text"
-                    and "annotations" not in content_item
+                    and content_item.get("annotations") is None
                 ):
                     content_item = {**content_item, "annotations": []}
                 normalized_content.append(content_item)
