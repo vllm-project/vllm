@@ -23,11 +23,39 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
 )
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
+    _flashinfer_mm_encoder_autotune_num_items,
     _run_flashinfer_autotune_dummy_runs,
     flashinfer_autotune,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    "mode,num_items,tp_size,expected",
+    [
+        ("data", 1, 2, 2),
+        ("data", 3, 2, 4),
+        ("data", 4, 2, 4),
+        ("data", 1, 4, 4),
+        ("data", 3, 1, 3),
+        ("weights", 3, 2, 3),
+    ],
+)
+def test_encoder_autotune_dummy_items_balance_rank_shapes(
+    mode, num_items, tp_size, expected
+):
+    """Data-mode tuning must give each rank identical nonempty encoder work."""
+    from vllm.model_executor.models.vision import get_load_balance_assignment
+
+    count = _flashinfer_mm_encoder_autotune_num_items(
+        num_items, MultiModalConfig(mm_encoder_tp_mode=mode), tp_size
+    )
+    assert count == expected
+    if mode == "data":
+        _, counts, loads = get_load_balance_assignment([256] * count, tp_size)
+        assert min(counts) > 0
+        assert len(set(counts)) == len(set(loads)) == 1
 
 
 @pytest.mark.parametrize(

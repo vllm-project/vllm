@@ -50,8 +50,10 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
+    from vllm.config import MultiModalConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -393,6 +395,15 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return tuple(dict.fromkeys(token_counts))
 
 
+def _flashinfer_mm_encoder_autotune_num_items(
+    num_items: int, mm_config: "MultiModalConfig", tp_size: int
+) -> int:
+    # Identical dummy items must split evenly for matching rank caches.
+    if mm_config.mm_encoder_tp_mode == "data":
+        return round_up(num_items, tp_size)
+    return num_items
+
+
 def _run_flashinfer_autotune_mm_encoder(
     runner: "GPUModelRunner", *, cache_hit: bool
 ) -> None:
@@ -436,7 +447,14 @@ def _run_flashinfer_autotune_mm_encoder(
         set_autotune_process_group(None)
     try:
         for modality in budget.mm_max_toks_per_item:
-            dummy_inputs = budget.get_dummy_encoder_profile_inputs(modality)
+            num_items = _flashinfer_mm_encoder_autotune_num_items(
+                budget.mm_max_items_per_batch[modality],
+                mm_config,
+                runner.vllm_config.parallel_config.tensor_parallel_size,
+            )
+            dummy_inputs = budget.get_dummy_encoder_profile_inputs(
+                modality, max_items_per_batch=num_items
+            )
             logger.info(
                 "Running FlashInfer autotune for the %s encoder with %d items.",
                 modality,
