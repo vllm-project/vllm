@@ -10,7 +10,8 @@ Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+tensor of each module whose PWAL changes its layout or is not idempotent, and
+of every ``padding_fill_params()`` parameter, which ``begin`` zero-fills whole.
 """
 
 from collections.abc import Iterator
@@ -129,6 +130,13 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
             storage = t.untyped_storage().data_ptr()
             t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
+    # Before PWAL, which may pad moe_config; by name, so a dropped param isn't kept.
+    model._ckpt_padding_fill = [
+        (module, name)
+        for module in model.modules()
+        if hasattr(module, "padding_fill_params")
+        for name in module.padding_fill_params()
+    ]
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
@@ -216,6 +224,11 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+    # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
+    for module, name in model._ckpt_padding_fill:
+        t = module._parameters.get(name)
+        if t is not None and _owned(model, t):
+            t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
