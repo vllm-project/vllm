@@ -677,6 +677,11 @@ def test_sparse_backend_decode_correctness(
         device_capability = current_platform.get_device_capability()
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+        if backend_cls == FlashInferMLASparseTRTLLMBackend:
+            from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
+
+            if not has_flashinfer_prims_ts_sparse_mla():
+                pytest.skip("nvfp4_ds_mla on FlashInfer needs its prims_ts kernel")
 
     if not backend_cls.supports_block_size(block_size):
         pytest.skip(

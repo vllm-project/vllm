@@ -681,9 +681,9 @@ def _kv_counters(
     """``multi_ctas_kv_counter_buffer`` for one launch when the reserved
     counters cover it; otherwise FlashInfer allocates its own."""
     counters = _fi_sparse_kv_counters
-    if counters is None or counters.nbytes < _kv_counter_bytes(
-        num_rows, num_heads, device
-    ):
+    if counters is None:
+        return {}
+    if counters.nbytes < _kv_counter_bytes(num_rows, num_heads, device):
         return {}
     return {"multi_ctas_kv_counter_buffer": counters}
 
@@ -777,6 +777,11 @@ def _finish_dcp_partials(
     assert out.stride(2) == 1 and out.stride(1) == head_dim and lse.stride(1) == 1
     assert counts.shape == (num_tokens,) and counts.is_contiguous()
     if num_tokens == 0:
+        return
+    if not out.is_cuda:
+        empty = counts == 0
+        out.masked_fill_(empty[:, None, None], 0.0)
+        lse.masked_fill_(empty[:, None], float("-inf"))
         return
     _finish_dcp_partials_kernel[(num_tokens,)](
         out,
