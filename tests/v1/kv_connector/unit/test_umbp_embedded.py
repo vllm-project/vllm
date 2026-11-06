@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import importlib.util
 import sys
 import threading
@@ -55,6 +56,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -62,7 +65,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
+from vllm.v1.worker.utils import allocate_kv_cache
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -145,6 +150,99 @@ def bulk_worker(monkeypatch, socket_dir):
     worker.register_kv_caches(buffers)
     yield worker, buffers, calls
     handle.close()
+
+
+@pytest.mark.parametrize("bulk", [True, False], ids=["bulk", "ranges"])
+@pytest.mark.parametrize("layout", list(KVCacheLayout), ids=lambda x: x.name)
+def test_every_kv_cache_layout_restores_blocks_exactly(
+    monkeypatch, socket_dir, layout, bulk
+):
+    """Restoring a stored block equals copying each layer's block, whatever the
+    layout interleaves with it (LHBNC and BHLNC split pages per head)."""
+    shape = dict(block_size=16, num_kv_heads=2, head_size=16, dtype=torch.float16)
+    groups = [
+        KVCacheGroupSpec(["a0", "a1"], FullAttentionSpec(**shape)),
+        KVCacheGroupSpec(["s0", "s1"], SlidingWindowSpec(**shape, sliding_window=32)),
+    ]
+    planner_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: layout,
+            num_gpu_blocks_override=4,
+            prefix_cache_retention_interval=None,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    config = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+    config.kv_cache_layout = layout.name
+    kv_caches = allocate_kv_cache(config, torch.device("cpu"), layout)
+
+    objects: dict[str, bytes] = {}
+
+    def put(keys, object_sizes, pointers, sizes, offsets):
+        for key, size, *ranges in zip(keys, object_sizes, pointers, sizes, offsets):
+            value = bytearray(size)
+            for pointer, length, offset in zip(*ranges):
+                value[offset : offset + length] = ctypes.string_at(pointer, length)
+            objects[key] = bytes(value)
+        return [True] * len(keys)
+
+    def get(keys, pointers, sizes, offsets):
+        for key, *ranges in zip(keys, pointers, sizes, offsets):
+            for pointer, length, offset in zip(*ranges):
+                ctypes.memmove(pointer, objects[key][offset : offset + length], length)
+        return [True] * len(keys)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cpp",
+        SimpleNamespace(MemoryLocationType=SimpleNamespace(CPU=0, GPU=1)),
+    )
+    client = SimpleNamespace(
+        register_memory=lambda *a: True,
+        deregister_memory=lambda *a: True,
+        batch_get_ranges_into_ptr=get,
+        batch_put_ranges_from_ptr=put,
+        flush=lambda: True,
+        close=lambda: None,
+    )
+    planner = KVLayoutPlanner.from_kv_cache_config(config)
+    handle = _MoriWorkerHandle(
+        client,
+        "layouts",
+        RankTopology(),
+        socket_dir,
+        1,
+        5,
+        planner.describe(RankTopology()),
+    )
+    try:
+        UMBPStoreConnectorWorker(handle, planner).register_kv_caches(kv_caches)
+        raw = torch.empty(0, dtype=torch.int8).set_(
+            next(iter(kv_caches.values())).untyped_storage()
+        )
+        set_random_seed(0)
+        raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
+        before = raw.clone()
+        for cache in kv_caches.values():
+            cache[3].copy_(cache[1])
+        expected = raw.clone()
+        raw.copy_(before)
+
+        def transfer(store, block_id):
+            plans = [BlockTransferPlan(f"g{g}", block_id, group_id=g) for g in (0, 1)]
+            if bulk:
+                job = (handle.store_blocks if store else handle.load_blocks)(plans)
+                assert job is not None
+            else:
+                plans = [planner.materialize(plan) for plan in plans]
+                job = (handle.store if store else handle.load)(plans)
+            assert handle.wait(job).status is TransferJobStatus.COMPLETED
+
+        transfer(True, 1)
+        transfer(False, 3)
+        assert torch.equal(raw, expected)
+    finally:
+        handle.close()
 
 
 @pytest.mark.parametrize("batched", [False, True])
