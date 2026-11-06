@@ -438,6 +438,11 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
+            )
             params["_p_side_truncated"] = True
 
     def _build_save_meta(
