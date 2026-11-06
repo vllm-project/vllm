@@ -36,6 +36,29 @@ def is_flashinfer_autotuning() -> bool:
     return AutoTuner.get().is_tuning_mode
 
 
+# M values (CUDA graph capture sizes) at which FlashInfer's bf16 GEMM autotuner
+# profiles and looks up tactics. None means FlashInfer's default buckets.
+_bf16_gemm_tuning_buckets: tuple[int, ...] | None = None
+
+
+def init_flashinfer_bf16_tuning_buckets() -> None:
+    """Remember the CUDA graph capture sizes as bf16 GEMM tuning buckets.
+
+    Called while the vLLM config is set (dispatch at model init), because the
+    config is not guaranteed to be available when the GEMM runs.
+    """
+    global _bf16_gemm_tuning_buckets
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    sizes = (
+        vllm_config.compilation_config.cudagraph_capture_sizes
+        if vllm_config is not None
+        else None
+    )
+    _bf16_gemm_tuning_buckets = tuple(sorted(set(sizes))) if sizes else None
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -47,14 +70,31 @@ def flashinfer_bf16_mm(
 
     # pdl=None keeps FlashInfer's default.
     kwargs = {} if pdl is None else {"pdl": pdl}
-    return mm_bf16(
-        a,
-        b,
-        bias=bias,
-        out_dtype=torch.bfloat16,
-        backend=backend,
-        **kwargs,
-    )
+
+    def _mm() -> torch.Tensor:
+        return mm_bf16(
+            a,
+            b,
+            bias=bias,
+            out_dtype=torch.bfloat16,
+            backend=backend,
+            **kwargs,
+        )
+
+    if _bf16_gemm_tuning_buckets is None:
+        return _mm()
+    # autotune()'s bucket override is global to its context, so scope it to
+    # this call to keep other FlashInfer ops (MoE, fp4, ...) on their own
+    # buckets. tune_mode=False does not end an enclosing autotune(True): tuning
+    # mode is reference-counted. The same override applies at serving time, so
+    # cache lookups hit the capture-size buckets. round_up=True matches the
+    # warmup in kernel_warmup.py for an M that is not a capture size.
+    with autotune(
+        tune_mode=False,
+        tuning_buckets=_bf16_gemm_tuning_buckets,
+        round_up=True,
+    ):
+        return _mm()
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -1369,6 +1409,7 @@ __all__ = [
     "flashinfer_recurrent_kda",
     "flashinfer_fused_kda_decode",
     "autotune",
+    "init_flashinfer_bf16_tuning_buckets",
     "has_flashinfer_moe",
     "has_flashinfer_autotune_v2",
     "has_flashinfer_comm",

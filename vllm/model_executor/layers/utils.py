@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    init_flashinfer_bf16_tuning_buckets,
     is_flashinfer_auto_bf16_gemm_supported,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
@@ -905,6 +906,7 @@ def dispatch_unquantized_gemm(
         )
         return cuda_unquantized_gemm
 
+    init_flashinfer_bf16_tuning_buckets()
     logger.info_once(
         "Using FlashInfer %s for eligible unquantized BF16 GEMMs.",
         backend_spec.flashinfer_backend,
