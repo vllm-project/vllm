@@ -142,17 +142,27 @@ def _get_max_soft_tokens(
     return None, False
 
 
-def _get_video_max_soft_tokens(merged_kwargs: Mapping[str, object]) -> int:
-    """Return the per-frame budget set by ``videos_kwargs.max_soft_tokens``."""
-    videos_kwargs = merged_kwargs.get("videos_kwargs")
+def _get_video_max_soft_tokens(mm_kwargs: Mapping[str, object]) -> int:
+    """Return the per-frame budget set by ``videos_kwargs.max_soft_tokens``.
+
+    ``mm_kwargs`` must not have flat keys resolved into scopes yet, so that a
+    conflicting flat ``max_soft_tokens`` is still visible (HF rejects it too).
+    """
+    videos_kwargs = mm_kwargs.get("videos_kwargs")
     if not isinstance(videos_kwargs, Mapping):
         return _VIDEO_MAX_SOFT_TOKENS
     val = videos_kwargs.get("max_soft_tokens")
     if val is None:
         return _VIDEO_MAX_SOFT_TOKENS
+    if mm_kwargs.get("max_soft_tokens") is not None:
+        raise ValueError(
+            "A flat max_soft_tokens cannot be combined with "
+            "videos_kwargs.max_soft_tokens; set images_kwargs.max_soft_tokens "
+            "for images instead."
+        )
     if not isinstance(val, int) or val not in _SUPPORTED_SOFT_TOKENS:
         raise ValueError(
-            f"Unsupported videos_kwargs.max_soft_tokens value: {val}. "
+            f"Unsupported videos_kwargs.max_soft_tokens value: {val!r}. "
             f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
         )
     return val
@@ -309,7 +319,9 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         video_opts = mm_config.limit_per_prompt.get("video")
         if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
-        video_max_soft_tokens = _get_video_max_soft_tokens(merged_kwargs)
+        video_max_soft_tokens = _get_video_max_soft_tokens(
+            mm_config.merge_mm_processor_kwargs({})
+        )
         tokens["video"] = num_frames * (video_max_soft_tokens + 2 + 6)
         return tokens
 
@@ -643,6 +655,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
             )
 
+        # Also checked for image-only requests: once videos_kwargs sets
+        # max_soft_tokens, a flat max_soft_tokens is dropped from the images.
+        video_max_soft_tokens = _get_video_max_soft_tokens(
+            self.info.ctx.get_mm_config().merge_mm_processor_kwargs(hf_kwargs)
+        )
+
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
         # Each frame is processed with videos_kwargs.max_soft_tokens (default
@@ -652,7 +670,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, list)
             processor = self.info.get_hf_processor()
-            video_max_soft_tokens = _get_video_max_soft_tokens(merged_kwargs)
 
             all_video_pixel_values: list[torch.Tensor] = []
             all_video_position_ids: list[torch.Tensor] = []

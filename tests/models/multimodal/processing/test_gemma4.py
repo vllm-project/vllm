@@ -122,15 +122,24 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
 
 
 @pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expected_image_tokens"),
+    ("mm_processor_kwargs", "expected_image_tokens", "expected_video_soft_tokens"),
     [
-        ({}, 280),
-        ({"max_soft_tokens": 70}, 70),
-        ({"max_soft_tokens": 280}, 280),
-        ({"max_soft_tokens": 1120}, 1120),
-        ({"images_kwargs": {"max_soft_tokens": 560}}, 560),
-        ({"images_kwargs": None}, 280),
-        ({"images_kwargs": "not-a-dict"}, 280),
+        ({}, 280, 70),
+        ({"max_soft_tokens": 70}, 70, 70),
+        ({"max_soft_tokens": 280}, 280, 70),
+        ({"max_soft_tokens": 1120}, 1120, 70),
+        ({"images_kwargs": {"max_soft_tokens": 560}}, 560, 70),
+        ({"images_kwargs": None}, 280, 70),
+        ({"images_kwargs": "not-a-dict"}, 280, 70),
+        ({"videos_kwargs": {"max_soft_tokens": 140}}, 280, 140),
+        (
+            {
+                "images_kwargs": {"max_soft_tokens": 560},
+                "videos_kwargs": {"max_soft_tokens": 1120},
+            },
+            560,
+            1120,
+        ),
     ],
 )
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
@@ -138,6 +147,7 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
     model_id: str,
     mm_processor_kwargs: dict[str, object],
     expected_image_tokens: int,
+    expected_video_soft_tokens: int,
 ):
     ctx = build_model_context(
         model_id,
@@ -153,7 +163,7 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
 
     assert tokens is not None
     assert tokens["image"] == expected_image_tokens
-    assert tokens["video"] == 32 * (70 + 2 + 6)
+    assert tokens["video"] == 32 * (expected_video_soft_tokens + 2 + 6)
 
 
 @pytest.mark.parametrize(
@@ -322,13 +332,13 @@ def test_video_cache_is_independent_of_image_kwargs(
 
 
 def _process_video(
-    mm_processor_kwargs: dict[str, object],
-    kwargs_on_init: bool,
+    config_kwargs: dict[str, object] | None,
+    request_kwargs: dict[str, object],
     model_config_kwargs: dict[str, object] | None = None,
 ):
     ctx = build_model_context(
         GEMMA4_MODEL_ID,
-        mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
+        mm_processor_kwargs=config_kwargs,
         model_config_kwargs=model_config_kwargs,
         limit_mm_per_prompt={"video": 1},
     )
@@ -339,11 +349,9 @@ def _process_video(
         {"video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
     )
     processed = processor(
-        hf_processor.video_token,
-        mm_items,
-        hf_processor_mm_kwargs={} if kwargs_on_init else mm_processor_kwargs,
+        hf_processor.video_token, mm_items, hf_processor_mm_kwargs=request_kwargs
     )
-    return processor, frames, processed
+    return hf_processor, frames, processed
 
 
 @pytest.mark.parametrize(
@@ -351,7 +359,6 @@ def _process_video(
     [
         ({}, 70),
         ({"max_soft_tokens": 560}, 70),
-        ({"images_kwargs": {"max_soft_tokens": 560}}, 70),
         ({"videos_kwargs": {"max_soft_tokens": 70}}, 70),
         ({"videos_kwargs": {"max_soft_tokens": 140}}, 140),
         (
@@ -369,15 +376,14 @@ def test_video_max_soft_tokens_matches_hf_video_processor(
     expected_video_soft_tokens: int,
     kwargs_on_init: bool,
 ):
-    """Only videos_kwargs.max_soft_tokens sets the per-frame budget, and both
-    the frames and their placeholders must follow it, as in HF.
+    """Video frames and their placeholders follow videos_kwargs.max_soft_tokens
+    (default 70); image budgets, flat or scoped, do not change them.
     """
-    processor, frames, processed = _process_video(
-        mm_processor_kwargs,
-        kwargs_on_init,
+    hf_processor, frames, processed = _process_video(
+        mm_processor_kwargs if kwargs_on_init else None,
+        {} if kwargs_on_init else mm_processor_kwargs,
         model_config_kwargs={"mm_device_do_normalize": False},
     )
-    hf_processor = processor.info.get_hf_processor()
     expected = hf_processor.video_processor(
         videos=[frames],
         max_soft_tokens=expected_video_soft_tokens,
@@ -396,18 +402,24 @@ def test_video_max_soft_tokens_matches_hf_video_processor(
     assert data["video_num_soft_tokens"] == [[soft_tokens_per_frame] * 2]
     num_video_tokens = processed["prompt_token_ids"].count(hf_processor.video_token_id)
     assert num_video_tokens == 2 * soft_tokens_per_frame
-    if kwargs_on_init:
-        tokens = processor.info.get_mm_max_tokens_per_item(
-            seq_len=processor.info.ctx.model_config.max_model_len,
-            mm_counts={"video": 1},
-        )
-        assert tokens["video"] == 32 * (expected_video_soft_tokens + 2 + 6)
 
 
-@pytest.mark.parametrize("kwargs_on_init", [False, True])
-def test_video_max_soft_tokens_rejects_unsupported_value(kwargs_on_init: bool):
+@pytest.mark.parametrize(
+    ("config_kwargs", "request_kwargs"),
+    [
+        ({"videos_kwargs": {"max_soft_tokens": 100}}, {}),
+        (None, {"videos_kwargs": {"max_soft_tokens": 100}}),
+        # HF also rejects a flat max_soft_tokens next to the scoped one.
+        ({"max_soft_tokens": 560}, {"videos_kwargs": {"max_soft_tokens": 140}}),
+        ({"videos_kwargs": {"max_soft_tokens": 140}}, {"max_soft_tokens": 560}),
+    ],
+)
+def test_video_max_soft_tokens_rejects_invalid_kwargs(
+    config_kwargs: dict[str, object] | None,
+    request_kwargs: dict[str, object],
+):
     with pytest.raises(ValueError, match="videos_kwargs.max_soft_tokens"):
-        _process_video({"videos_kwargs": {"max_soft_tokens": 100}}, kwargs_on_init)
+        _process_video(config_kwargs, request_kwargs)
 
 
 @pytest.mark.usefixtures("default_vllm_config")

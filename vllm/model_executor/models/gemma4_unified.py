@@ -185,7 +185,9 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         video_opts = mm_config.limit_per_prompt.get("video")
         if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
-        video_max_soft_tokens = _get_video_max_soft_tokens(merged_kwargs)
+        video_max_soft_tokens = _get_video_max_soft_tokens(
+            mm_config.merge_mm_processor_kwargs({})
+        )
         tokens["video"] = num_frames * (video_max_soft_tokens + 2 + 6)
         return tokens
 
