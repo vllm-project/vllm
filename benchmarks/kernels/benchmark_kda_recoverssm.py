@@ -354,7 +354,7 @@ def main() -> None:
     results = []
     for batch in args.batch:
         results.append(benchmark_batch(args, heads, num_layers, window, batch))
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
     print_results(args, heads, num_layers, window, results)
     if args.json:
         with open(args.json, "w") as f:

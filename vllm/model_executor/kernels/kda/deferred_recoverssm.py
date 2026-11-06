@@ -17,6 +17,8 @@ and the gated RMSNorm (``cute_dsl/fused_ws.py``: persistent, warp specialized;
 for small steps). Copied from the Kimi-K3 specialized decode.
 """
 
+from collections.abc import Callable
+
 import cutlass
 import cutlass.cute as cute
 import torch
@@ -74,7 +76,7 @@ class KdaDeferredVerify:
 
     def __init__(self, num_heads: int, window: int) -> None:
         self.num_heads, self.window = num_heads, window
-        self._compiled: dict[tuple, object] = {}
+        self._compiled: dict[tuple, Callable[..., None]] = {}
 
     def __call__(
         self,
