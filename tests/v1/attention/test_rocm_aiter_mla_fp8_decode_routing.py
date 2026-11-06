@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Decode-kernel routing for the ROCm AITER MLA backend.
 
-Gluon exposes a single fp8-KV regime, bh16bn128. It is a bf16-query kernel that
-upcasts the cache in registers with a hardcoded scale of 1.0, and it asserts
-batch_size == 1, so it cannot serve a decode batch. Every fp8 shape therefore
-has to land on the asm kernels, which ship real fp8 variants for gqa=16. These
-tests pin that down at the predicates, since the failure it prevents is either a
-batch assertion or -- worse -- a silently wrong result.
+Gluon exposes a single fp8-KV regime, bh16bn128, a bf16-query kernel. An fp8
+cache reaches it only for single-token decode batches within
+_gluon_fp8_decode_max_batch, which also keeps the query bf16. Every other fp8
+shape has to land on the asm kernels, which ship real fp8 variants for gqa=16.
 
 Gluon is still the route for supported non-DCP decode shapes. DCP multi-token
 verification uses segmented MLA instead, so it depends on neither Gluon's
@@ -73,6 +71,23 @@ def test_fp8_never_routes_to_gluon_under_any_mode(
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: mode)
     assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
     assert not AiterMLAHelper.use_gluon_verify(num_heads, 8, kv_cache_dtype)
+
+
+@pytest.mark.parametrize("num_heads", [8, 16, 32])
+@pytest.mark.parametrize(
+    "max_qo_len, num_reqs, max_batch, expected",
+    [(1, 64, 64, True), (1, 65, 64, False), (2, 1, 64, False), (1, 1, 0, False)],
+)
+def test_fp8_decode_uses_gluon_within_its_batch_limit(
+    num_heads, max_qo_len, num_reqs, max_batch, expected
+):
+    """Only single-token fp8 batches up to the limit take Gluon."""
+    assert (
+        AiterMLAHelper.use_gluon_decode(
+            num_heads, max_qo_len, "fp8", num_reqs=num_reqs, max_batch=max_batch
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("kv_cache_dtype", FP8_DTYPES + UNQUANTIZED_DTYPES)
