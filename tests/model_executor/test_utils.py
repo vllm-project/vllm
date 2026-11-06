@@ -463,19 +463,50 @@ def test_copy_weight_prefault_copies_exact_bytes(
     )
 
 
+E8M0, F4 = torch.float8_e8m0fnu, torch.float4_e2m1fn_x2
+E4M3, E5M2 = torch.float8_e4m3fn, torch.float8_e5m2
+
+
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
-    [(torch.float8_e8m0fnu, torch.uint8), (torch.uint8, torch.float8_e8m0fnu)],
-    ids=["e8m0_into_uint8", "uint8_into_e8m0"],
+    [
+        (E8M0, torch.uint8),
+        (torch.uint8, E8M0),
+        (E8M0, torch.int8),
+        (torch.int8, torch.uint8),
+        (torch.uint8, torch.int8),
+        (F4, torch.uint8),
+        (torch.uint8, F4),
+    ],
+    ids=str,
 )
-def test_copy_weight_keeps_e8m0_bytes(src_dtype, dst_dtype) -> None:
-    """MX scales copied between float8_e8m0fnu and uint8 keep their bytes
-    (every value, including 0xFF = NaN); a by-value copy_ would turn
-    2^(b-127) into an integer or back."""
+def test_copy_weight_keeps_bytes(src_dtype, dst_dtype) -> None:
+    """A copy between two byte containers keeps every byte (including NaN
+    encodings): a by-value copy_ would convert MX scales 2^(b-127) to
+    integers, and float4_e2m1fn_x2 has no copy_ at all."""
     data = torch.arange(256).to(torch.uint8)
     dst = torch.empty(256, dtype=dst_dtype)
     copy_weight_(dst, data.view(src_dtype))
     assert torch.equal(dst.view(torch.uint8), data)
+
+
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype",
+    [
+        (E4M3, E5M2),
+        (E5M2, E4M3),
+        (E8M0, E4M3),
+        (torch.uint8, E4M3),
+        (E5M2, torch.int8),
+    ],
+    ids=str,
+)
+def test_copy_weight_converts_float8_values(src_dtype, dst_dtype) -> None:
+    """Copies into or out of a float8 value format convert by value."""
+    src = torch.tensor([1.0, 2.0, 4.0, 8.0]).to(src_dtype)
+    dst = torch.empty(4, dtype=dst_dtype)
+    copy_weight_(dst, src)
+    assert torch.equal(dst.float(), src.float())
 
 
 def test_copy_weight_prefault_maps_the_mmap_view(
