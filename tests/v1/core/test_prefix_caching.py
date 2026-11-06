@@ -6817,3 +6817,34 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(
+            block_size, num_blocks=50, sliding_window_blocks=2
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = list(range(4 * block_size + 1))
+    request = make_request("0", token_ids, block_size, sha256)
+    assert (
+        manager.allocate_slots(request, len(token_ids), delay_cache_blocks=True)
+        is not None
+    )
+    assert manager.estimate_cached_tokens(request) == 0
+
+    # The block table has an unhashed tail.
+    manager.cache_blocks(request, 2 * block_size)
+    assert manager.estimate_cached_tokens(request) == 2 * block_size
+
+    manager.cache_blocks(request, 4 * block_size)
+    assert manager.estimate_cached_tokens(request) == 4 * block_size
+
+    # Evicting one group's last hashed block lowers the estimate to that group's.
+    full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
+    manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
+    assert manager.estimate_cached_tokens(request) == 3 * block_size
