@@ -30,9 +30,13 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
+from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import from_layer
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+    FusedMoEModularMethod,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -49,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
     get_masked_input_and_mask,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.models.glm5next.common.kda import _Glm5NextMergedColumnParallelLinear
 from vllm.platforms import current_platform
@@ -248,6 +253,33 @@ def test_base_layer_with_lora_delegates_load_weights():
 
     assert layer.load_weights(weights) == {"weight"}
     assert base_layer.loaded_weights == weights
+
+
+def test_moe_lora_reload_processes_routed_experts_once(default_vllm_config):
+    """The wrapper forwards the experts' ``quant_method``, so a post-load pass
+    over a LoRA model reaches it twice; only the experts must be processed."""
+    processed: list[torch.nn.Module] = []
+    old_method = SimpleNamespace(
+        moe_quant_config=None,
+        moe_kernel=None,
+        process_weights_after_loading=processed.append,
+    )
+    method = FusedMoEModularMethod(old_method, SimpleNamespace(moe_config=None))
+    routed_experts = torch.nn.Module()
+    routed_experts.quant_method = method
+    runner = torch.nn.Module()
+    runner.routed_experts = routed_experts
+    runner._quant_method = method
+    layer = FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)
+    torch.nn.Module.__init__(layer)
+    layer.base_layer = runner
+    model_config = SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False, quantization=None
+    )
+
+    process_weights_after_loading(layer, model_config, torch.device("cpu"))
+
+    assert processed == [routed_experts]
 
 
 @pytest.fixture(autouse=True)
