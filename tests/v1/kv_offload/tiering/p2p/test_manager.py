@@ -8,6 +8,7 @@ using fake transport and session objects.
 
 from __future__ import annotations
 
+import mmap
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
@@ -27,6 +29,8 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
@@ -57,6 +61,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.server import StoreDrainResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -721,6 +726,19 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
 
 
 class TestOnRequestFinished:
+    def test_finished_inflight_load_does_not_leak_failed_id(self):
+        mgr, peer = _build_paired_managers()
+        params = _remote_prefiller_kv_params("B", 2, kv_request_id="req-finish")
+        ctx = _req_context(params)
+        mgr.on_new_request(ctx)
+        job = _job_metadata(7, kv_params=params)
+        mgr.submit_load(job)
+        mgr.on_request_finished(ctx)
+        results = list(mgr.get_finished_jobs())
+        assert len(results) == 1 and results[0].job_id == 7
+        assert not results[0].success
+        assert mgr._failed_req_ids == set()
+
     def _make_with_failed(self) -> P2PSecondaryTierManager:
         mgr = _make_manager()
         mgr._failed_req_ids = {"req-1"}
@@ -778,6 +796,40 @@ class TestOnRequestFinished:
         mgr.on_request_finished(ctx)
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
+
+    @pytest.mark.parametrize("shared_session", [False, True])
+    @pytest.mark.parametrize("shared_request_id", [False, True])
+    def test_dual_role_finish_cleans_both_sessions(
+        self, shared_session, shared_request_id
+    ):
+        """Finish each distinct session/request pair exactly once."""
+        mgr = _make_manager()
+        source = _FakeSession(peer_id="source:1", connected=True)
+        decoder = (
+            source
+            if shared_session
+            else _FakeSession(peer_id="decoder:2", connected=True)
+        )
+        source_id = "req-1"
+        dest_id = source_id if shared_request_id else "req-2"
+        mgr._sessions[source.peer_id] = source
+        mgr._sessions[decoder.peer_id] = decoder
+        mgr._kv_to_session[dest_id] = decoder
+        params = _remote_kv_source_kv_params(
+            remote_host="source", remote_port=1, kv_request_id=source_id
+        )
+        params["remote_decoder"] = {"kv_request_id": dest_id}
+
+        mgr.on_request_finished(_req_context(kv_params=params))
+
+        if shared_session:
+            assert source.finishes == (
+                [source_id] if shared_request_id else [source_id, dest_id]
+            )
+        else:
+            assert source.finishes == [source_id]
+            assert decoder.finishes == [dest_id]
+        assert dest_id not in mgr._kv_to_session
 
     def test_prefiller_unbound_id_leaves_batches_parked(self):
         """Prefiller-side finish for an id with parked unbound batches
@@ -884,6 +936,9 @@ class _FakeSession:
         self._new_fetch_ids = []
         return result
 
+    def drain_stores(self, kv_request_ids=None):
+        return StoreDrainResult([], set())
+
     def request_blocks(self, job_id, kv_request_id, keys, block_ids):
         self.requests.append((job_id, kv_request_id))
 
@@ -896,6 +951,9 @@ class _FakeSession:
 
     def finish_request(self, kv_request_id):
         self.finishes.append(kv_request_id)
+
+    def abort_loads(self):
+        pass
 
     def close(self):
         return SessionCloseResult(
@@ -1137,6 +1195,7 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
@@ -1194,6 +1253,7 @@ class TestHasPendingWork:
             scheduler.running = []
             scheduler.waiting = []
             scheduler.kv_holding_waiting = []
+            scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
@@ -2115,16 +2175,24 @@ class TestPollOnce:
         assert mgr._kv_to_session["req-fast"] is sess
         assert sess.stores_added == []
 
-    def test_failed_load_records_kv_request_id(self):
-        """A LoadResult(success=False) from session.poll() must add its
-        kv_request_id to _failed_req_ids so future lookups return MISS."""
+    @pytest.mark.parametrize("request_finished", [False, True])
+    def test_failed_load_records_kv_request_id(self, request_finished):
+        """An unfinished failed load records its id so future lookups return MISS.
+        Finished requests still complete jobs without retaining their ids."""
         mgr = _make_manager()
         peer = "10.0.0.1:8000"
         sess = _FakeSession(
             peer_id=peer,
             alive=True,
             connected=True,
-            loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
+            loads=[
+                LoadResult(
+                    job_id=5,
+                    kv_request_id="req-5",
+                    success=False,
+                    request_finished=request_finished,
+                )
+            ],
         )
         mgr._sessions[peer] = sess
 
@@ -2137,7 +2205,7 @@ class TestPollOnce:
         mgr._poll_once()
 
         assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
-        assert "req-5" in mgr._failed_req_ids
+        assert ("req-5" in mgr._failed_req_ids) is not request_finished
 
 
 # ---------------------------------------------------------------------------
@@ -2893,6 +2961,84 @@ class TestRetainedTransfers:
         assert JobResult(job_id=1, success=False) in mgr._finished_jobs
 
 
+def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
+    """A decoder's reset must not wait out the load timeout of a fetch its
+    prefiller never serves: the drain aborts the load, fails it at once, and
+    returns as soon as the AbortAck releases the chunk."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+        AbortAckMsg,
+        AbortFetchMsg,
+    )
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier._control = _DrainCtrl()  # type: ignore[assignment]
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=4, mmap_region=_mock_mmap_region(4)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    key = OffloadKey(b"remote-block")
+    ctx = _req_context(_remote_prefiller_kv_params())
+    prepared = primary.prepare_write([key], ctx)
+    assert prepared is not None
+    assert isinstance(prepared.store_spec, CPULoadStoreSpec)
+    job = TransferJob(
+        job_id=7,
+        keys=[key],
+        chunk_ids=prepared.store_spec.chunk_ids,
+        is_promotion=True,
+        req_context=ctx,
+    )
+    tiering._register_job(job, tier_idx=0)
+    p2p_tier.submit_load(job)
+
+    sleeps = [0]
+
+    def ack_after_abort(_s):
+        # The silent prefiller answers only the drain's AbortFetch; without
+        # one the drain would spin until the load timeout.
+        sleeps[0] += 1
+        assert sleeps[0] < 5, "drain_jobs waited on a load no peer will write"
+        if any(m[TYPE_KEY] == AbortFetchMsg.TYPE for m in conn._sent):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.KV_REQUEST_ID: "req-1",
+                    AbortAckMsg.ROUND_SEQ: 0,
+                }
+            )
+
+    monkeypatch.setattr(manager_module.time, "sleep", ack_after_abort)
+    tiering.reset_cache()
+
+    assert 7 not in tiering._jobs
+    assert session.alive
+    assert primary.num_deferred_release_chunks == 0
+
+
 class TestReconnectBackoff:
     """A peer whose session ended on a data-plane fault reconnects at once the
     first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
@@ -3177,3 +3323,234 @@ class TestIdleWhileServingPeers:
             assert tiering.has_pending_work() is True
         finally:
             tiering.shutdown()
+
+
+class _ControlledDrainData(_FakeData):
+    """Hold external transfers and inject peer traffic at an exact poll."""
+
+    def __init__(self, local_id):
+        super().__init__(local_id)
+        self.hold = False
+        self.on_poll = None
+
+    def poll(self, peer_id=None):
+        from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
+
+        if self.on_poll is not None:
+            self.on_poll()
+        if self.hold:
+            return PollResult(done=[], failed=[])
+        return super().poll(peer_id)
+
+
+@pytest.fixture
+def drain_transports():
+    return [_ControlledDrainData("A:1"), _ControlledDrainData("B:2")]
+
+
+@pytest.fixture
+def drain_peers(monkeypatch, drain_transports):
+    """Real managers and sessions; only the wire transports are in memory."""
+    init_none_hash(sha256)
+    a = _LoopbackControl("A:1")
+    b = _LoopbackControl("B:2")
+    a.pair(b)
+    controls = {"A:1": a, "B:2": b}
+    monkeypatch.setattr(
+        manager_module, "ZmqTransport", lambda local_id, *_: controls[local_id]
+    )
+    transports = iter(drain_transports)
+    monkeypatch.setattr(
+        manager_module, "NixlTransport", lambda *_, **__: next(transports)
+    )
+    spec = CPUOffloadingSpec(make_offloading_config())
+    peers = [
+        P2PSecondaryTierManager(
+            spec, memoryview(bytearray(65536)), host=host, port=port
+        )
+        for host, port in [("A", 1), ("B", 2)]
+    ]
+    try:
+        yield peers
+    finally:
+        for peer in peers:
+            peer.shutdown()
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound):
+    """Reset must release every queued pin without offering stale chunk ids."""
+    consumer, producer = drain_peers
+    ctx = _req_context(_remote_prefiller_kv_params("B", 2))
+    consumer.on_new_request(ctx)
+    for _ in range(3):
+        list(consumer.get_finished_jobs())
+        list(producer.get_finished_jobs())
+
+    key = OffloadKey(b"unfetched")
+    if bound:
+        first = OffloadKey(b"first")
+        consumer.submit_load(_job_metadata(10, [first], [0], ctx.kv_transfer_params))
+        list(producer.get_finished_jobs())
+        producer.submit_store(
+            _job_metadata(11, [first], [0], _remote_decoder_kv_params())
+        )
+        assert list(producer.get_finished_jobs()) == [JobResult(11, True)]
+        assert list(consumer.get_finished_jobs()) == [JobResult(10, True)]
+
+    for job_id in (20, 21):
+        producer.submit_store(
+            _job_metadata(job_id, [key], [job_id - 20], _remote_decoder_kv_params())
+        )
+    producer.drain_jobs()
+    assert sorted(producer.get_finished_jobs(), key=lambda result: result.job_id) == [
+        JobResult(20, False),
+        JobResult(21, False),
+    ]
+    producer.drain_jobs()
+    assert list(producer.get_finished_jobs()) == []
+
+    consumer.submit_load(_job_metadata(30, [key], [1], ctx.kv_transfer_params))
+    list(producer.get_finished_jobs())
+    assert list(consumer.get_finished_jobs()) == [JobResult(30, False)]
+    producer.submit_store(_job_metadata(31, [key], [0], _remote_decoder_kv_params()))
+    assert list(producer.get_finished_jobs()) == [JobResult(31, False)]
+
+
+def test_reset_cache_releases_parked_p2p_slots(drain_peers):
+    """The real tiering reset can reclaim every slot held for an absent decoder."""
+    _, producer = drain_peers
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=8,
+        rank=0,
+        kv_bytes_per_chunk=mmap.PAGESIZE,
+        cpu_page_size=mmap.PAGESIZE,
+    )
+    tiering = TieringOffloadingManager(
+        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        [producer],
+        tier_poll_interval_s=0,
+    )
+    ctx = _req_context(_remote_decoder_kv_params())
+    keys = [OffloadKey(b"one"), OffloadKey(b"two")]
+    try:
+        tiering.on_new_request(ctx)
+        store = tiering.prepare_store(keys, ctx)
+        assert store is not None
+        tiering.complete_store(store.keys_to_store, ctx)
+        tiering.on_schedule_end(ScheduleEndContext([], ()))
+        tiering.reset_cache()
+        tiering.on_reset_flushed()
+        assert all(tiering.lookup(key, ctx) is LookupResult.MISS for key in keys)
+        replacement = tiering.prepare_store(
+            [OffloadKey(str(i).encode()) for i in range(8)], ctx
+        )
+        assert replacement is not None
+        assert len(replacement.keys_to_store) == 8
+    finally:
+        tiering.shutdown()
+        region.cleanup()
+
+
+def test_drain_rejects_fetch_arriving_mid_poll(drain_peers, drain_transports):
+    """A fetch arriving during drain must not leave a live producer binding."""
+    consumer, producer = drain_peers
+    ctx = _req_context(_remote_prefiller_kv_params("B", 2, "active"))
+    consumer.on_new_request(ctx)
+    for _ in range(3):
+        list(consumer.get_finished_jobs())
+        list(producer.get_finished_jobs())
+    key = OffloadKey(b"active")
+    consumer.submit_load(_job_metadata(1, [key], [0], ctx.kv_transfer_params))
+    list(producer.get_finished_jobs())
+    producer.submit_store(
+        _job_metadata(2, [key], [0], _remote_decoder_kv_params("active"))
+    )
+    data = drain_transports[1]
+    data.hold = True
+    late_ctx = _req_context(_remote_prefiller_kv_params("B", 2, "late"))
+    consumer.on_new_request(late_ctx)
+    polls = 0
+
+    def peer_traffic():
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            consumer.submit_load(
+                _job_metadata(3, [key], [1], late_ctx.kv_transfer_params)
+            )
+        elif polls == 3:
+            data.hold = False
+
+    data.on_poll = peer_traffic
+    producer.drain_jobs()
+    assert list(producer.get_finished_jobs()) == [JobResult(2, True)]
+    assert sorted(consumer.get_finished_jobs(), key=lambda result: result.job_id) == [
+        JobResult(1, True),
+        JobResult(3, False),
+    ]
+    producer.submit_store(
+        _job_metadata(4, [key], [1], _remote_decoder_kv_params("late"))
+    )
+    assert list(producer.get_finished_jobs()) == [JobResult(4, False)]
+
+
+@pytest.mark.parametrize("fetch_before_reset", [False, True])
+def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
+    """Old HITs fail promptly after reset; fresh lookups can reuse a completed id."""
+    consumer, producer = drain_peers
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=8,
+        rank=0,
+        kv_bytes_per_chunk=mmap.PAGESIZE,
+        cpu_page_size=mmap.PAGESIZE,
+    )
+    tiering = TieringOffloadingManager(
+        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        [producer],
+        tier_poll_interval_s=0,
+    )
+    key = OffloadKey(b"symmetric")
+    local_ctx = ReqContext(req_id="local")
+    ctx = _req_context(_remote_kv_source_kv_params("B", 2, "symmetric"))
+    step = ScheduleEndContext([], ())
+
+    def store():
+        output = tiering.prepare_store([key], local_ctx)
+        assert output is not None
+        tiering.complete_store(output.keys_to_store, local_ctx)
+        tiering.on_schedule_end(step)
+
+    def lookup():
+        assert consumer.lookup(key, ctx) is LookupResult.RETRY
+        consumer.on_schedule_end(step)
+        tiering.on_schedule_end(step)
+        list(consumer.get_finished_jobs())
+        assert consumer.lookup(key, ctx) is LookupResult.HIT
+
+    try:
+        tiering.on_new_request(local_ctx)
+        consumer.on_new_request(ctx)
+        for _ in range(3):
+            list(consumer.get_finished_jobs())
+            tiering.on_schedule_end(step)
+        store()
+        lookup()
+        if fetch_before_reset:
+            consumer.submit_load(_job_metadata(1, [key], [0], ctx.kv_transfer_params))
+            tiering.on_schedule_end(step)
+            assert list(consumer.get_finished_jobs()) == [JobResult(1, True)]
+
+        tiering.reset_cache()
+        tiering.on_reset_flushed()
+        if fetch_before_reset:
+            store()
+            lookup()
+        consumer.submit_load(_job_metadata(2, [key], [0], ctx.kv_transfer_params))
+        tiering.on_schedule_end(step)
+        assert list(consumer.get_finished_jobs()) == [JobResult(2, fetch_before_reset)]
+    finally:
+        tiering.shutdown()
+        region.cleanup()
