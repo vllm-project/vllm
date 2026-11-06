@@ -22,6 +22,7 @@
 
 from collections.abc import Iterable
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import PreTrainedConfig
@@ -150,6 +151,11 @@ class MiMoMultiTokenPredictor(nn.Module):
         return logits
 
 
+# The checkpoint carries the full model; keep only the MTP layers and the shared
+# embedding/head.
+_NON_MTP_WEIGHT = re.compile(r"^(?!.*(?:mtp_layers|embed_tokens|lm_head))")
+
+
 class MiMoMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -166,6 +172,7 @@ class MiMoMTP(nn.Module):
         # wrapper around the transformer block; remap onto the offset index.
         start = self.config.num_hidden_layers
         self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_regex={_NON_MTP_WEIGHT: None},
             orig_to_new_substr={
                 ".self_attn.": ".mtp_block.self_attn.",
                 ".mlp.": ".mtp_block.mlp.",
@@ -211,12 +218,5 @@ class MiMoMTP(nn.Module):
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The checkpoint carries the full model; keep only the MTP layers and
-        # the shared embedding/head.
-        def mtp_weights():
-            for name, weight in weights:
-                if "mtp_layers" in name or "embed_tokens" in name or "lm_head" in name:
-                    yield name, weight
-
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(mtp_weights(), mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
