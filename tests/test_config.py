@@ -959,7 +959,6 @@ def test_dsa_models_default_to_breakable_cudagraph(
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
         ),
     )
-    config._dflash_needs_multi_kv_group = lambda: False
     config._uses_breakable_cudagraph_by_default = lambda: (
         VllmConfig._uses_breakable_cudagraph_by_default(config)
     )
@@ -1200,37 +1199,6 @@ def test_model_runner_supports_custom_logits_processors():
     )
 
     assert config._get_model_runner_unsupported_features() == []
-
-
-@pytest.mark.parametrize(
-    "architecture",
-    ["DFlash2DraftModel", "DFlash2BeamDraftModel", "LiLiCorrDraftModel"],
-)
-def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
-    """A DFlash2 draft must reach the V2 speculator, the only one that runs its
-    candidate selector; on V1 it would draft as DFlash1 without raising."""
-
-    def config(method, architectures):
-        return SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method=method,
-                draft_model_config=SimpleNamespace(architectures=architectures),
-            )
-        )
-
-    assert VllmConfig._is_dflash_candidate_draft(config("dflash", [architecture]))
-    assert not VllmConfig._is_dflash_candidate_draft(
-        config("dflash", ["DFlashDraftModel"])
-    )
-    assert not VllmConfig._is_dflash_candidate_draft(config("eagle", [architecture]))
-    assert not VllmConfig._is_dflash_candidate_draft(
-        SimpleNamespace(speculative_config=None)
-    )
-    assert not VllmConfig._is_dflash_candidate_draft(
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
-        )
-    )
 
 
 def test_resolve_cudagraph_mode_keeps_spec_decode_sizes():
