@@ -40,6 +40,7 @@ from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
 )
 from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor,
+    Qwen2_5OmniProcessorKwargs,
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
@@ -79,6 +80,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     DictEmbeddingItems,
+    ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
 )
@@ -412,6 +414,8 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
 class Qwen2_5OmniThinkerProcessingInfo(
     Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
 ):
+    processor_kwargs_cls: type = Qwen2_5OmniProcessorKwargs
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
 
@@ -444,6 +448,53 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
+
+    def get_video_size_with_most_features(self) -> ImageSize:
+        processor = self.get_hf_processor()
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
+            video_size = self._get_vision_size(
+                merged_kwargs, default_size=processor.video_processor.size
+            )
+        else:
+            video_size = processor._merge_kwargs(
+                self.processor_kwargs_cls,
+                tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+                **merged_kwargs,
+            )["videos_kwargs"]["size"]
+        return self.get_image_size_with_most_features(
+            max_pixels=video_size["longest_edge"]
+        )
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        max_frames_per_video: int | None = None,
+    ) -> int:
+        video_processor = self.get_hf_processor().video_processor
+        temporal_patch_size = video_processor.temporal_patch_size
+        target_size = self.get_video_size_with_most_features()
+        tokens_per_step = self.get_num_video_tokens(
+            image_width=target_size.width,
+            image_height=target_size.height,
+            num_frames=temporal_patch_size,
+            image_processor=video_processor,
+            mm_kwargs={},
+        )
+        num_videos = max(mm_counts.get("video", 0), 1)
+        num_steps = max(seq_len // num_videos // tokens_per_step, 1)
+        num_frames = num_steps * temporal_patch_size
+        if max_frames_per_video is not None:
+            num_frames = min(num_frames, max_frames_per_video)
+        return num_frames
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        return seq_len
 
     def get_mm_max_tokens_per_item(
         self,
@@ -481,7 +532,9 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
 _I = TypeVar("_I", bound=BaseProcessingInfo, default=Qwen2_5OmniThinkerProcessingInfo)
 _VI = TypeVar(
-    "_VI", bound=Qwen2VLProcessingInfo, default=Qwen2_5OmniThinkerProcessingInfo
+    "_VI",
+    bound=Qwen2_5OmniThinkerProcessingInfo,
+    default=Qwen2_5OmniThinkerProcessingInfo,
 )
 
 
@@ -520,9 +573,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         )
 
         target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
-        )
+        video_size = self.info.get_video_size_with_most_features()
 
         mm_data = {
             "audio": self._get_dummy_audios(
@@ -537,9 +588,11 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=target_num_frames,
+                width=video_size.width,
+                height=video_size.height,
+                num_frames=self.info.get_num_frames_with_most_features(
+                    seq_len, mm_counts
+                ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),
             ),
