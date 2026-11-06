@@ -21,12 +21,13 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
-def server():
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+def server(request):
+    args = getattr(request, "param", [])
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -69,6 +70,7 @@ def _make_generate_response(
     prompt_logprobs: list | None = None,
     kv_transfer_params: dict | None = None,
     metrics: dict | None = None,
+    usage: dict | None = None,
 ) -> dict:
     choice: dict = {
         "index": 0,
@@ -82,6 +84,7 @@ def _make_generate_response(
         "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
         "metrics": metrics,
+        "usage": usage,
     }
 
 
@@ -208,7 +211,7 @@ async def test_derender_chat_usage(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_usage_default(client):
-    """Omitting prompt_tokens gives usage.prompt_tokens == 0."""
+    """Omitting prompt_tokens with no generate usage gives usage.prompt_tokens == 0."""
     gen_req = await _render_chat(client)
     synthetic_ids = gen_req["token_ids"][:3]
 
@@ -222,6 +225,65 @@ async def test_derender_chat_usage_default(client):
     assert response.status_code == 200
     usage = response.json()["usage"]
     assert usage["prompt_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_usage_falls_back_to_generate_usage(client):
+    """Omitting prompt_tokens reads generate_response.usage.prompt_tokens,
+    the way the streaming path does."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                synthetic_ids,
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": len(synthetic_ids),
+                    "total_tokens": 10 + len(synthetic_ids),
+                },
+            ),
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == 10
+    assert usage["completion_tokens"] == len(synthetic_ids)
+    assert usage["total_tokens"] == 10 + len(synthetic_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_tokens", [0, 17])
+async def test_derender_chat_usage_prompt_tokens_beats_generate_usage(
+    client, prompt_tokens
+):
+    """An explicit prompt_tokens, 0 included, wins over
+    generate_response.usage.prompt_tokens."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                synthetic_ids,
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": len(synthetic_ids),
+                    "total_tokens": 10 + len(synthetic_ids),
+                },
+            ),
+            "prompt_tokens": prompt_tokens,
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == prompt_tokens
+    assert usage["total_tokens"] == prompt_tokens + len(synthetic_ids)
 
 
 @pytest.mark.asyncio
@@ -524,6 +586,7 @@ def _make_completion_generate_response(
     kv_transfer_params: dict | None = None,
     logprobs: dict | None = None,
     prompt_logprobs: list | None = None,
+    usage: dict | None = None,
 ) -> dict:
     return {
         "request_id": request_id,
@@ -537,6 +600,7 @@ def _make_completion_generate_response(
         ],
         "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
+        "usage": usage,
     }
 
 
@@ -595,6 +659,130 @@ async def test_derender_completion_usage_aggregation(client):
     assert usage["prompt_tokens"] == 15
     assert usage["completion_tokens"] == len(ids1) + len(ids2)
     assert usage["total_tokens"] == 15 + len(ids1) + len(ids2)
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_usage_falls_back_to_generate_usage(client):
+    """Omitting prompt_tokens sums each generate response's usage.prompt_tokens,
+    the way the streaming path does."""
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+
+    ids1 = gr1["token_ids"][:3]
+    ids2 = gr2["token_ids"][:4]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    ids1,
+                    gr1["request_id"],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": len(ids1),
+                        "total_tokens": 5 + len(ids1),
+                    },
+                ),
+                _make_completion_generate_response(
+                    ids2,
+                    gr2["request_id"],
+                    usage={
+                        "prompt_tokens": 10,
+                        "completion_tokens": len(ids2),
+                        "total_tokens": 10 + len(ids2),
+                    },
+                ),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == 15
+    assert usage["completion_tokens"] == len(ids1) + len(ids2)
+    assert usage["total_tokens"] == 15 + len(ids1) + len(ids2)
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_usage_fallback_is_per_response(client):
+    """Omitting prompt_tokens falls back per generate response: one without
+    usage counts 0, the other keeps its usage.prompt_tokens."""
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+
+    ids1 = gr1["token_ids"][:3]
+    ids2 = gr2["token_ids"][:4]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    ids1,
+                    gr1["request_id"],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": len(ids1),
+                        "total_tokens": 5 + len(ids1),
+                    },
+                ),
+                _make_completion_generate_response(ids2, gr2["request_id"]),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == 5
+    assert usage["completion_tokens"] == len(ids1) + len(ids2)
+    assert usage["total_tokens"] == 5 + len(ids1) + len(ids2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_tokens", [[0, 0], [3, 7]])
+async def test_derender_completion_usage_prompt_tokens_beats_generate_usage(
+    client, prompt_tokens
+):
+    """An explicit prompt_tokens list, zeros included, wins over each generate
+    response's usage.prompt_tokens."""
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+
+    ids1 = gr1["token_ids"][:3]
+    ids2 = gr2["token_ids"][:4]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    ids1,
+                    gr1["request_id"],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": len(ids1),
+                        "total_tokens": 5 + len(ids1),
+                    },
+                ),
+                _make_completion_generate_response(
+                    ids2,
+                    gr2["request_id"],
+                    usage={
+                        "prompt_tokens": 10,
+                        "completion_tokens": len(ids2),
+                        "total_tokens": 10 + len(ids2),
+                    },
+                ),
+            ],
+            "prompt_tokens": prompt_tokens,
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == sum(prompt_tokens)
+    assert usage["total_tokens"] == sum(prompt_tokens) + len(ids1) + len(ids2)
 
 
 @pytest.mark.asyncio
@@ -1970,3 +2158,54 @@ async def test_derender_completion_preserves_requested_token_ids(
         )
     assert choices[0].token_ids == (token_ids if return_token_ids else None)
     assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "server_flag"),
+    [([], False), (["--return-tokens-as-token-ids"], True)],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("endpoint", ["chat", "completion"])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_derender_logprob_override(
+    client, tokenizer, server_flag, endpoint, override
+):
+    """An explicit false must override a true render-server default."""
+    token_id = tokenizer.convert_tokens_to_ids("▁true")
+    logprobs = _make_generate_logprobs(token_id)
+    logprobs["content"][0]["top_logprobs"][0]["token_id"] = token_id
+    generated = _make_generate_response(
+        [token_id], finish_reason="length", logprobs=logprobs
+    )
+    original = (
+        {"messages": [], "logprobs": True, "top_logprobs": 1}
+        if endpoint == "chat"
+        else {"prompt": "Hi", "logprobs": 1}
+    )
+    if override is not None:
+        original["return_tokens_as_token_ids"] = override
+    payload = (
+        {"chat_request": original, "generate_response": generated}
+        if endpoint == "chat"
+        else {"completion_request": original, "generate_responses": [generated]}
+    )
+    response = await client.post(
+        f"/v1/{'chat/completions' if endpoint == 'chat' else 'completions'}/derender",
+        json=payload,
+    )
+    response.raise_for_status()
+    placeholders = server_flag if override is None else override
+    expected = f"token_id:{token_id}" if placeholders else " true"
+    choice = response.json()["choices"][0]
+    if endpoint == "chat":
+        entry = choice["logprobs"]["content"][0]
+        assert (entry["token"], entry["bytes"]) == (
+            expected,
+            None if placeholders else list(b" true"),
+        )
+        assert entry["top_logprobs"][0]["token"] == expected
+    else:
+        assert choice["logprobs"]["tokens"] == [expected]
+        assert choice["logprobs"]["top_logprobs"] == [{expected: -2.0}]

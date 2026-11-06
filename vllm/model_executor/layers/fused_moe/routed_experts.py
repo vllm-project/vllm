@@ -237,6 +237,24 @@ class RoutedExperts(PluggableLayer):
 
         self.lora_base_layer_prefix = ""
 
+    def padding_fill_params(self) -> list[str]:
+        """Params a direct reload zero-fills; read at cold start, before PWAL."""
+        c = self.moe_config
+        inter = c.intermediate_size_per_partition
+        if not (
+            c.hidden_dim > (c.hidden_dim_unpadded or c.hidden_dim)
+            or inter > (c.intermediate_size_per_partition_unpadded or inter)
+            # The loader refills this padding too, but a load plan skips loader fills.
+            or c.tp_shard_with_padding
+        ):
+            return []
+        # Per-expert scalars ((E,), (E, <=2)) aren't padded.
+        return [
+            n
+            for n, p in self._parameters.items()
+            if p is not None and p.ndim > 1 and p.numel() > 2 * p.shape[0]
+        ]
+
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.quant_method = quant_method

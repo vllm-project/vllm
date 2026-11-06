@@ -950,11 +950,12 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
 
-- label: ":nvidia: (H100) Batch Invariance"
+- label: ":nvidia: (H100) [Nightly] Batch Invariance"
   key: batch-invariance-h100
   automatic_shard: true
   timeout_in_minutes: 60
   device: h100
+  optional: true
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers
@@ -971,6 +972,8 @@ steps:
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
     amd:
+      # Run on PRs even when the H100 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) Batch Invariance"
       dind: false
       automatic_shard: true
@@ -1076,6 +1079,7 @@ steps:
     - VLLM_TEST_MODEL=ibm-granite/granite-3.0-1b-a400m-base VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) Batch Invariance (Distributed)"
       dind: false
       device: mi300_4
