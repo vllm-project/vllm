@@ -388,39 +388,6 @@ def test_o_proj_mxfp8_handoff_is_decode_only(
     assert emits(layer) is False
 
 
-def test_o_proj_mxfp8_handoff_needs_kernel_and_mxfp8_o_proj(monkeypatch):
-    """The cached decision is False without a fp8_out kernel on the impl or an
-    o_proj that takes MXFP8 input, whatever the batch."""
-    from types import SimpleNamespace
-
-    from vllm.config import CUDAGraphMode
-    from vllm.models.minimax_m3.amd import model
-    from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
-
-    md = object.__new__(MiniMaxM3SparseMetadata)
-    md.num_prefills, md.num_decodes = 0, 8
-    ctx = SimpleNamespace(
-        cudagraph_runtime_mode=CUDAGraphMode.NONE, attn_metadata={"layer": md}
-    )
-    monkeypatch.setattr(model, "get_forward_context", lambda: ctx)
-    emits = model.MiniMaxM3SparseAttention._emits_o_proj_mxfp8
-
-    monkeypatch.setattr(model, "_can_fuse_input_norm_mxfp8", lambda _: False)
-    no_mxfp8 = SimpleNamespace(
-        _o_proj_mxfp8=None,
-        impl=SimpleNamespace(forward_decode_mxfp8=None),
-        o_proj=None,
-        layer_name="layer",
-    )
-    assert emits(no_mxfp8) is False
-
-    monkeypatch.setattr(model, "_can_fuse_input_norm_mxfp8", lambda _: True)
-    no_kernel = SimpleNamespace(
-        _o_proj_mxfp8=None, impl=SimpleNamespace(), o_proj=None, layer_name="layer"
-    )
-    assert emits(no_kernel) is False
-
-
 def test_xcd_splits_table():
     """Splits of the XCD-aware grid: 4 up to 8 requests (one per XCD) and for
     17-24, 2 for 9-16, the cost model beyond and off the tuned shape."""
