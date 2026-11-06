@@ -5,12 +5,13 @@ meta:
   provider: "Ricursive Intelligence"
   description: "Ricursive's Ripple-65B Preview, a dense 65B model for reasoning and agentic coding with hybrid sliding-window and NoPE full attention, tool calling, and a DFlash2 speculative drafter."
   date_added: 2026-11-04
-  date_updated: 2026-11-04
+  date_updated: 2026-11-06
   tasks:
     - text
   related_recipes: []
   hardware:
     b300: verified
+    mi355x: verified
   default_hardware: b300
 
 model:
@@ -63,9 +64,25 @@ variants:
 compatible_strategies:
   - single_node_tp
 
-hardware_overrides: {}
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
 
 strategy_overrides: {}
+
+notes:
+  - title: "Attention backend on AMD"
+    when:
+      hardware: [amd]
+    body: |
+      `ROCM_AITER_UNIFIED_ATTN` is set explicitly. The auto-selected
+      `ROCM_ATTN` backend runs every multi-token query, including each
+      DFlash2 verify step, through a Triton prefix-prefill kernel, which makes
+      speculative decoding far slower than with the AITER backends.
 
 guide: |
   ## Overview
@@ -73,7 +90,8 @@ guide: |
   [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview)
   is a dense 65B model from Ricursive Intelligence. Its 80 layers alternate four
   1024-token sliding-window layers with one NoPE full-attention layer, and it
-  supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300.
+  supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300, and
+  the BF16 checkpoint fits on one MI355X.
 
   Ripple decides per turn whether to reason, so `reasoning_content` is empty
   when it answers directly.
