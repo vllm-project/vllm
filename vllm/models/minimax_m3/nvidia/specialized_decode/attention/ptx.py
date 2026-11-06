@@ -162,6 +162,14 @@ def bulk_copy(
 
 
 @dsl_user_op
+def prefetch_l2(address: Int64, size: Int32, *, loc=None, ip=None):
+    """Prefetch ``size`` bytes (16-byte aligned) into L2 with the TMA unit."""
+    operands = [_v(Int64(address), loc, ip), _v(Int32(size), loc, ip)]
+    text = "cp.async.bulk.prefetch.L2.global [$0], $1;"
+    _asm(None, operands, text, "l,r", loc, ip, True)
+
+
+@dsl_user_op
 def ld_shared_u32x4(smem: Int32, *, loc=None, ip=None):
     text = "ld.shared.v4.b32 {$0, $1, $2, $3}, [$4];"
     res = _asm(

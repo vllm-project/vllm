@@ -93,7 +93,7 @@ a FlashInfer upgrade that moves or changes that class must update it.
 | qkv projection, QK norm, RoPE and KV insert: stock | all |
 | Index scores of every history page (E4M3 query, NVFP4 keys, max over the page) of the requests whose last query has more than 15 history pages, contexts up to 8192 pages (1M tokens) | 1-32, up to 32 requests of up to 8 queries |
 | Per row the top-15 history pages (all of them when at most 15) and the local page, the causal attention over them (NVFP4 K/V, E4M3 query), the output quantized to MXFP8 as o_proj's input; padding requests (seq_len 0) write zeros | 1-32 |
-| o_proj: FlashInfer's low-latency MXFP8 GEMM; its weight loads do not wait for the attention, its activation loads do | 1-32 |
+| o_proj: FlashInfer's low-latency MXFP8 GEMM; its weight loads do not wait for the attention, its activation loads do. Past eight rows (its CTAs find room only as the attention's exit) each attention CTA prefetches a share of its weights into L2 once its page loads are done | 1-32 |
 | Gate: stock `GateLinear` (FP32 logits) | all |
 | Front: top-4 of `sigmoid(logit) + bias`, BF16 weights from the recovered scores, per-token NVFP4 of the input, routing record | 1-32 |
 | Routed FC1 and FC2 on the record's work items; the last FC1 item of each token tile quantizes its BF16 output per token for FC2 | 1-32 |

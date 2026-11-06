@@ -60,6 +60,7 @@ from .ptx import (
     ld_u32x4,
     mma_f16,
     nvfp4_f16x8,
+    prefetch_l2,
     prmt,
     ranks_before,
     scales_x4,
@@ -376,6 +377,10 @@ class SparseAttention:
         partial: Int64,
         counters: Int64,
         logit_scale: Float32,
+        weight: Int64,
+        weight_bytes: Int32,
+        weight_scale: Int64,
+        scale_bytes: Int32,
         rows: Int32,
         stream: cuda.CUstream,
     ):
@@ -383,7 +388,8 @@ class SparseAttention:
         V slot) ``page_stride`` bytes apart; ``records`` the step's row
         records (``indexer_cute.IndexWork``); ``scores`` the indexer's;
         ``k_scale``, ``v_scale`` FP32 global scales; ``act`` E4M3 [rows,
-        2048] and ``act_scale`` its 128x4 scales. ``logit_scale`` is the
+        2048] and ``act_scale`` its 128x4 scales; ``weight``, ``weight_scale``
+        o_proj's (prefetched into L2 past eight rows). ``logit_scale`` is the
         softmax scale times the query scale and log2(e)."""
         self.kernel(
             q,
@@ -398,6 +404,10 @@ class SparseAttention:
             partial,
             counters,
             logit_scale,
+            weight,
+            weight_bytes,
+            weight_scale,
+            scale_bytes,
         ).launch(
             grid=(self.ctas, rows, 1),
             block=(WARPS * 32, 1, 1),
@@ -420,6 +430,10 @@ class SparseAttention:
         partial: Int64,
         counters: Int64,
         logit_scale: Float32,
+        weight: Int64,
+        weight_bytes: Int32,
+        weight_scale: Int64,
+        scale_bytes: Int32,
     ):
         tid, _, _ = cute.arch.thread_idx()
         c, r, _ = cute.arch.block_idx()
@@ -520,6 +534,14 @@ class SparseAttention:
             total = total + cute.arch.shuffle_sync_bfly(total, 1)
             total = total + cute.arch.shuffle_sync_bfly(total, 2)
             stat[2 + k] = total
+        # Past eight rows o_proj's CTAs only find room as these exit, so its
+        # weights stream after the attention: start that into L2 now that
+        # this CTA's page loads are done.
+        if (rows > 8) & (tid == 0):
+            part = r * self.ctas + c
+            parts = rows * self.ctas
+            self.prefetch_share(weight, weight_bytes, part, parts)
+            self.prefetch_share(weight_scale, scale_bytes, part, parts)
 
         # The CTA's warps merged.
         if t == 0:
@@ -586,6 +608,15 @@ class SparseAttention:
                 v_global,
                 part_o.iterator.toint(),
             )
+
+    @cute.jit
+    def prefetch_share(self, address: Int64, size: Int32, part: Int32, parts: Int32):
+        """Share ``part`` of ``parts`` of the ``size`` bytes at ``address``
+        into L2 (sizes and addresses multiples of 16)."""
+        share = (size + parts * 16 - 1) // (parts * 16) * 16
+        first = part * share
+        if first < size:
+            prefetch_l2(address + Int64(first), cute.min(share, size - first))
 
     @cute.jit
     def finish(

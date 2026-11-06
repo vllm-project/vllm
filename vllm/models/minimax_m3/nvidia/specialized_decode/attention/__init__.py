@@ -122,6 +122,7 @@ def _kernels(device_index: int) -> _Kernels:
             SparseAttention(ATTENTION_CTAS),
             *(Int64(0),) * 11,
             Float32(0.0),
+            *(Int64(0), Int32(0)) * 2,
             Int32(1),
             make_fake_stream(),
         )
@@ -169,6 +170,9 @@ class LowBatchAttention:
     """One sparse attention layer's low-batch path (module docstring)."""
 
     def __init__(self, layer, weight: torch.Tensor, weight_scale: torch.Tensor):
+        # The attention prefetches both into L2 (16-byte aligned sizes).
+        for t in (weight, weight_scale):
+            assert t.data_ptr() % 16 == 0 and t.nbytes % 16 == 0
         self.logit_scale = (
             float(layer.impl.scale) * layer._q_scale_float * math.log2(math.e)
         )
@@ -236,6 +240,10 @@ class LowBatchAttention:
             Int64(scratch.partial.data_ptr()),
             Int64(scratch.counters.data_ptr()),
             Float32(self.logit_scale),
+            Int64(self.weight.data_ptr()),
+            Int32(self.weight.nbytes),
+            Int64(self.weight_scale.data_ptr()),
+            Int32(self.weight_scale.nbytes),
             Int32(rows),
             stream,
         )
