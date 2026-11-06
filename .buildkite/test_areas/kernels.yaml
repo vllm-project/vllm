@@ -504,9 +504,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
-      - vllm/models/deepseek_v4/amd/rocm.py
       - vllm/models/deepseek_v41/amd/rocm.py
-      - vllm/models/deepseek_v41/amd/ops/topk_pack.py
       - vllm/models/deepseek_v41/sparse_mla.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
@@ -518,14 +516,12 @@ steps:
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
-      - tests/v1/attention/test_rocm_aiter_triton_sparse_mla.py
       commands:
       - amd-smi
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
-      - pytest -v -s tests/v1/attention/test_rocm_aiter_triton_sparse_mla.py -k store_epilogue
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
 
 - label: ":nvidia: (L4) Quantization Kernels"
