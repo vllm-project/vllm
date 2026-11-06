@@ -155,7 +155,9 @@ class EncoderRunner:
         if not budget.model_config.is_encoder_decoder:
             # Encoder-decoder models feed encoder outputs to cross-attention
             # instead of merging them into `inputs_embeds`.
-            with merge_context or nullcontext():
+            if merge_context is None:
+                merge_context = nullcontext()
+            with merge_context:
                 profile_mm_embed_input_ids(
                     self.model,
                     dummy_encoder_outputs,
