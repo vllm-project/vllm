@@ -694,9 +694,23 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             partitions.setdefault(request_id, {})[key] = refs
         state = _JobState(job_metadata, len(blocks), True, set())
         for request_id, partition in partitions.items():
-            handle = self._kvcr.deliver(partition, request_id=request_id)
+            try:
+                handle = self._kvcr.deliver(partition, request_id=request_id)
+            except Exception:
+                if len(partitions) == 1:
+                    raise
+                # Accepted partitions still own their destinations until completion.
+                state.remaining -= len(partition)
+                state.success = False
+                continue
             state.handles.add(handle)
             self._jobs_by_op[handle] = state
+        if not state.handles:
+            self._finished_jobs.append(
+                JobResult(
+                    job_id=job_metadata.job_id, success=False, successful_keys=set()
+                )
+            )
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:

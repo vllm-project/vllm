@@ -1019,3 +1019,62 @@ def test_strict_malformed_snapshot_stays_local(monkeypatch, cached, malformed):
     tier.submit_load(_job(7, ctx, key))
     assert kvcr.deliver_calls[-1][2] is None
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
+
+
+@pytest.mark.parametrize(
+    "failed_attempts,completion_success",
+    [((2,), True), ((2,), False), ((1,), True), ((1, 2), True)],
+)
+def test_strict_split_submission_failure_waits_for_accepted_work(
+    monkeypatch, failed_attempts, completion_success
+):
+    attempts = []
+
+    class FailingKVCR(RecordingKVCR):
+        def deliver(self, blocks, request_id=None):
+            attempts.append(request_id)
+            if len(attempts) in failed_attempts:
+                raise RuntimeError("submission failed")
+            return super().deliver(blocks, request_id)
+
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = FailingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    _set_chain(ctx)
+    keys = [make_offload_key((1).to_bytes(32, "big"), group) for group in (0, 1)]
+    tier.submit_load(
+        TransferJob(
+            job_id=7,
+            keys=keys,
+            chunk_ids=np.array([0, 1]),
+            is_promotion=True,
+            req_context=ctx,
+        )
+    )
+    assert attempts == ["req", None]
+    kvcr.completed.clear()
+    successful = set()
+    if kvcr.deliver_calls:
+        # No result may release primary destinations before accepted DMA ends.
+        assert list(tier.get_finished_jobs()) == []
+        for handle, blocks, _ in kvcr.deliver_calls:
+            kvcr.complete(handle, {key: completion_success for key in blocks})
+            if completion_success:
+                successful.update(blocks)
+    assert list(tier.get_finished_jobs()) == [JobResult(7, False, successful)]
+    tier.drain_jobs()
+    assert list(tier.get_finished_jobs()) == []
+
+
+@pytest.mark.parametrize("opportunistic", [True, False])
+def test_single_load_submission_preserves_exception(monkeypatch, opportunistic):
+    class FailingKVCR(RecordingKVCR):
+        def deliver(self, blocks, request_id=None):
+            raise RuntimeError("submission failed")
+
+    tier = _make_tier(monkeypatch, FailingKVCR(), opportunistic_query=opportunistic)
+    with pytest.raises(RuntimeError, match="submission failed"):
+        tier.submit_load(_job(7, ReqContext(req_id="req")))
+    assert list(tier.get_finished_jobs()) == []
+    tier.drain_jobs()
