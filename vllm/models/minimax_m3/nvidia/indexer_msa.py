@@ -17,7 +17,7 @@ Decode scores with CuteDSL when the flattened query tile is supported and fall
 back to Triton otherwise, writing into the decode region. Only the top-k is
 shared with prefill.
 
-Sharded decode selects local candidates and merges them at each head owner.
+Sharded scoring selects local candidates and merges them at each head owner.
 
 ``fmha_sm100`` imports are function-local so this module is import-safe on
 AMD / non-SM100.
@@ -108,14 +108,6 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
 
 
 @dataclass
-class MiniMaxM3IndexerMSAPrefillChunk:
-    start: int
-    end: int
-    block_table: torch.Tensor
-    plan: "MSAIcpScorePlan"
-
-
-@dataclass
 class MiniMaxM3IndexerMSAPrefillMetadata:
     """MSA gather plan or bounded local-score chunks for eager prefill."""
 
@@ -126,7 +118,7 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
     page_table: torch.Tensor | None  # flat physical pages for gathered prefill
     # Physical pages to gather; page_table indexes the gathered result.
     gather_pages: torch.Tensor | None = None
-    local_chunks: list[MiniMaxM3IndexerMSAPrefillChunk] | None = None
+    local_chunks: list[tuple[int, int, torch.Tensor, "MSAIcpScorePlan"]] | None = None
     candidate_pool: torch.Tensor | None = None
     graphs: "MSAIcpLayerGraphs | None" = None
     graph_steps: "dict[int, MSAIcpGraphStep]" = field(default_factory=dict)
@@ -254,7 +246,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             self.prefill_window_metadata = torch.empty(
                 windows, 5, scheduler.max_num_seqs + 1, dtype=torch.int32, device=device
             )
-        if not self.prefill_local_score:
+        else:
             self.unified_scores_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.num_index_heads,
@@ -350,6 +342,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             qo_lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
             side_qo = qo_lens_cpu[lo:hi]
             plan = None
+            page_table = None
+            gather_pages = None
             if not self.prefill_local_score:
                 from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
 
@@ -372,9 +366,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 # binding shape-matches the tile dim exactly). max_k_tiles >= the
                 # plan's natural value, so the extra tiles are simply never written.
                 plan["max_k_tiles"] = max_k_tiles
-            page_table = None
-            gather_pages = None
-            if not self.prefill_local_score:
                 cols = torch.arange(block_table.shape[1], device=block_table.device)
                 valid = cols[None, :] < nvp[lo:hi].to(block_table.device)[:, None]
                 page_table = block_table[lo:hi][valid].to(torch.int32)
@@ -423,14 +414,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                             indexer.max_model_len, block_table.shape[1] * PAGE_SIZE
                         ),
                     )
-                    local_chunks.append(
-                        MiniMaxM3IndexerMSAPrefillChunk(
-                            start=start,
-                            end=end,
-                            block_table=block_table[lo:hi],
-                            plan=chunk_plan,
-                        )
-                    )
+                    local_chunks.append((start, end, block_table[lo:hi], chunk_plan))
                 assert self.prefill_candidates_buffer is not None
                 candidate_elements = heads * side_tokens * (2 * TOPK + 1)
                 candidate_buffers = self.prefill_candidates_buffer[
@@ -482,7 +466,6 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         super().__init__(**kwargs)
         self.index_k_comm: IndexKShardComm | None = None
         self.index_k_ordinal = -1
-        self.index_k_rank = 0
         if self.index_cache.tp_shard > 1:
             comm = get_comm(
                 get_current_vllm_config(),
@@ -490,8 +473,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             )
             assert comm is not None
             self.index_k_comm = comm
-            self.index_k_ordinal = comm.register_layer()
-            self.index_k_rank = comm.rank
+            self.index_k_ordinal = comm.num_layers
+            comm.num_layers += 1
 
     def forward(
         self,
@@ -636,10 +619,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 assert self.index_k_comm is not None
                 kv = gather_prefill_pages(kv, p.gather_pages, self.index_k_comm)
                 h = self.num_index_heads
-                prefill_q = prefill_q[
-                    :, self.index_k_rank * h : (self.index_k_rank + 1) * h
-                ]
-                prefill_q = prefill_q.contiguous()
+                head = self.index_k_comm.rank * h
+                prefill_q = prefill_q[:, head : head + h].contiguous()
             # Index-K cache (num_blocks, 128, D) -> paged MQA (num_blocks,1,128,D).
             k_pages = kv.view(kv.shape[0], 1, PAGE_SIZE, self.index_head_dim)
             # fmha writes its max_score natively as [nnz_p, H, max_k_tiles] into
@@ -693,7 +674,7 @@ def prefill_local_score(
         send, received = metadata.candidate_buffers.unbind(0)
         received = received.view(comm.world, comm.hpr, index_q.shape[0], 2 * TOPK + 1)
         prefill = metadata.graphs.indexer.prepare_prefill_step(
-            [(c.start, c.end, c.block_table, c.plan) for c in metadata.local_chunks],
+            metadata.local_chunks,
             None,
             num_valid_pages,
             send,
@@ -994,11 +975,6 @@ class IndexKShardComm:
             self.max_decode_tokens,
         )
 
-    def register_layer(self) -> int:
-        """Ordinal of a sharded indexer layer (layers run in ordinal order)."""
-        self.num_layers += 1
-        return self.num_layers - 1
-
     def slot_set(self, ordinal: int) -> int:
         """Adjacent layers, including the step boundary, use different slots."""
         n = self.num_layers
@@ -1010,13 +986,11 @@ class IndexKShardComm:
 
 
 def gather_prefill_pages(
-    kv_shard: torch.Tensor, pages: torch.Tensor, comm: IndexKShardComm | None = None
+    kv_shard: torch.Tensor, pages: torch.Tensor, comm: IndexKShardComm
 ) -> torch.Tensor:
     """Full ``[P, 128, D]`` index-K pages of ``pages`` from every rank's shard
     (token ``i * tp + r`` of a block comes from rank ``r``'s row ``i``)."""
-    from vllm.distributed.parallel_state import get_tp_group
-
-    group = get_tp_group() if comm is None else comm.group
+    group = comm.group
     tp = group.world_size
     num_pages = pages.numel()
     _, rows, dim = kv_shard.shape

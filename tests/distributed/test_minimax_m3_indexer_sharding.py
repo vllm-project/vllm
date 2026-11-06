@@ -430,11 +430,11 @@ def _check_indexer_forwards(config, device, rank, comm):
                 prefill = local_metadata.prefill_msa
                 assert prefill.candidate_pool.dtype == torch.uint8
                 chunks = prefill.local_chunks
-                assert chunks[0].start == 0
-                assert chunks[-1].end == prefill.candidate_buffers.shape[2]
-                if chunks[-1].end > PREFILL_CHUNK_SIZE:
+                assert chunks[0][0] == 0
+                assert chunks[-1][1] == prefill.candidate_buffers.shape[2]
+                if chunks[-1][1] > PREFILL_CHUNK_SIZE:
                     assert len(chunks) > 1
-                assert all(chunk.plan is not None for chunk in chunks)
+                assert all(plan is not None for _, _, _, plan in chunks)
                 # Both dispatches reuse scratch across layers and steps; unified
                 # mixed scoring exchanges decode and prefill candidates together.
                 exchanges.clear()

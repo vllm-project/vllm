@@ -937,7 +937,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
             "bf16"
         )
-        self.index_k_shard = resolve_index_k_shard(
+        index_k_shard = resolve_index_k_shard(
             vllm_config,
             self.total_idx_heads,
             self.indexer_kv_dtype,
@@ -955,7 +955,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-            replicate_index_q=self.index_k_shard > 1,
+            replicate_index_q=index_k_shard > 1,
         )
         self.index_q_size = self.qkv_proj.num_index_heads * self.idx_head_dim
         # reduce_results=False: under sequence parallelism o_proj reduce-scatters
@@ -1051,7 +1051,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
-            index_k_shard=self.index_k_shard,
+            index_k_shard=index_k_shard,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.

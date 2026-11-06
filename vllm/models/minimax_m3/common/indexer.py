@@ -164,8 +164,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V);
-        # a sharded cache budgets 1 / tp_shard of it per rank.
+        # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
         content = None
         if self.tp_shard > 1:
             content = self.head_dim * self.dtype.itemsize // self.tp_shard
