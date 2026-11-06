@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     Fp8MoEKernelOracle,
@@ -403,6 +404,70 @@ def test_explicit_moe_backend(oracle, unknown, monkeypatch):
     else:
         assert selected_backend is expected_backend
         assert selected_experts_class is not None
+
+
+_FORMAT = mk.FusedMoEActivationFormat
+
+
+@pytest.mark.parametrize(
+    ("experts_format", "pf_format", "accepted"),
+    [
+        (_FORMAT.Standard, _FORMAT.Standard, True),
+        (_FORMAT.BatchedExperts, _FORMAT.BatchedExperts, True),
+        # A padding-aware experts class consumes the unpadded layout; the
+        # reverse is not valid, so the check must be one-directional.
+        (_FORMAT.PaddedStandard, _FORMAT.Standard, True),
+        (_FORMAT.Standard, _FORMAT.PaddedStandard, False),
+        (_FORMAT.Standard, _FORMAT.BatchedExperts, False),
+        (_FORMAT.BatchedExperts, _FORMAT.Standard, False),
+    ],
+    ids=[
+        "standard-standard",
+        "batched-batched",
+        "padded-experts-standard-pf",
+        "standard-experts-padded-pf",
+        "standard-experts-batched-pf",
+        "batched-experts-standard-pf",
+    ],
+)
+def test_make_moe_kernel_activation_format_superset(
+    experts_format: mk.FusedMoEActivationFormat,
+    pf_format: mk.FusedMoEActivationFormat,
+    accepted: bool,
+    monkeypatch,
+) -> None:
+    """The experts' format must be a superset of the prepare/finalize's rather
+    than equal to it, so `PaddedStandard` experts pair with a `Standard`
+    prepare/finalize but not the other way round."""
+    sentinel = object()
+    prepare_finalize = SimpleNamespace(
+        activation_format=pf_format,
+        max_num_tokens_per_rank=lambda: 64,
+        num_dispatchers=lambda: 3,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.base.maybe_make_prepare_finalize",
+        lambda **kwargs: prepare_finalize,
+    )
+    monkeypatch.setattr(mk, "FusedMoEKernel", lambda pf, experts: sentinel)
+    monkeypatch.setattr(TritonExperts, "__init__", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        TritonExperts, "activation_format", staticmethod(lambda: experts_format)
+    )
+
+    def assemble():
+        return make_moe_kernel(
+            SimpleNamespace(is_block_quantized=True),
+            make_dummy_moe_config(),
+            TritonExperts,
+        )
+
+    if accepted:
+        assert assemble() is sentinel
+        return
+
+    with pytest.raises(ValueError, match="expects .* activations"):
+        assemble()
 
 
 @pytest.mark.parametrize("batched", [False, True], ids=["standard", "batched"])

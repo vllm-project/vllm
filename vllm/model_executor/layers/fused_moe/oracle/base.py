@@ -165,11 +165,14 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         lora = "LoRA " if is_lora else ""
         return f"Using {backend.value} {self.name} MoE {lora}backend{available}."
 
-    def make_log_unsupported(self, backend: BackendT, reason: str | None) -> str:
+    def make_log_unsupported(
+        self, backend: BackendT, reason: str | None, is_lora: bool = False
+    ) -> str:
         """Message for a backend that does not support the configuration."""
         since = f" since {reason}" if reason else ""
+        lora = "LoRA " if is_lora else ""
         return (
-            f"{self.name} MoE backend '{backend.value}' does not support the "
+            f"{self.name} MoE {lora}backend '{backend.value}' does not support the "
             f"deployment configuration{since}."
         )
 
@@ -178,15 +181,12 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backend: BackendT,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
-        activation_format: mk.FusedMoEActivationFormat | None = None,
     ) -> tuple[type[mk.FusedMoEExperts] | None, list[Rejection]]:
         """Probe `backend`'s candidate kernel classes, first supported wins.
 
         A miss logs a DEBUG line and yields to the next candidate; whether that
         is fatal stays with the caller. `activation_key` overrides this oracle's
-        own key for oracles whose activation key varies per backend, and
-        `activation_format` overrides the predicted prepare/finalize layout (the
-        unquantized LoRA path forces `Standard`).
+        own key for oracles whose activation key varies per backend.
 
         Returns:
             `(kernel_cls, rejected)`: the winning class, or `None`, plus every
@@ -196,7 +196,6 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
         """
         rejected: list[Rejection] = []
-        act_format = activation_format or self.moe_config.activation_format
         act_quant_key = (
             self.activation_key if activation_key is _UNSET else activation_key
         )
@@ -208,7 +207,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 self.moe_config,
                 self.weight_key,
                 act_quant_key,
-                act_format,
+                self.moe_config.activation_format,
             )
             if supported:
                 return kernel_cls, rejected
@@ -222,7 +221,6 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         available_backends: list[BackendT] | None = None,
         kernel_classes: list[type[mk.FusedMoEExperts]] | None = None,
         activation_key: "QuantKey | None" = _UNSET,
-        activation_format: mk.FusedMoEActivationFormat | None = None,
         is_lora: bool = False,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts]]:
         """Return `backend` with its first supported kernel class, or raise.
@@ -232,12 +230,10 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 configuration; the message carries the last rejection reason.
 
         """
-        kernel_cls, rejected = self.try_backend(
-            backend, kernel_classes, activation_key, activation_format
-        )
+        kernel_cls, rejected = self.try_backend(backend, kernel_classes, activation_key)
         if kernel_cls is None:
             reason = rejected[-1][1] if rejected else None
-            raise ValueError(self.make_log_unsupported(backend, reason))
+            raise ValueError(self.make_log_unsupported(backend, reason, is_lora))
         logger.info_once(self.make_log_backend(backend, available_backends, is_lora))
         return backend, kernel_cls
 
@@ -283,8 +279,8 @@ def make_moe_kernel(
     ):
         raise ValueError(
             f"{experts_cls.__name__} expects "
-            f"{experts_cls.activation_format().value} activations but the selected "
-            f"prepare/finalize uses {prepare_finalize.activation_format.value}"
+            f"{experts_cls.activation_format().value[0]} activations but the selected "
+            f"prepare/finalize uses {prepare_finalize.activation_format.value[0]}"
         )
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)

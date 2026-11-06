@@ -261,7 +261,6 @@ def select_unquantized_moe_backend(
         return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
             UnquantizedMoeBackend.TRITON,
             [UnquantizedMoeBackend.TRITON],
-            activation_format=mk.FusedMoEActivationFormat.Standard,
             is_lora=True,
         )
 
