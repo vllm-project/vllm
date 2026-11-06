@@ -457,7 +457,12 @@ class ReplaySSMModelContext:
                     "executed query width 1, 4, or 8; got "
                     f"window={logical_window}, width={executed_query_width}"
                 )
-            expected_ring_buffer_len = 16 if executed_query_width == 1 else 32
+            expected_ring_buffer_len = (
+                16
+                if executed_query_width == 1
+                and first.kv_cache[1].dtype == torch.bfloat16
+                else 32
+            )
             if ring_buffer_len != expected_ring_buffer_len:
                 raise ValueError(
                     "FlashInfer GDN ReplaySSM ring depth does not match its "
@@ -560,7 +565,9 @@ class ReplaySSMModelContext:
     def _materialize(self) -> None:
         """Publish canonical prefix snapshots with the selected backend."""
         if self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
-            self.materialize_gdn(_load_gdn_replayssm_materialize())
+            self.materialize_gdn(
+                _load_gdn_replayssm_materialize(self.mixers[0].kv_cache[1].dtype)
+            )
             return
         assert self.materialize_tables is not None
         first = self.mixers[0]
@@ -680,6 +687,7 @@ class ReplaySSMModelContext:
             GDN_STP=(
                 self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
                 and self.executed_query_width == 1
+                and self.ring_buffer_len == 16
             ),
         )
         if not self.materialize_prefixes or not may_materialize:

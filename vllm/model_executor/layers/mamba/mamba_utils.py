@@ -28,15 +28,17 @@ logger = init_logger(__name__)
 ConvStateLayoutType = Literal["SD", "DS"]
 
 
-def gdn_replayssm_geometry(num_speculative_tokens: int) -> tuple[int, int]:
+def gdn_replayssm_geometry(
+    num_speculative_tokens: int, state_dtype: torch.dtype = torch.bfloat16
+) -> tuple[int, int]:
     """Return the selected GDN provider's query width and physical ring slots.
 
     Both paths retain at most 16 logical history records. MTP needs extra
     physical slots for verification writes while other blocks read history.
-    STP appends one record or folds the current token without appending.
+    BF16 STP folds the current token. FP16 UMMA STP uses the MTP ring contract.
     """
     if num_speculative_tokens == 0:
-        return 1, 16
+        return 1, 32 if state_dtype == torch.float16 else 16
     if 1 <= num_speculative_tokens <= 3:
         return 4, 32
     if 4 <= num_speculative_tokens <= 7:

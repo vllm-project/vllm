@@ -316,21 +316,24 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
-@pytest.mark.parametrize("gdn_stp", [False, True])
+@pytest.mark.parametrize("gdn_mode", ["none", "stp", "umma_stp"])
 def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
-    post_step, gdn_stp
+    post_step, gdn_mode
 ):
     """Skip prefill self-copies, reset trackers, and preserve in-place MTP replay."""
+    gdn_stp = gdn_mode == "stp"
+    umma_stp = gdn_mode == "umma_stp"
+    ring_slots = 16 if gdn_stp else 32 if umma_stp else 20
     mixer = _replayssm_mixer(
         kv_cache=(
             torch.empty(0, device="cuda"),
             torch.empty(6, 1, 1, 1, device="cuda"),
-            torch.empty(6, 1, 20, 1, device="cuda"),
-            torch.empty(6, 1, 20, device="cuda"),
-            torch.empty(6, 1, 20, 1, device="cuda"),
+            torch.empty(6, 1, ring_slots, 1, device="cuda"),
+            torch.empty(6, 1, ring_slots, device="cuda"),
+            torch.empty(6, 1, ring_slots, 1, device="cuda"),
         ),
         ring_start=_cuda_ints([3] * 6),
-        committed=_cuda_ints([2, 2, 2, 2, 15 if gdn_stp else 2, 2]),
+        committed=_cuda_ints([2, 2, 2, 2, 15 if gdn_stp else 16 if umma_stp else 2, 2]),
         A=torch.empty(1, device="cuda"),
     )
     spec = MambaSpec(
@@ -350,7 +353,7 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
     context = ReplaySSMModelContext.create([([mixer], spec, table)], max_num_reqs=4)
     # Reordered rows: canonical prefill in slot 2; in-place MTP replay in slot 4;
     # padded slot; padded request.
-    query_len = 1 if gdn_stp else 4
+    query_len = 1 if gdn_stp or umma_stp else 4
     _postprocess_replayssm_kernel[(4, 1)](
         _cuda_ints([1, 2, 0, -1]),
         _cuda_ints([0, 48, 48 + query_len, 64 + query_len, 64 + query_len])
@@ -372,14 +375,14 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
         MAX_NUM_REQS=4,
         MAMBA_BLOCK_SIZE=16,
         LOGICAL_WINDOW=16,
-        RING_BUFFER_LEN=16 if gdn_stp else 20,
+        RING_BUFFER_LEN=ring_slots,
         PAD_SLOT_ID=NULL_BLOCK_ID,
         QUERY_METADATA_IS_CUMULATIVE=post_step,
         NUM_COMPUTED_IS_POST_STEP=post_step,
         HAS_IDX_MAPPING=True,
         MATERIALIZE_PREFIXES=True,
         LIVE_COL_IS_ZERO=False,
-        EXECUTED_QUERY_WIDTH=1 if gdn_stp else 0,
+        EXECUTED_QUERY_WIDTH=1 if gdn_stp or umma_stp else 0,
         GDN_STP=gdn_stp,
     )
     _compact_replayssm_requests_kernel[(1,)](
@@ -391,7 +394,12 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(
         BLOCK_SIZE=4,
     )
 
-    assert context.plan_flush_count.tolist() == [-1, 0 if gdn_stp else 6, -1, -1]
+    assert context.plan_flush_count.tolist() == [
+        -1,
+        0 if gdn_stp else 1 if umma_stp else 6,
+        -1,
+        -1,
+    ]
     assert context.active_request_indices.tolist() == [1, -1, -1, -1]
     assert context.src_slots[0, 1].item() == 4
     assert context.dst_slots[0, 1].item() == 4

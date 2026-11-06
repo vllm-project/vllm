@@ -25,10 +25,6 @@ def check_gdn_replayssm_dependencies(
     if state_dtype not in (torch.bfloat16, torch.float16):
         raise ValueError(f"Unsupported GDN ReplaySSM state dtype: {state_dtype}")
     use_umma = state_dtype == torch.float16
-    if use_umma and (executed_width == 1 or needs_materializer):
-        raise ValueError(
-            "FP16 GDN ReplaySSM requires speculative decoding without prefix caching"
-        )
     if os.environ.get("SGLANG_GDN_WY_STRIDED_QKV") != "1":
         raise RuntimeError(
             "FlashInfer GDN ReplaySSM requires "
@@ -69,7 +65,7 @@ def check_gdn_replayssm_dependencies(
         )
 
         try:
-            _load_gdn_replayssm_materialize()
+            _load_gdn_replayssm_materialize(state_dtype)
         except ImportError as e:
             raise ImportError(
                 f"FlashInfer GDN ReplaySSM ({mode}) requires "
@@ -159,8 +155,8 @@ def run_gdn_replayssm(
 ) -> torch.Tensor:
     """Pack rows, invoke FlashInfer, and return only real-token outputs.
 
-    STP receives one real row per request. The adapter supplies FlashInfer's
-    four-token input buffer: one real token followed by three zero rows.
+    BF16 STP receives one real token followed by three zero input positions.
+    FP16 UMMA receives the executed width, including one for standard decoding.
     vLLM publishes cursors once per model step, after every layer runs.
     """
     if executed_query_width not in (1, 4, 8):
@@ -179,18 +175,16 @@ def run_gdn_replayssm(
         raise ValueError(
             "FlashInfer GDN ReplaySSM requires bfloat16 inputs and BF16 or FP16 state"
         )
-    if checkpoint_state.dtype == torch.float16 and executed_query_width == 1:
-        raise ValueError("FP16 GDN ReplaySSM requires speculative decoding")
-
-    # Native STP's public contract is T=1, but its serving fast path consumes a
+    native_stp = executed_query_width == 1 and checkpoint_state.dtype == torch.bfloat16
+    # BF16 STP's public contract is T=1, but its serving fast path consumes a
     # caller-owned zero-padded T=4 buffer. Packing a shared QKV allocation here
     # preserves the common token stride required by block-strided cache pools.
-    packed_width = 4 if executed_query_width == 1 else executed_query_width
-    uniform = executed_query_width > 1 and uniform_query_length == packed_width
+    packed_width = 4 if native_stp else executed_query_width
+    uniform = not native_stp and uniform_query_length == packed_width
     # STP metadata permits only zero or one token per row. Eager zero-length
     # rows use the packer's fallback. Captured padding can have input storage;
     # its negative state index makes FlashInfer skip that row.
-    single_token = executed_query_width == 1
+    single_token = native_stp
     packed_qkv = pack_replayssm_rows(
         mixed_qkv,
         query_start_loc,
@@ -208,7 +202,7 @@ def run_gdn_replayssm(
     # eight. Give each gate its own aligned allocation instead.
     # The MTP kernel advances every padded lane. Make those lanes exact
     # recurrent no-ops: a=-inf gives zero decay after softplus(a + dt_bias),
-    # while zero q/k/v and b give a zero state update. STP has no ragged real
+    # while zero q/k/v and b give a zero state update. BF16 STP has no ragged real
     # rows, so only invalid graph-padding requests can be padded here; their
     # negative state index skips the kernel CTA. STP requires three zero
     # input rows after the real token. It returns and commits only that token.
@@ -217,7 +211,7 @@ def run_gdn_replayssm(
         query_start_loc,
         packed_width,
         offsets,
-        padding_value=0.0 if executed_query_width == 1 else -torch.inf,
+        padding_value=0.0 if native_stp else -torch.inf,
         uniform=uniform,
         single_token=single_token,
     )
@@ -259,7 +253,7 @@ def run_gdn_replayssm(
         kernel = check_gdn_replayssm_dependencies(
             executed_query_width, False, checkpoint_state.dtype
         )
-    if executed_query_width == 1:
+    if native_stp:
         # STP updates these cursor copies. Every layer must start from the
         # same pre-step values; model-wide postprocess publishes the update.
         mode_kwargs = {"prepadded": True}

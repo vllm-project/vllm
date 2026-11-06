@@ -57,12 +57,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self.replayssm_ring_slots: int | None = None
         if self.use_replayssm:
             self.replayssm_executed_query_width, self.replayssm_ring_slots = (
-                gdn_replayssm_geometry(self.num_spec)
+                gdn_replayssm_geometry(self.num_spec, self.get_state_dtype()[1])
             )
         if self.replayssm_executed_query_width is not None:
-            # STP accepts four input positions: one real token and three zeros.
+            # BF16 STP accepts one real token and three zero input positions.
             # These offsets pack token inputs; they are not replay-ring cursors.
-            packed_width = max(self.replayssm_executed_query_width, 4)
+            packed_width = (
+                4
+                if self.replayssm_ring_slots == 16
+                else self.replayssm_executed_query_width
+            )
             self.register_buffer(
                 "_replayssm_offsets",
                 torch.arange(packed_width, dtype=torch.int32),

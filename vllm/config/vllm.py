@@ -4046,15 +4046,13 @@ class VllmConfig:
                         "FP16 GDN ReplaySSM does not support "
                         "--enable-mamba-cache-stochastic-rounding"
                     )
-                if self.num_speculative_tokens == 0:
-                    raise ValueError("FP16 GDN ReplaySSM requires speculative decoding")
                 if (
-                    self.cache_config.mamba_cache_mode != "none"
-                    or self.cache_config.enable_prefix_caching
+                    self.cache_config.mamba_cache_mode == "align"
+                    and os.environ.get("GDN_UCACHE_STATE_DTYPE") != "fp16"
                 ):
                     raise ValueError(
-                        "FP16 GDN ReplaySSM requires --mamba-cache-mode=none "
-                        "and disabled prefix caching"
+                        "FP16 GDN ReplaySSM prefix materialization requires "
+                        "GDN_UCACHE_STATE_DTYPE=fp16 before process startup"
                     )
             # These execution modes need additional tracker lifecycle support.
             if self.parallel_config.pipeline_parallel_size > 1:

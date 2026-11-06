@@ -256,7 +256,6 @@ def _warm_gdn_replayssm_materializer(
     if runner.vllm_config.cache_config.mamba_cache_mode != "align":
         return
 
-    materialize = _load_gdn_replayssm_materialize()
     warmed: set[tuple[Any, ...]] = set()
     for module in runner.get_model().modules():
         if not getattr(module, "use_flashinfer_replayssm", False) or getattr(
@@ -279,6 +278,7 @@ def _warm_gdn_replayssm_materializer(
         )
         if signature in warmed:
             continue
+        materialize = _load_gdn_replayssm_materialize(state.dtype)
         warmed.add(signature)
         inactive = torch.full(
             (max_num_reqs,), -1, dtype=torch.int32, device=state.device

@@ -91,23 +91,28 @@ CPU metadata builder determines the output indices.
 Set `enable_adaptive_verification` to `false` in the speculative configuration.
 Prefix caching requires `--mamba-cache-mode align`.
 
-Standard decoding requires `gated_delta_rule_stp_ucache_flush`. Speculative
+BF16 standard decoding requires `gated_delta_rule_stp_ucache_flush`. Speculative
 decoding requires `gated_delta_rule_mtp_ucache_flush`, available in FlashInfer
 0.7.2.post1. Prefix caching also requires `gdn_prefix_materialize`, available in
-FlashInfer 0.7.3. The STP API is not included in either release, so standard
+FlashInfer 0.7.3. The STP API is not included in either release, so BF16 standard
 decoding requires a compatible provider build. This integration does not install
 missing kernels or change FlashInfer.
 
 Set `SGLANG_GDN_WY_STRIDED_QKV=1` before process startup. FlashInfer reads this
 setting when its kernel module is imported; setting it later is insufficient.
 
-For speculative decoding on SM100-class GPUs, set
+For standard or speculative decoding on SM100-class GPUs, set
 `--mamba-ssm-cache-dtype float16` to select FlashInfer 0.7.3's direct UMMA API.
 Keep model activations and convolution state in BF16. This path supports at most
-four value heads per key head. It requires `--mamba-cache-mode none` and disabled
-prefix caching. FP16 standard decoding, prefix materialization, and Mamba cache
-stochastic rounding are unsupported.
-The state and rings retain the existing paged allocation.
+four value heads per key head. It uses a 32-slot ring for both decoding modes.
+The state and rings retain the existing paged allocation. Mamba cache stochastic
+rounding is unsupported.
+
+For FP16 prefix caching, use `--mamba-cache-mode align` and enable prefix caching.
+Set `GDN_UCACHE_STATE_DTYPE=fp16` before process startup in each worker environment.
+FlashInfer selects the materializer's state dtype during import. Changing the
+environment after import does not change that dtype. BF16 prefix caching requires
+the default BF16 materializer, so use separate processes for different state dtypes.
 
 ## Notes
 

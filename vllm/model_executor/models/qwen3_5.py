@@ -428,7 +428,9 @@ class Qwen3_5ForCausalLMBase(
         )
 
         if vllm_config.is_gdn_replayssm_enabled():
-            _, ring_slots = gdn_replayssm_geometry(num_spec)
+            _, ring_slots = gdn_replayssm_geometry(
+                num_spec, cls.get_mamba_state_dtype_from_config(vllm_config)[1]
+            )
             shapes += MambaStateShapeCalculator.gated_delta_net_replayssm_ring_shapes(
                 tp_size,
                 hf_config.linear_num_key_heads,

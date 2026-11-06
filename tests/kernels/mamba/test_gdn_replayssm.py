@@ -14,10 +14,13 @@ from vllm.model_executor.layers.mamba.gdn.replayssm import (
     pack_replayssm_rows,
     run_gdn_replayssm,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    _load_gdn_replayssm_materialize,
+)
 
 
 @pytest.mark.parametrize(
-    "width,mode", [(1, "stp"), (4, "mtp"), (8, "mtp"), (4, "umma")]
+    "width,mode", [(1, "stp"), (4, "mtp"), (8, "mtp"), (1, "umma"), (4, "umma")]
 )
 def test_dependencies_import_only_selected_decode_api(monkeypatch, width, mode):
     """An MTP-only FlashInfer installation must not need the STP module."""
@@ -47,6 +50,37 @@ def test_dependencies_import_only_selected_decode_api(monkeypatch, width, mode):
         assert check_gdn_replayssm_dependencies(width, False, state_dtype) is kernel
     finally:
         check_gdn_replayssm_dependencies.cache_clear()
+
+
+@pytest.mark.parametrize("loaded_dtype", [torch.bfloat16, torch.float16])
+def test_materializer_rejects_dtype_change_after_import(monkeypatch, loaded_dtype):
+    """Changing the environment cannot change an imported provider's state dtype."""
+    provider = ModuleType("provider")
+    materialize = lambda **kwargs: None
+    monkeypatch.setattr(provider, "gdn_prefix_materialize", materialize, raising=False)
+    monkeypatch.setattr(provider, "state_ty_torch", lambda: loaded_dtype, raising=False)
+    original_import = builtins.__import__
+
+    def import_provider(name, *args, **kwargs):
+        if name == "flashinfer.gdn_kernels.gdn_prefix_materialize":
+            return provider
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_provider)
+    _load_gdn_replayssm_materialize.cache_clear()
+    try:
+        assert _load_gdn_replayssm_materialize(loaded_dtype) is materialize
+        requested_dtype = (
+            torch.float16 if loaded_dtype == torch.bfloat16 else torch.bfloat16
+        )
+        monkeypatch.setenv(
+            "GDN_UCACHE_STATE_DTYPE",
+            "fp16" if requested_dtype == torch.float16 else "bf16",
+        )
+        with pytest.raises(ValueError, match="before process startup"):
+            _load_gdn_replayssm_materialize(requested_dtype)
+    finally:
+        _load_gdn_replayssm_materialize.cache_clear()
 
 
 def test_pack_replayssm_rows_preserves_tokens_and_masks_padding():
@@ -189,6 +223,7 @@ def _reconstruct_replayssm_state(
         (4, 4, 2, torch.bfloat16),
         (8, 6, 4, torch.bfloat16),
         (8, 8, 4, torch.bfloat16),
+        (1, 1, 1, torch.float16),
         (4, 3, 2, torch.float16),
         (8, 6, 4, torch.float16),
     ],
@@ -212,7 +247,8 @@ def test_gdn_replayssm_output_and_accepted_state(
     pytest.importorskip(f"flashinfer.gdn_kernels.{module}")
     device, dtype = torch.device("cuda"), torch.bfloat16
     generator = torch.Generator(device=device).manual_seed(20260909 + width)
-    ring_slots = 16 if width == 1 else 32
+    native_stp = width == 1 and state_dtype == torch.bfloat16
+    ring_slots = 16 if native_stp else 32
 
     def random_tensor(*shape):
         return torch.randn(*shape, generator=generator, device=device).to(dtype)
@@ -236,6 +272,8 @@ def test_gdn_replayssm_output_and_accepted_state(
     pages[0].fill_(17)  # Nonzero canaries catch writes to the padding page.
     checkpoint.copy_(random_tensor(2, 2, 128, 128) * 0.03)
     ring_start = torch.zeros(2, dtype=torch.int32, device=device)
+    if width == 1 and not native_stp:
+        ring_start[1] = 24  # Cross the UMMA ring boundary before the first flush.
     committed = torch.zeros_like(ring_start)
     A_log = torch.nn.Parameter(torch.full((2,), -3.0, device=device))
     dt_bias = torch.nn.Parameter(random_tensor(2) * 0.2)
@@ -342,7 +380,7 @@ def test_gdn_replayssm_output_and_accepted_state(
             dt_bias,
         )
         old_committed = int(committed[1].item())
-        if width == 1:
+        if native_stp:
             committed[1] = 0 if old_committed >= 15 else old_committed + 1
         elif old_committed + width > 16:
             ring_start[1] = (ring_start[1] + old_committed) % ring_slots
