@@ -24,7 +24,7 @@ vLLM currently supports the following reasoning models:
 | [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
-| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | `json`, `regex` | ❌ |
 | [IBM Granite 4.2 language models](https://huggingface.co/ibm-granite/granite-4.2-30b) | `granite_thinking_parser` | `json`, `regex` | ✅ |
 | [Kolibri 1](https://huggingface.co/Aleph-Alpha/Kolibri-1) | `hf` | `json`, `regex` | ✅ |
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
