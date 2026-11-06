@@ -667,6 +667,38 @@ def test_config_capping_and_explicit_limits():
     assert cfg_explicit_16k.model_config.max_model_len == 16384
 
 
+def _update_matryoshka_config(**hf_config_fields):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.config import EmbeddingGemma2ModelConfig
+
+    hf_config = SimpleNamespace(**hf_config_fields)
+    EmbeddingGemma2ModelConfig.verify_and_update_model_config(
+        SimpleNamespace(hf_config=hf_config)
+    )
+    return hf_config
+
+
+def test_sets_matryoshka_dimensions_from_model_card():
+    assert _update_matryoshka_config().matryoshka_dimensions == [128, 256, 512, 768]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"matryoshka_dimensions": [768, 256]},
+        {"matryoshka_dimensions": None},
+        {"is_matryoshka": True},
+        {"is_matryoshka": False},
+    ],
+)
+def test_keeps_declared_matryoshka_config(fields):
+    hf_config = _update_matryoshka_config(**fields)
+    assert getattr(hf_config, "matryoshka_dimensions", None) == fields.get(
+        "matryoshka_dimensions"
+    )
+
+
 def test_sentence_transformer_tokenizer_config_max_seq_length(tmp_path):
     """Verify get_sentence_transformer_tokenizer_config accepts config
     with only max_seq_length.
