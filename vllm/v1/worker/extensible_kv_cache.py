@@ -110,9 +110,6 @@ class ExtensibleKVCache:
         # Bytes torch's caching allocator may reserve, set once the cache is
         # sized; None leaves it unlimited.
         self.torch_memory_limit: int | None = None
-        # Free memory the platform added at the final sizing, which later
-        # free-memory checks reuse.
-        self.free_memory_correction = 0
         self.buffer = ExtensibleTensor(
             self.size,
             device=device,
@@ -583,9 +580,7 @@ def measure_kv_cache_blocks(
     torch.accelerator.synchronize()
     gc.collect()
     torch.accelerator.empty_cache()
-    free_memory, kv_cache.free_memory_correction = (
-        current_platform.corrected_free_memory(device, kv_cache.physical_bytes)
-    )
+    free_memory = current_platform.free_device_memory(device)
     transient_peak = kv_cache.reserved_headroom_bytes
     available = measure_kv_cache_bytes(
         init_free_memory=init_free_memory,
@@ -686,8 +681,7 @@ def _release_for_weight_update(
     layer_bytes = max_layer_reload_bytes(model)
     needed = WEIGHT_UPDATE_PEAK_LAYER_FACTOR * layer_bytes
     free = (
-        device_memory_info()[0]
-        + kv_cache.free_memory_correction
+        current_platform.free_device_memory()
         + torch.accelerator.memory_reserved()
         - torch.accelerator.memory_allocated()
     )

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The exact device memory count and the free memory correction on a real
-ROCm GPU. The sysfs lookup and the correction's arithmetic are tested without
-a GPU in tests/utils_/test_rocm_vram_lookup.py."""
+"""Free memory by the exact device memory count on a real ROCm GPU. The sysfs
+lookup is tested without a GPU in tests/utils_/test_rocm_vram_lookup.py."""
 
 import ctypes
 import subprocess
@@ -30,6 +29,17 @@ def _used() -> int:
     assert path is not None
     with open(path) as f:
         return int(f.read())
+
+
+def _exact_free() -> int:
+    free = rocm_device_memory.exact_free_memory(DEVICE)
+    assert free is not None
+    return free
+
+
+def _hidden() -> int:
+    """Free memory the exact count shows and HIP's free memory does not."""
+    return _exact_free() - torch.accelerator.get_memory_info(DEVICE)[0]
 
 
 @pytest.fixture
@@ -94,9 +104,9 @@ def code_objects():
 def test_code_objects_are_added_back(exact_count, code_objects):
     """200 code objects of a few KB, each counted as at least 2 MB, are added
     back; another process taking 1 GB meanwhile is not."""
-    rocm_device_memory.record_memory_baseline(DEVICE)
+    hidden_before = _hidden()
     code_objects(200)
-    free_alone, added_alone = rocm_device_memory.corrected_free_memory(DEVICE, 0)
+    free_alone, added_alone = _exact_free(), _hidden() - hidden_before
     assert added_alone > 200 * MB
 
     child = subprocess.Popen(
@@ -116,7 +126,7 @@ def test_code_objects_are_added_back(exact_count, code_objects):
     try:
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "ready"
-        free_shared, added_shared = rocm_device_memory.corrected_free_memory(DEVICE, 0)
+        free_shared, added_shared = _exact_free(), _hidden() - hidden_before
     finally:
         assert child.stdin is not None
         child.stdin.close()
@@ -129,11 +139,10 @@ def test_code_objects_are_added_back(exact_count, code_objects):
 
 def _corrected_target(code_objects) -> int:
     """Corrected free memory after loading code objects, less 256 MB."""
-    rocm_device_memory.record_memory_baseline(DEVICE)
+    hidden_before = _hidden()
     code_objects(200)
-    free, added = rocm_device_memory.corrected_free_memory(DEVICE, 0)
-    assert added > 200 * MB
-    return free - 256 * MB
+    assert _hidden() - hidden_before > 200 * MB
+    return _exact_free() - 256 * MB
 
 
 @pytest.mark.optional

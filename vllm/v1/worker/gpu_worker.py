@@ -596,7 +596,8 @@ class Worker(WorkerBase):
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             if self.cache_config.enable_extensible_kv_cache:
-                current_platform.record_memory_baseline(self.device)
+                # Read as the final sizing reads the free memory it compares.
+                self.init_free_memory = current_platform.free_device_memory(self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
@@ -1321,7 +1322,7 @@ class Worker(WorkerBase):
                     kv_cache,
                     self.vllm_config,
                     self.device,
-                    init_free_memory=self.init_snapshot.free_memory,
+                    init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
                 )
             )

@@ -1,16 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Finding amdgpu's exact VRAM counter from KFD topology and DRM sysfs, and
-the free memory correction computed from it. Plain files and readings, so
-this runs without a GPU."""
+"""Finding amdgpu's exact VRAM counter from KFD topology and DRM sysfs. Plain
+files in a temporary directory, so this runs without a GPU."""
 
 import pytest
 
-from vllm.platforms.rocm_device_memory import (
-    DeviceMemoryReading,
-    find_vram_used_file,
-    free_memory_correction,
-)
+from vllm.platforms.rocm_device_memory import find_vram_used_file
 
 GB = 1 << 30
 # torch's ROCm UUID holds the KFD unique_id 0x13a691b49a73a35c as ASCII hex.
@@ -136,39 +131,3 @@ def test_vram_total_must_match_hip(root, vram_total, found):
 def test_no_kfd_topology(tmp_path):
     path, reason = _find(tmp_path)
     assert path is None and "no KFD topology" in reason
-
-
-# A 16 GB device. At startup 1.5 GB is used exactly and 2 GB as free memory
-# implies, a gap of -0.5 GB; torch has 1 GB reserved.
-BASELINE = DeviceMemoryReading(
-    used=3 * GB // 2, free=14 * GB, total=16 * GB, torch_reserved=GB
-)
-
-
-def _now(used, free, torch_reserved=2 * GB):
-    return DeviceMemoryReading(used, free, 16 * GB, torch_reserved)
-
-
-@pytest.mark.parametrize(
-    ("baseline", "current", "correction"),
-    [
-        # Free memory implies 10 GB used, the exact count 7.5 GB: the gap fell
-        # by 2 GB since startup, which free memory over-counts.
-        (BASELINE, _now(15 * GB // 2, 6 * GB), 2 * GB),
-        # Another process took 1 GB meanwhile, which changes both alike.
-        (BASELINE, _now(17 * GB // 2, 5 * GB), 2 * GB),
-        # The gap rose (an erase still pending): never below free memory.
-        (BASELINE, _now(21 * GB // 2, 6 * GB), 0),
-        # The exact count grew less than this process's 1 GB of torch growth
-        # and 1 GB outside torch: memory left VRAM or was freed meanwhile.
-        (BASELINE, _now(5 * GB // 2, 6 * GB), 0),
-        # Never more than the exact count leaves free (16 - 9.5 - 6 = 0.5).
-        (
-            DeviceMemoryReading(3 * GB, 14 * GB, 16 * GB, GB),
-            _now(19 * GB // 2, 6 * GB),
-            GB // 2,
-        ),
-    ],
-)
-def test_free_memory_correction(baseline, current, correction):
-    assert free_memory_correction(baseline, current, untracked_bytes=GB) == (correction)

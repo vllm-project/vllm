@@ -1280,14 +1280,9 @@ class RocmPlatform(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def record_memory_baseline(cls, device: torch.device) -> None:
-        rocm_device_memory.record_memory_baseline(device)
-
-    @classmethod
-    def corrected_free_memory(
-        cls, device: torch.device, untracked_bytes: int
-    ) -> tuple[int, int]:
-        return rocm_device_memory.corrected_free_memory(device, untracked_bytes)
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        free = rocm_device_memory.exact_free_memory(device)
+        return super().free_device_memory(device) if free is None else free
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
