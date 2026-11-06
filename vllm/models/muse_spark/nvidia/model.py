@@ -70,6 +70,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -1971,8 +1974,12 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
         ModelOptNvFp4Config,
+        OnlineQuantizationConfig,
     )
-    supported_quantization_description = "NVFP4 (modelopt_fp4)"
+    supported_quantization_description = (
+        "NVFP4 (modelopt_fp4) or online FP8 routed experts "
+        "(quantization_config={'moe': 'fp8_per_channel'})"
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -2003,6 +2010,16 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 f"{self.supported_quantization_description} quantized checkpoints; "
                 "got quantization "
                 f"{vllm_config.quant_config.get_name()!r}."
+            )
+        if isinstance(vllm_config.quant_config, OnlineQuantizationConfig) and (
+            vllm_config.quant_config.args.linear is not None
+            or vllm_config.quant_config.args.targets is not None
+        ):
+            # Attention, dense, router and lm_head stay BF16.
+            raise NotImplementedError(
+                "Muse Spark online quantization covers the routed experts only: "
+                "pass quantization_config={'moe': 'fp8_per_channel'} without "
+                "'linear' or 'targets'."
             )
         if layer_type is None:
             layer_type = self.decoder_layer_cls

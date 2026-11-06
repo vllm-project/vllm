@@ -216,6 +216,9 @@ llm = LLM(
 )
 ```
 
+!!! note
+    Muse Spark Open on NVIDIA supports online quantization of its routed experts only: serve the BF16 checkpoint with `--quantization online --quantization-config '{"moe": "fp8_per_channel"}'`. Attention, dense layers, the router and `lm_head` stay BF16, and a config that sets `linear` or `targets` is rejected.
+
 ### Excluding Layers from Quantization
 
 Use the `ignore` parameter to skip specific layers. It accepts exact layer names, regex patterns (prefixed with `re:`), and patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch):
