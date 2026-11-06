@@ -3197,9 +3197,9 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
-  - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  # tp=2 and pp=2 with torchrun: no longer supported with MRV2
   - TP_SIZE=4 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
-  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # tp=2, pp=2 and dp=1 with torchrun: no longer supported with MRV2
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   # Loading weights from the shared HF cache can exceed the default 300s --timeout.
