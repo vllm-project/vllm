@@ -197,10 +197,13 @@ def deferred_commit(ctx, accepted, slots, starts, rows, pending, window):
 
 def check(layer, verify, inputs, slots, starts, ones, accepted, window):
     """One deferred step of a layer against the commit then the verify of the
-    model's path, from the same checkpoint and records."""
+    model's path, from the same checkpoint and records (the conv weight in FP32
+    on both sides)."""
     x, beta, f_a, gate = inputs
     batch = slots.shape[0]
     expected_layer = clone_layer(layer)
+    # The CuTe conv multiplies in FP32; Triton's rounds BF16 x BF16 products.
+    expected_layer.conv_weight = layer.conv_weight.float()
     ctx = KDARecoverSSMCommitContext.create(
         [expected_layer], spec_query_len=window, max_num_reqs=batch
     )
