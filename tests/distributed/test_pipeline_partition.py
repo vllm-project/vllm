@@ -36,6 +36,9 @@ def test_custom_layer_partition(monkeypatch: pytest.MonkeyPatch):
         # Wrong number of layers
         with pytest.raises(ValueError):
             _verify("5,5,5,5", 21, 4, [(0, 5), (5, 10), (10, 15), (15, 20)])
+        # Negative layer count
+        with pytest.raises(ValueError):
+            _verify("-1,5", 4, 2, [(0, -1), (-1, 4)])
 
 
 @pytest.mark.parametrize(

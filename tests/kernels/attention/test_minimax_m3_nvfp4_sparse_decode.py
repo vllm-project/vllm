@@ -419,3 +419,148 @@ def test_o_proj_mxfp8_handoff_needs_kernel_and_mxfp8_o_proj(monkeypatch):
         _o_proj_mxfp8=None, impl=SimpleNamespace(), o_proj=None, layer_name="layer"
     )
     assert emits(no_kernel) is False
+
+
+def test_xcd_splits_table():
+    """Splits of the XCD-aware grid: 4 up to 8 requests (one per XCD) and for
+    17-24, 2 for 9-16, the cost model beyond and off the tuned shape."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    got = [host._xcd_splits(n, 8, 16, 8, 1) for n in (1, 5, 8, 9, 16, 17, 24, 25)]
+    assert got == [4, 4, 4, 2, 2, 4, 4, None]
+    assert host._xcd_splits(5, 8, 16, 4, 1) is None  # DSpark 3: not tuned
+    assert host._xcd_splits(5, 0, 16, 8, 1) is None  # no XCD-aware grid
+    assert host._xcd_splits(5, 8, 32, 8, 1) is None  # other top-k width
+    assert host._xcd_splits(5, 8, 16, 8, 2) is None  # TP2: over-splits
+    assert host._xcd_splits(5, 8, 16, 8, 4) is None  # TP1: over-splits
+
+
+@pytest.mark.parametrize("num_reqs", [1, 3, 5, 8, 9, 12, 16, 17, 24, 40])
+@pytest.mark.parametrize("ctx", [30000, 500000])
+def test_default_splits_match_unsplit(num_reqs, ctx):
+    """The default split count agrees with the unsplit kernel (the summation
+    order is the only difference) and repeats bitwise, at DSpark 7 batch sizes."""
+    torch.manual_seed(num_reqs)
+    lens = torch.randint(ctx * 6 // 10, ctx * 14 // 10 + 1, (num_reqs,)).tolist()
+    table, num_blocks = _block_table(lens)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    topk = _selections(lens, 8)
+    cache = torch.randint(
+        0, 256, (num_blocks, 2, BLOCK, 72), dtype=torch.uint8, device="cuda"
+    )
+    for side in range(2):
+        sf = cache.view(num_blocks, -1)[:, side * 9216 + 8192 : (side + 1) * 9216]
+        sf.masked_fill_((sf & 0x7F) == 0x7F, 0x38)  # no NaN scales
+    q = (torch.randn(num_reqs * 8, GROUP, D, device="cuda") * 0.05).bfloat16()
+    out = _decode(q, cache, topk, table, seq_lens, 8)
+    unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
+    assert torch.isfinite(out).all()
+    assert _rel(out, unsplit) < 3e-3
+    assert torch.equal(out, _decode(q, cache, topk, table, seq_lens, 8))
+
+
+def _default_split_case(num_kv_heads, num_reqs):
+    """A decode batch with padding requests (seq_len 0) for the default-splits tests."""
+    torch.manual_seed(num_reqs)
+    lens = [0 if r % 3 == 2 else 20000 + 700 * r for r in range(num_reqs)]
+    live = [max(s, 1) for s in lens]
+    table, num_blocks = _block_table(live)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    topk = _selections(live, 8, num_kv_heads)
+    cache = _nvfp4_cache(num_blocks, _scales(), num_kv_heads)
+    q = (
+        torch.randn(num_reqs * 8, GROUP * num_kv_heads, D, device="cuda") * 0.05
+    ).bfloat16()
+    return q, cache, topk, table, seq_lens
+
+
+def _record_kernels(monkeypatch, host):
+    """The (splits, topk, xcds) of every kernel the default path compiles."""
+    chosen = []
+    real = host._get_kernel
+
+    def record(*args):
+        chosen.append(args)
+        return real(*args)
+
+    monkeypatch.setattr(host, "_get_kernel", record)
+    return chosen
+
+
+@pytest.mark.parametrize(
+    "queried, gfx950, expected",
+    [(8, True, 8), (4, True, 0), (2, True, 0), (0, True, 0), (8, False, 0)],
+)
+def test_xcd_grid_needs_the_tuned_topology(monkeypatch, queried, gfx950, expected):
+    """The XCD-aware grid is on only for 8 XCDs on gfx950: a DPX/QPX partition
+    of the same GPU reports fewer and keeps the grid off."""
+    import vllm.platforms.rocm as rocm
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    monkeypatch.setattr(host, "_query_xcd_count", lambda device_index: queried)
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: gfx950)
+    host._xcd_count.cache_clear()
+    try:
+        assert host._xcd_count(0) == expected
+    finally:
+        host._xcd_count.cache_clear()
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize("num_reqs", [1, 9, 40])
+def test_default_splits_without_the_xcd_grid(monkeypatch, num_kv_heads, num_reqs):
+    """On a device without the 8-XCD topology (e.g. a DPX partition) the default
+    path uses the cost model on a plain grid and agrees with the unsplit kernel."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    monkeypatch.setattr(host, "_xcd_count", lambda device_index: 0)
+    q, cache, topk, table, seq_lens = _default_split_case(num_kv_heads, num_reqs)
+    chosen = _record_kernels(monkeypatch, host)
+    out = _decode(q, cache, topk, table, seq_lens, 8)
+
+    rows = num_reqs * 8
+    expected = host.decode_splits(rows * num_kv_heads, 16, host.cu_count(q.device))
+    if rows * num_kv_heads > host.MAX_SPLIT_ROWS:
+        expected = 1
+    assert chosen == [(expected, 16, 0)]
+    unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
+    real_rows = (seq_lens.repeat_interleave(8) > 0).cpu()
+    assert torch.isfinite(out).all()
+    assert (out[~real_rows] == 0).all()
+    assert _rel(out[real_rows], unsplit[real_rows]) < 3e-3
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 16, 17, 24, 40])
+def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
+    """The default split count is the XCD table at one KV head per rank and the
+    cost model otherwise, counted over every request including padding
+    (seq_len 0), and agrees with the unsplit kernel."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    # The table is tuned for the full 8-XCD device; partitioned (DPX/QPX)
+    # devices report fewer XCDs and run the default path without the XCD grid.
+    if host._xcd_count(torch.accelerator.current_device_index()) != 8:
+        pytest.skip("needs an 8-XCD device")
+    q, cache, topk, table, seq_lens = _default_split_case(num_kv_heads, num_reqs)
+    chosen = _record_kernels(monkeypatch, host)
+    out = _decode(q, cache, topk, table, seq_lens, 8)
+
+    xcds = host._xcd_count(q.device.index)
+    rows = num_reqs * 8
+    expected = host._xcd_splits(num_reqs, xcds, 16, 8, num_kv_heads)
+    if expected is None:
+        expected = host.decode_splits(rows * num_kv_heads, 16, host.cu_count(q.device))
+    grid_x = -(-rows // (xcds * 8)) * xcds * 8
+    if grid_x * num_kv_heads > host.MAX_SPLIT_ROWS:
+        expected = 1
+    assert chosen == [(expected, 16, xcds)]
+    if num_kv_heads == 1:
+        table_splits = {1: 4, 5: 4, 8: 4, 9: 2, 16: 2, 17: 4, 24: 4}
+        assert expected == table_splits.get(num_reqs, expected)
+
+    unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
+    real_rows = (seq_lens.repeat_interleave(8) > 0).cpu()
+    assert torch.isfinite(out).all()
+    assert (out[~real_rows] == 0).all()
+    assert _rel(out[real_rows], unsplit[real_rows]) < 3e-3
