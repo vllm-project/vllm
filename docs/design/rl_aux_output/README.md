@@ -34,7 +34,8 @@ The trainer replays a row to reproduce the computation that produced a sampled t
 - **Engine events need explicit handling, and each was found and fixed by test.** Preemption, in-flight weight updates (`pause` + `reset_prefix_cache`), write failures, prefix hits that end mid-block, forks, and speculative decoding each break a naive implementation; the protocol lists what the engine does in each case.
 - **Verify against an independent reference.** For prefix-hit positions the engine's own inline rows are read back from the same store, so "delivered = inline" cannot see delivery errors there. Correctness is checked against each trajectory's own first computation, dumped by the engine.
 - **Sizes on DeepSeek-V4.1-Flash.** R3 480 B/token; indexer 16 KB raw, 2.5–3.6 KB after 20-bit packing and zstd; hidden ~5 KB as fp8 (full-vocabulary KL < 1e-3).
-- **At scale.** 512K context, 108 turns, 13 replicas on one shared Mooncake pool over RDMA: 0 missing and 0 wrong of 3.48e8 rows. With 8 replicas, delivering through Mooncake costs the engine nothing measurable compared with the engine-local store; every hop is far below its NIC and memory ceilings. The one slow hop is decoding the indexer on the trainer's CPU, which must move to the GPU.
+- **At scale.** 512K context, 108 turns, 13 replicas on one shared Mooncake pool over RDMA: 0 missing and 0 wrong of 3.48e8 rows. Every hop is far below its NIC and memory ceilings; the one slow hop was decoding the indexer on the trainer's CPU, now on the GPU.
+- **Engine overhead.** Relative to R3 off, R3 as built costs 22% of throughput on DeepSeek-V4.1, nearly all of it from running every prefill row through the replay layers. Keeping the replay trim for rows already in the pool brings this to 5.4%, and to 10.7% with indexer and hidden states delivered through Mooncake, with identical rows and tokens. Measured on one node; the fix is not yet on this branch.
 
 ## Status
 
