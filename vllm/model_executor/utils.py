@@ -76,14 +76,17 @@ def _is_integrated_gpu(device: torch.device) -> bool:
     return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
 
 
+_E8M0_AND_UINT8 = {torch.float8_e8m0fnu, torch.uint8}
+
+
 def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     """`dst.copy_(src)` for weight loaders.
 
     Model-specific weight loaders should call this instead of `.copy_()` when
     copying a checkpoint tensor to the device. Off integrated GPUs it is a
-    plain `copy_`, except that `float8_e8m0fnu` (MX scales) copied into
-    `uint8` keeps its bytes: a plain `copy_` would convert the value 2^(b-127)
-    to an integer.
+    plain `copy_`, except that E8M0 scales copied between `float8_e8m0fnu`
+    and `uint8` keep their bytes: a plain `copy_` would convert the value
+    2^(b-127) to an integer, or an integer to the nearest power of two.
 
     On integrated GPUs, a host-to-device copy straight from a safetensors mmap
     takes its page faults inside the driver copy, which is several times slower
@@ -92,8 +95,8 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     a CPU temporary. Sources with at most one element are skipped: they count
     as contiguous with any stride, which `view(torch.uint8)` rejects.
     """
-    if src.dtype == torch.float8_e8m0fnu and dst.dtype == torch.uint8:
-        src = src.view(torch.uint8)
+    if {src.dtype, dst.dtype} == _E8M0_AND_UINT8:
+        src = src.view(dst.dtype)
     if (
         src.device.type == "cpu"
         and src.dtype == dst.dtype

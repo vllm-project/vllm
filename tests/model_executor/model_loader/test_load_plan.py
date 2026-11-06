@@ -546,18 +546,26 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
 def test_e8m0_scales_into_uint8_stay_direct():
     """MX scales sent as float8_e8m0fnu into a uint8 parameter: the loader's
     copy keeps their bytes, so the name is direct and holds the sent bytes."""
+    name, shape = "layer.weight_scale", (16, 32)
 
     def make():
         model = _Toy()
         model.layer = _Layer()
-        model.layer.weight_scale = _param(4, 8, dtype=torch.uint8)
+        model.layer.weight_scale = _param(*shape, dtype=torch.uint8)
         return model
 
-    shapes = {"layer.weight_scale": ((4, 8), torch.float8_e8m0fnu)}
-    model, plan = _check_plan_equals_cold_start(make, shapes)
-    assert plan.get_dest("layer.weight_scale") is not None
-    sent = _checkpoint(shapes, seed=2)["layer.weight_scale"]
-    assert torch.equal(model.layer.weight_scale, sent.view(torch.uint8))
+    def scales(seed):  # every byte value, shifted per update
+        return torch.arange(512).add(seed).remainder(256).to(torch.uint8).view(shape)
+
+    model = _cold_start(make, {name: scales(0)})
+    start_reload(model)
+    plan = _plan(model, {name: (shape, torch.float8_e8m0fnu)})
+    assert plan.get_dest(name) is not None
+    for seed in (1, 2):
+        if seed > 1:
+            start_reload(model)
+        _planned_reload(model, plan, {name: scales(seed).view(torch.float8_e8m0fnu)})
+        assert torch.equal(model.layer.weight_scale, scales(seed))
 
 
 def test_tensors_sharing_one_storage():

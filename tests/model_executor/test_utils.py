@@ -463,6 +463,22 @@ def test_copy_weight_prefault_copies_exact_bytes(
     )
 
 
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype",
+    [(torch.float8_e8m0fnu, torch.uint8), (torch.uint8, torch.float8_e8m0fnu)],
+    ids=["e8m0_into_uint8", "uint8_into_e8m0"],
+)
+def test_copy_weight_keeps_e8m0_bytes(src_dtype, dst_dtype) -> None:
+    """MX scales copied between float8_e8m0fnu and uint8 keep their bytes
+    (every value, including 0xFF = NaN), also from a non-contiguous source;
+    a by-value copy_ would turn 2^(b-127) into an integer or back."""
+    data = torch.arange(512).remainder(256).to(torch.uint8).view(16, 32)
+    src = data.view(src_dtype).t()
+    dst = torch.empty(32, 16, dtype=dst_dtype)
+    copy_weight_(dst, src)
+    assert torch.equal(dst.view(torch.uint8), data.t())
+
+
 def test_copy_weight_prefault_maps_the_mmap_view(
     prefault_on: None, tmp_path: Path
 ) -> None:
