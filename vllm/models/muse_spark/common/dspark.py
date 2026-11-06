@@ -458,6 +458,17 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             # The hook exists only here: without it the speculator may
             # batch-shard the draft logits and the sequential sampling.
             self.sample_sequential = self._sample_sequential_fused
+        # With --monokernel on ROCm, a Markov round of the speculator's
+        # sequential sampling is one launch. Batch-sharded sampling keeps its
+        # own sharded loop.
+        if (
+            current_platform.is_rocm()
+            and vllm_config.kernel_config.monokernel
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            from vllm.models.muse_spark.amd.ops import fused_markov
+
+            self.sample_sequential = fused_markov.sample_sequential  # type: ignore[assignment]
 
     def apply_output_logit_transform(self, logits: torch.Tensor) -> torch.Tensor:
         logits = logits.float() * self.output_multiplier
@@ -593,6 +604,9 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             self.model.specialized_draft = build_draft_decode(
                 self.model, self.model._compilation_mode
             )
+        if current_platform.is_rocm() and hasattr(self, "sample_sequential"):
+            # The fused rounds sample in draft ids, so they need d2t = 0.
+            self.d2t_is_identity = not self.draft_id_to_target_id.any().item()
 
 
 EntryClass = MuseSparkDSparkForCausalLM
