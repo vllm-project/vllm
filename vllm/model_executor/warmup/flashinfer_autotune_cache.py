@@ -30,7 +30,9 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
     return normalized
 
 
-def _flashinfer_mm_encoder_autotune_hash(mm_config: MultiModalConfig) -> str:
+def _flashinfer_mm_encoder_autotune_hash(
+    mm_config: MultiModalConfig, *, enable_chunked_prefill: bool = True
+) -> str:
     if mm_config.skip_mm_profiling:
         return ""
 
@@ -46,6 +48,7 @@ def _flashinfer_mm_encoder_autotune_hash(mm_config: MultiModalConfig) -> str:
     return MultiModalHasher.hash_kwargs(
         "sha256",
         encoder_config=mm_config.compute_hash(),
+        enable_chunked_prefill=enable_chunked_prefill,
         mm_processor_kwargs=sort_dicts(mm_config.mm_processor_kwargs or {}),
         limit_per_prompt=sort_dicts(
             {
@@ -56,21 +59,35 @@ def _flashinfer_mm_encoder_autotune_hash(mm_config: MultiModalConfig) -> str:
     )
 
 
+def get_flashinfer_mm_encoder_autotune_config(
+    vllm_config: VllmConfig,
+) -> MultiModalConfig | None:
+    """Return the multimodal config when encoder autotuning is enabled."""
+    model_config = vllm_config.model_config
+    if (
+        model_config is None
+        or not model_config.supports_multimodal_inputs
+        or not vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
+        or not vllm_config.use_v2_model_runner
+    ):
+        return None
+    mm_config = model_config.multimodal_config
+    if mm_config is None or mm_config.skip_mm_profiling:
+        return None
+    return mm_config
+
+
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     vllm_config: VllmConfig = runner.vllm_config
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
     config_hash = vllm_config.compute_hash(include_version=False)
-    model_config = vllm_config.model_config
-    if (
-        model_config is not None
-        and model_config.supports_multimodal_inputs
-        and vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
-        and vllm_config.use_v2_model_runner
-    ):
+    mm_config = get_flashinfer_mm_encoder_autotune_config(vllm_config)
+    if mm_config is not None:
         config_hash += _flashinfer_mm_encoder_autotune_hash(
-            model_config.get_multimodal_config()
+            mm_config,
+            enable_chunked_prefill=vllm_config.scheduler_config.enable_chunked_prefill,
         )
     return hashlib.sha256(config_hash.encode()).hexdigest()
 

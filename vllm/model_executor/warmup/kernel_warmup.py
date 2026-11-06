@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    get_flashinfer_mm_encoder_autotune_config,
     resolve_flashinfer_autotune_v2_root,
     resolve_rank_flashinfer_autotune_file,
     use_flashinfer_autotune_v2,
@@ -408,18 +409,11 @@ def _flashinfer_mm_encoder_autotune_num_items(
 def _run_flashinfer_autotune_mm_encoder(
     runner: "GPUModelRunner", *, cache_hit: bool
 ) -> None:
-    if (
-        not runner.supports_mm_inputs
-        or not runner.vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
-        or not runner.vllm_config.use_v2_model_runner
-    ):
-        return
-
     if cache_hit:
         return
 
-    mm_config = runner.model_config.multimodal_config
-    if mm_config is None or mm_config.skip_mm_profiling:
+    mm_config = get_flashinfer_mm_encoder_autotune_config(runner.vllm_config)
+    if mm_config is None:
         return
 
     from vllm.distributed.parallel_state import get_pp_group
@@ -437,11 +431,23 @@ def _run_flashinfer_autotune_mm_encoder(
     encoder_runner = cast("GPUModelRunnerV2", runner).model_state.encoder_runner
 
     for modality in budget.mm_max_toks_per_item:
+        num_profile_items = budget.mm_max_items_per_batch[modality]
         num_items = _flashinfer_mm_encoder_autotune_num_items(
-            budget.mm_max_items_per_batch[modality],
+            num_profile_items,
             mm_config,
             runner.vllm_config.parallel_config.tensor_parallel_size,
         )
+        if num_items > num_profile_items:
+            logger.warning(
+                "FlashInfer encoder autotuning rounds the %s dummy batch from "
+                "%d to %d items to split evenly across TP ranks. Unsharded "
+                "encoder modules and projectors may exceed the memory reserved "
+                "during profiling and cause a startup OOM. If this occurs, set "
+                "enable_flashinfer_mm_encoder_autotune=false in --kernel-config.",
+                modality,
+                num_profile_items,
+                num_items,
+            )
         dummy_inputs = budget.get_dummy_encoder_profile_inputs(
             modality, max_items_per_batch=num_items
         )

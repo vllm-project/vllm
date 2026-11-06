@@ -20,6 +20,7 @@ import vllm.utils.flashinfer as fi_utils
 from vllm.config import MultiModalConfig
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     _flashinfer_mm_encoder_autotune_hash,
+    get_flashinfer_mm_encoder_autotune_config,
 )
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
@@ -67,22 +68,66 @@ def test_encoder_autotune_identity_ignores_processor_cache_and_ipc(overrides):
     ) == _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
 
 
-def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_components(
-    tmp_path,
+@pytest.mark.parametrize("skip_mm_profiling", [False, True])
+def test_encoder_autotune_identity_tracks_chunked_prefill_unless_profiling_skipped(
+    skip_mm_profiling,
 ):
-    """Processor cache capacity must not change either part of the cache key."""
+    mm_config = MultiModalConfig(skip_mm_profiling=skip_mm_profiling)
+    chunked = _flashinfer_mm_encoder_autotune_hash(
+        mm_config, enable_chunked_prefill=True
+    )
+    unchunked = _flashinfer_mm_encoder_autotune_hash(
+        mm_config, enable_chunked_prefill=False
+    )
+    if skip_mm_profiling:
+        assert chunked == unchunked == ""
+    else:
+        assert chunked != unchunked
+
+
+@pytest.fixture
+def encoder_autotune_config(tmp_path):
     from transformers import Qwen2_5_VLConfig
 
     from vllm.config import DeviceConfig, KernelConfig, ModelConfig, VllmConfig
 
     Qwen2_5_VLConfig().save_pretrained(tmp_path)
-    config = VllmConfig(
+    return VllmConfig(
         model_config=ModelConfig(
             str(tmp_path), skip_tokenizer_init=True, max_model_len=512
         ),
         device_config=DeviceConfig("cpu"),
         kernel_config=KernelConfig(enable_flashinfer_mm_encoder_autotune=True),
     )
+
+
+@pytest.mark.parametrize(
+    "excluded_by", [None, "disabled", "mrv1", "skip_profiling", "no_model"]
+)
+def test_encoder_autotune_eligibility(
+    encoder_autotune_config, monkeypatch, excluded_by
+):
+    config = encoder_autotune_config
+    mm_config = config.model_config.get_multimodal_config()
+    monkeypatch.setenv(
+        "VLLM_USE_V2_MODEL_RUNNER", "0" if excluded_by == "mrv1" else "1"
+    )
+    if excluded_by == "disabled":
+        config.kernel_config.enable_flashinfer_mm_encoder_autotune = False
+    elif excluded_by == "skip_profiling":
+        mm_config.skip_mm_profiling = True
+    elif excluded_by == "no_model":
+        config.model_config = None
+
+    expected = mm_config if excluded_by is None else None
+    assert get_flashinfer_mm_encoder_autotune_config(config) is expected
+
+
+def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_components(
+    encoder_autotune_config,
+):
+    """Processor cache capacity must not change either part of the cache key."""
+    config = encoder_autotune_config
     mm_config = config.model_config.get_multimodal_config()
     config_hash = config.compute_hash(include_version=False)
     encoder_hash = _flashinfer_mm_encoder_autotune_hash(mm_config)
@@ -170,6 +215,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
         supports_mm_inputs=False,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
+            model_config=None,
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 enable_elastic_ep=False,
