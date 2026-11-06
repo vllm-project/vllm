@@ -61,10 +61,6 @@ const fn default_reset_connector() -> bool {
     true
 }
 
-fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), None)
-}
-
 /// Put the engine to sleep.
 pub async fn sleep(
     State(state): State<Arc<AppState>>,
@@ -74,7 +70,7 @@ pub async fn sleep(
         level,
         mode,
         reset_connector,
-    }) = params.map_err(invalid_query)?;
+    }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state
@@ -94,7 +90,7 @@ pub async fn release_kv_cache_memory(
     State(state): State<Arc<AppState>>,
     params: Result<Query<ReleaseKvCacheMemoryParams>, QueryRejection>,
 ) -> Result<Json<ReleaseKvCacheMemoryResponse>, ApiError> {
-    let Query(ReleaseKvCacheMemoryParams { reset_connector }) = params.map_err(invalid_query)?;
+    let Query(ReleaseKvCacheMemoryParams { reset_connector }) = params?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("release_kv_cache_memory");
     state
         .engine_core_client()

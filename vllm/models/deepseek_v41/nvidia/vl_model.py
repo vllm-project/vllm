@@ -27,9 +27,11 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -39,6 +41,7 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
+    encode_images,
     run_dp_sharded_vision_tower,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -122,6 +125,7 @@ class DeepseekV41ForCausalLM(
     SupportsEncoderCudaGraph,
     SupportsPP,
     SupportsEagle3,
+    SupportsLoRA,
 ):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
@@ -132,6 +136,15 @@ class DeepseekV41ForCausalLM(
     """
 
     supports_encoder_tp_data = True
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+    }
+
+    # The MTP draft head is not LoRA-adapted.
+    lora_skip_prefixes = ["mtp."]
 
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
@@ -220,16 +233,9 @@ class DeepseekV41ForCausalLM(
                 self.vision, self.aligner, patches, vit_grid
             )
         else:
-            image_embeds_list = []
-            vit_offset = 0
-            for n_vit_h, n_vit_w in vit_grid:
-                n_vit = n_vit_h * n_vit_w
-                image_embeds_list.append(
-                    self._encode_image(
-                        patches[vit_offset : vit_offset + n_vit], n_vit_h, n_vit_w
-                    )
-                )
-                vit_offset += n_vit
+            image_embeds_list = encode_images(
+                self.vision, self.aligner, patches, vit_grid
+            )
 
         embeds: list[torch.Tensor] = []
         span_offset = 0
@@ -324,3 +330,11 @@ class DeepseekV41ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefixes in the multimodal model."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )
