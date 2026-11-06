@@ -36,7 +36,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.utils import (
     refill_derived,
-    weights_already_processed,
 )
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -727,6 +726,26 @@ class DFlashQwen3Model(nn.Module):
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
         return all_k, all_v
 
+    def _apply_context_rope(
+        self, all_k: torch.Tensor, context_positions: torch.Tensor
+    ) -> None:
+        """Apply RoPE in place to the context K of every layer, one fused call."""
+        num_layers, num_ctx = all_k.shape[:2]
+        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
+        # In-place RoPE: pass K as the "query" arg with key=None.
+        all_k_flat = all_k.view(num_layers * num_ctx, -1)
+        cos_sin_cache = self._rope_cos_sin_cache
+        if cos_sin_cache.dtype != all_k_flat.dtype:
+            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        ops.rotary_embedding(
+            context_positions.repeat(num_layers),
+            all_k_flat,
+            None,
+            self._rope_head_size,
+            cos_sin_cache,
+            self._rope_is_neox,
+        )
+
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
@@ -757,39 +776,15 @@ class DFlashQwen3Model(nn.Module):
         When context_slot_mapping is None (e.g. during dummy_run) only
         the computation runs, and no K/V is written to cache.
         """
-        if not hasattr(self, "_num_attn_layers"):
-            logger.warning_once(
-                "DFlash buffer initialization was skipped. If dummy weights are not "
-                "in use, this may indicate an error in weight loading."
-            )
-            with weights_already_processed():
-                self._build_fused_kv_buffers()
-
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
-        kv = self._kv_size
         hd = self._head_dim
         nkv = self._num_kv_heads
 
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
 
-        # --- Fused RoPE across all layers ---
-        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-        # In-place RoPE: pass K as the "query" arg with key=None.
-        all_k_flat = all_k_normed.view(L * num_ctx, kv)
-        positions_repeated = context_positions.repeat(L)
-        cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
-            positions_repeated,
-            all_k_flat,
-            None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
-        )
+        self._apply_context_rope(all_k_normed, context_positions)
 
         if context_slot_mapping is None:
             return
@@ -799,7 +794,7 @@ class DFlashQwen3Model(nn.Module):
             all_v.mul_(v_scale)
 
         # --- Per-layer cache insert ---
-        all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        all_k_final = all_k_normed.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
         for i in range(L):
             slot_mapping = (

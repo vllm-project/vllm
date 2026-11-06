@@ -919,6 +919,12 @@ class OffloadingConnectorScheduler:
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
+        if self._sliding_window_groups:
+            # the last prompt token has to be recomputed to get the logprobs
+            # for sliding window attention, we must reduce by 1 to make sure
+            # we still have a hit after reduction. Tighter caps below are
+            # already supported boundaries and are not reduced.
+            max_hit_size_tokens -= 1
         if max_num_new_tokens is not None:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
@@ -928,16 +934,11 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens,
                 num_computed_tokens + req_status.max_load_tokens,
             )
-        if self._sliding_window_groups:
-            # the last prompt token has to be recomputed to get the logprobs
-            # for sliding window attention, we must reduce by 1 to make sure
-            # we still have a hit after reduction
-            max_hit_size_tokens -= 1
-            if self._mamba_align_size is not None:
-                # Constrain hit-window to the mamba block size.
-                max_hit_size_tokens = round_down(
-                    max_hit_size_tokens, self._mamba_align_size
-                )
+        if self._sliding_window_groups and self._mamba_align_size is not None:
+            # Constrain hit-window to the mamba block size.
+            max_hit_size_tokens = round_down(
+                max_hit_size_tokens, self._mamba_align_size
+            )
 
         num_hit_tokens: int = 0
         defer_lookup = False
@@ -1351,6 +1352,9 @@ class OffloadingConnectorScheduler:
         except Exception:
             del self._req_status[request.request_id]
             raise
+        self._events_tracker.on_new_request(
+            req_context, request, self.config.kv_group_configs
+        )
 
     def get_num_new_matched_tokens(
         self,

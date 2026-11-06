@@ -770,6 +770,54 @@ def test_default_local_buffer_size_matches_pr40900():
     assert mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
+@pytest.mark.parametrize(
+    ("store_config", "physical_gpu", "expected"),
+    [
+        ({"device_name": "mlx5_0,mlx5_1"}, None, "mlx5_0,mlx5_1"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1,rdma2"]}, 1, "rdma1,rdma2"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1"]}, 2, ValueError),
+    ],
+)
+def test_setup_passes_the_current_gpus_device_names(
+    monkeypatch, tmp_path, store_config, physical_gpu, expected
+):
+    import vllm.platforms
+
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    config = mooncake_store.MooncakeStoreConfig.from_file(str(path))
+    platform = MagicMock()
+    platform.visible_device_id_to_physical_device_id.return_value = physical_gpu
+    monkeypatch.setattr(vllm.platforms, "current_platform", platform)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    store = MagicMock()
+    store.setup.return_value = 0
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="no entry for physical GPU 2"):
+            mooncake_store.setup_mooncake_store(store, config, "host")
+        return
+    mooncake_store.setup_mooncake_store(store, config, "host")
+    assert store.setup.call_args.args[5] == expected
+    if physical_gpu is None:
+        platform.visible_device_id_to_physical_device_id.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "store_config",
+    [
+        {"device_name": "rdma0", "device_name_per_gpu": ["rdma0"]},
+        {"device_name_per_gpu": []},
+        {"device_name_per_gpu": ["rdma0", " "]},
+        {"device_name_per_gpu": "rdma0"},
+    ],
+)
+def test_device_name_per_gpu_rejects_invalid_config(tmp_path, store_config):
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    with pytest.raises(ValueError, match="device_name"):
+        mooncake_store.MooncakeStoreConfig.from_file(str(path))
+
+
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
     monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
 
@@ -3237,6 +3285,48 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
     assert keys[0] != keys[1]
 
 
+@pytest.mark.cpu_test
+def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
+    """Workers are laid out as PP x PCP x TP, so with PCP the first rank of
+    each PP stage is 0 and tp_size * pcp_size, and the stages' keys differ."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=2, pcp_size=2)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    keys = []
+    for rank in (0, 4):
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank, pipeline_parallel_size=2, tensor_parallel_size=2
+            ),
+            _make_kv_cache_config(num_kv_heads=4),
+        )
+        layout = w.token_dbs[0].store_layout
+        keys.append(layout.key_for(layout.local_shard_ids[0], BlockHash(b"h")))
+
+    assert "@pp_rank:0@" in keys[0]
+    assert "@pp_rank:1@" in keys[1]
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 @pytest.mark.parametrize("missing_group", [None, 0, 1])
 def test_hybrid_lookup_uses_each_pp_stage_schema(
@@ -5591,6 +5681,28 @@ def test_register_kv_caches_excludes_nonprefix_cacheable_layers():
     assert registered_caches[0] is full_cache
     worker.store.register_buffer.assert_called_once_with(
         full_cache.data_ptr(), full_cache.untyped_storage().nbytes()
+    )
+
+
+def test_register_kv_caches_uses_committed_block_count():
+    """An extensible KV cache creates the connector with its committed block
+    count while cache_config.num_gpu_blocks still holds the warmup size."""
+    num_blocks = 6
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    worker.cache_config.num_gpu_blocks = 16
+    store_layout = MagicMock()
+    worker.token_dbs[0].store_layout = store_layout
+    cache = torch.zeros(num_blocks, 4, dtype=torch.float16)
+
+    _register_with_mocked_threads(worker, {"layer0": cache})
+
+    registered_caches, registered_num_blocks = (
+        store_layout.register_kv_caches.call_args.args
+    )
+    assert registered_num_blocks == num_blocks
+    assert registered_caches[0] is cache
+    worker.store.register_buffer.assert_called_once_with(
+        cache.data_ptr(), cache.untyped_storage().nbytes()
     )
 
 

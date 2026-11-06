@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import functools
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -226,6 +228,70 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     assert limits == [2 * gib + left_free]
 
 
+def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch):
+    """On native UMA parts the page cache (e.g. prefetched weights) is reclaimable
+    but cudaMemGetInfo reports it as used; sizing from the raw figure left
+    a 120 GiB DGX Spark with zero KV cache blocks (vllm-project/vllm#65378)."""
+    gib = 1 << 30
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=7 * gib,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=lambda limit: None,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 20 * gib)
+    # cudaMemGetInfo: 10 GiB free of 120; the OS has 100 GiB available.
+    monkeypatch.setattr(
+        accelerator, "get_memory_info", lambda *args: (10 * gib, 120 * gib)
+    )
+    from vllm.utils import mem_utils
+
+    monkeypatch.setattr(mem_utils, "in_wsl", lambda: False)
+    monkeypatch.setattr(
+        mem_utils.current_platform, "is_integrated_gpu", lambda *args: True
+    )
+    monkeypatch.setattr(
+        mem_utils.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=100 * gib),
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=None,
+    )
+    measure = functools.partial(
+        extensible_kv_cache.measure_kv_cache_blocks,
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cuda", 0),
+        init_free_memory=110 * gib,
+        requested_memory=96 * gib,
+    )
+
+    num_blocks = measure()
+
+    # headroom 101 GiB, margin 0.75 * 7, non-KV use 110 - 100 - 1 = 9 GiB:
+    # min(96 - 9, 101 - 5.25) - 7 = 80 GiB.
+    assert num_blocks == 80
+
+    # The raw figure would have sized it to nothing.
+    monkeypatch.setattr(
+        mem_utils.current_platform, "is_integrated_gpu", lambda *args: False
+    )
+    assert measure() == 0
+
+
 def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
     """The process may start another engine, which must not inherit the cap."""
     fractions: list[float] = []
@@ -302,6 +368,67 @@ def test_pad_kv_cache_segments():
 
     config, _ = _make_config(KVCacheLayout.BLNHC)
     assert pad_kv_cache_segments(config, KVCacheLayout.BLNHC, granule) is config
+
+    # LHBNC has no per-layer segments: left alone, unless a connector needs them.
+    config, _ = _make_config(KVCacheLayout.LHBNC)
+    assert pad_kv_cache_segments(config, KVCacheLayout.LHBNC, granule) is config
+    with pytest.raises(AssertionError, match="LHBNC"):
+        pad_kv_cache_segments(
+            config, KVCacheLayout.LHBNC, granule, registers_memory=True
+        )
+
+
+def _layout_of_segments(worker):
+    kv_cache = worker.model_runner.extensible_kv_cache
+    granule = kv_cache.buffer.granularity
+    return kv_cache.segment_offsets, granule
+
+
+@requires_cuda
+def test_engine_pads_segments_without_a_connector(
+    vmm, vllm_runner, enable_pickle, monkeypatch
+):
+    """A plain engine, with no KV connector, starts each layer on a granule."""
+    # Pinned: some ROCm backends default to LHBNC, which has no per-layer segments.
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", KVCacheLayout.LBHNC.name)
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        enforce_eager=True,
+        max_model_len=256,
+    ) as runner:
+        ((offsets, granule),) = runner.llm.collective_rpc(_layout_of_segments)
+    assert len(offsets) > 1
+    assert all(offset % granule == 0 for offset in offsets)
+
+
+@requires_cuda
+@pytest.mark.parametrize("num_layers", [28, 85])
+def test_block_outermost_views_have_mapped_memory_past_their_start(vmm, num_layers):
+    """Only the null block's bytes would leave the last layer's view under 128 KiB
+    from unmapped memory: 72 KiB pages put block 0's end just below a granule."""
+    layout = KVCacheLayout.BLNHC
+    spec = MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    assert spec.page_size_bytes == 72 << 10
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    layers = [f"layer.{i}" for i in range(num_layers)]
+    config = get_kv_cache_config_from_groups(
+        vllm_config,
+        [KVCacheGroupSpec(layers, spec)],
+        available_memory=num_layers * spec.page_size_bytes * NUM_BLOCKS,
+    )
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
+    try:
+        views = allocate_kv_cache(
+            config, torch.device("cuda"), layout, allocate=kv_cache.allocate
+        )
+        last_view_start = views[layers[-1]].data_ptr() - kv_cache.buffer.base_ptr
+        granule = kv_cache.buffer.granularity
+        assert kv_cache.physical_bytes - last_view_start >= granule // 2
+    finally:
+        kv_cache.free()
 
 
 @requires_cuda
