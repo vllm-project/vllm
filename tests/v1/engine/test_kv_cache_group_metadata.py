@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import (
@@ -154,3 +156,17 @@ def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
     assert [item["block_size"] for item in metadata] == [
         manager.block_size for manager in managers
     ]
+
+
+@pytest.mark.asyncio
+async def test_async_llm_fetches_kv_cache_group_metadata_once() -> None:
+    """The metadata is static, so the frontend should only ask the engine once."""
+    expected = _make_engine_core_with_dcp_manager().get_kv_cache_group_metadata()
+    async_llm = object.__new__(AsyncLLM)
+    async_llm.engine_core = MagicMock(
+        get_kv_cache_group_metadata_async=AsyncMock(return_value=expected)
+    )
+
+    assert await async_llm.get_kv_cache_group_metadata() == expected
+    assert await async_llm.get_kv_cache_group_metadata() == expected
+    async_llm.engine_core.get_kv_cache_group_metadata_async.assert_awaited_once()
