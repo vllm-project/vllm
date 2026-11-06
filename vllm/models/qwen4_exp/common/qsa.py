@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Main-attention metadata shared by the QSA platform implementations."""
 
-from dataclasses import dataclass, replace
-from typing import ClassVar
+from dataclasses import dataclass, field, replace
+from typing import Any, ClassVar
 
 import torch
 
@@ -17,12 +17,77 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
+@dataclass(frozen=True)
+class QSAPrefillLayout:
+    """The trailing run of prefilling requests of a step, with the exact
+    host lengths an op that plans on the host needs.
+
+    Requests ``first_req`` .. the last, rows ``first_row`` .. the last; the
+    requests before them (decodes, whose lengths the host only bounds) are
+    not described. ``prefix_lens`` count the tokens already in the cache.
+    """
+
+    first_req: int
+    first_row: int
+    query_lens: tuple[int, ...]
+    prefix_lens: tuple[int, ...]
+    # Device tensors derived from this layout and a block table, shared by
+    # the layers of one step.
+    cache: dict[Any, Any] = field(
+        default_factory=dict, init=False, compare=False, repr=False
+    )
+
+    @property
+    def num_rows(self) -> int:
+        return sum(self.query_lens)
+
+
+def host_prefill_layout(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> QSAPrefillLayout | None:
+    """The step's trailing prefilling requests from host metadata only (no
+    device read), or None when the step has none or the host cannot give
+    their lengths exactly.
+
+    ``seq_lens_cpu_upper_bound`` is exact for prefilling rows (not for decode
+    rows under async spec decode), and the host query lengths of prefilling
+    rows are exact as well (``supports_device_cpu_query_lens_mismatch``), so
+    the run of prefilling requests at the end of the batch (decodes come
+    first) is described exactly. A step whose rows run past its requests
+    (padding) is not described.
+    """
+    seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
+    is_prefilling = common_attn_metadata.is_prefilling
+    if seq_lens is None or is_prefilling is None:
+        return None
+    num_reqs = common_attn_metadata.num_reqs
+    starts = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1].tolist()
+    if starts[-1] != common_attn_metadata.num_actual_tokens:
+        return None
+    prefilling = is_prefilling[:num_reqs].tolist()
+    first = num_reqs
+    while first and prefilling[first - 1]:
+        first -= 1
+    if first == num_reqs:
+        return None
+    query_lens = tuple(b - a for a, b in zip(starts[first:-1], starts[first + 1 :]))
+    prefix_lens = tuple(
+        seq - query for seq, query in zip(seq_lens[first:num_reqs].tolist(), query_lens)
+    )
+    if min(query_lens) <= 0 or min(prefix_lens) < 0:
+        return None
+    return QSAPrefillLayout(first, starts[first], query_lens, prefix_lens)
+
+
 @dataclass
 class Qwen4ExpQSAMetadata(AttentionMetadata):
     num_actual_tokens: int
     max_query_len: int
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    # Host lengths of the step's prefilling requests; set only by a platform
+    # builder whose attention op plans on them.
+    prefill_layout: QSAPrefillLayout | None = None
 
 
 class Qwen4ExpQSAMetadataBuilder(AttentionMetadataBuilder[Qwen4ExpQSAMetadata]):
