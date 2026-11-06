@@ -138,6 +138,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader import weight_utils
@@ -2550,7 +2551,11 @@ def test_online_quantization_targets_ignore_collision() -> None:
             "weight_only",
         ),
         (QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel"}), "w8a8"),
-        (QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"}), "per_tensor"),
+        (QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"}), "unsupported"),
+        (
+            QuantizationConfigArgs(targets={"lm_head": "fp8_per_block"}),
+            "unsupported",
+        ),
         (quant_config_args(linear="fp8_per_channel"), None),
         (QuantizationConfigArgs(targets={"re:.*": "fp8_per_tensor"}), None),
         (
@@ -2564,6 +2569,7 @@ def test_online_quantization_targets_ignore_collision() -> None:
         "targets_weight_only_spec",
         "targets_per_channel",
         "targets_per_tensor",
+        "targets_per_block",
         "linear_spec",
         "broad_target",
         "broad_target_ignored_head",
@@ -2575,17 +2581,51 @@ def test_online_quantization_lm_head_needs_explicit_target(
     """The lm_head is quantized online only when a target names it; the
     scheme is the one the linear layers use for that name."""
     config = OnlineQuantizationConfig(args)
+    if expected == "unsupported":
+        # Only per-channel FP8 is validated on the padded, sharded vocab.
+        with pytest.raises(NotImplementedError, match="does not support the lm_head"):
+            config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
+        return
     resolved = config.resolve_quant_method_cls(ParallelLMHead, "lm_head")
     if expected is None:
         assert resolved is None
         return
     assert resolved is not None
-    if expected == "per_tensor":
-        assert resolved[-1] is Fp8PerTensorOnlineLinearMethod
-        return
     assert resolved[-1] is Fp8PtpcOnlineLinearMethod
     expected_activation = None if expected == "weight_only" else kFp8DynamicTokenSym
     assert resolved[3].activation == expected_activation
+
+
+class _TestLMHead(ParallelLMHead):
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+
+
+def test_online_resolve_quant_method_lm_head(default_vllm_config) -> None:
+    """An online target on an unquantized lm_head selects weight-only PTPC."""
+    from vllm.model_executor.layers.quantization import resolve_quant_method
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    quant_config = SimpleNamespace(
+        online_quantization_config=OnlineQuantizationConfig(
+            QuantizationConfigArgs(
+                targets={
+                    "lm_head": QuantSpec(
+                        weight="fp8_per_channel_static", activation=None
+                    )
+                }
+            )
+        ),
+        packed_modules_mapping={},
+        get_quant_method=lambda *_: UnquantizedEmbeddingMethod(),
+    )
+    method = resolve_quant_method(quant_config, _TestLMHead(), "lm_head")
+    assert isinstance(method, Fp8PtpcOnlineLinearMethod)
+    assert method.activation_quant_key is None
+    # The seq-cls adapters index `lm_head.weight` by token id.
+    default_vllm_config.model_config.convert_type = "classify"
+    with pytest.raises(NotImplementedError, match="sequence classification"):
+        resolve_quant_method(quant_config, _TestLMHead(), "lm_head")
 
 
 def test_online_ptpc_activation_override(default_vllm_config) -> None:

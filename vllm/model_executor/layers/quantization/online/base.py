@@ -364,6 +364,16 @@ class OnlineQuantizationConfig(QuantizationConfig):
             return None
         assert quant_spec is not None
         assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+        if issubclass(layer_cls, ParallelLMHead) and not getattr(
+            quant_method_cls, "supports_lm_head", False
+        ):
+            # Per-tensor reduces its amax across TP ranks and per-block assumes
+            # 128-aligned shards, neither validated on a padded, sharded vocab.
+            raise NotImplementedError(
+                f"{prefix}: {quant_method_cls.__name__} does not support the "
+                "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
+                "with `activation: null`)."
+            )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(
             weight=quant_spec.weight,
