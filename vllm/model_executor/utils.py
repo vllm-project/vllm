@@ -36,6 +36,12 @@ def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
 
 
+def in_weight_update(model: torch.nn.Module) -> bool:
+    """Whether ``model`` is between `start_reload` and `finish_reload`, when one
+    ``load_weights`` call may hold only part of the checkpoint."""
+    return getattr(model, "_in_weight_update", False)
+
+
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,

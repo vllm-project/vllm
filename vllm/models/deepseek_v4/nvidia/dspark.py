@@ -43,6 +43,7 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkMarkovHead,
 )
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.model_executor.utils import in_weight_update
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -447,11 +448,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
 
     # --- Weight loading ----------------------------------------------------
 
-    def finish_checkpoint_load(self, loaded: set[str]) -> None:
-        # Cold start only: one bucket of an update may lack this optional head.
-        if not any("confidence_head" in name for name in loaded):
-            self.model.confidence_head = None
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
 
@@ -489,6 +485,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        loaded_confidence_head = False
 
         weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
@@ -496,6 +493,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             if mapped is None:
                 continue
             name = mapped
+            if "confidence_head." in name:
+                loaded_confidence_head = True
 
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
@@ -572,6 +571,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
+        if (
+            self.model.confidence_head is not None
+            and not loaded_confidence_head
+            and not in_weight_update(self)
+        ):
+            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
