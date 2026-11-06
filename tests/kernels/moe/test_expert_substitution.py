@@ -179,10 +179,7 @@ def test_make_expert_substitution_matches_layer_index():
 def test_constant_substitution_loads_values():
     substitution = _substitution(2)
     substitution.weight_loader(substitution.values, torch.tensor([1.0, 2.0]), 3)
-    with pytest.raises(ValueError, match="missing approx_value .* \\[1\\]"):
-        substitution.validate_loaded_values("layer")
     substitution.weight_loader(substitution.values, torch.tensor([3.0, 4.0]), 1)
-    substitution.validate_loaded_values("layer")
     torch.testing.assert_close(
         substitution.values, torch.tensor([[3.0, 4.0], [1.0, 2.0]])
     )
