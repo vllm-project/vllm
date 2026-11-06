@@ -54,7 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
     get_fp8_min_max,
 )
-from vllm.model_executor.utils import refill_derived
+from vllm.model_executor.utils import storage_view
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -1642,9 +1642,10 @@ def init_indexer_wk_weights_proj(
     """Build the indexer's checkpoint layers ``wk`` (BF16, or FP8 as the
     checkpoint stores it and run in BF16: `Fp8DequantLinearMethod`) and
     ``weights_proj`` (BF16), and ``wk_weights_proj``, the BF16 linear that runs
-    both as one GEMM. Its weight is not a parameter: it is derived from theirs
-    after every load and every in-place reload of the runtime weights
-    (`fuse_indexer_wk_weights_proj` from the indexer's post-load hook)."""
+    both as one GEMM. Its weight is not a parameter: it holds ``wk`` and
+    ``weights_proj``'s rows and is refilled after every load and every in-place
+    reload of the runtime weights (`fuse_indexer_wk_weights_proj` from the
+    indexer's post-load hook)."""
 
     def wk(config: QuantizationConfig | None) -> ReplicatedLinear:
         return ReplicatedLinear(
@@ -1675,14 +1676,38 @@ def init_indexer_wk_weights_proj(
     del fused.weight
     fused.weight = weight  # a plain attribute: loaders and reloads skip it
     indexer.wk_weights_proj = fused
+    # No separate storage: weights_proj loads into the fused rows, and wk (FP8
+    # or BF16, as loaded) at the start of the fused storage, whose BF16 rows
+    # it fills once dequantized (direct reload views it back to FP8 there).
+    indexer.weights_proj.weight.data = weight[indexer.head_dim :]
+    wk_weight = indexer.wk.weight
+    indexer.wk.weight.data = storage_view(
+        weight.untyped_storage(),
+        0,
+        wk_weight.shape,
+        wk_weight.stride(),
+        wk_weight.dtype,
+    )
 
 
 def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
-    """Refill the fused BF16 ``wk_weights_proj`` weight from the loaded ``wk``
-    and ``weights_proj``, in place so captured CUDA graphs keep its address."""
-    dtype = indexer.wk_weights_proj.weight.dtype
-    parts = [
-        get_and_maybe_dequant_weights(layer, out_dtype=dtype)
-        for layer in (indexer.wk, indexer.weights_proj)
-    ]
-    refill_derived(indexer.wk_weights_proj, "weight", torch.cat(parts))
+    """Fill the fused BF16 ``wk_weights_proj`` weight in place (captured CUDA
+    graphs keep its address) from ``wk`` and ``weights_proj``. A part already
+    in its rows is left alone; one in its own storage (dequantized or
+    restaged outside direct reload) is copied there and viewed from there."""
+    fused = indexer.wk_weights_proj.weight
+    row = 0
+    for layer in (indexer.wk, indexer.weights_proj):
+        part = get_and_maybe_dequant_weights(layer, out_dtype=fused.dtype)
+        rows = fused[row : row + part.shape[0]]
+        row += part.shape[0]
+        if part.data_ptr() == rows.data_ptr() and part.stride() == rows.stride():
+            continue
+        rows.copy_(part)
+        weight = layer.weight
+        if (weight.shape, weight.stride(), weight.dtype) == (
+            rows.shape,
+            rows.stride(),
+            rows.dtype,
+        ):
+            weight.data = rows

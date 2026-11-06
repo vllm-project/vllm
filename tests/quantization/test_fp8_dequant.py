@@ -438,3 +438,32 @@ def test_layerwise_metadata_does_not_keep_layers_alive(model_config):
     del model
     gc.collect()
     assert wk() is None
+
+
+@pytest.mark.parametrize("layout", _LAYOUTS)
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_indexer_parts_live_in_fused_weight(monkeypatch, model_config, layout, mode):
+    """Wk and weights_proj hold no storage of their own: after a cold start and
+    after FP8 / BF16 reloads they are views of the fused weight's rows, and
+    filling the fused weight then copies nothing."""
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        fuse_indexer_wk_weights_proj,
+    )
+    from vllm.model_executor.model_loader.reload.meta import CopyCounter
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _indexer_cold_start(
+        _indexer_checkpoint(10, layout)[0], layout, model_config
+    )
+    for seed, sent in ((11, "bf16"), (12, layout), (None, None)):
+        indexer = model.indexer
+        fused = indexer.wk_weights_proj.weight
+        assert indexer.wk.weight.data_ptr() == fused.data_ptr()
+        assert indexer.weights_proj.weight.data_ptr() == fused[_WK:].data_ptr()
+        with CopyCounter() as counter:
+            fuse_indexer_wk_weights_proj(indexer)
+        assert counter.copied_numel == 0
+        if seed is not None:
+            new, expected = _indexer_checkpoint(seed, sent)
+            _reload(model, new, mode, model_config, monkeypatch)
+            torch.testing.assert_close(fused, expected, rtol=0, atol=0)
