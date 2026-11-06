@@ -23,7 +23,8 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 /// </｜DSML｜function_calls>
 /// ```
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// The function name is emitted when an `invoke` opens. A string value streams as it decodes;
+/// any other value is emitted when its parameter closes.
 ///
 /// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are
 /// represented as special tokens in the tokenizer and therefore must be
@@ -441,16 +442,22 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v32_streaming_does_not_emit_incomplete_invoke() {
+    fn deepseek_v32_streaming_streams_unfinished_invoke_and_reports_it_incomplete() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools(), &tokenizer());
-        parser.parse_chunk("<｜DSML｜function_calls>\n").unwrap();
-        parser.parse_chunk("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
-        parser
-            .parse_chunk(
-                "<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n",
-            )
-            .unwrap();
+        let mut output = parser.parse_chunk("<｜DSML｜function_calls>\n").unwrap();
+        output.append(parser.parse_chunk("<｜DSML｜invoke name=\"get_weather\">\n").unwrap());
+        output.append(
+            parser
+                .parse_chunk(
+                    "<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n",
+                )
+                .unwrap(),
+        );
 
+        let output = output.coalesce();
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, r#"{"location":"SF""#);
         let error = parser.finish().unwrap_err();
         assert!(error.to_report_string().contains("incomplete DeepSeek DSML tool call"));
     }

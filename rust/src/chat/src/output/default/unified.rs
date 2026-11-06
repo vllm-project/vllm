@@ -991,4 +991,70 @@ mod tests {
             assert_eq!(text, "Checking the weather. ", "deltas: {deltas:?}");
         }
     }
+
+    /// A non-streaming message keeps a DeepSeek DSML call that fails partway, with
+    /// the arguments closed after malformed markup and left open after a cut-off value.
+    #[tokio::test]
+    async fn non_streaming_message_keeps_a_deepseek_dsml_call_that_fails_partway() {
+        use vllm_parser::tool::{DeepSeekV41ToolParser, ToolParser as _};
+
+        use crate::event::{AssistantMessageExt as _, ChatEvent};
+        use crate::output::structured::structured_chat_event_stream;
+
+        let invoke = concat!(
+            "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n",
+            "<｜DSML｜ parameter name=\"query\" string=\"true\">",
+        );
+        let mut messages = Vec::new();
+        for output in [
+            format!(
+                "{invoke}a</｜DSML｜ parameter>\ngarbage\n</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+            ),
+            format!("{invoke}rm -rf /tmp/"),
+        ] {
+            let dsml = DeepSeekV41ToolParser::create(&[], Arc::new(TestTokenizer::new())).unwrap();
+            let parser = vllm_parser::unified::CombinedParser::new(None, Some(dsml));
+            let parsed = unified_event_stream(
+                stream::iter([Ok(finished_delta(&output))]),
+                Box::new(parser),
+            );
+            let events = structured_chat_event_stream(parsed, None)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<crate::Result<Vec<_>>>()
+                .unwrap();
+            let Some(ChatEvent::Done { message, .. }) = events.last() else {
+                panic!("expected done");
+            };
+            let calls = message
+                .tool_calls()
+                .map(|call| (call.name.clone(), call.arguments.clone()))
+                .collect::<Vec<_>>();
+            messages.push((calls, message.text()));
+        }
+        expect_test::expect![[r#"
+            [
+                (
+                    [
+                        (
+                            "lookup",
+                            "{\"query\":\"a\"}",
+                        ),
+                    ],
+                    "\ngarbage\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+                ),
+                (
+                    [
+                        (
+                            "lookup",
+                            "{\"query\":\"rm -rf /tmp/",
+                        ),
+                    ],
+                    "",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&messages);
+    }
 }
