@@ -214,7 +214,7 @@ def _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
 
 
 # num_logits only bounds the bonus-logit lookahead; one kernel serves every value.
-@triton.jit(do_not_specialize=["num_logits"])
+@triton.jit(do_not_specialize=["num_logits", "all_greedy"])
 def _compute_local_logits_stats_kernel(
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
@@ -247,6 +247,7 @@ def _compute_local_logits_stats_kernel(
     temp_ptr,
     vocab_size,
     num_logits,
+    all_greedy: tl.int1,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
@@ -258,7 +259,9 @@ def _compute_local_logits_stats_kernel(
 
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    temp = tl.load(temp_ptr + req_state_idx, mask=not all_greedy, other=0).to(
+        tl.float32
+    )
 
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -516,7 +519,7 @@ def _compute_local_residual_mass_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["all_greedy"])
 def _rejection_kernel(
     # [num_reqs, num_speculative_steps + 1]
     sampled_ptr,
@@ -573,6 +576,7 @@ def _rejection_kernel(
     fly_entropy_ptr,
     fly_entropy_threshold,
     vocab_num_blocks,
+    all_greedy: tl.int1,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
@@ -584,8 +588,10 @@ def _rejection_kernel(
     start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_draft_tokens = end_idx - start_idx - 1
-    seed = tl.load(seed_ptr + req_state_idx)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    seed = tl.load(seed_ptr + req_state_idx, mask=not all_greedy, other=0)
+    temp = tl.load(temp_ptr + req_state_idx, mask=not all_greedy, other=0).to(
+        tl.float32
+    )
     is_greedy = temp == 0.0
 
     accepted_length = tl.zeros((), tl.int64)
@@ -820,7 +826,7 @@ def _seeded_resample_argmax(
     )
 
 
-@triton.jit(do_not_specialize=["watermark_key_0", "watermark_key_1"])
+@triton.jit(do_not_specialize=["watermark_key_0", "watermark_key_1", "all_greedy"])
 def _resample_kernel(
     # [num_reqs, num_blocks]
     resampled_local_argmax_ptr,
@@ -865,6 +871,7 @@ def _resample_kernel(
     watermark_key_0,
     watermark_key_1,
     vocab_size,
+    all_greedy: tl.int1,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -881,7 +888,9 @@ def _resample_kernel(
     resample_token_idx = start_idx + resample_idx
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    temp = tl.load(temp_ptr + req_state_idx, mask=not all_greedy, other=0).to(
+        tl.float32
+    )
     is_bonus = resample_token_idx == end_idx - 1
     if temp == 0.0 and not is_bonus:
         # Greedy + non-bonus token. No resampling needed because
@@ -1001,7 +1010,10 @@ def _resample_kernel(
         ).to(tl.float32)
 
     # Resample the rejected/bonus token.
-    if WATERMARK:
+    if all_greedy:
+        value, idx = tl.max(residual_logits, axis=0, return_indices=True)
+        value = value.to(tl.float64) if USE_FP64 else value
+    elif WATERMARK:
         # Padded and greedy rows retain the stock draw.
         if is_watermarked & (temp != 0.0) & ~skip_watermarking:
             watermark_value, idx = philox_gumbel_block_argmax(
@@ -1055,7 +1067,7 @@ def _resample_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["all_greedy"])
 def _insert_resampled_kernel(
     # [num_reqs, num_speculative_steps + 1]
     sampled_ptr,
@@ -1075,6 +1087,7 @@ def _insert_resampled_kernel(
     expanded_idx_mapping_ptr,
     # [max_num_reqs]
     temp_ptr,
+    all_greedy: tl.int1,
     PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -1087,7 +1100,9 @@ def _insert_resampled_kernel(
     # Increment the number of sampled tokens.
     tl.store(num_sampled_ptr + req_idx, num_sampled + 1)
 
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    temp = tl.load(temp_ptr + req_state_idx, mask=not all_greedy, other=0).to(
+        tl.float32
+    )
     is_bonus = resample_token_idx == end_idx - 1
     if temp == 0.0 and not is_bonus:
         # Greedy + non-bonus token. The target argmax is already
@@ -1143,6 +1158,7 @@ def rejection_sample(
     # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
+    all_greedy: bool,
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
@@ -1169,6 +1185,11 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
 
     watermark = contexts is not None
+    all_greedy = (
+        all_greedy
+        and synthetic_conditional_rates is None
+        and not (fly_window_size or watermark)
+    )
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
         "contexts, watermarking and watermark_key must be set together."
     )
@@ -1262,6 +1283,7 @@ def rejection_sample(
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        all_greedy=all_greedy,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -1391,6 +1413,7 @@ def rejection_sample(
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
+        all_greedy=all_greedy,
         num_warps=1,
     )
 
@@ -1442,6 +1465,7 @@ def rejection_sample(
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
         SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
+        all_greedy=all_greedy,
     )
 
     # Insert the resampled tokens into the output sampled.
@@ -1458,5 +1482,6 @@ def rejection_sample(
         expanded_idx_mapping,
         temperature,
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        all_greedy=all_greedy,
     )
     return sampled, num_sampled

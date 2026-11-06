@@ -93,6 +93,7 @@ def _run(
         temperature=temperature,
         seed=seeds,
         num_speculative_steps=NUM_SPECULATIVE_STEPS,
+        all_greedy=False,
         use_block_verification=True,
     )
     return sampled[roi_req].clone(), num_sampled[roi_req].clone()

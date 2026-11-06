@@ -2,16 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
+from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.sampling_params import SamplingParams
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
@@ -21,6 +22,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 VOCAB_SIZE = 4096
 
@@ -48,10 +50,12 @@ def _rejection_sample(
     *,
     draft_logits: torch.Tensor | None,
     draft_logits_row_mapping: torch.Tensor | None = None,
+    all_greedy: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return rejection_sample(
         draft_logits_cache=_draft_logits(draft_logits, draft_logits_row_mapping),
+        all_greedy=all_greedy,
         **kwargs,
     )
 
@@ -817,7 +821,8 @@ def test_multiround_rejection_sample_is_unbiased(
 
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
-def test_greedy_rejection_sample(num_speculative_steps: int):
+@pytest.mark.parametrize("all_greedy", [False, True])
+def test_greedy_rejection_sample(num_speculative_steps: int, all_greedy: bool):
     """Verify that greedy (temperature=0) always outputs the target argmax
     at every accepted position.
     """
@@ -837,7 +842,7 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
     )
 
     sampled, num_sampled = _rejection_sample(
-        **inputs, num_speculative_steps=num_speculative_steps
+        **inputs, num_speculative_steps=num_speculative_steps, all_greedy=all_greedy
     )
 
     target_argmax = target_logits_1d.argmax().item()
@@ -915,8 +920,10 @@ def test_synthetic_rejection_sample(
         )
 
 
-@pytest.mark.parametrize("temperature", [0.0, 1.0])
-def test_all_nan_target_logits_in_range(temperature: float):
+@pytest.mark.parametrize(
+    "temperature,all_greedy", [(0.0, False), (0.0, True), (1.0, False)]
+)
+def test_all_nan_target_logits_in_range(temperature: float, all_greedy: bool):
     """Regression test for NaN breaking tl.argmax index bounds.
 
     An all-NaN target logits row makes every per-block local max NaN.
@@ -947,7 +954,9 @@ def test_all_nan_target_logits_in_range(temperature: float):
         num_trials=num_trials,
     )
 
-    sampled, num_sampled = _rejection_sample(**inputs, num_speculative_steps=K)
+    sampled, num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=K, all_greedy=all_greedy
+    )
 
     assert ((num_sampled >= 1) & (num_sampled <= K + 1)).all()
     steps = torch.arange(K + 1, device=device).unsqueeze(0)
@@ -1070,7 +1079,8 @@ def test_block_verification_placeholder_truncates_block(
         )
 
 
-def test_greedy_placeholder_emits_target_argmax():
+@pytest.mark.parametrize("all_greedy", [False, True])
+def test_greedy_placeholder_emits_target_argmax(all_greedy: bool):
     """Greedy sampling skips resampling and relies on the rejection kernel
     storing the target argmax at the rejected position. A placeholder must not
     bypass that store, or the output slot is returned uninitialized.
@@ -1096,7 +1106,9 @@ def test_greedy_placeholder_emits_target_argmax():
     draft_sampled[:, 1] = target_argmax
     draft_sampled[:, 2:] = -1
 
-    sampled, num_sampled = _rejection_sample(**inputs, num_speculative_steps=K)
+    sampled, num_sampled = _rejection_sample(
+        **inputs, num_speculative_steps=K, all_greedy=all_greedy
+    )
 
     assert torch.equal(num_sampled, torch.full_like(num_sampled, 2))
     steps = torch.arange(K + 1, device=device).unsqueeze(0)
@@ -1173,24 +1185,25 @@ def test_verify_rejects_unproposed_drafts():
     # decode step after a P/D remote KV load.
     first_pos = inputs["pos"].view(num_trials, K + 1)[:, 0]
     prefill_len = first_pos + 1
-    rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = SimpleNamespace(
-        apply_sampling_params=lambda logits, *args: logits,
-        sampling_states=SimpleNamespace(
-            temperature=SimpleNamespace(gpu=inputs["temperature"]),
-            seeds=SimpleNamespace(gpu=inputs["seed"]),
-        ),
-        use_fp64_gumbel=False,
-        trace_replay_state=None,
-        may_mask_logits=np.zeros(num_trials, dtype=bool),
+    req_states = RequestState(
+        num_trials, K + 1, num_trials * (K + 1), K, VOCAB_SIZE, torch.device(device)
     )
-    rejection_sampler.num_speculative_steps = K
-    rejection_sampler.synthetic_conditional_rates = None
-    rejection_sampler.use_block_verification = True
-    rejection_sampler.fly_window_size = 0
-    rejection_sampler.fly_entropy_threshold = 0.3
-    rejection_sampler.fly_entropy_top_k = 3
-    rejection_sampler.watermark_key = None
+    sampler = Sampler(
+        VllmConfig(), num_trials, VOCAB_SIZE, torch.device(device), req_states
+    )
+    for req_idx in range(num_trials):
+        req_states.add_request(str(req_idx), 0, [], 0, K + 1)
+        sampler.add_request(req_idx, SamplingParams(temperature=1.0, seed=req_idx))
+    req_states.apply_staged_writes()
+    sampler.apply_staged_writes()
+    rejection_sampler = RejectionSampler(
+        sampler,
+        SpeculativeConfig(
+            method="ngram", num_speculative_tokens=K, rejection_sample_method="block"
+        ),
+        torch.device(device),
+    )
+    idx_mapping_np = inputs["idx_mapping"].cpu().numpy()
     draft_logits = DraftLogitsCache(
         *inputs["draft_logits"].shape,
         dtype=inputs["draft_logits"].dtype,
@@ -1215,10 +1228,10 @@ def test_verify_rejects_unproposed_drafts():
             pos,
             inputs["cu_num_logits"],
             inputs["idx_mapping"],
-            None,
+            idx_mapping_np,
             inputs["expanded_idx_mapping"],
             inputs["expanded_local_pos"],
-            None,
+            idx_mapping_np * 0 + K + 1,
         )
         return sampled, num_sampled
 
@@ -1494,7 +1507,9 @@ def test_adaptive_draft_lengths_match_and_bonus_oracle(
         req_inputs["cu_num_logits"] = cu_num_logits[req_idx : req_idx + 2] - lo
         req_inputs["idx_mapping"] = idx_mapping[req_idx : req_idx + 1]
 
-        req_sampled, req_num_sampled = _rejection_sample(**req_inputs)
+        req_sampled, req_num_sampled = _rejection_sample(
+            **req_inputs, all_greedy=temperatures[req_idx] == 0.0
+        )
 
         n = int(req_num_sampled[0])
         assert n <= num_drafts[req_idx] + 1
