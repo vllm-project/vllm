@@ -969,12 +969,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
-            if registers_kv_cache_memory(self.vllm_config):
-                kv_cache_config = pad_kv_cache_segments(
-                    kv_cache_config,
-                    self.cache_config.get_resolved_kv_cache_layout(),
-                    granule_size(torch.accelerator.current_device_index()),
-                )
+            kv_cache_config = pad_kv_cache_segments(
+                kv_cache_config,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                granule_size(torch.accelerator.current_device_index()),
+                registers_memory=registers_kv_cache_memory(self.vllm_config),
+            )
             # The connector is created in `extend_kv_cache`, once the
             # memory it registers is final.
             self._kv_cache_config = kv_cache_config
