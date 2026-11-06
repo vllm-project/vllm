@@ -68,7 +68,12 @@ class ExtractHiddenStatesProposer:
                 "eagle_aux_hidden_state_layer_ids must be set in the draft "
                 "model config for extract_hidden_states method"
             )
-        self.num_hidden_states = len(layer_ids)
+        from vllm.distributed.kv_transfer.kv_connector.v1.hidden_state_window import (
+            extraction_layout,
+        )
+
+        self.hidden_states_layout, capture_ids = extraction_layout(vllm_config)
+        self.num_hidden_states = len(capture_ids)
         self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.num_hidden_states, self.hidden_size),
@@ -126,11 +131,11 @@ class ExtractHiddenStatesProposer:
         # target_hidden_states is a list of tensors (one per layer)
         # Each tensor has shape [num_tokens, hidden_size]
         # Stack to shape: [num_tokens, num_hidden_states, hidden_size]
-        stacked_hidden_states = torch.stack(target_hidden_states, dim=1)
-        num_tokens = stacked_hidden_states.shape[0]
-
-        # Copy hidden states to buffer
-        self.hidden_states[:num_tokens] = stacked_hidden_states
+        num_tokens = target_hidden_states[0].shape[0]
+        if len(target_hidden_states) != self.num_hidden_states:
+            raise ValueError("Target hidden-state layout does not match cache layout")
+        for index, hidden in enumerate(target_hidden_states):
+            self.hidden_states[:num_tokens, index].copy_(hidden)
 
         assert self.attn_metadata_builder is not None
         attn_metadata = self.attn_metadata_builder.build_for_drafting(
