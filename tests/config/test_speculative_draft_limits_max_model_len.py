@@ -15,8 +15,10 @@ from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig, VllmConf
 from vllm.engine.arg_utils import EngineArgs
 
 # All repos are public; only config/tokenizer-config files are fetched.
-AR_MODEL = "JackFram/llama-68m"  # max_position_embeddings=2048
-EAGLE3_DRAFT = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
+AR_MODEL = "vllm-project/llama-68m"  # max_position_embeddings=2048
+EAGLE3_DRAFT = (
+    "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
+)
 LLAMA3_TARGET = "unsloth/Meta-Llama-3.1-8B-Instruct"  # max_position_embeddings=131072
 HYBRID_MODEL = "ai21labs/Jamba-tiny-random"  # hybrid Mamba/attention
 

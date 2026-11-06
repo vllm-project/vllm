@@ -1328,7 +1328,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_k=swa_cu_seqlens,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=swa_max_seqlens,
-            min_seqlen_q=1,
+            min_seqlen_q=0,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
@@ -1496,7 +1496,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     causal=False,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
-                    sink_ptr=self.sinks,
+                    # The causal call above already adds the sink to each query's
+                    # LSE; adding it per context chunk would overcount it on merge.
+                    sink_ptr=None,
                 )
             else:
                 suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
@@ -1514,7 +1516,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     causal=False,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
-                    sink_ptr=self.sinks,
+                    # The causal call above already adds the sink to each query's
+                    # LSE; adding it per context chunk would overcount it on merge.
+                    sink_ptr=None,
                 )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1779,7 +1783,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_k=prefill_metadata.query_start_loc,
                     max_seqlen_q=prefill_metadata.max_query_len,
                     max_seqlen_k=prefill_metadata.max_seq_len,
-                    min_seqlen_q=1,
+                    min_seqlen_q=0,
                     out=prefill_output,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
@@ -1820,7 +1824,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 output=extend_outputs,
                 cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
-                min_seqlen_q=1,
+                min_seqlen_q=0,
                 max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
                 block_table=attn_metadata.block_table[
                     num_decodes : num_decodes + num_extends
