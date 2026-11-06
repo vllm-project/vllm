@@ -429,7 +429,11 @@ class RejectionSampler:
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
-        num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
+        num_nans = (
+            get_num_nans(logits, input_batch.cu_num_logits)
+            if self.sampler.compute_nans
+            else None
+        )
 
         draft_sampled, pos = gather_draft_sampled(
             input_batch.input_ids,

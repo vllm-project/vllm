@@ -11,6 +11,7 @@ import torch
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -553,3 +554,86 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert masks == expected_masks
     assert all(token_id in mask for token_id, mask in zip(emitted, masks))
     assert torch.equal(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_get_num_nans_sums_rows_per_request():
+    """Request j owns logits rows cu_num_logits[j]:cu_num_logits[j+1]; rows past
+    the last request (adaptive-verification padding) are not counted."""
+    device = torch.device("cuda")
+    cu_num_logits = torch.tensor([0, 3, 4, 8, 10], dtype=torch.int32, device=device)
+    logits = torch.zeros(12, 17, device=device)
+    logits[0, 1] = float("nan")
+    logits[2, 5:8] = float("nan")
+    logits[3, :] = float("nan")
+    logits[9, 16] = float("nan")
+    logits[11, 0] = float("nan")
+
+    assert get_num_nans(logits, cu_num_logits).tolist() == [4, 17, 0, 1]
+
+    # Uniform multi-row layout without drafts (several sampled tokens per step).
+    cu_num_logits = torch.tensor([0, 2, 4, 6], dtype=torch.int32, device=device)
+    logits = torch.zeros(6, 5, device=device)
+    logits[1, 0] = float("nan")
+    logits[2, 1:3] = float("nan")
+    logits[5, 4] = float("nan")
+
+    assert get_num_nans(logits, cu_num_logits).tolist() == [1, 2, 1]
+
+    # Vocab spanning several kernel chunks (BLOCK_SIZE 2048), NaNs on chunk
+    # edges, an empty request, and a trailing padding row.
+    cu_num_logits = torch.tensor([0, 1, 3, 3], dtype=torch.int32, device=device)
+    logits = torch.zeros(4, 4097, device=device)
+    logits[0, [0, 2047, 2048, 4095, 4096]] = float("nan")
+    logits[1, 2048] = float("nan")
+    logits[2, 4096] = float("nan")
+    logits[3, :] = float("nan")
+
+    assert get_num_nans(logits, cu_num_logits).tolist() == [5, 2, 0]
+    bf16_logits = logits.to(torch.bfloat16)
+    assert get_num_nans(bf16_logits, cu_num_logits).tolist() == [5, 2, 0]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_rejection_sampler_reports_num_nans_per_request():
+    """With drafts, `SamplerOutput.num_nans` has one entry per request (the sum
+    over its verification rows), so it zips with `req_ids` downstream."""
+    device = torch.device("cuda")
+    vocab_size = 17
+    cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    num_reqs = len(idx_mapping_np)
+    num_logits = int(cu_num_logits_np[-1])
+    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
+    input_batch.input_ids = torch.zeros(num_logits, dtype=torch.int32, device=device)
+    input_batch.positions = torch.arange(num_logits, dtype=torch.int64, device=device)
+    input_batch.logits_indices = torch.arange(
+        num_logits, dtype=torch.int32, device=device
+    )
+    input_batch.seq_lens = torch.full((num_reqs,), 64, dtype=torch.int32, device=device)
+    sampler = SimpleNamespace(
+        compute_nans=True,
+        logprobs_mode="raw_logprobs",
+        return_sampling_mask=False,
+        logprob_token_ids_state=None,
+        get_logprobs_dims=lambda _idx_mapping_np: None,
+        req_states=SimpleNamespace(
+            prefill_len=SimpleNamespace(
+                gpu=torch.zeros(num_reqs, dtype=torch.int32, device=device)
+            )
+        ),
+    )
+    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
+    rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
+        _fake_verify(device, vocab_size), rejection_sampler
+    )
+    logits = torch.zeros(num_logits, vocab_size, device=device)
+    logits[1, 2] = float("nan")
+    logits[2, 3:5] = float("nan")
+    logits[3, 0] = float("nan")
+    logits[9, :] = float("nan")
+
+    output = rejection_sampler(logits, input_batch, draft_logits=None)
+
+    assert output.num_nans is not None
+    assert output.num_nans.tolist() == [3, 1, 0, 17]
