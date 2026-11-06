@@ -503,7 +503,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
-                self.sampler = Sampler(**sampler_kwargs)
+                with self.jit_warmup_registry.activate():
+                    self.sampler = Sampler(**sampler_kwargs)
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
