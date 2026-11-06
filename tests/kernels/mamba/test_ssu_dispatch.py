@@ -800,6 +800,36 @@ def _source(dtype):
     return value * factors[None, ..., None], factors
 
 
+def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
+    """Tiny prefill rows must not overflow the encoder or produce zero scales."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
+        quantize_replayssm_state,
+    )
+
+    floor = 2.0**-117
+    rows = torch.tensor(
+        [0.0, 2.0**-140, 2.0**-118, 448.0 * floor, 448.0], device="cuda"
+    )
+    source = rows[None, None, :, None].expand(1, 1, 5, 128).contiguous()
+    state = torch.zeros(2, 1, 5, 128, dtype=torch.float8_e4m3fn, device="cuda")
+    scales = torch.ones(2, 1, 5, device="cuda")
+    quantize_replayssm_state(
+        source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
+    )
+
+    expected = torch.tensor([0.0, 0.0, 0.5, 448.0, 448.0], device="cuda")
+    torch.testing.assert_close(
+        state[1].float(), expected[None, :, None].expand(1, 5, 128), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        scales[1, 0],
+        torch.tensor([1.0, floor, floor, floor, 1.0], device="cuda"),
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
 def test_shared_prefill_selected_slots_and_reuse(dtype):
     """Pack, gather, and replace prefill states without touching padding."""

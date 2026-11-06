@@ -237,6 +237,7 @@ steps:
       kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
       kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
       kernels/mamba/test_ssu_dispatch.py::test_shared_prefill_selected_slots_and_reuse
+      kernels/mamba/test_ssu_dispatch.py::test_shared_fp8_prefill_tiny_rows_keep_valid_scales
       kernels/mamba/test_ssu_dispatch.py::test_shared_graph_mixed_flush_checkpoint_bytes
       kernels/mamba/test_ssu_dispatch.py::test_shared_bolt_t8_acceptance_and_ring_wrap
       kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_copies_payload_and_scale

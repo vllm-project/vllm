@@ -31,7 +31,12 @@ def _quantize_checkpoint(
     cols = tl.arange(0, N)
     value = tl.load(source + src * source_stride + row * N + cols).to(tl.float32)
     amax = tl.max(tl.abs(value), axis=0)
-    encode = tl.where(amax == 0, 1.0, QMAX / amax)
+    denominator = amax
+    if not INT8:
+        # Keep nonzero FP8 values normal after decoding into FP32.
+        minimum_amax = QMAX * 2.0**-117
+        denominator = tl.where(amax < minimum_amax, minimum_amax, amax)
+    encode = tl.where(amax == 0, 1.0, QMAX / denominator)
     quantized = tl.minimum(tl.maximum(value * encode, -QMAX), QMAX)
     if INT8:
         quantized = tl.inline_asm_elementwise(
