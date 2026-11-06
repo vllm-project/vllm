@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import dcp_global_to_local_index
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import get_block_table_width
 
@@ -163,11 +164,10 @@ class ConvertReqIndexToGlobalIndexKernel(
         # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
         # remote) and local_idx == tok, so this reduces to the non-DCP path; with
         # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / // DCP_SIZE).
-        owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
+        owning_rank, local_idx = dcp_global_to_local_index(
+            tok, DCP_SIZE, DCP_INTERLEAVE
+        )
         is_remote = owning_rank != DCP_RANK
-        local_idx = (
-            tok // (DCP_SIZE * DCP_INTERLEAVE)
-        ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
 
         # Compute block id and in-block offset
         block_id = local_idx // BLOCK_SIZE

@@ -1983,8 +1983,17 @@ def build_prefill_chunk_metadata(
         this_rank_counts = local_seq_lens[:, dcp_rank].to(torch.int32)
         local_cu_seq_lens = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
         torch.cumsum(this_rank_counts, dim=0, out=local_cu_seq_lens[1:])
-        local_total_seq_lens = int(local_cu_seq_lens[-1].item())
-        max_local_total_seq_lens = int(local_seq_lens.sum(dim=0).max().item())
+        # The host extents come from the CPU copy of the same lengths. Reading
+        # them off the device tensors would sync the metadata build with the
+        # GPU, which under async scheduling drains the previous step first.
+        local_seq_lens_cpu = get_dcp_local_seq_lens(
+            compressed_seq_lens_cpu[start_idx:end_idx],
+            dcp_world_size,
+            None,
+            cp_kv_cache_interleave_size,
+        )
+        local_total_seq_lens = int(local_seq_lens_cpu[:, dcp_rank].sum())
+        max_local_total_seq_lens = int(local_seq_lens_cpu.sum(dim=0).max())
 
     query_start_loc = (
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]

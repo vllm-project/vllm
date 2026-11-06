@@ -42,6 +42,7 @@ from vllm.v1.attention.backends.mla.index_group import (
     HiSparseMLAIndexGroup,
     SparseMLAIndexGroup,
     SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
@@ -223,7 +224,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
+        self.topk_tokens: int = self.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -732,7 +733,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
-            index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
+            index_group_builder = SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(get_current_vllm_config()),
+            )
         if index_group_builder is not None:
             vllm_config = get_current_vllm_config()
             self.index_group, self.index_group_index = (
@@ -965,7 +969,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
+        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """``return_lse`` None means ``need_to_return_lse_for_decode``."""
         raise NotImplementedError
 
     @staticmethod

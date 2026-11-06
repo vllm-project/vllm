@@ -302,6 +302,7 @@ from vllm.v1.attention.ops.pcp import (
 from vllm.v1.attention.ops.shardq import allocate_shardq_buffers, shard_q, unshard_out
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
+    DS_MLA_STATE_CONTENT_BYTES,
     AttentionSpec,
     KVCacheSpec,
     KVQuantMode,
@@ -1454,7 +1455,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             state_content_bytes=(
                 cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
                 if self.kv_cache_dtype == "fp8_ds_mla"
-                else {"nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
+                else DS_MLA_STATE_CONTENT_BYTES.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:
@@ -3198,6 +3199,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=block_table,
+                    workspace_starts=padded_local_cu_seq_lens,
+                    batch_size=chunk.num_requests,
+                    seq_starts=chunk.starts,
+                )
+            elif self.kv_cache_dtype == "nvfp4_ds_mla":
+                ops.cp_gather_and_upconvert_nvfp4_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
                     block_table=block_table,
