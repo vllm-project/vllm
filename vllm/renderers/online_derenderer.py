@@ -765,7 +765,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -972,7 +972,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -1009,7 +1009,9 @@ class OnlineDerenderer:
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
-            prompt_tokens if prompt_tokens is not None else [0] * n
+            prompt_tokens
+            if prompt_tokens is not None
+            else [resolve_prompt_tokens(None, gen.usage) for gen in generate_responses]
         )
         prompt_token_ids_list: list[list[int] | None] = (
             prompt_token_ids if prompt_token_ids is not None else [None] * n
@@ -1211,7 +1213,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -1381,6 +1383,14 @@ def _completion_top_logprobs_limit(
     return completion_top_logprobs_limit(
         completion_request.logprobs, bool(completion_request.logprob_token_ids)
     )
+
+
+def resolve_prompt_tokens(prompt_tokens: int | None, usage: UsageInfo | None) -> int:
+    """The request's `prompt_tokens` if set (0 included), else the generate
+    `usage.prompt_tokens`, else 0 when the generate response has no usage."""
+    if prompt_tokens is not None:
+        return prompt_tokens
+    return usage.prompt_tokens if usage is not None else 0
 
 
 def _resolve_prompt_logprobs(
