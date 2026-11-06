@@ -992,8 +992,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 tool_choice = "auto"
                 data["tool_choice"] = tool_choice
         else:
+            # omitted tool_choice defaults to none if tools are not provided
             # auto tool_choice degrades to none if no tool is provided
-            if tool_choice == "auto":
+            if tool_choice is None or tool_choice == "auto":
                 tool_choice = "none"
                 data["tool_choice"] = tool_choice
 
