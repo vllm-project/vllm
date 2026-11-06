@@ -148,6 +148,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -387,6 +388,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
+    def _init_model_state(self) -> ModelState:
+        """Create the ModelState for the loaded model.
+
+        Subclasses may override this to supply their own ModelState.
+        """
+        return init_model_state(
+            self.vllm_config, self.model, self.encoder_cache, self.device
+        )
+
     def load_model(
         self,
         load_dummy_weights: bool = False,
@@ -444,9 +454,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else nullcontext()
         )
         with pool:
-            self.model_state = init_model_state(
-                self.vllm_config, self.model, self.encoder_cache, self.device
-            )
+            self.model_state = self._init_model_state()
 
         self.decode_query_len = (
             self.num_speculative_steps
