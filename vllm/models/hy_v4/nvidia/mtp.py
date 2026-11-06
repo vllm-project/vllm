@@ -11,10 +11,6 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -744,11 +740,6 @@ class HYV4MTP(nn.Module):
         }
 
         num_experts = getattr(self.config, "n_routed_experts", 0)
-        sink_tp_size = get_tensor_model_parallel_world_size()
-        sink_tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // sink_tp_size
-        head_rank_start = n_local_head * sink_tp_rank
-        head_rank_end = n_local_head * (sink_tp_rank + 1)
 
         # Routed-expert weights come in two checkpoint layouts:
         #   split: mlp.experts.<id>.gate_proj.weight
@@ -881,15 +872,6 @@ class HYV4MTP(nn.Module):
                     num_experts,
                 )
             if is_loaded:
-                continue
-
-            if "learnable_sink_param" in name:
-                if name in params_dict:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                 continue
 
             remapped_name = maybe_remap_kv_scale_name(name, params_dict)

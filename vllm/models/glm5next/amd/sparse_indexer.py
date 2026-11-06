@@ -396,16 +396,33 @@ def sparse_attn_indexer_kpool(
                     chunk.token_start : chunk.token_end, :topk_tokens
                 ]
 
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_dst,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                select_k,
-            )
+            if rocm_aiter_ops.is_indexer_top_k_supported(
+                is_prefill=True,
+                compress_ratio=index_kpool,
+                num_rows=num_rows,
+            ):
+                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                    _launch_aiter_top_k_per_row_prefill,
+                )
+
+                _launch_aiter_top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_dst,
+                    select_k,
+                )
+            else:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_dst,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    select_k,
+                )
 
             if index_kpool > 1:
                 pool_ids = pool_topk.to(torch.int64)
@@ -733,6 +750,26 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_backend = (
             cfg.kernel_config.sparse_indexer_topk_backend if cfg is not None else "auto"
         )
+        if cfg is not None and cfg.parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "SparseAttnIndexerKpool on ROCm does not support DCP."
+            )
+        model_config = cfg.model_config if cfg is not None else None
+        hf_config = model_config.hf_text_config if model_config is not None else None
+        index_kpool = getattr(hf_config, "index_kpool", None) or 1
+        if index_kpool > 1:
+            kpool_ops.kpool_compress_dispatch.register_warmup(
+                k_cache=k_cache,
+                pool_size=index_kpool,
+                head_dim=head_dim,
+                round_scale=scale_fmt is not None,
+            )
+            if tail_cache is not None:
+                kpool_ops.kpool_tail_seed_dispatch.register_warmup(
+                    tail_cache=tail_cache,
+                    kpool=index_kpool,
+                    head_dim=head_dim,
+                )
 
     def forward_hip(
         self,
