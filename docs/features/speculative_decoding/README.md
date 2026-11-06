@@ -156,7 +156,6 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `draft_enable_eplb` | `boolean` | `true` | Enable EPLB for the draft when target EPLB is enabled. Set to `false` to disable EPLB for the draft. |
-| `draft_num_redundant_experts` | `integer >= 0` | `None` | Redundant expert count for an EPLB-backed MoE draft (Eagle, Eagle3, MTP, DFlash, or supported DSpark). If unset, the target's count is used when target and draft have the same routed expert counts; otherwise, set it explicitly. If the count is not divisible across the draft's expert-parallel ranks, config validation suggests the lowest valid count. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
@@ -167,6 +166,10 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
 | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
+
+Set a draft's redundant expert count with
+`eplb_config.draft_num_redundant_experts`; see the
+[EPLB deployment guide](../../serving/expert_parallel_deployment.md#multimodel-eplb-with-speculative-decoding).
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not

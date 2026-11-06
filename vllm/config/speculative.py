@@ -480,10 +480,10 @@ class SpeculativeConfig:
     draft_enable_eplb: bool = True
     """Whether to enable EPLB for the draft model when it is enabled for the
     target model."""
-    draft_num_redundant_experts: int | None = Field(default=None, ge=0)
-    """Redundant expert count for a MoE draft using EPLB. If unset, the minimum
-    valid count is computed from the draft's routed expert counts and EP size.
-    Set this to override the computed count."""
+    resolved_draft_num_redundant_experts: int | None = field(
+        default=None, init=False, repr=False
+    )
+    """Resolved redundant expert count used for the draft's EPLB config."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -753,8 +753,8 @@ class SpeculativeConfig:
                     self.draft_tensor_parallel_size,
                 )
             )
-        if self.draft_num_redundant_experts is not None:
-            factors.append(self.draft_num_redundant_experts)
+        if self.resolved_draft_num_redundant_experts is not None:
+            factors.append(self.resolved_draft_num_redundant_experts)
 
         if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
@@ -1603,23 +1603,30 @@ class SpeculativeConfig:
         """Validate EPLB against draft experts and the topology they use."""
         draft_model_config = self.draft_model_config
         target_parallel_config = self.target_parallel_config
+        requested_redundant_experts = (
+            target_parallel_config.eplb_config.draft_num_redundant_experts
+            if target_parallel_config is not None
+            else None
+        )
 
         if not self.draft_enable_eplb:
-            if self.draft_num_redundant_experts is not None:
+            if requested_redundant_experts is not None:
                 raise ValueError(
-                    "draft_num_redundant_experts requires draft_enable_eplb=true."
+                    "eplb_config.draft_num_redundant_experts requires "
+                    "speculative_config.draft_enable_eplb=true."
                 )
             return
 
-        if self.draft_num_redundant_experts is not None:
+        if requested_redundant_experts is not None:
             if target_parallel_config is None or not target_parallel_config.enable_eplb:
                 raise ValueError(
-                    "draft_num_redundant_experts requires target EPLB to be "
+                    "eplb_config.draft_num_redundant_experts requires target "
+                    "EPLB to be "
                     "enabled and speculative_config.draft_enable_eplb=true."
                 )
             if not self.use_eagle():
                 raise ValueError(
-                    "draft_num_redundant_experts is only supported for MoE "
+                    "eplb_config.draft_num_redundant_experts is only supported for MoE "
                     "draft methods that use EPLB."
                 )
 
@@ -1635,11 +1642,12 @@ class SpeculativeConfig:
             )
 
             supports_eplb = dspark_draft_supports_eplb(draft_model_config)
-            if self.draft_num_redundant_experts is not None and not supports_eplb:
+            if requested_redundant_experts is not None and not supports_eplb:
                 raise ValueError(
-                    "draft_num_redundant_experts is only supported for "
+                    "eplb_config.draft_num_redundant_experts is only supported for "
                     "DeepSeek V4 or V4.1 DSpark drafts that support EPLB. To "
-                    "disable draft EPLB, remove draft_num_redundant_experts "
+                    "disable draft EPLB, remove "
+                    "eplb_config.draft_num_redundant_experts "
                     "and set speculative_config.draft_enable_eplb=false."
                 )
             if not supports_eplb:
@@ -1652,8 +1660,8 @@ class SpeculativeConfig:
                 and target_parallel_config.data_parallel_size == 1
             ):
                 redundant_override_hint = (
-                    " Remove speculative_config.draft_num_redundant_experts and"
-                    if self.draft_num_redundant_experts is not None
+                    " Remove eplb_config.draft_num_redundant_experts and"
+                    if requested_redundant_experts is not None
                     else ""
                 )
                 raise ValueError(
@@ -1677,39 +1685,88 @@ class SpeculativeConfig:
             if not self.use_eagle() or not target_parallel_config.enable_eplb:
                 return
             if not draft_model_config.is_moe:
-                if self.draft_num_redundant_experts is not None:
+                if requested_redundant_experts is not None:
                     raise ValueError(
-                        "draft_num_redundant_experts requires a MoE draft model."
+                        "eplb_config.draft_num_redundant_experts requires a MoE "
+                        "draft model."
                     )
                 return
             draft_parallel_config = target_parallel_config
             draft_num_experts = None
 
-        if self.draft_num_redundant_experts is None:
-            draft_parallel_config = replace(
-                draft_parallel_config,
-                eplb_config=replace(
-                    draft_parallel_config.eplb_config,
-                    num_redundant_experts=None,
-                ),
+        ep_size = (
+            draft_parallel_config.tensor_parallel_size
+            * draft_parallel_config.prefill_context_parallel_size
+            * draft_parallel_config.data_parallel_size
+        )
+        draft_expert_counts = draft_model_config.get_eplb_expert_counts(
+            draft_num_experts
+        )
+        target_expert_counts = (
+            self.target_model_config.get_eplb_expert_counts()
+            if self.target_model_config is not None
+            else set()
+        )
+        target_num_redundant_experts = (
+            target_parallel_config.eplb_config.num_redundant_experts
+        )
+        can_inherit_target_count = (
+            requested_redundant_experts is None
+            and bool(draft_expert_counts)
+            and draft_expert_counts == target_expert_counts
+            and target_num_redundant_experts is not None
+            and all(
+                (count + target_num_redundant_experts) % ep_size == 0
+                for count in draft_expert_counts
             )
-            draft_parallel_config.compute_eplb_num_redundant_experts(
+        )
+        requested_count_is_valid = requested_redundant_experts is not None and all(
+            (count + requested_redundant_experts) % ep_size == 0
+            for count in draft_expert_counts
+        )
+        if can_inherit_target_count:
+            self.resolved_draft_num_redundant_experts = target_num_redundant_experts
+        elif requested_count_is_valid:
+            self.resolved_draft_num_redundant_experts = requested_redundant_experts
+        else:
+            default_num_experts = (
                 draft_num_experts
                 if draft_num_experts is not None
                 else draft_model_config.get_num_experts()
             )
-            self.draft_num_redundant_experts = (
-                draft_parallel_config.eplb_config.num_redundant_experts
-            )
-        else:
-            draft_parallel_config = self._apply_draft_eplb_override(
-                draft_parallel_config
-            )
+            minimum_counts = {(-count) % ep_size for count in draft_expert_counts}
+            if len(minimum_counts) == 1:
+                self.resolved_draft_num_redundant_experts = next(iter(minimum_counts))
+                reason = (
+                    "not specified"
+                    if requested_redundant_experts is None
+                    else "not divisible by the EP size"
+                )
+                logger.info_once(
+                    "Draft EPLB redundant expert count %s, defaulting to "
+                    "minimum valid value: %d "
+                    "(routed_expert_counts=%s, ep_size=%d)",
+                    reason,
+                    self.resolved_draft_num_redundant_experts,
+                    tuple(sorted(draft_expert_counts)),
+                    ep_size,
+                )
+            else:
+                self.resolved_draft_num_redundant_experts = (
+                    -default_num_experts
+                ) % ep_size
+        draft_parallel_config = replace(
+            draft_parallel_config,
+            eplb_config=replace(
+                draft_parallel_config.eplb_config,
+                num_redundant_experts=self.resolved_draft_num_redundant_experts,
+            ),
+        )
 
         draft_model_config.verify_eplb_config(
             draft_parallel_config,
             num_experts=draft_num_experts,
-            config_name="speculative_config.draft_num_redundant_experts",
+            config_name="eplb_config.draft_num_redundant_experts",
             disable_config_name="speculative_config.draft_enable_eplb",
         )
 
@@ -1726,19 +1783,19 @@ class SpeculativeConfig:
                     num_redundant_experts=0,
                 ),
             )
-        if self.draft_num_redundant_experts is None:
+        if self.resolved_draft_num_redundant_experts is None:
             return parallel_config
         return replace(
             parallel_config,
             eplb_config=replace(
                 parallel_config.eplb_config,
-                num_redundant_experts=self.draft_num_redundant_experts,
+                num_redundant_experts=self.resolved_draft_num_redundant_experts,
             ),
         )
 
     def apply_draft_eplb_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
         """Apply draft-only EPLB settings without changing the target config."""
-        if self.draft_enable_eplb and self.draft_num_redundant_experts is None:
+        if self.draft_enable_eplb and self.resolved_draft_num_redundant_experts is None:
             return vllm_config
         # VllmConfig retains the target ModelConfig here. Replacing it would
         # revalidate the draft count against the target model's expert count.
@@ -1752,7 +1809,8 @@ class SpeculativeConfig:
         """Overlay this config's draft overrides onto a target VllmConfig.
 
         Only non-None model overrides are applied. Draft EPLB settings are
-        applied separately, including the draft-specific redundant-expert count.
+        applied separately, including the draft-specific redundant-expert count
+        from eplb_config.
         """
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:

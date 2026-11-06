@@ -267,7 +267,8 @@ class _TopologyEncodingPolicy:
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         cls.calls.append((num_replicas, num_groups))
-        return torch.zeros((weight.shape[0], num_replicas), dtype=torch.long)
+        assert old_global_expert_indices is not None
+        return old_global_expert_indices
 
 
 class _EplbTestGroup:
@@ -312,7 +313,9 @@ def test_rearrange_handles_heterogeneous_model_topologies(monkeypatch, use_async
     monkeypatch.setattr(eplb_state_module, "get_node_count", lambda: 1)
     monkeypatch.setattr(eplb_state_module, "all_reduce", lambda tensor, group: None)
     monkeypatch.setattr(
-        eplb_state_module, "create_eplb_communicator", lambda **kwargs: None
+        eplb_state_module,
+        "create_eplb_communicator",
+        lambda **kwargs: SimpleNamespace(owned_expert_buffer=None),
     )
     monkeypatch.setattr(
         eplb_state_module,

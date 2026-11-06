@@ -1670,6 +1670,16 @@ class ModelConfig:
         if not expert_counts:
             return
 
+        if redundant_experts is None:
+            from vllm.config.parallel import get_min_num_redundant_experts
+
+            num_logical_experts = (
+                num_experts if num_experts is not None else self.get_num_experts()
+            )
+            redundant_experts = get_min_num_redundant_experts(
+                num_logical_experts, ep_size
+            )
+
         invalid_counts = {
             count
             for count in expert_counts
