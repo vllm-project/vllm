@@ -150,7 +150,8 @@ def test_assistant_message_function_call_still_supported():
             ],
         }
     )
-    assert request.messages[1]["function_call"]["name"] == "get_weather"
+    dumped = request.model_dump()
+    assert dumped["messages"][1]["function_call"]["name"] == "get_weather"
 
 
 def test_general_extra_fields_still_allowed():
