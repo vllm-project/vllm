@@ -150,7 +150,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, None, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, False, False)",  # noqa: E501
+            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -160,7 +160,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, None, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, True, False)",  # noqa: E501
+            stmt="output = marlin_gemm(a, None, marlin_q_w, None, marlin_s, marlin_s2, marlin_zp, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, False, True, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
