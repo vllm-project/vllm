@@ -28,8 +28,7 @@ steps:
 #     # init) fails fast with a traceback instead of running until the global
 #     # build timeout. The `thread` method also handles hangs inside C/CUDA
 #     # calls that the signal method cannot interrupt.
-#     # test_reload_refit.py runs in the B200 Weight Reload Refit step
-#     - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread --ignore=model_executor/model_loader/test_reload_refit.py
+#     - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread
 #     - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
 #   mirror:
 #     amd:
@@ -88,11 +87,12 @@ steps:
 - label: ":nvidia: (B200) Weight Reload Refit"
   device: b200-k8s
   key: weight-reload-refit
-  timeout_in_minutes: 30
-  source_file_dependencies:
+  timeout_in_minutes: 45
+  source_file_dependencies: &weight-reload-refit-deps
   - vllm/config/vllm.py
   - vllm/envs.py
   - vllm/distributed/eplb/
+  - vllm/distributed/weight_transfer/ipc_engine.py
   - vllm/model_executor/model_loader/
   - vllm/model_executor/kernels/linear/
   - vllm/model_executor/layers/fused_moe/
@@ -105,43 +105,39 @@ steps:
   - vllm/model_executor/utils.py
   - vllm/model_executor/models/utils.py
   - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/models/llama.py
   - vllm/model_executor/models/nemotron_h.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_moe.py
+  - vllm/utils/deep_gemm.py
   - vllm/v1/attention/backends/flashinfer.py
-  - tests/model_executor/model_loader/test_reload.py
+  - vllm/v1/worker/extensible_kv_cache.py
+  - vllm/v1/worker/gpu_worker.py
+  - tests/model_executor/model_loader/test_direct_reload.py
+  - tests/model_executor/model_loader/test_load_plan.py
   - tests/model_executor/model_loader/test_reload_refit.py
   commands:
-  - pytest -v -s model_executor/model_loader/test_reload_refit.py -k tp1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_direct_reload.py
+    model_executor/model_loader/test_load_plan.py
+  - >-
+    pytest -v -s model_executor/model_loader/test_reload_refit.py
+    -m "not distributed" --timeout=900 --timeout-method=thread
 
 - label: ":nvidia: (2xB200) Weight Reload Refit"
   device: b200-k8s
   num_devices: 2
   key: weight-reload-refit-2gpu
   timeout_in_minutes: 60
-  source_file_dependencies:
-  - vllm/config/vllm.py
-  - vllm/envs.py
-  - vllm/distributed/eplb/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/kernels/linear/
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/
-  - vllm/model_executor/layers/linear.py
-  - vllm/model_executor/layers/attention/
-  - vllm/model_executor/layers/mamba/
-  - vllm/model_executor/layers/vocab_parallel_embedding.py
-  - vllm/model_executor/parameter.py
-  - vllm/model_executor/utils.py
-  - vllm/model_executor/models/utils.py
-  - vllm/model_executor/models/deepseek_v2.py
-  - vllm/model_executor/models/nemotron_h.py
-  - vllm/model_executor/models/qwen2.py
-  - vllm/model_executor/models/qwen3.py
-  - vllm/model_executor/models/qwen3_moe.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - tests/model_executor/model_loader/test_reload.py
-  - tests/model_executor/model_loader/test_reload_refit.py
+  source_file_dependencies: *weight-reload-refit-deps
   commands:
-  - pytest -v -s model_executor/model_loader/test_reload_refit.py -k "not tp1"
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s model_executor/model_loader/test_reload_refit.py
+    -m distributed --timeout=1500 --timeout-method=thread
