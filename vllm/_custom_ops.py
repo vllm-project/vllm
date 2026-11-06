@@ -726,11 +726,14 @@ def cutlass_scaled_fp4_mm(
     block_scale_b: torch.Tensor,
     alpha: torch.Tensor,
     out_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     m, n = a.shape[0], b.shape[0]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
+    torch.ops._C.cutlass_scaled_fp4_mm(
+        out, a, b, block_scale_a, block_scale_b, alpha, bias
+    )
     return out
 
 
@@ -2217,6 +2220,42 @@ def moe_wna16_gemm(
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
         bit,
+    )
+
+
+def lut_b_moe_gemm_supported() -> bool:
+    """Whether the Rubin (SM107) LUT-B MoE GEMM was compiled."""
+    return current_platform.is_cuda() and hasattr(torch.ops._moe_C, "lut_b_moe_gemm")
+
+
+def lut_b_moe_gemm(
+    a: torch.Tensor,
+    a_scales: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+) -> None:
+    """Grouped GEMM of MXFP8 activations with LUT-B expert weights.
+
+    ``c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T`` for each routed
+    row ``i`` (scaled by ``topk_weights[i]`` when given), using routing
+    aligned to blocks of 128 by ``moe_align_block_size``. ``b`` holds the
+    weights in the kernel tile layout from ``lut_b_to_sm107_tiles``.
+    """
+    torch.ops._moe_C.lut_b_moe_gemm(
+        a,
+        a_scales,
+        b,
+        c,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
     )
 
 

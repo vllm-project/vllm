@@ -32,6 +32,10 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import (
+    MoEKernelOracle,
+    make_moe_kernel,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -278,6 +282,17 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     )
 
 
+class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
+    """WNA16 MoE backend selection for one deployment configuration."""
+
+    name = "WNA16"
+
+    def backend_to_kernel_cls(
+        self, backend: WNA16MoEBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
@@ -302,42 +317,8 @@ def select_wna16_moe_backend(
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
 
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: WNA16MoEBackend):
-        return f"Using '{backend.value}' WNA16 MoE backend."
-
-    def _make_log_unsupported(backend: WNA16MoEBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"WNA16 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"WNA16 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: WNA16MoEBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    # WNA16 MoE always runs BF16 activations.
+    oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -352,10 +333,8 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            raise ValueError(_make_log_unsupported(requested_backend, reason))
-        return _return_or_raise(
-            requested_backend, config, weight_key, None, activation_format
-        )
+            raise ValueError(oracle.make_log_unsupported(requested_backend, reason))
+        return oracle.return_or_raise(requested_backend)
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
@@ -370,18 +349,12 @@ def select_wna16_moe_backend(
             allow_tile_padding,
         )
         if reason is not None:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+            logger.debug_once(oracle.make_log_unsupported(backend, reason))
             continue
-        activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+        kernel_cls, _ = oracle.try_backend(backend)
+        if kernel_cls is not None:
+            logger.info_once(oracle.make_log_backend(backend))
+            return backend, kernel_cls
 
     raise NotImplementedError(
         "No WNA16 MoE backend supports the deployment configuration."
@@ -438,9 +411,6 @@ def make_wna16_moe_kernel(
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
-    )
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
     )
@@ -476,36 +446,12 @@ def make_wna16_moe_kernel(
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
     assert experts_cls in allowed_experts
 
-    is_monolithic = experts_cls.is_monolithic()
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
-    logger.info_once("Using %s", experts_cls.__name__, scope="local")
-
-    extra_args: dict[str, Any] = {}
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        extra_args["max_num_tokens"] = max_num_tokens
-        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-        **extra_args,
-    )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return make_moe_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        routing_tables,
+        experts_log="Using %s",
     )
 
 
