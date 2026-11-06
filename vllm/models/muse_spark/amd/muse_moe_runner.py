@@ -531,7 +531,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             activation=activation,
             expert_mask=expert_map,
             quant_config=self.quant_config,
-            quant_method=self._AITER_QUANT_METHOD,
+            quant_type=self._AITER_QUANT_TYPE,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
