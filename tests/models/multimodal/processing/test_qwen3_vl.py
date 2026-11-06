@@ -87,6 +87,7 @@ def test_processor_partial_scoped_image_size(model_id: str) -> None:
         limit_mm_per_prompt={"image": 1, "video": 0},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen3VLProcessingInfo)
 
     image = np.zeros((128, 128, 3), dtype=np.uint8)
     min_pixels = 256 * 32 * 32
@@ -95,9 +96,11 @@ def test_processor_partial_scoped_image_size(model_id: str) -> None:
 
     def process(hf_mm_kwargs: dict[str, Any]) -> torch.Tensor:
         mm_items = processor.info.parse_mm_data({"image": [image]})
-        return processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
+        grid = processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
             "image_grid_thw"
         ]
+        assert isinstance(grid, torch.Tensor)
+        return grid
 
     stock_grid = process({})
     complete_grid = process({"images_kwargs": {"size": complete_size}})
@@ -127,6 +130,7 @@ def test_processor_partial_scoped_video_size(model_id: str) -> None:
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Qwen3VLProcessingInfo)
 
     min_pixels = 512 * 32 * 32
     default_size = dict(processor.info.get_video_processor().size)
@@ -134,9 +138,11 @@ def test_processor_partial_scoped_video_size(model_id: str) -> None:
 
     def process(hf_mm_kwargs: dict[str, Any]) -> torch.Tensor:
         mm_items = processor.info.parse_mm_data(_build_video_mm_data(num_frames=8))
-        return processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
+        grid = processor._apply_hf_processor_main(mm_items, hf_mm_kwargs)[
             "video_grid_thw"
         ]
+        assert isinstance(grid, torch.Tensor)
+        return grid
 
     stock_grid = process({})
     complete_grid = process({"videos_kwargs": {"size": complete_size}})
@@ -302,6 +308,7 @@ def _probe_mm_token_budgets(
         limit_mm_per_prompt={"image": 1, "video": 1},
     )
     info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    assert isinstance(info, Qwen3VLProcessingInfo)
     video = info.get_max_video_tokens(
         seq_len=500000, mm_counts={"video": 1, "image": 1}
     )
@@ -381,7 +388,9 @@ def test_processor_multi_video_list_kwargs(
             mm_items=processor.info.parse_mm_data({"video": [videos[0]]}),
             hf_processor_mm_kwargs=hf_kwargs,
         )
-        return single["mm_kwargs"].get_data()["video_grid_thw"][0]
+        grids = single["mm_kwargs"].get_data()["video_grid_thw"]
+        assert isinstance(grids, torch.Tensor)
+        return grids[0]
 
     expected_grids = [process_single(kwargs) for kwargs in scalar_kwargs]
     assert not torch.equal(expected_grids[0], expected_grids[1])
@@ -466,7 +475,9 @@ def test_processor_profiles_fewer_videos_than_configured_options(
     profiled = processor.get_dummy_mm_inputs({"video": 1})
 
     assert len(profiled["mm_placeholders"]["video"]) == 1
-    assert profiled["mm_kwargs"].get_data()["video_grid_thw"].shape[0] == 1
+    video_grid_thw = profiled["mm_kwargs"].get_data()["video_grid_thw"]
+    assert isinstance(video_grid_thw, torch.Tensor)
+    assert video_grid_thw.shape[0] == 1
 
 
 def _build_video_embeds_mm_data(
@@ -584,7 +595,9 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
     capped_dummy = capped.dummy_inputs.get_dummy_mm_data(
         1024, {"video": 1}, MultiModalDummyOptions()
     )
-    capped_frames = capped_dummy["video"][0][0].shape[0]
+    capped_videos = capped_dummy["video"]
+    assert isinstance(capped_videos, list)
+    capped_frames = capped_videos[0][0].shape[0]
     assert capped_frames == 16, (
         f"Expected the dummy to spread the budget over 16 frames, got {capped_frames}"
     )
@@ -598,7 +611,9 @@ def test_dummy_video_spreads_budget_when_frame_cap_enabled(model_id: str) -> Non
     uncapped_dummy = uncapped.dummy_inputs.get_dummy_mm_data(
         1024, {"video": 1}, MultiModalDummyOptions()
     )
-    uncapped_frames = uncapped_dummy["video"][0][0].shape[0]
+    uncapped_videos = uncapped_dummy["video"]
+    assert isinstance(uncapped_videos, list)
+    uncapped_frames = uncapped_videos[0][0].shape[0]
     assert uncapped_frames == 2, (
         f"Expected the uncapped dummy to keep 2 frames, got {uncapped_frames}"
     )

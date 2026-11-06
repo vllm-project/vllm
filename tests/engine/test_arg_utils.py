@@ -92,6 +92,13 @@ def test_watermark_config_cli():
     assert config.deduplicate_contexts == "none"
     assert config.deduplicate_contexts_max_history == 32
 
+    args = parser.parse_args(
+        ["--model", "dummy", "--watermark-config", '{"key":42,"enforce":true}']
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+    assert config is not None
+    assert config.enforce is True
+
 
 @pytest.mark.parametrize(
     "option",
@@ -803,6 +810,11 @@ def test_numa_bind_args():
     assert engine_args.numa_bind is True
     assert engine_args.numa_bind_nodes == [0, 0, 1, 1]
     assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
+
+    # Unset means auto; --no-numa-bind disables explicitly.
+    assert EngineArgs.from_cli_args(args=parser.parse_args([])).numa_bind is None
+    args = parser.parse_args(["--no-numa-bind"])
+    assert EngineArgs.from_cli_args(args=args).numa_bind is False
 
 
 def test_ir_op_priority():

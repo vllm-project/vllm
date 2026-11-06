@@ -70,6 +70,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
+from vllm.utils.gc_utils import untracked_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
@@ -526,7 +527,9 @@ class OpenAIServingChat(GenerateBaseServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         # TODO: Remove once all reasoning parsers use the Parser Engine.
-        generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        generated_token_ids: list[list[int]] = [
+            untracked_list() for _ in range(num_choices)
+        ]
         previous_reasoning_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
@@ -630,6 +633,14 @@ class OpenAIServingChat(GenerateBaseServing):
                                     _make_completion_tokens_details(0)
                                     if self._include_reasoning_tokens_details
                                     else None
+                                ),
+                                # Known from the first output, so the first
+                                # chunk's prompt split matches the final one.
+                                prompt_tokens_details=_make_prompt_tokens_details(
+                                    self.enable_prompt_tokens_details,
+                                    num_cached_tokens,
+                                    num_cache_creation_tokens,
+                                    mm_token_counts,
                                 ),
                             )
 
