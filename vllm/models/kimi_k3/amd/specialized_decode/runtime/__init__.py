@@ -46,16 +46,18 @@ class DecodeConfig:
     m1: bool = True
     # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
     interleave: int = 1
-    # the most requests a step has (spec verify: ``step_reasons`` caps its rows)
+    # the most requests a step has (spec verify: ``step_reasons`` caps its rows;
+    # regular decode: unbounded, steps past MAX_ROWS run vLLM's decode)
     max_num_seqs: int = 1
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, 1 .. max_num_seqs of them.
-        Every uniform regular-decode or spec-verify step is one of them (vLLM
-        captures no uniform decode graph wider than max_num_seqs x q), so an eager
-        step never pads; a FULL replay pads whole requests the way vLLM's stock
-        decode does."""
+        """The rows a launch serves: whole requests, up to MAX_ROWS rows and
+        max_num_seqs requests. Every uniform spec-verify step is one of them
+        (vLLM captures no uniform decode graph wider than max_num_seqs x q), so an
+        eager step never pads; a FULL replay pads whole requests the way vLLM's
+        stock decode does. A regular-decode step wider than
+        min(max_num_seqs, MAX_ROWS) is none of them and runs vLLM's decode."""
         rows = min(MAX_ROWS, self.max_num_seqs * self.q)
         return tuple(range(self.q, rows + 1, self.q))
 

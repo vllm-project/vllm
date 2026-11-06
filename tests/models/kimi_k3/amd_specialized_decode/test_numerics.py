@@ -218,6 +218,8 @@ def test_k1_matches_vllm_ops(
     fused_recurrent_kda -> FusedRMSNormGated on one regular-decode or spec-verify
     step (S / L requests of L tokens), including the state each step leaves
     behind."""
+    if L == 1 and nacc != 1:
+        pytest.skip("at L = 1 every request accepts 1 token: the nacc = 1 case")
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
@@ -414,7 +416,7 @@ def _fp8_f(t):
 
 @needs_gfx950
 @pytest.mark.parametrize("qbf16", [False, True])
-@pytest.mark.parametrize("S", [4, 8, 16, 32, 64])
+@pytest.mark.parametrize("S", [1, 2, 3, 4, 8, 16, 32, 64])
 def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
     """M1a at DCP1 (ranks = 1: no gather, no peer memory) against attn_res ->
     qkv_a -> q / kv RMSNorm -> q_b -> aiter's fp4 W_UK -> the fp8 query (bf16
@@ -577,7 +579,10 @@ def _mla_back_reference(w):
 
 
 @needs_gfx950
-@pytest.mark.parametrize("S, q", [(4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)])
+@pytest.mark.parametrize(
+    "S, q",
+    [(1, 1), (4, 1), (16, 1), (4, 4), (8, 4), (16, 4), (32, 4), (64, 4), (64, 8)],
+)
 def test_m1b_single_gpu_matches_vllm_ops(S: int, q: int) -> None:
     """M1b at DCP1 (ranks = 1: no LSE, no peer memory): AITER's strided
     output -> aiter's fp4 W_UV -> the gate."""
@@ -1163,7 +1168,7 @@ def _m1_worker(
     assert qheads >= R * NH
 
     # M1a: this rank's query rows land at heads 12 * rank.. on every rank
-    for S in (4, 8, 16, 32, 64):
+    for S in (1, 3, 4, 8, 16, 32, 64):
         w = _mla_inputs(S, nb, rank, R)
         ref = _mla_reference(w, nb)
         runner.step_begin()
@@ -1201,7 +1206,7 @@ def _m1_worker(
 
     # M1b: every sender's partials for this rank's heads, each with its own
     # empty-shard mask, combined in rank order
-    for S, q in ((4, 4), (16, 4), (64, 4), (64, 8)):
+    for S, q in ((1, 1), (16, 1), (4, 4), (16, 4), (64, 4), (64, 8)):
         b = _mla_back_inputs(S, q, R, rank)
         runner.step_begin()
         core = torch.zeros(S, GROWS, dtype=bf, device=device)
@@ -1229,7 +1234,7 @@ def _m1_worker(
     # K2 with M1b in its launch (``K2Build.m1b_qlen``): core, prefix and the
     # MoE output bit-identical to M1b's launch then K2's, at DCP8 and DCP1
     mw = _moe_weights(rank, device)
-    for S, q in ((8, 8), (16, 8), (16, 4), (64, 4)):
+    for S, q in ((1, 1), (8, 1), (16, 1), (8, 8), (16, 8), (16, 4), (64, 4)):
         k = _k2_inputs(rank, device, S)
         for ranks in (R, 1):
             b = _mla_back_inputs(S, q, ranks, rank)

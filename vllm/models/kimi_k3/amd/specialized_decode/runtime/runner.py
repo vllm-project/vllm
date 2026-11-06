@@ -58,6 +58,8 @@ class MonoRunner:
         layer.TAG_READY = True
         self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
         self.health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=device)
+        # K1's num_acc on regular decode: K1 reads state slot num_acc - 1, so it
+        # must stay all ones; allocated once so captured graphs keep its address
         self.regular_num_accepted = torch.ones(
             MAX_TOKENS, dtype=torch.int32, device=device
         )
