@@ -536,10 +536,12 @@ def promote(tmp_path: Path, images: list[str], **env: str):
     return run_build(
         tmp_path,
         "promote",
-        ROCM_PROMOTE_PR="7",
-        ROCM_PROMOTE_SHA="a" * 40,
-        ROCM_PROMOTE_IMAGES=" ".join(images),
-        **env,
+        **{
+            "ROCM_PROMOTE_PR": "7",
+            "ROCM_PROMOTE_SHA": "a" * 40,
+            "ROCM_PROMOTE_IMAGES": " ".join(images),
+            **env,
+        },
     )
 
 
@@ -576,9 +578,17 @@ def test_promote_skips_tags_main_already_has(tmp_path):
         ([PR_STACK], {}, "recorded no"),
         ([PR_WHEELS, PR_STACK], {"RECIPE_DIFF": "1"}, "another build.sh or bake file"),
         ([PR_WHEELS, PR_STACK], {"ROCM_CI_REPO": "rocm/vllm-dev"}, "only pushes"),
+        ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_SHA": "main"}, "malformed"),
     ],
 )
 def test_promote_refuses_what_main_would_not_build(tmp_path, images, env, message):
     status, stderr, calls = promote(tmp_path, images, **env)
     assert status != 0 and message in stderr
+    assert not copied(calls)
+
+
+def test_promote_without_a_pr_does_nothing(tmp_path):
+    # Nightly builds and "Run more jobs" run the optional step without one.
+    status, stderr, calls = promote(tmp_path, [PR_WHEELS, PR_STACK], ROCM_PROMOTE_PR="")
+    assert status == 0 and "nothing to cache" in stderr
     assert not copied(calls)

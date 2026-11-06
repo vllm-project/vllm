@@ -389,6 +389,10 @@ case $MODE in
     # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
     # ROCM_PROMOTE_SHA recorded. Copy the stack pair here under the key main's keys_at gives that
     # commit, if it was built with main's recipe; main reuses it once it gets that key.
+    # Nightly builds and "Run more jobs" also run this optional step: without a PR, nothing to do.
+    [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "no ROCM_PROMOTE_PR: nothing to cache" >&2; exit 0; }
+    [[ $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
+      || { echo "ROCM_PROMOTE_PR or ROCM_PROMOTE_SHA is malformed" >&2; exit 2; }
     [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
     git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
     git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \

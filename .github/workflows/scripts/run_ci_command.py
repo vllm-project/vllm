@@ -49,6 +49,7 @@ UPSTREAM_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/ci ")),
         COMMAND_RETRY_FAILED,
         COMMAND_CANCEL_CI,
+        *ROCM_CACHE_COMMANDS,
     }
 )
 AMD_CI_COMMANDS = frozenset(
@@ -56,7 +57,6 @@ AMD_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
-        *ROCM_CACHE_COMMANDS,  # they start AMD CI builds
     }
 )
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
@@ -94,6 +94,8 @@ ROCM_CACHE_DONE = (
 ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
 # build.sh base mode records the stack images it built under these keys.
 ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack-wheels", "rocm-rocm-stack")
+# The step in .buildkite/hardware_tests/amd.yaml that runs build.sh promote.
+ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
 
 
 class ApiError(RuntimeError):
@@ -1221,7 +1223,6 @@ def handle_rocm_cache(
     *,
     actor: str,
     buildkite: BuildkiteClient,
-    ci_buildkite: BuildkiteClient,
     command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
@@ -1248,8 +1249,7 @@ def handle_rocm_cache(
     # built, whatever happens to their tags afterwards.
     sources = [
         build
-        for client in (buildkite, ci_buildkite)
-        for build in client.list_builds(sha)
+        for build in buildkite.list_builds(sha)
         if is_build_for_pr(build, pr["number"])
         and all((build.get("meta_data") or {}).get(k) for k in ROCM_STACK_IMAGE_KEYS)
     ]
@@ -1265,6 +1265,7 @@ def handle_rocm_cache(
             "branch": "main",
             "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
             "env": {
+                "VLLM_CI_ONLY_STEP_KEYS": json.dumps([ROCM_CACHE_STEP_KEY]),
                 "ROCM_PROMOTE_PR": str(pr["number"]),
                 "ROCM_PROMOTE_SHA": sha,
                 "ROCM_PROMOTE_IMAGES": " ".join(
@@ -1274,7 +1275,7 @@ def handle_rocm_cache(
         }
     )
     return (
-        f"Caching the ROCm base image for main: [AMD CI #{build['number']}]"
+        f"Caching the ROCm base image for main: [CI #{build['number']}]"
         f"({build['web_url']}) copies the image [this PR's CI]({source['web_url']}) "
         f"built. {ROCM_CACHE_DONE}"
     )
@@ -1308,7 +1309,6 @@ def run(
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
     branch_updater: GitHubClient | None = None,
-    ci_buildkite: BuildkiteClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1391,7 +1391,6 @@ def run(
             message = handle_rocm_cache(
                 actor=actor,
                 buildkite=buildkite,
-                ci_buildkite=ci_buildkite or buildkite,
                 command=command,
                 github=github,
                 pr=pr,
@@ -1462,9 +1461,11 @@ def main() -> None:
         amd_ci_pipeline=os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci"),
         upstream_ci_pipeline=os.environ.get("BUILDKITE_PIPELINE", "ci"),
     )
-    buildkite_token = os.environ.get("BUILDKITE_API_TOKEN", "")
-    organization = os.environ.get("BUILDKITE_ORGANIZATION", "vllm")
-    buildkite = BuildkiteClient(buildkite_token, organization, pipeline)
+    buildkite = BuildkiteClient(
+        os.environ.get("BUILDKITE_API_TOKEN", ""),
+        os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
+        pipeline,
+    )
     branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
@@ -1474,9 +1475,6 @@ def main() -> None:
         GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
         if branch_update_token
         else None,
-        BuildkiteClient(
-            buildkite_token, organization, os.environ.get("BUILDKITE_PIPELINE", "ci")
-        ),
     )
 
 

@@ -41,3 +41,23 @@ steps:
           limit: 1
         - exit_status: -10  # Agent was lost
           limit: 1
+
+  # /ci rocm cache starts a main build of only this step (VLLM_CI_ONLY_STEP_KEYS), with the PR's
+  # ROCM_PROMOTE_PR/SHA/IMAGES: it copies the stack images that PR's CI built into rocm/vllm-ci.
+  - label: ":docker: Cache a PR's ROCm base image"
+    key: rocm-base-image-cache
+    depends_on: []
+    device: amd_cpu
+    no_plugin: true
+    optional: true
+    commands:
+      - bash .buildkite/scripts/rocm/build.sh rocm promote
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
