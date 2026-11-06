@@ -592,10 +592,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if len(loaded) < (2 if shard_id == "w2" else 4):
             return
         loaded.clear()
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.utils.deep_gemm import requantize_fp8_weights_for_sm90_mega_moe
 
         weight, scale = self._kernel_weights(name)
-        requantized = _import_deep_gemm().requantize_fp8_weights_for_sm90_mega_moe(
+        requantized = requantize_fp8_weights_for_sm90_mega_moe(
             (weight.data, scale.data), is_sf_transposed_for_utccp=True
         )
         for param, data in zip((weight, scale), requantized):
@@ -635,13 +635,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
             AssertionError: If a row's UE8M0 scales are out of the kernel's range.
 
         """
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.utils.deep_gemm import (
+            relayout_fp4_weights_for_sm90_mega_moe,
+            transform_fp4_sf_for_sm90_mega_moe,
+        )
 
-        deep_gemm = _import_deep_gemm()
         if is_scale:
             sf = src.view(torch.uint8).contiguous().view(torch.int32)
-            return deep_gemm.transform_fp4_sf_for_sm90_mega_moe(sf)
-        return deep_gemm.relayout_fp4_weights_for_sm90_mega_moe(src.view(torch.int8))
+            return transform_fp4_sf_for_sm90_mega_moe(sf)
+        return relayout_fp4_weights_for_sm90_mega_moe(src.view(torch.int8))
 
     @staticmethod
     def _pack_scale(sf: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
