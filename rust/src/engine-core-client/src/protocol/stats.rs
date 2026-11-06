@@ -359,6 +359,67 @@ pub mod kv_connector {
     #[serde(transparent)]
     pub struct UmbpStats(pub BTreeMap<UmbpOperation, UmbpOperationCounts>);
 
+    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SimpleCPUOffloadMetricType {
+        Counter,
+        Gauge,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    pub enum SimpleCPUOffloadMetricName {
+        #[serde(rename = "vllm:simple_kv_offload_save_outcomes_total")]
+        SaveOutcomes,
+        #[serde(rename = "vllm:simple_kv_offload_load_blocks_total")]
+        LoadBlocks,
+        #[serde(rename = "vllm:simple_kv_offload_used_blocks")]
+        UsedBlocks,
+        #[serde(rename = "vllm:simple_kv_offload_pending_store_blocks")]
+        PendingStoreBlocks,
+        #[serde(rename = "vllm:simple_kv_offload_info")]
+        Info,
+    }
+
+    /// Tuple-keyed SimpleCPU samples. Floating-point values preserve the Python
+    /// stats helper's `int | float` domain rather than truncating observations.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct SimpleCPUOffloadData {
+        #[serde(default, rename = "vllm:simple_kv_offload_save_outcomes_total")]
+        pub save_outcomes: BTreeMap<[String; 1], f64>,
+        #[serde(default, rename = "vllm:simple_kv_offload_load_blocks_total")]
+        pub load_blocks: BTreeMap<[String; 0], f64>,
+        #[serde(default, rename = "vllm:simple_kv_offload_used_blocks")]
+        pub used_blocks: BTreeMap<[String; 0], f64>,
+        #[serde(default, rename = "vllm:simple_kv_offload_pending_store_blocks")]
+        pub pending_store_blocks: BTreeMap<[String; 0], f64>,
+        #[serde(default, rename = "vllm:simple_kv_offload_info")]
+        pub info: BTreeMap<[String; 4], f64>,
+    }
+
+    /// SimpleCPU's envelope permits partial intervals and empty child stats.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct SimpleCPUOffloadStats {
+        pub types: BTreeMap<SimpleCPUOffloadMetricName, SimpleCPUOffloadMetricType>,
+        pub data: SimpleCPUOffloadData,
+    }
+
+    fn deserialize_flat_simple_cpu_offload<'de, D>(
+        deserializer: D,
+    ) -> Result<SimpleCPUOffloadStats, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let stats = SimpleCPUOffloadStats::deserialize(deserializer)?;
+        if stats.types.is_empty() {
+            return Err(serde::de::Error::custom(
+                "flat SimpleCPU stats require a known metric name",
+            ));
+        }
+        Ok(stats)
+    }
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -375,6 +436,8 @@ pub mod kv_connector {
         pub mooncake: Option<MooncakeStats>,
         #[serde(rename = "UMBPStoreConnector")]
         pub umbp: Option<UmbpStats>,
+        #[serde(rename = "SimpleCPUOffloadConnector")]
+        pub simple_cpu_offload: Option<SimpleCPUOffloadStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -396,6 +459,10 @@ pub mod kv_connector {
         MooncakeTransfer(MooncakeTransferStats),
         Mooncake(MooncakeStats),
         Umbp(UmbpStats),
+        SimpleCPUOffload(
+            #[serde(deserialize_with = "deserialize_flat_simple_cpu_offload")]
+            SimpleCPUOffloadStats,
+        ),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }

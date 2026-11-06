@@ -673,3 +673,68 @@ print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
 print(msgspec.msgpack.encode(lora_request).hex())
 print(msgspec.msgpack.encode(inplace_lora_request).hex())
+
+simple_cpu_offload_stats = {
+    "types": {
+        "vllm:simple_kv_offload_save_outcomes_total": "counter",
+        "vllm:simple_kv_offload_load_blocks_total": "counter",
+        "vllm:simple_kv_offload_used_blocks": "gauge",
+        "vllm:simple_kv_offload_pending_store_blocks": "gauge",
+        "vllm:simple_kv_offload_info": "gauge",
+    },
+    "data": {
+        "vllm:simple_kv_offload_save_outcomes_total": {
+            (outcome,): count
+            for count, outcome in enumerate(
+                [
+                    "stored",
+                    "dropped_cpu_full",
+                    "dropped_request_gone",
+                    "dropped_null_block",
+                    "dropped_not_hashed",
+                    "skipped_already_cached",
+                    "skipped_in_flight",
+                ],
+                start=1,
+            )
+        },
+        "vllm:simple_kv_offload_load_blocks_total": {(): 4.5},
+        "vllm:simple_kv_offload_used_blocks": {(): 9},
+        "vllm:simple_kv_offload_pending_store_blocks": {(): 2},
+        "vllm:simple_kv_offload_info": {("cpu", "false", "true", "64"): 1},
+    },
+}
+print(msgspec.msgpack.encode(simple_cpu_offload_stats).hex())
+print(
+    msgspec.msgpack.encode(
+        {
+            **multi_connector_stats,
+            "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
+        }
+    ).hex()
+)
+print(
+    msgspec.msgpack.encode(
+        {
+            "types": {"vllm:simple_kv_offload_used_blocks": "gauge"},
+            "data": {"vllm:simple_kv_offload_used_blocks": {(): 3}},
+        }
+    ).hex()
+)
+print(msgspec.msgpack.encode({"types": {}, "data": {}}).hex())
+print(
+    msgspec.msgpack.encode(
+        {
+            "types": {"unknown_connector_blocks": "gauge"},
+            "data": {"unknown_connector_blocks": {(): 3}},
+        }
+    ).hex()
+)
+print(
+    msgspec.msgpack.encode(
+        {
+            "NixlConnector": nixl_stats,
+            "SimpleCPUOffloadConnector": {"types": {}, "data": {}},
+        }
+    ).hex()
+)

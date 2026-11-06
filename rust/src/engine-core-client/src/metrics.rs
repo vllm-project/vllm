@@ -9,13 +9,15 @@ use vllm_metrics::{
     CacheHitSourceLabels, EngineLabels, EnginePositionLabels, EngineSleepStateLabels, F64Gauge,
     Family, HistogramMetric, KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels,
     MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
-    RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
+    RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, SimpleCPUOffloadCounter,
+    SimpleCPUOffloadInfoLabels, SimpleCPUOffloadOutcomeLabels, U64Counter, U64Gauge,
     UmbpOperationCounterFamily, UmbpOperationLabels, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
     CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
-    MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats, UmbpStats,
+    MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
+    SimpleCPUOffloadMetricName, SimpleCPUOffloadMetricType, SimpleCPUOffloadStats, UmbpStats,
 };
 use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
@@ -75,6 +77,12 @@ pub(crate) struct SchedulerStatsRecorder {
 
 /// Per-engine cached metric handles used while recording `SchedulerStats`.
 struct SchedulerStatsHandles {
+    simple_cpu_offload_save_outcomes:
+        Family<SimpleCPUOffloadOutcomeLabels, SimpleCPUOffloadCounter>,
+    simple_cpu_offload_load_blocks: Family<EngineLabels, SimpleCPUOffloadCounter>,
+    simple_cpu_offload_used_blocks: Family<EngineLabels, F64Gauge>,
+    simple_cpu_offload_pending_store_blocks: Family<EngineLabels, F64Gauge>,
+    simple_cpu_offload_info: Family<SimpleCPUOffloadInfoLabels, F64Gauge>,
     // Base labels reused for dynamic child labels.
     labels: EngineLabels,
 
@@ -234,6 +242,13 @@ fn resolve_scheduler_stats_handles(
     };
 
     SchedulerStatsHandles {
+        simple_cpu_offload_save_outcomes: metrics.simple_cpu_offload_save_outcomes.clone(),
+        simple_cpu_offload_load_blocks: metrics.simple_cpu_offload_load_blocks.clone(),
+        simple_cpu_offload_used_blocks: metrics.simple_cpu_offload_used_blocks.clone(),
+        simple_cpu_offload_pending_store_blocks: metrics
+            .simple_cpu_offload_pending_store_blocks
+            .clone(),
+        simple_cpu_offload_info: metrics.simple_cpu_offload_info.clone(),
         scheduler_running: metrics.scheduler_running.get_or_create_owned(&labels),
         scheduler_waiting: metrics.scheduler_waiting.get_or_create_owned(&labels),
         scheduler_waiting_capacity: metrics
@@ -437,6 +452,9 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
             }
             KvConnectorStats::Mooncake(stats) => record_mooncake_stats(handles, stats),
             KvConnectorStats::Umbp(stats) => record_umbp_stats(handles, stats),
+            KvConnectorStats::SimpleCPUOffload(stats) => {
+                record_simple_cpu_offload_stats(handles, stats)
+            }
             KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
             KvConnectorStats::Other(_) => {}
         }
@@ -444,6 +462,9 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
 }
 
 fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiConnectorStats) {
+    if let Some(stats) = &stats.simple_cpu_offload {
+        record_simple_cpu_offload_stats(handles, stats);
+    }
     for nixl in [&stats.nixl, &stats.nixl_pull, &stats.nixl_push].into_iter().flatten() {
         record_nixl_stats(handles, nixl);
     }
@@ -475,6 +496,95 @@ fn record_mooncake_transfer_stats(handles: &SchedulerStatsHandles, stats: &Moonc
     handles
         .mooncake_num_kv_expired_reqs
         .inc_by(stats.num_kv_expired_reqs.iter().sum());
+}
+
+fn record_simple_cpu_offload_stats(handles: &SchedulerStatsHandles, stats: &SimpleCPUOffloadStats) {
+    let data = &stats.data;
+    for (name, present, expected) in [
+        (
+            SimpleCPUOffloadMetricName::SaveOutcomes,
+            !data.save_outcomes.is_empty(),
+            SimpleCPUOffloadMetricType::Counter,
+        ),
+        (
+            SimpleCPUOffloadMetricName::LoadBlocks,
+            !data.load_blocks.is_empty(),
+            SimpleCPUOffloadMetricType::Counter,
+        ),
+        (
+            SimpleCPUOffloadMetricName::UsedBlocks,
+            !data.used_blocks.is_empty(),
+            SimpleCPUOffloadMetricType::Gauge,
+        ),
+        (
+            SimpleCPUOffloadMetricName::PendingStoreBlocks,
+            !data.pending_store_blocks.is_empty(),
+            SimpleCPUOffloadMetricType::Gauge,
+        ),
+        (
+            SimpleCPUOffloadMetricName::Info,
+            !data.info.is_empty(),
+            SimpleCPUOffloadMetricType::Gauge,
+        ),
+    ] {
+        if present && stats.types.get(&name) != Some(&expected) {
+            tracing::warn!(
+                metric = ?name,
+                "Invalid SimpleCPUOffload metric type; dropping stats"
+            );
+            return;
+        }
+    }
+    if data
+        .save_outcomes
+        .values()
+        .chain(data.load_blocks.values())
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        tracing::warn!("Invalid SimpleCPUOffload counter increment; dropping stats");
+        return;
+    }
+    for ([outcome], value) in &data.save_outcomes {
+        handles
+            .simple_cpu_offload_save_outcomes
+            .get_or_create(&SimpleCPUOffloadOutcomeLabels {
+                model_name: handles.labels.model_name.clone(),
+                engine: handles.labels.engine,
+                outcome: outcome.clone(),
+            })
+            .inc_by(*value);
+    }
+    for value in data.load_blocks.values() {
+        handles
+            .simple_cpu_offload_load_blocks
+            .get_or_create(&handles.labels)
+            .inc_by(*value);
+    }
+    for value in data.used_blocks.values() {
+        handles
+            .simple_cpu_offload_used_blocks
+            .get_or_create(&handles.labels)
+            .set(*value);
+    }
+    for value in data.pending_store_blocks.values() {
+        handles
+            .simple_cpu_offload_pending_store_blocks
+            .get_or_create(&handles.labels)
+            .set(*value);
+    }
+    for ([backend, page_cache, lazy_offload, capacity_blocks], value) in &data.info {
+        handles
+            .simple_cpu_offload_info
+            .get_or_create(&SimpleCPUOffloadInfoLabels {
+                model_name: handles.labels.model_name.clone(),
+                engine: handles.labels.engine,
+                backend: backend.clone(),
+                page_cache: page_cache.clone(),
+                lazy_offload: lazy_offload.clone(),
+                capacity_blocks: capacity_blocks.clone(),
+            })
+            .set(*value);
+    }
 }
 
 fn record_mooncake_stats(handles: &SchedulerStatsHandles, stats: &MooncakeStats) {
@@ -627,10 +737,344 @@ mod tests {
     use crate::protocol::stats::{
         KvConnectorStats, KvFetchReqsByStage, MooncakeOperation, MooncakeRecord, MooncakeStats,
         MooncakeStatus, MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
+        SimpleCPUOffloadStats,
     };
 
     fn names(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn simple_cpu_offload_wire(outcomes: &[(&str, f64)], used: u64) -> rmpv::Value {
+        use rmpv::Value;
+
+        let entries = [
+            (
+                "save_outcomes_total",
+                "counter",
+                outcomes
+                    .iter()
+                    .map(|(outcome, value)| {
+                        (
+                            Value::Array(vec![Value::from(*outcome)]),
+                            Value::F64(*value),
+                        )
+                    })
+                    .collect(),
+            ),
+            (
+                "load_blocks_total",
+                "counter",
+                vec![(Value::Array(vec![]), Value::from(4))],
+            ),
+            (
+                "used_blocks",
+                "gauge",
+                vec![(Value::Array(vec![]), Value::from(used))],
+            ),
+            (
+                "pending_store_blocks",
+                "gauge",
+                vec![(Value::Array(vec![]), Value::from(2))],
+            ),
+            (
+                "info",
+                "gauge",
+                vec![(
+                    Value::Array(["cpu", "false", "true", "64"].map(Value::from).to_vec()),
+                    Value::from(1),
+                )],
+            ),
+        ];
+        let mut types = Vec::new();
+        let mut data = Vec::new();
+        for (name, kind, samples) in entries {
+            let name = Value::from(format!("vllm:simple_kv_offload_{name}"));
+            types.push((name.clone(), Value::from(kind)));
+            data.push((name, Value::Map(samples)));
+        }
+        Value::Map(vec![
+            (Value::from("types"), Value::Map(types)),
+            (Value::from("data"), Value::Map(data)),
+        ])
+    }
+
+    fn assert_simple_cpu_sample(rendered: &str, expected: &str) {
+        let (series, expected_value) = expected.rsplit_once(' ').unwrap();
+        let value = rendered
+            .lines()
+            .filter_map(|line| line.rsplit_once(' '))
+            .find_map(|(candidate, value)| (candidate == series).then_some(value))
+            .unwrap_or_else(|| panic!("missing {series}:\n{rendered}"));
+        assert_eq!(
+            value.parse::<f64>().unwrap(),
+            expected_value.parse::<f64>().unwrap()
+        );
+    }
+
+    #[test]
+    fn simple_cpu_offload_msgpack_flat_multi_and_engines_render_all_labels() {
+        use rmpv::Value;
+
+        let outcomes = [
+            ("stored", 1.5),
+            ("dropped_cpu_full", 2.0),
+            ("dropped_request_gone", 3.0),
+            ("dropped_null_block", 4.0),
+            ("dropped_not_hashed", 5.0),
+            ("skipped_already_cached", 6.0),
+            ("skipped_in_flight", 7.0),
+        ];
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let other_engine = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 1);
+        let flat_wire = rmp_serde::to_vec(&simple_cpu_offload_wire(&outcomes, 9)).unwrap();
+        let flat: KvConnectorStats = rmp_serde::from_slice(&flat_wire).unwrap();
+        assert!(matches!(&flat, KvConnectorStats::SimpleCPUOffload(_)));
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(flat),
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+        super::record_scheduler_stats_with_handles(&other_engine, &stats);
+
+        let multi_wire = rmp_serde::to_vec(&Value::Map(vec![
+            (
+                Value::from("SimpleCPUOffloadConnector"),
+                simple_cpu_offload_wire(&[("stored", 0.25)], 0),
+            ),
+            (
+                Value::from("NixlConnector"),
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&nixl_stats()).unwrap()).unwrap(),
+            ),
+            (
+                Value::from("MooncakeStoreConnector"),
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&mooncake_stats()).unwrap())
+                    .unwrap(),
+            ),
+            (
+                Value::from("UnknownConnector"),
+                Value::Map(vec![(Value::from("hits"), Value::from(3))]),
+            ),
+        ]))
+        .unwrap();
+        let direct: MultiConnectorStats = rmp_serde::from_slice(&multi_wire)
+            .expect("direct MultiConnector decode of named MessagePack fixture");
+        let multi: KvConnectorStats = rmp_serde::from_slice(&multi_wire).unwrap();
+        let KvConnectorStats::Multi(children) = &multi else {
+            panic!("expected MultiConnector")
+        };
+        assert_eq!(&direct, children.as_ref());
+        assert!(children.other.contains_key("UnknownConnector"));
+        super::record_scheduler_stats_with_handles(
+            &handles,
+            &SchedulerStats {
+                kv_connector_stats: Some(multi),
+                ..Default::default()
+            },
+        );
+
+        let rendered = metrics.render().unwrap();
+        for (outcome, value) in outcomes {
+            for engine in 0..2 {
+                let expected = if engine == 0 && outcome == "stored" {
+                    1.75
+                } else {
+                    value
+                };
+                assert_simple_cpu_sample(
+                    &rendered,
+                    &format!(
+                        "vllm:simple_kv_offload_save_outcomes_total{{model_name=\"model\",engine=\"{engine}\",outcome=\"{outcome}\"}} {expected}"
+                    ),
+                );
+            }
+        }
+        for expected in [
+            "vllm:simple_kv_offload_load_blocks_total{model_name=\"model\",engine=\"0\"} 8",
+            "vllm:simple_kv_offload_used_blocks{model_name=\"model\",engine=\"0\"} 0",
+            "vllm:simple_kv_offload_pending_store_blocks{model_name=\"model\",engine=\"0\"} 2",
+            "vllm:simple_kv_offload_info{model_name=\"model\",engine=\"0\",backend=\"cpu\",page_cache=\"false\",lazy_offload=\"true\",capacity_blocks=\"64\"} 1",
+            "vllm:simple_kv_offload_save_outcomes_total{model_name=\"model\",engine=\"1\",outcome=\"stored\"} 1.5",
+            "vllm:simple_kv_offload_load_blocks_total{model_name=\"model\",engine=\"1\"} 4",
+            "vllm:simple_kv_offload_used_blocks{model_name=\"model\",engine=\"1\"} 9",
+            "vllm:nixl_num_kv_expired_reqs_total{model_name=\"model\",engine=\"0\"} 1",
+            "vllm:mooncake_store_operation_total{model_name=\"model\",engine=\"0\",operation=\"load_get\",status=\"ok\"} 1",
+        ] {
+            assert_simple_cpu_sample(&rendered, expected);
+        }
+        assert!(!rendered.contains("simple_kv_offload_save_outcomes_total_total"));
+        assert!(!rendered.contains("simple_kv_offload_info{model_name=\"model\",engine=\"0\"}"));
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("vllm:simple_kv_offload_"))
+                .count(),
+            22
+        );
+    }
+
+    #[test]
+    fn simple_cpu_offload_multi_unnamed_fixture_reports_direct_decode_error() {
+        use rmpv::Value;
+
+        let wire = rmp_serde::to_vec(&Value::Map(vec![
+            (
+                Value::from("SimpleCPUOffloadConnector"),
+                simple_cpu_offload_wire(&[("stored", 0.25)], 0),
+            ),
+            (
+                Value::from("NixlConnector"),
+                rmpv::ext::to_value(nixl_stats()).unwrap(),
+            ),
+            (
+                Value::from("MooncakeStoreConnector"),
+                rmpv::ext::to_value(mooncake_stats()).unwrap(),
+            ),
+            (
+                Value::from("UnknownConnector"),
+                Value::Map(vec![(Value::from("hits"), Value::from(3))]),
+            ),
+        ]))
+        .unwrap();
+        let error = rmp_serde::from_slice::<MultiConnectorStats>(&wire)
+            .expect_err("unnamed rmpv enum encoding is not the Python connector wire");
+        eprintln!("DIRECT_MULTI_UNNAMED_FIXTURE_ERROR: {error}");
+        let decoded: KvConnectorStats = rmp_serde::from_slice(&wire).unwrap();
+        assert!(matches!(decoded, KvConnectorStats::Other(_)));
+    }
+
+    #[test]
+    fn simple_cpu_offload_empty_interval_preserves_counters_and_gauges() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let wire = rmp_serde::to_vec(&simple_cpu_offload_wire(&[("stored", 2.5)], 9)).unwrap();
+        let stats: SimpleCPUOffloadStats = rmp_serde::from_slice(&wire).unwrap();
+        super::record_simple_cpu_offload_stats(&handles, &stats);
+        let before = metrics.render().unwrap();
+        let empty = SimpleCPUOffloadStats {
+            types: BTreeMap::new(),
+            data: Default::default(),
+        };
+        super::record_simple_cpu_offload_stats(&handles, &empty);
+        assert_eq!(metrics.render().unwrap(), before);
+
+        let mut partial = simple_cpu_offload_wire(&[], 3);
+        let rmpv::Value::Map(envelope) = &mut partial else {
+            unreachable!()
+        };
+        for (_, entries) in envelope {
+            let rmpv::Value::Map(entries) = entries else {
+                unreachable!()
+            };
+            entries.retain(|(name, _)| name.as_str() == Some("vllm:simple_kv_offload_used_blocks"));
+        }
+        let wire = rmp_serde::to_vec(&partial).unwrap();
+        let partial: KvConnectorStats = rmp_serde::from_slice(&wire).unwrap();
+        assert!(matches!(&partial, KvConnectorStats::SimpleCPUOffload(_)));
+        super::record_scheduler_stats_with_handles(
+            &handles,
+            &SchedulerStats {
+                kv_connector_stats: Some(partial),
+                ..Default::default()
+            },
+        );
+        let rendered = metrics.render().unwrap();
+        for expected in [
+            "vllm:simple_kv_offload_save_outcomes_total{model_name=\"model\",engine=\"0\",outcome=\"stored\"} 2.5",
+            "vllm:simple_kv_offload_load_blocks_total{model_name=\"model\",engine=\"0\"} 4",
+            "vllm:simple_kv_offload_used_blocks{model_name=\"model\",engine=\"0\"} 3",
+            "vllm:simple_kv_offload_pending_store_blocks{model_name=\"model\",engine=\"0\"} 2",
+        ] {
+            assert_simple_cpu_sample(&rendered, expected);
+        }
+    }
+
+    #[test]
+    fn simple_cpu_offload_wrong_tuple_lengths_and_metadata_are_not_observed() {
+        use rmpv::Value;
+
+        let mut payload = simple_cpu_offload_wire(&[("stored", 1.0)], 9);
+        let Value::Map(envelope) = &mut payload else {
+            unreachable!()
+        };
+        let Value::Map(data) = &mut envelope[1].1 else {
+            unreachable!()
+        };
+        data[0].1 = Value::Map(vec![(Value::Array(vec![]), Value::from(1))]);
+        let wire = rmp_serde::to_vec(&payload).unwrap();
+        assert!(rmp_serde::from_slice::<SimpleCPUOffloadStats>(&wire).is_err());
+
+        let wire = rmp_serde::to_vec(&simple_cpu_offload_wire(&[("stored", 1.0)], 9)).unwrap();
+        let mut stats: SimpleCPUOffloadStats = rmp_serde::from_slice(&wire).unwrap();
+        stats.types.remove(&super::SimpleCPUOffloadMetricName::SaveOutcomes);
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        super::record_simple_cpu_offload_stats(&handles, &stats);
+        assert!(
+            !metrics
+                .render()
+                .unwrap()
+                .lines()
+                .any(|line| line.starts_with("vllm:simple_kv_offload_"))
+        );
+    }
+
+    #[test]
+    fn simple_cpu_offload_invalid_counters_do_not_create_series() {
+        for value in [-1.0, f64::NAN, f64::INFINITY] {
+            let wire =
+                rmp_serde::to_vec(&simple_cpu_offload_wire(&[("stored", value)], 9)).unwrap();
+            let stats: SimpleCPUOffloadStats = rmp_serde::from_slice(&wire).unwrap();
+            let metrics = Metrics::new();
+            let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+            super::record_simple_cpu_offload_stats(&handles, &stats);
+            assert!(
+                !metrics
+                    .render()
+                    .unwrap()
+                    .lines()
+                    .any(|line| line.starts_with("vllm:simple_kv_offload_"))
+            );
+        }
+    }
+
+    #[test]
+    fn simple_cpu_offload_fractional_samples_are_not_truncated() {
+        use rmpv::Value;
+
+        let mut payload = simple_cpu_offload_wire(&[("stored", 0.5)], 9);
+        let Value::Map(envelope) = &mut payload else {
+            unreachable!()
+        };
+        let Value::Map(data) = &mut envelope[1].1 else {
+            unreachable!()
+        };
+        for (_, samples) in data.iter_mut().skip(1).take(3) {
+            let Value::Map(samples) = samples else {
+                unreachable!()
+            };
+            samples[0].1 = Value::F64(0.25);
+        }
+        let wire = rmp_serde::to_vec(&payload).unwrap();
+        let stats: KvConnectorStats = rmp_serde::from_slice(&wire).unwrap();
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        super::record_scheduler_stats_with_handles(
+            &handles,
+            &SchedulerStats {
+                kv_connector_stats: Some(stats),
+                ..Default::default()
+            },
+        );
+        let rendered = metrics.render().unwrap();
+        for expected in [
+            "vllm:simple_kv_offload_save_outcomes_total{model_name=\"model\",engine=\"0\",outcome=\"stored\"} 0.5",
+            "vllm:simple_kv_offload_load_blocks_total{model_name=\"model\",engine=\"0\"} 0.25",
+            "vllm:simple_kv_offload_used_blocks{model_name=\"model\",engine=\"0\"} 0.25",
+            "vllm:simple_kv_offload_pending_store_blocks{model_name=\"model\",engine=\"0\"} 0.25",
+        ] {
+            assert_simple_cpu_sample(&rendered, expected);
+        }
     }
 
     /// The `lora_requests_info` series with the non-deterministic timestamp
