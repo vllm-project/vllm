@@ -22,7 +22,7 @@ from vllm.engine.protocol import StreamingInput
 from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -518,6 +518,34 @@ async def test_streaming_input_per_chunk_sampling_params(engine: AsyncLLM):
     assert len(full_text) > 0, "Should have generated text"
 
     print(f"Per-chunk params test generated: {full_text}")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_streaming_input_per_chunk_structured_outputs(engine: AsyncLLM):
+    """Test that a later chunk's structured outputs constrain its generation."""
+    request_id = "test_per_chunk_structured_outputs"
+    choices = ["yes", "no"]
+    prefill_params = get_sampling_params(max_tokens=1)
+    answer_params = SamplingParams(
+        max_tokens=5,
+        output_kind=RequestOutputKind.DELTA,
+        temperature=0.0,
+        structured_outputs=StructuredOutputsParams(choice=choices),
+    )
+    first_chunk_done = asyncio.Event()
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt="Is the sky blue?", sampling_params=prefill_params)
+        await first_chunk_done.wait()
+        yield StreamingInput(prompt=" Answer:", sampling_params=answer_params)
+
+    answer = ""
+    async for output in engine.generate(input_generator(), prefill_params, request_id):
+        if first_chunk_done.is_set():
+            answer += output.outputs[0].text
+        first_chunk_done.set()
+
+    assert answer in choices
 
 
 @pytest.mark.asyncio(loop_scope="module")

@@ -18,7 +18,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.request import StructuredOutputRequest
 
 STOP_TOKEN = 128001
 
@@ -224,6 +225,40 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 4
         assert session.max_tokens == 4
+
+    def test_update_request_as_session_structured_output(self):
+        scheduler = create_scheduler()
+
+        session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
+        session.append_output_token_ids(10)
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        assert not session.use_structured_output
+
+        new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5])
+        new_request.sampling_params = SamplingParams(
+            max_tokens=10,
+            structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+        )
+        new_request.structured_output_request = (
+            StructuredOutputRequest.from_sampling_params(new_request.sampling_params)
+        )
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
+
+        assert session.structured_output_request is (
+            new_request.structured_output_request
+        )
+        assert session.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+
+        session.append_output_token_ids(11)
+        session.num_computed_tokens = len(session.prompt_token_ids)
+
+        new_request2 = DummyRequest(request_id="session", prompt_token_ids=[6])
+        update2 = StreamingUpdate.from_request(new_request2)
+        scheduler._update_request_as_session(session, update2)
+
+        assert session.structured_output_request is None
+        assert session.status == RequestStatus.WAITING
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()

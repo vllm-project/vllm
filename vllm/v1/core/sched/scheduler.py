@@ -1990,11 +1990,16 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.structured_output_request = update.structured_output_request
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
-        session.status = RequestStatus.WAITING
+        session.status = (
+            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+            if session.use_structured_output
+            else RequestStatus.WAITING
+        )
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
