@@ -26,3 +26,29 @@ steps:
       'cd tests &&
       pytest -v -s distributed/test_eplb_algo.py &&
       pytest -v -s distributed/test_eplb_utils.py'
+
+- label: ":intel: (BMG) EPLB Execution (torch_xccl, 4 GPUs)"
+  key: eplb-execution-xccl-4-gpus
+  timeout_in_minutes: 45
+  num_devices: 4
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/distributed/eplb
+  - vllm/distributed/device_communicators/xpu_communicator.py
+  - vllm/distributed/stateless_coordinator.py
+  - tests/distributed/test_eplb_execute.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s distributed/test_eplb_execute.py -k "torch_xccl"'
