@@ -9,15 +9,11 @@ import torch
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import refill_derived
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -856,9 +852,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
-        # Block scale for the preshuffled weight; None = not preshuffled.
-        self._wqa_wkv_scale: torch.Tensor | None = None
-        self._wo_b_scale: torch.Tensor | None = None
         self._wo_a_fp8_weight: torch.Tensor | None = None
         self._wo_a_e8m0_scale: torch.Tensor | None = None
         self._wo_a_cos_cache: torch.Tensor | None = None
@@ -1087,52 +1080,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
-    def prepare_attn_preshuffle(self) -> None:
+    def prepare_fp8_wo_a(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if not rocm_aiter_ops.is_enabled():
+        if not (
+            rocm_aiter_ops.is_enabled()
+            and _ON_GFX950
+            and envs.VLLM_ROCM_USE_AITER_FP8BMM
+        ):
             return
-        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
-        # Leaving the block scales as None -> "not preshuffled"
-        # _fused_wqa_wkv_gemm and _o_proj both fall back to the standard linear path
-        if on_gfx1250():
-            return
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
-            get_fp8_block_weight_scale,
-        )
-
-        def _prep(linear) -> torch.Tensor | None:
-            w = getattr(linear, "weight", None)
-            if w is None or w.dim() != 2:
-                return None
-            # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
-            if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
-                return None
-            ws = get_fp8_block_weight_scale(linear)
-            if ws is None:
-                return None
-            if ws.dtype == torch.float8_e8m0fnu:
-                ws = _upcast_e8m0_to_fp32(ws).contiguous()
-            # Shuffle the weight in place (single weight, no unshuffled copy),
-            # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
-                replace_parameter(
-                    linear,
-                    "weight",
-                    rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-                )
-            # A plain tensor: assigning the scale Parameter itself would register
-            # it a second time on this module, under the name below.
-            return ws.detach()
-
-        # Refilled in place on reloads: captured CUDA graphs read them.
-        refill_derived(self, "_wqa_wkv_scale", _prep(self.fused_wqa_wkv))
-        refill_derived(self, "_wo_b_scale", _prep(self.wo_b))
-        if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
-            self._prepare_fp8_wo_a()
-
-    def _prepare_fp8_wo_a(self) -> None:
         try:
             from aiter.ops.batched_gemm_op_a8w8 import (
                 batched_gemm_a8w8_mxscale as mxscale_op,
@@ -1259,30 +1215,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight = fused_weight
         self._fused_compressor_split_sizes = (main_size, indexer_size)
         return True
-
-    def _bpre_attn_gemm(
-        self,
-        weight: torch.Tensor,
-        scale: torch.Tensor,
-        x: torch.Tensor,
-        reduce_tp: bool,
-    ) -> torch.Tensor:
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
-        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-            x_fp8, weight, x_scale, scale, output_dtype=x.dtype
-        )
-        if reduce_tp and get_tensor_model_parallel_world_size() > 1:
-            out = tensor_model_parallel_all_reduce(out)
-        return out
-
-    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
-            return self._bpre_attn_gemm(
-                self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
-            )
-        return super()._fused_wqa_wkv_gemm(hidden_states)
 
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
@@ -1416,8 +1348,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 inverse_rope=False,
             )
             zf = z.flatten(1)
-        if self._wo_b_scale is not None and zf.dim() == 2:
-            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
         return self.wo_b(zf)
 
     def forward_mqa(

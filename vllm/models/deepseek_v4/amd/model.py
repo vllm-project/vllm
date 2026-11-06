@@ -75,7 +75,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import refill_derived, replace_parameter
+from vllm.model_executor.utils import refill_derived
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
@@ -84,7 +84,7 @@ from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950, on_gfx1250
+from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
@@ -139,58 +139,8 @@ class DeepseekV4MLP(nn.Module):
         else:
             self.act_fn = SiluAndMul()
 
-        # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
-        self._gateup = rocm_aiter_ops.is_enabled()
-        # Block scale for the preshuffled gate_up weight; None = not preshuffled.
-        self._gateup_scale: torch.Tensor | None = None
-
-    def prepare_gateup_preshuffle(self) -> None:
-        # B-preshuffle the gate_up_proj weight in place (single weight).
-        if not self._gateup:
-            return
-        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
-        # Leaving _gateup_scale as None -> "not preshuffled"
-        # forward() falls back to the standard gate_up_proj linear
-        if on_gfx1250():
-            return
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
-            get_fp8_block_weight_scale,
-        )
-
-        w = getattr(self.gate_up_proj, "weight", None)
-        ws = get_fp8_block_weight_scale(self.gate_up_proj)
-        if w is None or ws is None or w.dim() != 2:
-            return
-        # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
-        if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
-            return
-        if ws.dtype == torch.float8_e8m0fnu:
-            ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        # Skip when the linear kernel already B-preshuffled this weight.
-        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
-            replace_parameter(
-                self.gate_up_proj,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
-        # A plain tensor (the scale Parameter would register a second time on
-        # this module), refilled in place on reloads for captured CUDA graphs.
-        refill_derived(self, "_gateup_scale", ws.detach())
-
     def forward(self, x):
-        if self._gateup_scale is not None and x.dim() == 2:
-            # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
-            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
-            gate_up = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-                x_fp8,
-                self.gate_up_proj.weight,
-                x_scale,
-                self._gateup_scale,
-                output_dtype=x.dtype,
-            )
-        else:
-            gate_up, _ = self.gate_up_proj(x)
+        gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -1516,6 +1466,29 @@ def _make_deepseek_v4_weights_mapper(
     )
 
 
+def _request_aiter_bpreshuffle(model: nn.Module) -> None:
+    """Run the attention's fused_wqa_wkv / wo_b and the shared experts'
+    gate_up_proj on aiter's B-preshuffle GEMM (gfx942 / gfx950). Their linear
+    kernel shuffles the weight while processing it after loading, so a weight
+    reload shuffles the new weight again."""
+    for module in model.modules():
+        if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+            linears = [module.fused_wqa_wkv, module.wo_b]
+        elif (
+            isinstance(module, DeepseekV4MoE)
+            and module.shared_experts is not None
+            # MegaMoE and the heterogeneous MoE take the shared expert's
+            # weights in their checkpoint layout.
+            and not module.fuse_heterogeneous_shared_expert
+            and not (module.use_mega_moe and module.experts.fuse_shared_expert)
+        ):
+            linears = [module.shared_experts.gate_up_proj]
+        else:
+            continue
+        for linear in linears:
+            linear.use_aiter_bpreshuffle = True
+
+
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
 
@@ -1536,6 +1509,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        _request_aiter_bpreshuffle(self.model)
         if expert_dtype != "fp4" or self.model.fused_shared_expert_layers:
             self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
                 expert_dtype,
@@ -1590,16 +1564,12 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        # Must precede the gate_up preshuffle of the fused shared experts.
         finalize_mega_moe_weights(self)
-        # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
         for module in self.modules():
             if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
                 fused_compressor_layers += module.prepare_compressor_gemm_fusion()
-                module.prepare_attn_preshuffle()
-            elif isinstance(module, DeepseekV4MLP):
-                module.prepare_gateup_preshuffle()
+                module.prepare_fp8_wo_a()
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",

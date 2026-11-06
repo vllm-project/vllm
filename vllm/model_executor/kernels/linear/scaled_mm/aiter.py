@@ -386,13 +386,24 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         n, k = config.weight_shape
 
         _on_gfx1250 = False
+        _on_gfx942_or_gfx950 = False
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx1250
+            from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
 
             _on_gfx1250 = on_gfx1250()
+            _on_gfx942_or_gfx950 = on_gfx942() or on_gfx950()
 
         self.use_triton = not current_platform.is_fp8_fnuz() and (
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
+        )
+
+        # aiter's gemm_a8w8_blockscale_bpreshuffle, for the layers that set
+        # ``use_aiter_bpreshuffle`` (see _uses_bpreshuffle_gemm).
+        self.supports_bpreshuffle_gemm = (
+            _on_gfx942_or_gfx950
+            and n % 16 == 0
+            and k % 128 == 0
+            and self.weight_group_shape == GroupShape(128, 128)
         )
 
         self.use_bpreshuffle = (
@@ -429,14 +440,53 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if getattr(layer, "is_bmm", False):
             self.use_bpreshuffle = False
 
-        if self.use_bpreshuffle:
+        if self.use_bpreshuffle or self._uses_bpreshuffle_gemm(layer):
             w = FP8BlockParams.from_layer(layer).weight
+            logger.info_once(
+                "Using aiter A8W8 blockscale B-preshuffle GEMM for N=%d K=%d",
+                *w.shape,
+            )
             replace_parameter(
                 layer,
                 FP8BlockParams.WEIGHT,
                 rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
             )
             layer.aiter_bpreshuffled = True
+
+    def _uses_bpreshuffle_gemm(self, layer: torch.nn.Module) -> bool:
+        """Whether ``layer`` runs aiter's gemm_a8w8_blockscale_bpreshuffle on
+        gfx942 / gfx950: only layers that set ``use_aiter_bpreshuffle`` do.
+        Read off the layer rather than recorded while its weights are
+        processed, so it also holds for weights loaded already processed."""
+        return (
+            self.supports_bpreshuffle_gemm
+            and getattr(layer, "use_aiter_bpreshuffle", False)
+            and not getattr(layer, "is_bmm", False)
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if not self._uses_bpreshuffle_gemm(layer):
+            return super().apply_weights(layer, x, bias, **kwargs)
+        params = self._get_layer_params(layer)
+        x_2d = x.view(-1, x.shape[-1])
+        # The B-preshuffle GEMM reads the activation scales column-major.
+        x_q, x_scale = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=True)
+        output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            x_q,
+            params.weight,
+            x_scale,
+            params.block_scale,
+            output_dtype=self.config.out_dtype,
+        )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], params.weight.shape[0])
 
     @classmethod
     def is_supported(cls, compute_capability=None):
