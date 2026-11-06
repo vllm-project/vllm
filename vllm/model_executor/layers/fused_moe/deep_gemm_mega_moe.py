@@ -464,6 +464,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             scale_k = k // (4 * spec.scale_group_k)
             scale = torch.zeros(*outer, scale_k, n, dtype=torch.int32)
             register(f"{name}_weight_scale", scale.transpose(-1, -2))
+            # Loaders copy the scales as bytes; layerwise reload counts those.
+            param = getattr(self, f"{name}_weight_scale")
+            param.weight_loader_numel = param.numel() * param.element_size()
 
     def _kernel_weights(
         self, name: str
@@ -538,10 +541,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
         w1_scale, w3_scale = scales
         mismatch = ~torch.isclose(w3_scale, w1_scale, rtol=1e-5, atol=0.0)
         if mismatch.any():
+            # A local slot: EPLB may have moved experts since the first load.
             slot = int(mismatch.nonzero()[0])
-            expert_id = (self.experts_start_idx + slot) % self.num_logical_experts
             raise ValueError(
-                f"MegaMoE NVFP4 expert {expert_id}: w1 weight_scale_2 "
+                f"{self.prefix}: MegaMoE NVFP4 local expert slot {slot}: "
+                f"w1 weight_scale_2 "
                 f"{float(w1_scale[slot])} != w3 weight_scale_2 "
                 f"{float(w3_scale[slot])}; the kernel takes one L1 scale per expert."
             )
