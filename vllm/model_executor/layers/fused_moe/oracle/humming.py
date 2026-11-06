@@ -37,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP8_DTYPE,
     GroupShape,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
@@ -167,11 +168,7 @@ def select_humming_moe_experts(
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(experts_cls: type[mk.FusedMoEExperts]):
         return f"Using {experts_cls.__name__} Humming MoE backend."
@@ -226,7 +223,7 @@ def make_humming_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(
@@ -464,6 +461,34 @@ def _process_single_sublayer(
     )
 
     return current_weight_schema, current_input_schema, config
+
+
+def stage_moe_weights_for_humming(
+    layer: "RoutedExperts",
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor | None = None,
+    w2_input_scale: torch.Tensor | None = None,
+) -> str:
+    """Install canonical weights and scales for Humming's layer-based converter.
+
+    Returns the scale parameter name used, ``weight_scale`` or
+    ``weight_scale_inv``.
+    """
+    scale_name = (
+        "weight_scale_inv" if hasattr(layer, "w13_weight_scale_inv") else "weight_scale"
+    )
+    replace_parameter(layer, "w13_weight", w13)
+    replace_parameter(layer, "w2_weight", w2)
+    replace_parameter(layer, f"w13_{scale_name}", w13_scale)
+    replace_parameter(layer, f"w2_{scale_name}", w2_scale)
+    if w13_input_scale is not None:
+        replace_parameter(layer, "w13_input_scale", w13_input_scale)
+    if w2_input_scale is not None:
+        replace_parameter(layer, "w2_input_scale", w2_input_scale)
+    return scale_name
 
 
 def convert_to_humming_moe_kernel_format(
