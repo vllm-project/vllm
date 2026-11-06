@@ -831,6 +831,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
+        if envs.VLLM_BATCH_INVARIANT:
+            max_seq_len = self.model_config.max_model_len
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -1422,9 +1424,6 @@ class FlashAttentionImpl(AttentionImpl):
                     sliding_window_size is not None and sliding_window_size[1] >= 0
                 )
                 causal = not has_window
-
-            if self.batch_invariant_enabled and sliding_window_size is not None:
-                max_seqlen_k = max(max_seqlen_k, sliding_window_size[0] + 2)
 
             num_splits = attn_metadata.max_num_splits
             if self.fa4_hd256:
