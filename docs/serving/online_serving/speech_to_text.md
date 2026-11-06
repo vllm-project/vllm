@@ -62,9 +62,11 @@ The Transcriptions API supports uploading audio files in various formats includi
 
 - `file`: The audio file to transcribe (required)
 - `model`: The model to use for transcription (required)
-- `language`: The language code (e.g., "en", "zh") (optional)
+- `language`: The language code (e.g., "en", "zh") (optional; required by
+  `nvidia/canary-1b-v2`, which cannot detect the language)
 - `prompt`: Optional text to guide the transcription style (optional)
-- `response_format`: Format of the response ("json", "text") (optional)
+- `response_format`: Format of the response ("json", "text", "verbose_json", or
+  "diarized_json") (optional)
 - `temperature`: Sampling temperature between 0 and 1 (optional)
 
 For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/speech_to_text/transcription/protocol.py).
@@ -98,6 +100,35 @@ For `verbose_json` response format:
     ```
 Currently “verbose_json” response format doesn’t support no_speech_prob.
 
+For models with hotword support, `hotwords` takes a comma-separated list of terms
+(names, jargon) to bias recognition toward. Currently, this is supported by
+`FunAudioLLM/Fun-ASR-Nano-2512-vllm` and `OpenMOSS-Team/MOSS-Transcribe-Diarize`.
+Keep the list short and relevant to the audio: long or unrelated lists can
+degrade accuracy.
+
+For models with diarization support, `diarized_json` returns OpenAI-compatible
+speaker segments. Currently, this is supported by
+`OpenMOSS-Team/MOSS-Transcribe-Diarize`.
+
+```json
+{
+  "task": "transcribe",
+  "duration": 6.1,
+  "text": "Hello. Hi, how are you?",
+  "segments": [
+    {
+      "type": "transcript.text.segment",
+      "id": "segment_0",
+      "start": 0.0,
+      "end": 2.8,
+      "text": "Hello.",
+      "speaker": "S01"
+    }
+  ],
+  "usage": {"type": "duration", "seconds": 7}
+}
+```
+
 ### Extra Parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.
@@ -122,6 +153,7 @@ Our Translation API is compatible with [OpenAI's Translations API](https://platf
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 Whisper models can translate audio from one of the 55 non-English supported languages into English.
 Please mind that the popular `openai/whisper-large-v3-turbo` model does not support translating.
+`nvidia/canary-1b-v2` translates to or from English only and needs both `language` and `to_language`.
 
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.

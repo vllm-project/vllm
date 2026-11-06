@@ -143,6 +143,7 @@ fi
 # Build-wide mode: fetch finished jobs matching $SCOPE.
 [ -z "$OUT" ] || die "[output_file] is only valid when fetching a single job."
 
+# shellcheck disable=SC2016  # single-quoted: these are awk field refs ($3/$4/$5), not shell vars
 case "$SCOPE" in
 failed) FILTER='$3 == "True" && $4 == "False" && $5 == "True"' ;;
 soft) FILTER='$3 == "True" && $5 == "True"' ;;

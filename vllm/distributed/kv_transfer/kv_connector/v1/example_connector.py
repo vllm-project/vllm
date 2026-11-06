@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +16,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -117,6 +120,7 @@ class ExampleConnector(KVConnectorBase_V1):
         Note:
             The number of elements in kv_caches and layer_names should be
             the same.
+
         """
 
         def inject_kv_into_layer(
@@ -128,19 +132,24 @@ class ExampleConnector(KVConnectorBase_V1):
             """Inject the KV cache into the layer.
 
             Args:
-                dst_kv_cache_layer (torch.Tensor): the destination KV cache
-                    layer. In shape [num_pages, page_size, xxx] for MLA,
-                    [num_pages, 2, page_size, xxx] otherwise.
+                dst_kv_cache_layer (torch.Tensor): the destination KV cache layer,
+                    a standardized [B, H, N, C] per-layer view (H == 1 for MLA).
                 src_kv_cache (torch.Tensor): the source KV cache.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
+                attn_metadata (AttentionMetadata): attention metadata for the
+                    current forward pass.
+
             """
+            # Deliberate bulk transfers in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping = slot_mapping.to(
+                    dst_kv_cache_layer.device, non_blocking=True
+                )
             if isinstance(attn_metadata, MLACommonMetadata):
-                dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
-                num_pages = dst_kv_cache_layer_shape[0]
-                page_size = dst_kv_cache_layer_shape[1]
+                # [B, 1, N, C] -> [B * N, C]; slot_mapping indexes B * N slots.
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    num_pages * page_size, -1
+                    -1, dst_kv_cache_layer.shape[-1]
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
             else:
@@ -170,7 +179,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
-                # layers like FusedMoE/MLP etc.
+                # layers like FusedMoEFactory/MLP etc.
                 kv_cache_layer = getattr(layer, "kv_cache", None)
                 if kv_cache_layer is None:
                     continue
@@ -178,9 +187,10 @@ class ExampleConnector(KVConnectorBase_V1):
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
                 )
-                kv_cache = safetensors.torch.load_file(
-                    filename, device=str(kv_cache_layer.device)
-                )["kv_cache"]
+                # Deliberate bulk load in this reference connector.
+                with gpu_sync_allowed():
+                    kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
+                    kv_cache = kv_cache_cpu.to(kv_cache_layer.device, non_blocking=True)
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
@@ -197,6 +207,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
         Args:
             layer_name: the name of that layer
+
         """
         return
 
@@ -216,6 +227,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
+
         """
 
         def extract_kv_from_layer(
@@ -224,12 +236,14 @@ class ExampleConnector(KVConnectorBase_V1):
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
-            Assume the shape of the layer is (num_pages, page_size, xxx)
-            for MLA, and (num_pages, 2, page_size, xxx) otherwise.
+            The layer is a standardized [B, H, N, C] per-layer view (H == 1 for MLA).
             """
+            # Deliberate bulk transfer in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping = slot_mapping.to(layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
+                # [B, 1, N, C] -> [B * N, C]; slot_mapping indexes B * N slots.
+                return layer.reshape(-1, layer.shape[-1])[slot_mapping, ...]
             block_idxs = slot_mapping // self._block_size
             offsets = slot_mapping % self._block_size
             return layer[block_idxs, :, offsets]
@@ -242,7 +256,8 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
-                tensors = {"kv_cache": kv_cache.detach().cpu()}
+                with gpu_sync_allowed():
+                    tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
@@ -253,8 +268,7 @@ class ExampleConnector(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -265,6 +279,7 @@ class ExampleConnector(KVConnectorBase_V1):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
@@ -288,8 +303,7 @@ class ExampleConnector(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
+        """Update KVConnector state after block allocation.
 
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.
@@ -308,6 +322,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         meta = ExampleConnectorMetadata()
 
@@ -383,20 +398,20 @@ class ExampleConnector(KVConnectorBase_V1):
     ) -> bool:
         """Check if the cache is hit for the request."""
         return self._found_match_for_prompt(
-            list(request.prompt_token_ids or []),
+            request.prompt_token_ids or [],
             [f.identifier for f in request.mm_features],
         )
 
     def _found_match_for_prompt(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_hashes: list[str],
     ) -> bool:
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
         )
         foldername = self._generate_foldername_debug(
-            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            token_ids_to_tensor(prompt_token_ids)[:num_tokens_to_check],
             mm_hashes,
             create_folder=False,
         )

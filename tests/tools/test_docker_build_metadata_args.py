@@ -6,6 +6,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 
@@ -91,6 +93,25 @@ def test_nightly_metadata_args_fall_back_to_pipeline_slug() -> None:
     assert option_values(args, "--tag") == [expected_tag]
 
 
+@pytest.mark.parametrize(
+    ("variant", "expected_image_tag"),
+    [
+        ("efa", "vllm/vllm-openai:efa-nightly-def456"),
+        ("cu134-efa", "vllm/vllm-openai:cu134-nightly-def456-efa"),
+    ],
+)
+def test_nightly_variant_tags_match_published_nightly_tags(
+    variant: str, expected_image_tag: str
+) -> None:
+    """push-nightly-builds.sh <variant> publishes as <variant>-nightly-<commit>."""
+    args = run_helper(
+        variant,
+        env={"BUILDKITE": "1", "BUILDKITE_COMMIT": "def456", "NIGHTLY": "1"},
+    )
+
+    assert build_args(args)["VLLM_IMAGE_TAG"] == expected_image_tag
+
+
 def test_local_metadata_args_use_local_overrides() -> None:
     args = run_helper(
         env={
@@ -152,29 +173,27 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
         assert expected in dockerfile
 
 
-def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
-    bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
+def test_rust_build_cache_excludes_git_metadata() -> None:
+    import torch
 
-    for expected in (
-        'variable "CI_BASE_CONTENT_HASH"',
-        'target "ci-base-rocm"',
-        'target   = "ci_base"',
-        '"vllm.ci_base.content_hash" = CI_BASE_CONTENT_HASH',
+    from vllm.platforms import current_platform
+
+    dockerfile_names = ["Dockerfile", "Dockerfile.cpu"]
+    # CPU jobs can reuse ROCm artifacts, which omit the XPU Dockerfile.
+    if not current_platform.is_rocm() and (
+        not current_platform.is_cpu() or torch.version.hip is None
     ):
-        assert expected in bake_file
+        dockerfile_names.append("Dockerfile.xpu")
+    for name in dockerfile_names:
+        dockerfile = (REPO_ROOT / "docker" / name).read_text()
+        cached_stage, exact_version_stage = dockerfile.split(
+            "FROM rust-build-cache AS rust-build", maxsplit=1
+        )
+        exact_version_stage = exact_version_stage.split("\nFROM ", maxsplit=1)[0]
+        cached_run = cached_stage.rsplit("RUN ", maxsplit=1)[1]
 
-
-def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
-    ci_bake = (REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh").read_text()
-
-    for expected in (
-        "requirements/common.txt",
-        "requirements/rocm.txt",
-        "requirements/test/rocm.txt",
-        "docker/Dockerfile.rocm_base",
-        "docker/Dockerfile.rocm",
-        "docker/ci-rocm.hcl",
-        "docker/docker-bake-rocm.hcl",
-        ".buildkite/scripts/ci-bake-rocm.sh",
-    ):
-        assert expected in ci_bake
+        assert 'SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache"' in cached_run
+        assert "source=.git,target=.git" not in cached_run
+        assert "source=.git,target=.git" in exact_version_stage
+        assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in exact_version_stage
+        assert "bash tools/build_rust.sh" in exact_version_stage

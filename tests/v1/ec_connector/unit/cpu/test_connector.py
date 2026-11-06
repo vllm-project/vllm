@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
@@ -34,14 +36,36 @@ def test_worker_role_builds_only_worker(monkeypatch):
     assert c.connector_scheduler is None
 
 
-def test_request_finished_inherited_noop(monkeypatch):
+@pytest.mark.parametrize("role", [ECConnectorRole.SCHEDULER, ECConnectorRole.WORKER])
+def test_v1_model_runner_is_rejected(monkeypatch, role):
+    """The V1 runner never reports save completions, so refuse to start."""
     monkeypatch.setattr(
         ECCPUConnector, "_make_scheduler", lambda self, cfg: MagicMock()
     )
-    c = ECCPUConnector(_cfg(), ECConnectorRole.SCHEDULER)
-    assert c.request_finished(MagicMock()) == (False, None)
+    monkeypatch.setattr(ECCPUConnector, "_make_worker", lambda self, cfg: MagicMock())
+    cfg = _cfg()
+    cfg.use_v2_model_runner = False
+
+    with pytest.raises(ValueError, match="V2 model runner"):
+        ECCPUConnector(cfg, role)
 
 
 def test_factory_registered():
     cls = ECConnectorFactory._registry["ECCPUConnector"]()
     assert cls is ECCPUConnector
+
+
+def test_request_finished_forwards_to_scheduler(monkeypatch):
+    from unittest.mock import MagicMock
+
+    import vllm.distributed.ec_transfer.ec_connector.cpu.connector as conn_mod  # noqa: F401
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+    from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
+
+    fake_sched = MagicMock()
+    fake_sched.request_finished.return_value = (False, {"h1": {"peer_port": 1}})
+    monkeypatch.setattr(ECCPUConnector, "_make_scheduler", lambda self, cfg: fake_sched)
+    c = ECCPUConnector(_cfg(), ECConnectorRole.SCHEDULER)
+    req = MagicMock()
+    assert c.request_finished(req) == (False, {"h1": {"peer_port": 1}})
+    fake_sched.request_finished.assert_called_once_with(req)

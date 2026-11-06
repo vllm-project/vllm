@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 
@@ -9,6 +10,7 @@ import pytest
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
+from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -30,12 +32,11 @@ SSM_MODELS = [
     "tiiuae/falcon-mamba-tiny-dev",
     # mamba2-codestral in transformers is broken pending:
     # https://github.com/huggingface/transformers/pull/40861
-    # "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # "vllm-project/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
@@ -43,14 +44,8 @@ HYBRID_MODELS = [
     "tiny-random/qwen3-next-moe",
 ]
 
-HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL = {
-    "LiquidAI/LFM2-1.2B",
-    "tiny-random/qwen3-next-moe",
-}
-
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -79,6 +74,7 @@ def _set_conv_state_layout(monkeypatch, layout: str) -> None:
 def test_models(
     hf_runner,
     vllm_runner,
+    gpu_memory_cleared,
     example_prompts,
     monkeypatch,
     model: str,
@@ -97,15 +93,11 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-    extra_kwargs = {}
-    if model in HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL:
-        extra_kwargs["enable_chunked_prefill"] = True
-
     with vllm_runner(
         model,
         max_num_seqs=MAX_NUM_SEQS,
         attention_backend=ATTN_BACKEND,
-        **extra_kwargs,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -142,7 +134,9 @@ def test_batching(
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
     for_loop_outputs = []
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+    ) as vllm_model:
         for prompt in example_prompts:
             (single_output,) = vllm_model.generate_greedy_logprobs(
                 [prompt], max_tokens, num_logprobs
@@ -172,8 +166,7 @@ def test_chunked_prefill_with_parallel_sampling(
     max_tokens: int,
     conv_state_layout: str,
 ) -> None:
-    """
-    Tests chunked prefill in conjunction with n > 1.
+    """Tests chunked prefill in conjunction with n > 1.
 
     In this case, prefill is populated with decoding tokens and
     we test that it doesn't fail.
@@ -207,8 +200,7 @@ def test_mamba_cache_cg_padding(
     max_tokens: int,
     conv_state_layout: str,
 ) -> None:
-    """
-    This test is for verifying that mamba cache is padded to CG captured
+    """This test is for verifying that mamba cache is padded to CG captured
     batch size. If it's not, a torch RuntimeError will be raised because
     tensor dimensions aren't compatible.
     """
@@ -219,6 +211,8 @@ def test_mamba_cache_cg_padding(
     cudagraph_dispatcher.initialize_cudagraph_keys(
         vllm_config.compilation_config.cudagraph_mode
     )
+    if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
+        pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
@@ -226,7 +220,7 @@ def test_mamba_cache_cg_padding(
         example_prompts.append(example_prompts[0])
 
     try:
-        with vllm_runner(model) as vllm_model:
+        with vllm_runner(model, enable_chunked_prefill=True) as vllm_model:
             vllm_model.generate_greedy(example_prompts, max_tokens)
     except RuntimeError:
         pytest.fail(
@@ -242,8 +236,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     example_prompts,
     model: str,
 ) -> None:
-    """
-    This test is for verifying that the hybrid inner state management doesn't
+    """This test is for verifying that the hybrid inner state management doesn't
     collapse in case where the number of incoming requests and
     finished_requests_ids is larger than the maximum mamba block capacity.
 
@@ -252,7 +245,9 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     a single step.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+            model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+        ) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
         pytest.fail(
@@ -267,14 +262,15 @@ def test_state_cleanup(
     example_prompts,
     model: str,
 ) -> None:
-    """
-    This test is for verifying that the Hybrid state is cleaned up between
+    """This test is for verifying that the Hybrid state is cleaned up between
     steps.
 
     If it's not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+            model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+        ) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
@@ -296,14 +292,20 @@ def test_distributed_correctness(
     num_logprobs: int,
 ) -> None:
     with vllm_runner(
-        model, tensor_parallel_size=1, max_num_seqs=MAX_NUM_SEQS
+        model,
+        tensor_parallel_size=1,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
 
     with vllm_runner(
-        model, tensor_parallel_size=2, max_num_seqs=MAX_NUM_SEQS
+        model,
+        tensor_parallel_size=2,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -341,8 +343,14 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs
         )
 
+    # Leave headroom for the HF model that ran earlier in this process on a
+    # 32.5 GiB MIG.
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        gpu_memory_utilization=0.9,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -390,6 +398,7 @@ def test_fp32_cache_state(
         model,
         max_num_seqs=MAX_NUM_SEQS,
         gpu_memory_utilization=0.9,
+        enable_chunked_prefill=True,
         **{cache_dtype_param: "float32"},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
@@ -918,3 +927,89 @@ def test_apc_common_prefix_same_batch(
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         assert "two" in output.outputs[0].text
+
+
+@pytest.fixture(scope="module")
+def zaya_tiny_random(tmp_path_factory) -> str:
+    """A random tiny ZAYA1 checkpoint with both full and sliding window layers.
+
+    The published tiny ZAYA1 checkpoints predate the released config format.
+    """
+    import torch
+    from transformers import AutoTokenizer, ZayaConfig, ZayaForCausalLM
+
+    config = ZayaConfig(
+        hidden_size=128,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        num_experts=4,
+        moe_intermediate_size=64,
+        router_hidden_size=32,
+        layer_types=["hybrid", "hybrid_sliding"] * 2,
+        sliding_window=16,
+        initializer_range=0.2,
+    )
+    torch.manual_seed(0)
+    model = ZayaForCausalLM(config).to(torch.bfloat16)
+    with torch.no_grad():
+        for name, tensor in model.state_dict().items():
+            if name.endswith("qk_norm.temp"):
+                tensor.fill_(3.0)
+            elif name.endswith("balancing_biases"):
+                tensor.normal_(0, 0.1)
+                # Transformers pins the skip expert's bias, as in the checkpoints
+                tensor[-1] = -1.0
+    path = tmp_path_factory.mktemp("zaya_tiny_random")
+    model.save_pretrained(path)
+    AutoTokenizer.from_pretrained("Zyphra/ZAYA1-8B").save_pretrained(path)
+    # The checkpoint names a `processor_class` it has no image processor for
+    tokenizer_config = path / "tokenizer_config.json"
+    tokenizer_config.write_text(
+        json.dumps(
+            {
+                k: v
+                for k, v in json.loads(tokenizer_config.read_text()).items()
+                if k != "processor_class"
+            }
+        )
+    )
+    return str(path)
+
+
+def test_zaya_cca_state(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    zaya_tiny_random,
+) -> None:
+    """ZAYA1's CCA carries the previous tokens' q/k and delayed value in
+    per-request state, which must survive decode, chunked prefill and prefix
+    cache hits. Runs in fp32 so only the hard router's near-ties differ."""
+    max_tokens, num_logprobs = 32, 5
+    with hf_runner(zaya_tiny_random, dtype="float32") as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    with vllm_runner(
+        zaya_tiny_random,
+        dtype="float32",
+        moe_backend="triton",
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=True,
+    ) as vllm_model:
+        # The first pass prefills cold, the second hits the prefix cache
+        for _ in range(2):
+            vllm_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs
+            )
+            check_logprobs_close(
+                outputs_0_lst=hf_outputs,
+                outputs_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+            )

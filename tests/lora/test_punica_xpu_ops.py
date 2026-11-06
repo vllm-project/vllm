@@ -86,9 +86,7 @@ def check_bgmv_shrink(
     device: str,
     scaling: float,
 ):
-    """
-    Compare vllm.bgmv_shrink against a reference implementation.
-    """
+    """Compare vllm.bgmv_shrink against a reference implementation."""
     seq_length = 1
     data: PunicaTensors = generate_data(
         batches,
@@ -130,9 +128,7 @@ def check_bgmv_expand(
     device: str,
     add_inputs: bool,
 ):
-    """
-    Compare vllm.bgmv_expand against a reference implementation.
-    """
+    """Compare vllm.bgmv_expand against a reference implementation."""
     seq_length = 1
     data: PunicaTensors = generate_data(
         batches,
@@ -172,9 +168,7 @@ def check_bgmv_expand_slice(
     device: str,
     add_inputs: bool,
 ):
-    """
-    Compare vllm.bgmv_expand_slice against a reference implementation.
-    """
+    """Compare vllm.bgmv_expand_slice against a reference implementation."""
     seq_length = 1
     data: PunicaTensors = generate_data_for_expand_nslices(
         batches,

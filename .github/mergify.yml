@@ -5,7 +5,6 @@ pull_request_rules:
     - label != stale
     - -closed
     - or:
-      - files~=^[^/]+\.md$
       - files~=^docs/
       - files~=^examples/
   actions:
@@ -15,10 +14,24 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: label-recipe
+  description: Automatically apply recipe label
+  conditions:
+    - label != stale
+    - -closed
+    - files~=^recipes/
+  actions:
+    label:
+      add:
+        - recipe
+    comment:
+      message: "Recipe preview: https://vllm-recipes-git-preview-vllm-pr-{{number}}-inferact-inc.vercel.app"
+
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
     - check-failure=pre-commit
+    - -check-cancelled=pre-commit
     - -closed
     - -draft
     - or:
@@ -67,6 +80,23 @@ pull_request_rules:
       add:
         - ci/build
 
+- name: label-cohere
+  description: Automatically apply cohere label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^examples/.*cohere.*\.py
+      - files~=^tests/.*cohere.*\.py
+      - files~=^vllm/model_executor/models/.*cohere.*\.py
+      - files~=^vllm/tool_parsers/.*cohere.*\.py
+      - files~=^vllm/reasoning/.*cohere.*\.py
+      - files~=^vllm/transformers_utils/.*cohere.*\.py
+      - title~=(?i)Cohere
+  actions:
+    label:
+      add:
+        - cohere
+
 - name: label-deepseek
   description: Automatically apply deepseek label
   conditions:
@@ -75,10 +105,13 @@ pull_request_rules:
       - files~=^examples/.*deepseek.*\.py
       - files~=^tests/.*deepseek.*\.py
       - files~=^vllm/model_executor/models/.*deepseek.*\.py
+      - files~=^vllm/models/deepseek.*/
       - files~=^vllm/tool_parsers/.*deepseek.*\.py
       - files~=^vllm/reasoning/.*deepseek.*\.py
       - files~=^vllm/transformers_utils/.*deepseek.*\.py
-      - title~=(?i)DeepSeek
+      # DSv4 / DSv4.1 mentions fold into the vendor label; we no longer track
+      # per-version DeepSeek labels.
+      - title~=(?i)(?:DeepSeek|\bDSv4\b)
   actions:
     label:
       add:
@@ -93,6 +126,32 @@ pull_request_rules:
     label:
       add:
         - frontend
+
+- name: label-pooling
+  description: Automatically apply pooling label
+  conditions:
+    - -closed
+    - or:
+      - files~=^vllm/entrypoints/pooling/
+      - files~=^vllm/model_executor/layers/pooler/
+      - files=vllm/model_executor/models/transformers/pooling.py
+      - files=vllm/model_executor/models/adapters.py
+      - files=vllm/config/pooler.py
+      - files=vllm/pooling_params.py
+      - files~=^vllm/v1/pool/
+      - files~=^vllm/v1/worker/gpu/pool/
+      - files~=^tests/entrypoints/pooling/
+      - files~=^tests/models/(language|multimodal)/pooling(_mteb_test)?/
+      - files~=^tests/model_executor/layers/test_pooler_.*\.py$
+      - files=tests/test_pooling_params.py
+      - files~=^tests/v1/e2e/general/test_pooling_.*\.py$
+      - files~=^docs/models/pooling_models/
+      - files~=^examples/pooling/
+      - title~=(?i)\bpooling\b
+  actions:
+    label:
+      add:
+        - pooling
 
 - name: label-rust
   description: Automatically apply rust label
@@ -115,9 +174,7 @@ pull_request_rules:
       - files~=^examples/.*llama.*\.py
       - files~=^tests/.*llama.*\.py
       - files~=^vllm/model_executor/models/.*llama.*\.py
-      - files~=^vllm/reasoning/.*llama.*\.py
       - files~=^vllm/tool_parsers/.*llama.*\.py
-      - files~=^vllm/transformers_utils/.*llama.*\.py
       - title~=(?i)llama
   actions:
     label:
@@ -159,9 +216,17 @@ pull_request_rules:
   description: Automatically apply new-model label
   conditions:
     - label != stale
-    - and:
-      - files~=^vllm/model_executor/models/
-      - files=vllm/model_executor/models/registry.py
+    - or:
+      # A model file is added alongside a registry entry. added-files rather
+      # than files: touching an existing model file is a fix or a refactor,
+      # and a PR that removes a model is not a new one.
+      - and:
+        - added-files~=^vllm/model_executor/models/.*\.py$
+        - files=vllm/model_executor/models/registry.py
+      # A new top-level package under vllm/models/. common/ is shared kernel
+      # code rather than a model, and nested packages belong to a model that
+      # already exists.
+      - added-files~=^vllm/models/(?!common/)[^/]+/__init__\.py$
   actions:
     label:
       add:
@@ -215,16 +280,12 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*gpt[-_]?oss.*\.py
       - files~=^tests/.*gpt[-_]?oss.*\.py
-      - files~=^tests/entrypoints/openai/test_response_api_with_harmony.py
-      - files~=^tests/entrypoints/test_context.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
       - files~=^vllm/entrypoints/openai/parser/harmony_utils.py
-      - files~=^vllm/entrypoints/tool_server.py
-      - files~=^vllm/entrypoints/tool.py
-      - files~=^vllm/entrypoints/context.py
+      # Harmony rendering now lives in the Rust frontend.
+      - files~=^rust/src/chat/src/.*/harmony/
       - title~=(?i)gpt[-_]?oss
       - title~=(?i)harmony
   actions:
@@ -232,12 +293,95 @@ pull_request_rules:
       add:
         - gpt-oss
 
+- name: label-kimi
+  description: Automatically apply kimi label (covers the whole Kimi family, including K3)
+  conditions:
+    - label != stale
+    - or:
+      - files~=(?i)kimi
+      - title~=(?i)(?:kimi|moonshot|\bk3\b)
+  actions:
+    label:
+      add:
+        - kimi
+
+- name: label-glm
+  description: Automatically apply glm label
+  conditions:
+    - label != stale
+    - or:
+      # Anchored to the start of the filename so midashenglm.py (an unrelated
+      # model) does not match.
+      - files~=^vllm/model_executor/models/(?:chat)?glm[^/]*\.py
+      - files~=^tests/.*[/_](?:chat)?glm[^/]*\.py
+      - files~=^vllm/tool_parsers/.*glm.*\.py
+      - files~=^vllm/transformers_utils/.*/(?:chat)?glm[^/]*\.py
+      - title~=(?i)\b(?:chat)?glm
+  actions:
+    label:
+      add:
+        - glm
+
+- name: label-minimax
+  description: Automatically apply minimax label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/models/minimax.*/
+      - files~=^vllm/model_executor/models/.*minimax.*\.py
+      - files~=^vllm/tool_parsers/.*minimax.*\.py
+      - files~=^tests/.*minimax.*\.py
+      - title~=(?i)minimax
+  actions:
+    label:
+      add:
+        - minimax
+
+- name: label-beam
+  description: Automatically apply beam label for Reflection AI's model
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/models/beam/
+      - files=vllm/transformers_utils/configs/beam.py
+      - files=vllm/parser/beam.py
+      - files=vllm/reasoning/beam_reasoning_parser.py
+      - files=vllm/tool_parsers/beam_tool_parser.py
+      - files~=^rust/src/parser/src/unified/beam(?:\.rs|/)
+      - files~=^tests/models/test_beam_.*\.py$
+      - files=tests/parser/test_beam_parser.py
+      - files=tests/transformers_utils/test_beam_config.py
+      - files~=^recipes/models/reflection/Beam-
+      # Bare "beam" also describes beam search; require a model identifier.
+      - title~=(?i)(?:\bbeam[- ]\d|\breflection(?:\s+ai)?[ /-]+beam\b|\bBeamForCausalLM\b|\bBeamConfig\b|\[beam\])
+  actions:
+    label:
+      add:
+        - beam
+
+- name: label-inkling
+  description: Automatically apply inkling label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/models/inkling/
+      - files~=^vllm/tool_parsers/inkling.*\.py
+      - files~=^vllm/renderers/inkling.*\.py
+      - files~=^tests/.*inkling.*\.py
+      - title~=(?i)inkling
+  actions:
+    label:
+      add:
+        - inkling
+
 - name: label-nvidia
   description: Automatically apply nvidia label
   conditions:
     - label != stale
     - or:
-      - files~=cuda
+      # Exclude requirements/: a dependency bump touching requirements/cuda.txt
+      # is not NVIDIA backend work.
+      - files~=^(?!requirements/).*cuda
       - files~=cutlass
       - files~=flashinfer
       - files~=trtllm
@@ -257,7 +401,7 @@ pull_request_rules:
       - files~=^csrc/rocm/
       - files~=^docker/Dockerfile.rocm
       - files~=^requirements/rocm.*\.txt
-      - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/model_executor/layers/fused_moe/.*rocm.*\.py
       - files~=^vllm/v1/attention/backends/rocm.*\.py
       - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
       - files~=^vllm/v1/attention/ops/rocm.*\.py
@@ -276,8 +420,8 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^docker/Dockerfile.xpu
-      - files~=^\\.buildkite/intel_jobs/
-      - files=\.buildkite/ci_config_intel.yaml
+      - files~=^\.buildkite/intel_jobs/
+      - files=.buildkite/ci_config_intel.yaml
       - files=vllm/model_executor/layers/fused_moe/experts/xpu_moe.py
       - files=vllm/model_executor/kernels/linear/mixed_precision/xpu.py
       - files=vllm/model_executor/kernels/linear/mxfp8/xpu.py
@@ -288,7 +432,6 @@ pull_request_rules:
       - files=vllm/v1/worker/xpu_worker.py
       - files=vllm/v1/worker/xpu_model_runner.py
       - files=vllm/_xpu_ops.py
-      - files=vllm/kernels/xpu_ops.py
       - files~=^vllm/lora/ops/xpu_ops
       - files=vllm/lora/punica_wrapper/punica_xpu.py
       - files=vllm/platforms/xpu.py
@@ -324,7 +467,7 @@ pull_request_rules:
       - files=benchmarks/benchmark_serving_structured_output.py
       - files=benchmarks/run_structured_output_benchmark.sh
       - files=docs/features/structured_outputs.md
-      - files=^examples/features/structured_outputs/
+      - files~=^examples/features/structured_outputs/
       - files~=^tests/v1/structured_output/
       - files=tests/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
@@ -339,27 +482,58 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^vllm/v1/spec_decode/
+      # Model Runner V2 keeps its speculators in a separate subtree.
+      - files~=^vllm/v1/worker/gpu/spec_decode/
       - files~=^tests/v1/spec_decode/
-      - files=^examples/features/speculative_decoding/
+      - files~=^tests/v1/e2e/spec_decode/
+      - files~=^examples/features/speculative_decoding/
       - files~=^vllm/model_executor/models/.*eagle.*\.py
-      - files=vllm/model_executor/models/mlp_speculator.py
-      - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
+      - files~=^vllm/transformers_utils/configs/eagle\.py
   actions:
     label:
       add:
         - speculative-decoding
 
-- name: label-v1
-  description: Automatically apply v1 label
+# dflash covers the DFlash and DSpark speculative decoding techniques as one
+# workstream, matching how they are tracked in the sprint board. It is applied
+# in addition to speculative-decoding, never instead of it.
+- name: label-dflash
+  description: Automatically apply dflash label
   conditions:
     - label != stale
     - or:
-      - files~=^vllm/v1/
-      - files~=^tests/v1/
+      - files~=^vllm/v1/spec_decode/dflash\.py
+      - files~=^vllm/v1/worker/gpu/spec_decode/dflash/
+      - files~=^vllm/model_executor/models/.*dflash.*\.py
+      - files~=^tests/.*dflash.*\.py
+      - title~=(?i)dflash
+      - files~=^vllm/v1/worker/gpu/spec_decode/dspark/
+      - files~=^vllm/model_executor/models/.*dspark.*\.py
+      - files~=^vllm/models/deepseek_v4/nvidia/dspark\.py
+      - files~=^vllm/models/deepseek_v4/amd/dspark\.py
+      - files~=^vllm/models/deepseek_v4/xpu/dspark\.py
+      - files~=^vllm/models/kimi_k3/nvidia/dspark_mla\.py
+      - files~=^vllm/transformers_utils/configs/k3_dspark\.py
+      - files~=^tests/.*dspark.*\.py
+      - title~=(?i)dspark
   actions:
     label:
       add:
-        - v1
+        - dflash
+
+- name: label-mrv2
+  description: Automatically apply mrv2 label
+  conditions:
+    - label != stale
+    - or:
+      # Model Runner V2 subtree. The trailing slash is required: the MRv1
+      # files (gpu_model_runner.py, gpu_worker.py, ...) sit one level up.
+      - files~=^vllm/v1/worker/gpu/
+      - title~=(?i)(?:\bmrv2\b|model[-\s]?runner[-\s]?v2)
+  actions:
+    label:
+      add:
+        - mrv2
 
 - name: label-tpu
   description: Automatically apply tpu label
@@ -368,10 +542,7 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=tpu.py
-      - files~=_tpu
-      - files~=tpu_
       - files~=/tpu/
-      - files~=pallas
   actions:
     label:
       add:
@@ -384,10 +555,7 @@ pull_request_rules:
     - label != stale
     - and:
       - -files~=tpu.py
-      - -files~=_tpu
-      - -files~=tpu_
       - -files~=/tpu/
-      - -files~=pallas
   actions:
     label:
       remove:
@@ -403,7 +571,6 @@ pull_request_rules:
       - files~=^tests/parser/
       - files~=^tests/reasoning/
       - files~=^tests/entrypoints/openai/.*tool.*
-      - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
       - files~=^vllm/parser/
       - files~=^vllm/reasoning/
@@ -414,12 +581,30 @@ pull_request_rules:
       add:
         - tool-calling
 
+- name: label-batch-invariance
+  description: Automatically apply batch-invariance label
+  conditions:
+    - label != stale
+    - or:
+      - files~=batch[-_]invarian
+      - files~=determinism
+      - title~=(?i)(?:batch|TP)[\s_-]?invarian
+      - title~=\bBI\b
+      - title~=(?i)determinis(?:m|tic)
+      - title~=(?i)\bnon-?reproducible\b|\bnot reproducible\b|\brun-to-run\b
+      - title~=(?i)\bbatch[\s-]?(?:size[\s-]?)?dependen
+      - title~=(?i)\b(?:identical|repeated|same)\s+(?:greedy\s+)?(?:runs?|requests?|calls?)\b
+  actions:
+    label:
+      add:
+        - batch-invariance
+
 - name: auto-rebase to keep merge candidate within 1 day behind main
   conditions:
     - base = main
     - label=ready
     - "#approved-reviews-by >= 1"
-    - "#commits-behind >= 50"
+    - "#commits-behind >= 100"
     - "#check-failure = 0"
     - -closed
     - -draft
@@ -507,3 +692,143 @@ pull_request_rules:
     label:
       add:
         - kv-connector
+
+- name: label-hisparse
+  description: Automatically apply hisparse label
+  conditions:
+    - label != stale
+    - or:
+      - files~=hisparse
+      - title~=(?i)hisparse
+  actions:
+    label:
+      add:
+        - hisparse
+
+- name: label-mooncake
+  description: Automatically apply mooncake label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+      # Covers the mooncake/ connector dir, mooncake_store_embedding/ and
+      # mooncake_ec_connector.py.
+      - files~=^vllm/distributed/ec_transfer/ec_connector/mooncake
+      - files=vllm/distributed/mooncake_store.py
+      - files~=^tests/v1/kv_connector/.*mooncake
+      - files~=^tests/v1/ec_connector/.*mooncake
+      - files~=^docs/features/mooncake.*\.md
+      - files=.buildkite/test_areas/disaggregated_mooncake.yaml
+      - title~=(?i)mooncake
+  actions:
+    label:
+      add:
+        - mooncake
+    assign:
+      users:
+        - "stmatengss"
+        - "LCAIZJ"
+
+- name: label-nixl
+  description: Automatically apply nixl label
+  conditions:
+    - label != stale
+    - or:
+      # Any NIXL-named file: KV connector and shared utils, NIXL EP
+      # dispatch, EC-transfer NIXL data, the offload p2p data layer,
+      # tests, docs, examples.
+      - files~=(?i)nixl
+      # KV offloading paths (multi-tiered KVCR tiering and simple), plus
+      # their tests and docs.
+      - files~=kv_offload
+      - title~=(?i)nixl
+  actions:
+    label:
+      add:
+        - nixl
+    assign:
+      users:
+        - "ovidiusm"
+        - "iyastreb"
+        - "mkhazraee"
+
+- name: label-scheduler
+  description: Automatically apply scheduler label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/v1/core/sched/
+      - files~=^tests/v1/core/test_scheduler.*\.py
+  actions:
+    label:
+      add:
+        - scheduler
+
+- name: label-kv-cache-manager
+  description: Automatically apply kv-cache-manager label
+  conditions:
+    - label != stale
+    - or:
+      # Scoped to the block/cache allocator in v1/core. KV transfer between
+      # instances is kv-connector, not this.
+      - files~=^vllm/v1/core/(?:kv_cache|block_pool|single_type_kv_cache)
+      - files~=^tests/v1/core/test_(?:kv_cache|single_type_kv_cache|prefix_caching).*\.py
+  actions:
+    label:
+      add:
+        - kv-cache-manager
+
+- name: label-torch-compile
+  description: Automatically apply torch.compile label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/compilation/
+      - files~=^tests/compile/
+      - title~=(?i)torch\.compile
+  actions:
+    label:
+      add:
+        - torch.compile
+
+- name: label-ray
+  description: Automatically apply ray label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/v1/executor/ray_
+      - files~=^tests/.*ray_.*\.py
+      - title~=(?i)\bray\b
+  actions:
+    label:
+      add:
+        - ray
+
+- name: label-vllm-ir
+  description: Automatically apply vllm-ir label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/ir/
+      - files~=^tests/ir/
+      - title~=(?i)vllm[-\s]?ir
+  actions:
+    label:
+      add:
+        - vllm-ir
+
+- name: label-agents
+  description: Automatically apply agents label
+  conditions:
+    - label != stale
+    - or:
+      - files~=(?:^|/)AGENTS\.md$
+      - files~=^\.agents/
+      - files~=^\.claude/
+      # The [Agents] title tag only: a bare "agents" also matches CI, K8s and
+      # NIXL agents.
+      - title~=(?i)\[agents\]
+  actions:
+    label:
+      add:
+        - agents

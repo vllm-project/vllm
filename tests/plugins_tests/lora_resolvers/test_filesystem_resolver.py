@@ -4,13 +4,13 @@ import os
 import shutil
 
 import pytest
-from huggingface_hub import snapshot_download
 
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
+from vllm.transformers_utils.repo_utils import hf_api
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-LORA_NAME = "charent/self_cognition_Alice"
-PA_NAME = "swapnilbp/llama_tweet_ptune"
+LORA_NAME = "vllm-project/self_cognition_Alice"
+PA_NAME = "vllm-project/llama_tweet_ptune"
 
 
 @pytest.fixture(scope="module")
@@ -22,12 +22,12 @@ def adapter_cache(request, tmpdir_factory):
 
 @pytest.fixture(scope="module")
 def qwen3_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
+    return hf_api().snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.fixture(scope="module")
 def pa_files():
-    return snapshot_download(repo_id=PA_NAME)
+    return hf_api().snapshot_download(repo_id=PA_NAME)
 
 
 @pytest.mark.asyncio

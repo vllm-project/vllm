@@ -1,7 +1,5 @@
 # Install OpenAI triton_kernels from https://github.com/triton-lang/triton/tree/main/python/triton_kernels
 
-set(DEFAULT_TRITON_KERNELS_TAG "v3.5.1")
-
 # Set TRITON_KERNELS_SRC_DIR for use with local development with vLLM. We expect TRITON_KERNELS_SRC_DIR to
 # be directly set to the triton_kernels python directory.
 if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
@@ -12,14 +10,29 @@ if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
   )
 
 else()
-  set(TRITON_GIT "https://github.com/triton-lang/triton.git")
-  message (STATUS "[triton_kernels] Fetch from ${TRITON_GIT}:${DEFAULT_TRITON_KERNELS_TAG}")
+  if (VLLM_TARGET_DEVICE STREQUAL "rocm")
+    set(TRITON_GIT "https://github.com/ROCm/triton.git")
+    # Pinned from release/internal/3.8.x
+    set(TRITON_KERNELS_TAG "669b31acc1dd1b3fd93286afd5db67f65d9f7557")
+  else()
+    set(TRITON_GIT "https://github.com/triton-lang/triton.git")
+    set(TRITON_KERNELS_TAG "v3.5.1")
+  endif()
+  # Fetch the source archive of the pinned revision instead of git-cloning the
+  # whole Triton repo: FetchContent cannot shallow-clone a raw commit sha, so a
+  # clone pulls ~406 MiB of history (443 MB on disk) to install a few .py files,
+  # while this archive is a 7.7 MB download. docker/Dockerfile.rocm prefetches
+  # the same archive for TRITON_KERNELS_SRC_DIR, so Docker and non-Docker builds
+  # get identical sources; keep the URL form in sync with that Dockerfile.
+  string(REGEX REPLACE "\\.git$" "" TRITON_REPO_URL "${TRITON_GIT}")
+  string(REPLACE "https://github.com/" "https://codeload.github.com/"
+         TRITON_REPO_URL "${TRITON_REPO_URL}")
+  set(TRITON_KERNELS_URL "${TRITON_REPO_URL}/tar.gz/${TRITON_KERNELS_TAG}")
+  message (STATUS "[triton_kernels] Fetch from ${TRITON_KERNELS_URL}")
   FetchContent_Declare(
           triton_kernels
-          # TODO (varun) : Fetch just the triton_kernels directory from Triton
-          GIT_REPOSITORY https://github.com/triton-lang/triton.git
-          GIT_TAG ${DEFAULT_TRITON_KERNELS_TAG}
-          GIT_PROGRESS TRUE
+          URL ${TRITON_KERNELS_URL}
+          DOWNLOAD_EXTRACT_TIMESTAMP TRUE
           SOURCE_SUBDIR python/triton_kernels/triton_kernels
   )
 endif()

@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+model_name: "Qwen/Qwen3.8-Flash-Next-FP8"
+datasets:
+  gsm8k:
+    metric_threshold: 0.98
+    tolerance: 0.02
+  aime25:
+    metric_threshold: 0.90
+    tolerance: 0.05
+eval_batch_size: 32
+startup_max_wait_seconds: 1800
+generation_config:
+  seed: 1236
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  repetition_penalty: 1.0
+  presence_penalty: 1.5
+  max_tokens: 32768
+  stream: true
+  extra_body:
+    chat_template_kwargs:
+      enable_thinking: true
+server_args: "--tensor-parallel-size 4"

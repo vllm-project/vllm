@@ -2,28 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
+from contextlib import nullcontext
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
 import torch
-from torch.nn.parameter import is_lazy
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    finalize_model_weights,
+)
 
 from .meta import (
-    SKIP_TENSORS,
+    SKIP_LOAD_TENSORS,
     capture_layer_to_meta,
     get_numel_loaded,
-    get_reloadable_layer_tensors,
     materialize_layer,
     restore_layer_on_meta,
-    to_meta_tensor,
 )
-from .sanitize import restore_layer_refs
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -41,6 +41,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "max_layer_reload_bytes",
 ]
 
 
@@ -58,8 +59,7 @@ LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
-    """
-    Get information related to restoring and layerwise processing. If no previous
+    """Get information related to restoring and layerwise processing. If no previous
     information existed, a new entry is constructed
     """
     if layer not in LAYERWISE_INFO:
@@ -72,8 +72,7 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
 
 
 def record_metadata_for_reloading(model: torch.nn.Module):
-    """
-    Record layer metadata needed for later reloading.
+    """Record layer metadata needed for later reloading.
 
     Stores parameter and buffer metadata as meta tensors for restoration.
     Must be called before `initialize_layerwise_reload`.
@@ -84,10 +83,22 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info.restore_device = torch.get_default_device()
 
 
+def max_layer_reload_bytes(model: torch.nn.Module) -> int:
+    """Bytes of the largest layer in checkpoint format, which a layerwise reload
+    materializes on the device, one layer at a time, before processing it."""
+    sizes = (
+        sum(t.nbytes for tensors in info.restore_metadata for t in tensors.values())
+        for layer in model.modules()
+        if (info := LAYERWISE_INFO.get(layer)) is not None
+    )
+    return max(sizes, default=0)
+
+
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
-    """
-    Set up layerwise weight loading with deferred processing.
+def initialize_layerwise_reload(
+    model: torch.nn.Module, *, defer_processing: bool = False
+):
+    """Set up layerwise weight loading with deferred processing.
 
     Must be called after `record_metadata_for_reloading`. This function:
     1. Saves current kernel tensors for later copying
@@ -99,13 +110,13 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     2. Load all cached weights
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
+
+    With defer_processing=True, only finalize_layerwise_reload triggers processing.
     """
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
 
-    mapped_layers = 0
-    layerwise_layers = 0
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
@@ -113,16 +124,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
-        runtime_tensors = get_layer_params_buffers(layer)
-        mapping = _get_runtime_weight_reload_mapping(layer, info)
-        if mapping is not None and _bind_runtime_weight_reload_mapping(
-            layer, info, runtime_tensors, mapping
-        ):
-            mapped_layers += 1
-            continue
-
         # Save current tensors for later copying
-        info.kernel_tensors = runtime_tensors
+        info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
         info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
 
@@ -131,166 +134,17 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
-        layerwise_layers += 1
-
-    logger.info_once(
-        "Weight reload uses %d mapped layers and %d layerwise layers",
-        mapped_layers,
-        layerwise_layers,
-    )
-
-
-def _get_runtime_weight_reload_mapping(
-    layer: torch.nn.Module,
-    info: LayerReloadingInfo,
-) -> dict[str, torch.nn.Parameter] | None:
-    restore_params, restore_buffers = info.restore_metadata
-    runtime_params, runtime_buffers = get_reloadable_layer_tensors(layer)
-    if not _matching_tensor_layouts(restore_buffers, runtime_buffers):
-        return None
-
-    quant_method = getattr(layer, "quant_method", None)
-    if not isinstance(quant_method, QuantizeMethodBase):
-        return (
-            runtime_params
-            if _matching_tensor_layouts(restore_params, runtime_params)
-            else None
-        )
-
-    checkpoint_params = {
-        name: restore_layer_refs(to_meta_tensor(param), layer)
-        for name, param in restore_params.items()
-    }
-    mapping = quant_method.get_runtime_weight_reload_mapping(
-        layer, checkpoint_params, runtime_params
-    )
-    if mapping is None or mapping.keys() != restore_params.keys():
-        return None
-    return dict(mapping)
-
-
-def _restore_loading_metadata(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
-    restore_params, restore_buffers = info.restore_metadata
-    runtime_params, runtime_buffers = get_layer_params_buffers(layer)
-    for checkpoint_tensors, runtime_tensors in (
-        (restore_params, runtime_params),
-        (restore_buffers, runtime_buffers),
-    ):
-        for name, checkpoint_tensor in checkpoint_tensors.items():
-            runtime_tensor = runtime_tensors[name]
-            checkpoint_tensor = restore_layer_refs(
-                to_meta_tensor(checkpoint_tensor), layer
-            )
-            runtime_tensor.__class__ = checkpoint_tensor.__class__
-            runtime_tensor.__dict__.update(checkpoint_tensor.__dict__)
-            if not hasattr(runtime_tensor, "weight_loader"):
-                runtime_tensor.weight_loader = default_weight_loader
-
-
-def _bind_runtime_weight_reload_mapping(
-    layer: torch.nn.Module,
-    info: LayerReloadingInfo,
-    runtime_tensors: tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
-    mapping: dict[str, torch.nn.Parameter],
-) -> bool:
-    restore_params, restore_buffers = info.restore_metadata
-    runtime_params, _ = runtime_tensors
-    reloadable_runtime_params, _ = get_reloadable_layer_tensors(layer)
-    is_identity = mapping.keys() == reloadable_runtime_params.keys() and all(
-        mapping[name] is reloadable_runtime_params[name] for name in mapping
-    )
-
-    if is_identity:
-        if not _matching_tensor_layouts(restore_params, reloadable_runtime_params):
-            return False
-    else:
-        if restore_buffers:
-            return False
-
-        for name, checkpoint_param in restore_params.items():
-            mapped_param = mapping[name]
-            runtime_param = runtime_params.get(name)
-            if (
-                runtime_param is None
-                or mapped_param.__class__ is not checkpoint_param.__class__
-                or not _covers_same_storage(mapped_param, runtime_param)
-            ):
-                return False
-
-    info.kernel_tensors = runtime_tensors
-    info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
-    if is_identity:
-        _restore_loading_metadata(layer, info)
-    else:
-        for name, mapped_param in mapping.items():
-            setattr(layer, name, mapped_param)
-    info.runtime_bound = True
-    return True
-
-
-def _validate_runtime_binding(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
-    assert info.kernel_tensors is not None
-    runtime_params, runtime_buffers = info.kernel_tensors
-    for name, runtime_tensor in {**runtime_params, **runtime_buffers}.items():
-        bound_tensor = getattr(layer, name, None)
-        if bound_tensor is None or not _covers_same_storage(
-            bound_tensor, runtime_tensor
-        ):
-            raise RuntimeError(
-                f"{layer.__class__.__name__} changed runtime tensor storage "
-                "during weight reload"
-            )
-
-
-def _covers_same_storage(view: torch.Tensor, runtime_tensor: torch.Tensor) -> bool:
-    if view.device != runtime_tensor.device or view.is_meta:
-        return False
-    try:
-        view_storage = view.untyped_storage()
-        runtime_storage = runtime_tensor.untyped_storage()
-    except (RuntimeError, ValueError):
-        return False
-
-    return (
-        view_storage.data_ptr() == runtime_storage.data_ptr()
-        and view_storage.nbytes() == runtime_storage.nbytes()
-        and view.storage_offset() * view.element_size()
-        == runtime_tensor.storage_offset() * runtime_tensor.element_size()
-        and view.numel() * view.element_size()
-        == runtime_tensor.numel() * runtime_tensor.element_size()
-        and torch._debug_has_internal_overlap(view) == 0
-    )
-
-
-def _matching_tensor_layouts(
-    checkpoint_tensors: dict[str, torch.Tensor],
-    runtime_tensors: dict[str, torch.Tensor],
-) -> bool:
-    if checkpoint_tensors.keys() != runtime_tensors.keys():
-        return False
-    for name, checkpoint_tensor in checkpoint_tensors.items():
-        runtime_tensor = runtime_tensors.get(name)
-        if runtime_tensor is None:
-            return False
-        if is_lazy(checkpoint_tensor) or is_lazy(runtime_tensor):
-            return False
-        if (
-            checkpoint_tensor.shape != runtime_tensor.shape
-            or checkpoint_tensor.stride() != runtime_tensor.stride()
-            or checkpoint_tensor.dtype != runtime_tensor.dtype
-        ):
-            return False
-    return True
+        info.defer_processing = defer_processing
 
 
 def initialize_online_processing(layer: torch.nn.Module):
-    """
-    Wrap a layer's weight loaders with online processing loaders.
+    """Wrap a layer's weight loaders with online processing loaders.
     Called by either `initialize_layerwise_reload` or an online quantization scheme,
     prevents double wrapping in the case of online quantization + reloading
 
     Args:
         layer: layer whose parameter weight loaders will be wrapped
+
     """
     info = get_layerwise_info(layer)
 
@@ -304,7 +158,7 @@ def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
-        if name in SKIP_TENSORS:
+        if name in SKIP_LOAD_TENSORS:
             continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
@@ -360,13 +214,15 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if is_deferred_attention_layer(layer):
+        # Preserve placement remapping until checkpoint iteration finishes:
+        # expert reload wrappers must survive trailing redundant mappings.
+        if info.defer_processing or is_deferred_attention_layer(layer):
             return ret
 
         # Log warnings allocating excessive buffers on device
-        if has_device_tensors(bound_args):
+        if has_device_tensors(bound_args) and layer not in LOADING_LAYERS:
             LOADING_LAYERS.add(layer)
-            if len(LOADING_LAYERS) >= 2:
+            if len(LOADING_LAYERS) == 2:
                 names = sorted([layer.__class__.__name__ for layer in LOADING_LAYERS])
                 mem_used = sum(
                     get_info_size(LAYERWISE_INFO[layer]) for layer in LOADING_LAYERS
@@ -390,8 +246,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
 
 
 def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
-    """
-    Apply processing to any layers which were not layerwise processed during loading.
+    """Apply processing to any layers which were not layerwise processed during loading.
     This includes attention layers and layers which have weight elements which are not
     loaded (due to padding).
 
@@ -401,6 +256,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     Args:
         model: model to finalize processing for
         model_config: config needed for applying processing to attention layers
+
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
@@ -409,18 +265,13 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
-        if is_deferred_attention_layer(layer) and (
-            info.runtime_bound or info.can_load()
-        ):
-            deferred_attn.append((layer, info))
-            continue
-        if info.runtime_bound:
-            _validate_runtime_binding(layer, info)
-            _place_kernel_tensors(layer, info)
-            info.reset()
-            continue
         if not info.can_load():
             info.reset()
+            continue
+
+        # Deferred attention-like layers are processed after all other layers
+        if is_deferred_attention_layer(layer):
+            deferred_attn.append((layer, info))
             continue
 
         # No weights were loaded
@@ -441,7 +292,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
-        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
+        elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
@@ -455,17 +306,15 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     LOADING_LAYERS.clear()
 
 
-def finalize_layerwise_reload(*args, **kwargs):
-    finalize_layerwise_processing(*args, **kwargs)
+def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
+    finalize_layerwise_processing(model, model_config)
+    finalize_model_weights(model)
 
 
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
-    if info.runtime_bound:
-        _validate_runtime_binding(layer, info)
-        _place_kernel_tensors(layer, info)
-    elif info.kernel_tensors is None:
+    if info.kernel_tensors is None:
         if info.load_numel > 0:
             _layerwise_process(layer, info)
     elif info.load_numel > 0:
@@ -474,7 +323,7 @@ def _finalize_attention_layer(
         _reload_attention_scales(layer, info)
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    # its post-load hook runs from finalize_model_weights
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -496,14 +345,27 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
     if quant_method is not None:
-        quant_method.process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
+        )
+
+        timing_context = (
+            online_quantization_timing_context(layer, quant_method)
+            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+            else nullcontext()
+        )
+        with timing_context:
+            quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
-    """
-    Finalize layer loading after all weights have been buffered.
+    """Finalize layer loading after all weights have been buffered.
 
     This function:
     1. Materializes the layer onto the target device
@@ -532,7 +394,21 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        quant_method.process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
+        )
+
+        timing_context = (
+            online_quantization_timing_context(layer, quant_method)
+            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+            else nullcontext()
+        )
+        with timing_context:
+            quant_method.process_weights_after_loading(layer)
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.
@@ -549,7 +425,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:
-    """Return the weight loader with any layerwise wrappers removed"""
+    """Return the weight loader with any layerwise wrappers removed."""
     loader = _get_weight_loader(tensor)
     while loader.__name__ == "online_process_loader":
         loader = loader.__wrapped__  # type: ignore[union-attr]
@@ -569,17 +445,13 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     non_persistent = info.kernel_non_persistent_buffers
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
-        loaded_param = getattr(layer, name)
-        if param.data_ptr() != loaded_param.data_ptr():
-            param.data.copy_(loaded_param)
+        param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
             continue
-        loaded_buffer = getattr(layer, name)
-        if buffer.data_ptr() != loaded_buffer.data_ptr():
-            buffer.data.copy_(loaded_buffer)
+        buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
 

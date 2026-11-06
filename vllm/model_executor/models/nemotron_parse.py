@@ -9,23 +9,26 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, cast
 
+import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from PIL import Image
 from transformers import (
     BartConfig,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -62,8 +65,7 @@ logger = init_logger(__name__)
 
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
-    """
-    This module overrides VocabParallelEmbedding's
+    """This module overrides VocabParallelEmbedding's
     forward by multiplying with embeddings scale.
     """
 
@@ -75,24 +77,6 @@ class BartScaledWordEmbedding(VocabParallelEmbedding):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().forward(input_ids) * self.embed_scale
-
-
-class BartParallelLMHead(ParallelLMHead):
-    """
-    This module overrides ParallelLMHead's
-    forward by dividing by embeddings scale,
-    yielding effectively the inverse of
-    BartScaledWordEmbedding
-    """
-
-    def __init__(
-        self, num_embeddings: int, embedding_dim: int, embed_scale: float = 1.0
-    ):
-        super().__init__(num_embeddings, embedding_dim)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_ids) / self.embed_scale
 
 
 class BartDecoderLayer(nn.Module):
@@ -156,12 +140,13 @@ class BartDecoderLayer(nn.Module):
         decoder_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             decoder_hidden_states: torch.Tensor of *decoder* input embeddings.
             encoder_hidden_states: torch.Tensor of *encoder* input embeddings.
+
         Returns:
             Decoder layer output torch.Tensor
+
         """
         residual = decoder_hidden_states
 
@@ -236,12 +221,13 @@ class MBartDecoderLayer(BartDecoderLayer):
 
 
 class MBartDecoderNoPos(nn.Module):
-    """
-    Transformer decoder consisting of *config.decoder_layers* layers.
+    """Transformer decoder consisting of *config.decoder_layers* layers.
     Each layer is a [`BartDecoderLayer`]
+
     Args:
         config: BartConfig
         embed_tokens (nn.Embedding): output embedding
+
     """
 
     def __init__(
@@ -292,13 +278,13 @@ class MBartDecoderNoPos(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             decoder_input_ids: Indices of *decoder* input sequence tokens in the
                 vocabulary. Padding will be ignored by default should you provide it.
             encoder_hidden_states: Tensor of encoder output embeddings
         Returns:
             Decoder output torch.Tensor
+
         """
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(decoder_input_ids)
@@ -357,12 +343,11 @@ class MBartDecoderNoPos(nn.Module):
 
 
 class NemotronParsePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - b: Batch size
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"]
@@ -406,7 +391,7 @@ class NemotronParseDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -419,34 +404,94 @@ class NemotronParseDummyInputsBuilder(
         }
 
 
+def _to_pil_image(image: object) -> Image.Image:
+    """Convert a `uint8` array/tensor image item to PIL, since the checkpoint's
+    image processor calls `.convert("RGB")` on every input."""
+    if isinstance(image, Image.Image):
+        return image
+
+    array = image.numpy() if isinstance(image, torch.Tensor) else np.asarray(image)
+    if array.dtype != np.uint8 or array.ndim != 3:
+        raise ValueError(
+            "Nemotron-Parse expects image arrays/tensors to be 3-D uint8, "
+            f"got {array.dtype} {array.shape}"
+        )
+    # Same layout heuristic as `ImageProcessorItems.get_image_size`.
+    if array.shape[-1] not in (1, 3, 4):
+        array = array.transpose(1, 2, 0)
+    if array.shape[-1] == 1:
+        array = array[..., 0]
+
+    return Image.fromarray(np.ascontiguousarray(array))
+
+
+def _build_uint8_canvas(
+    image_processor: Any, images: Sequence[Image.Image]
+) -> torch.Tensor:
+    """Reproduce the image processor's pipeline up to, but excluding, its
+    `ToTensor` rescale, yielding the padded `uint8` canvas as `(N, 3, H, W)`.
+
+    Raises `AttributeError`/`TypeError` if the checkpoint's remote code does
+    not expose that pipeline.
+    """
+    resize = image_processor._resize_with_aspect_ratio
+    pad = image_processor._pad_to_size
+    # v1.x pads with albumentations, 2.0 sets `transform` to None and pads
+    # with `_pad_to_size`; mirror `preprocess` and pick the same branch.
+    transform = image_processor.transform
+
+    canvases = []
+    for image in images:
+        array = np.asarray(image.convert("RGB"))
+        array = resize(array)
+        array = transform(image=array)["image"] if transform is not None else pad(array)
+        if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 3:
+            raise TypeError(
+                f"expected a uint8 HWC canvas, got {array.dtype} {array.shape}"
+            )
+        canvases.append(torch.from_numpy(np.ascontiguousarray(array)).permute(2, 0, 1))
+
+    return torch.stack(canvases)
+
+
 class NemotronParseMultiModalProcessor(
     EncDecMultiModalProcessor[NemotronParseProcessingInfo]
 ):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
 
     def _call_hf_processor(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs, tok_kwargs
-            )
-        else:
-            hf_processor = self.info.get_hf_processor()
-            tokenizer = hf_processor.tokenizer
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=False, return_tensors="pt"
-            )
-        return processed_outputs
+        images = [_to_pil_image(i) for i in cast(list, hf_data.get("images") or [])]
+        if images:
+            hf_data = {**hf_data, "images": images}
+
+        # The checkpoint ships its image processor as remote code, and its
+        # `preprocess` ignores `do_rescale`/`do_normalize`: it always runs
+        # `ToTensor` and normalises from `self.do_normalize`. Build the uint8
+        # canvas here so the device-side norm is not applied on top.
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if images and set(hf_data) == {"images"} and mm_config.mm_device_do_normalize:
+            image_processor = self.info.get_hf_processor().image_processor
+            try:
+                pixel_values = _build_uint8_canvas(image_processor, images)
+            except (AttributeError, TypeError) as exc:
+                raise RuntimeError(
+                    f"{type(image_processor).__name__} does not expose the "
+                    f"expected pre-rescale pipeline ({exc}), so the uint8 canvas "
+                    "that mm_device_do_normalize requires cannot be built. Pass "
+                    "--no-mm-device-do-normalize to normalise on the host instead."
+                ) from exc
+            return BatchFeature({"pixel_values": pixel_values})
+
+        return super()._call_hf_processor(hf_data, hf_kwargs)
 
     def _get_mm_fields_config(
         self,
@@ -477,7 +522,7 @@ class RadioWithNeck(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -517,7 +562,7 @@ class RadioWithNeck(nn.Module):
 
     def get_vit_model_from_radio_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> RadioModel:
         hf_config_vision = hf_config.encoder
@@ -579,6 +624,8 @@ class RadioWithNeck(nn.Module):
     dummy_inputs=NemotronParseDummyInputsBuilder,
 )
 class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
+    supports_mm_device_do_normalize = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -587,6 +634,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.vision_config = config.encoder
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.input_norm = build_mm_input_norm(vllm_config.model_config)
 
         with self._mark_tower_model(vllm_config, "image"):
             self.encoder = RadioWithNeck(
@@ -605,6 +653,15 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.lm_head = ParallelLMHead(
             config.decoder.vocab_size, config.decoder.d_model, quant_config=quant_config
         )
+        # Some checkpoints (e.g. compact exports) tie the output head to the
+        # decoder's input embeddings instead of materializing a separate
+        # lm_head.weight tensor.
+        tie_word_embeddings = bool(
+            getattr(config, "tie_word_embeddings", False)
+            or getattr(config.decoder, "tie_word_embeddings", False)
+        )
+        if tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.decoder.embed_tokens)
         self.logits_processor = LogitsProcessor(
             self.vocab_size, config.decoder.vocab_size
         )
@@ -650,8 +707,8 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         assert image_input["type"] == "pixel_values"
         pixel_values = image_input["data"]
         dtype = next(self.encoder.parameters()).dtype
-        pixel_values = pixel_values.to(dtype)
-        return self.encoder(pixel_values)
+        flat = self.input_norm(pixel_values.flatten(1), dtype)
+        return self.encoder(flat.view(pixel_values.shape))
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -667,14 +724,15 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             input_ids: torch.Tensor of *decoder* input token ids.
             positions: torch.Tensor of *decoder* position indices.
             encoder_outputs: List of encoder output tensors (vision embeddings).
                 During profiling, this may be None or empty.
+
         Returns:
             Output torch.Tensor
+
         """
         inputs_embeds = None
         if encoder_outputs:

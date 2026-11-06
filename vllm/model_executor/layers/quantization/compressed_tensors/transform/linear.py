@@ -28,8 +28,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils 
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):
-    """
-    Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
+    """Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
     input and output transforms to either side of the original apply method
     """
 
@@ -41,18 +40,19 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         input_tfms: dict[int, TransformTuple],
         output_tfms: dict[int, TransformTuple],
     ) -> "CompressedTensorsLinearTransformMethod":
-        from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_qutlass_nvfp4 import (  # noqa: E501
-            QutlassNvFP4LinearMethod,
-            is_qutlass_fp4_scheme,
+        from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_humming_nvfp4 import (  # noqa: E501
+            HummingNvFP4HadamardLinearMethod,
+            is_humming_hadamard_fp4_scheme,
         )
 
         assert input_tfms or output_tfms
 
-        if is_qutlass_fp4_scheme(quant_scheme, input_tfms):
-            return QutlassNvFP4LinearMethod(quant_method, input_tfms, output_tfms)
+        if is_humming_hadamard_fp4_scheme(quant_scheme, input_tfms, output_tfms):
+            return HummingNvFP4HadamardLinearMethod(
+                quant_method, input_tfms, output_tfms
+            )
 
         # hadacore or dense gemm is selected by Transform module
-
         return cls(quant_method, input_tfms, output_tfms)
 
     def __init__(
@@ -78,6 +78,9 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # The transform must see the raw activation, before any quantization
+        layer.requires_unquantized_input = bool(self.input_tfms)
+
         # get weight loader for transforms
         weight_loader: Callable = extra_weight_attrs.get("weight_loader")  # type: ignore[assignment]
 
@@ -238,8 +241,7 @@ def get_schemes_args(
 def get_layer_partition_names(
     layer_name: str, packed_modules_mapping: dict[str, list[str]]
 ) -> list[str]:
-    """
-    Get all partition names associated with this layer.
+    """Get all partition names associated with this layer.
     Names are returned in order of their partition indices.
 
     ```python
@@ -249,7 +251,9 @@ def get_layer_partition_names(
         "gate_proj",
         "up_proj",
     ]
-    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]"""
+    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]
+    ```
+    """
     for fused_suffix, part_suffixes in packed_modules_mapping.items():
         if layer_name.endswith(fused_suffix):
             return [

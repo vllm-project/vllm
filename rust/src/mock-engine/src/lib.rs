@@ -48,10 +48,13 @@ pub struct Opt {
 }
 
 /// Run one mock engine until shutdown or transport failure.
-async fn run_engine(engine_index: u32, opt: Opt, shutdown: CancellationToken) -> Result<()> {
+async fn run_engine(engine_index: usize, opt: Opt, shutdown: CancellationToken) -> Result<()> {
+    let engine_index =
+        u16::try_from(engine_index).context("mock engine index exceeds two-byte identity limit")?;
+    let engine_id = EngineId::from_engine_index(engine_index);
     let MockEngineSockets { data_sockets, .. } = connect_to_frontend(
         &opt.handshake_address,
-        EngineId::from_engine_index(engine_index),
+        engine_id,
         MockEngineConfig::default(),
     )
     .await
@@ -71,7 +74,7 @@ async fn run_engine(engine_index: u32, opt: Opt, shutdown: CancellationToken) ->
     ));
     // Engine loop: input_rx -> engine logic -> output_tx
     let mut engine_loop = tokio::spawn(engine::run_engine_loop(
-        engine_index,
+        u32::from(engine_index),
         opt,
         input_rx,
         output_tx,
@@ -111,11 +114,7 @@ pub async fn run(opt: Opt, shutdown: CancellationToken) -> Result<()> {
 
     let mut engines = JoinSet::new();
     for engine_index in 0..opt.engine_count {
-        engines.spawn(run_engine(
-            engine_index as u32,
-            opt.clone(),
-            shutdown.clone(),
-        ));
+        engines.spawn(run_engine(engine_index, opt.clone(), shutdown.clone()));
     }
 
     tokio::select! {

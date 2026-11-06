@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GSM8K correctness test for CPU KV offloading connectors.
+"""GSM8K correctness test for CPU KV offloading connectors.
 
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
@@ -12,15 +11,19 @@ in-flight offload transfers have released their GPU blocks, so retrying
 it until success also waits for offloading to complete.
 
 Correctness is enforced via GSM8K accuracy on both runs: corrupt reloaded
-KV drops accuracy below threshold.  The reload itself is not asserted, so
-a silently skipped reload (e.g. offloading disabled) would not be flagged.
+KV drops accuracy below threshold.  The reload itself is only asserted for
+configs with ``assert_reload``, so elsewhere a silently skipped reload
+(e.g. offloading disabled) would not be flagged.
 
 Covers both KV offloading connectors (OffloadingConnector and
-SimpleCPUOffloadConnector) across four architecture families:
+SimpleCPUOffloadConnector) across five architecture families, plus
+UMBPStoreConnector on ROCm for Gemma 4:
   - Hybrid Mamba (NemotronH: attention + Mamba)
   - Heterogeneous head dim (Gemma 4)
   - Hybrid GDN (Qwen 3.5: attention + GatedDeltaNet)
   - Compressed attention (DeepSeek-V4-Flash: CSA)
+  - Pure MLA (DeepSeek-V2-Lite: TieringOffloadingSpec, TP=2, replicated
+    single-slot host layout)
 
 Usage:
     pytest -s -v evals/gsm8k/test_gsm8k_offloading.py
@@ -34,6 +37,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
 from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
@@ -47,16 +51,29 @@ NUM_FEWSHOT = 5
 _OFFLOAD_SYNC_TIMEOUT = 60
 
 
-def _kv_transfer_config(connector: str, cpu_gib: int = 4) -> str:
+def _kv_transfer_config(
+    connector: str, cpu_gib: int = 4, spec_name: str = "CPUOffloadingSpec"
+) -> str:
     if connector == "OffloadingConnector":
         return json.dumps(
             {
                 "kv_connector": "OffloadingConnector",
                 "kv_role": "kv_both",
                 "kv_connector_extra_config": {
-                    "spec_name": "CPUOffloadingSpec",
+                    "spec_name": spec_name,
                     "cpu_bytes_to_use": cpu_gib << 30,
                     "eviction_policy": "lru",
+                },
+            }
+        )
+    elif connector == "UMBPStoreConnector":
+        return json.dumps(
+            {
+                "kv_connector": "UMBPStoreConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "mode": "embedded",
+                    "capacity_bytes": cpu_gib << 30,
                 },
             }
         )
@@ -107,6 +124,17 @@ def _reset_gpu_prefix_cache(base_url: str) -> None:
         _force_engine_step(base_url)
 
 
+def _external_kv_tokens(base_url: str) -> float:
+    metrics = requests.get(f"{base_url}/metrics", timeout=30)
+    metrics.raise_for_status()
+    return sum(
+        float(line.rsplit(" ", 1)[1])
+        for line in metrics.text.splitlines()
+        if line.startswith("vllm:prompt_tokens_by_source_total{")
+        and 'source="external_kv_transfer"' in line
+    )
+
+
 @dataclass
 class OffloadingModelConfig:
     id: str
@@ -115,8 +143,11 @@ class OffloadingModelConfig:
     accuracy_threshold: float
     tolerance: float = 0.05
     extra_server_args: list[str] = field(default_factory=list)
+    env_dict: dict[str, str] = field(default_factory=dict)
     cpu_offload_gib: int = 4
     startup_timeout: int = 600
+    spec_name: str = "CPUOffloadingSpec"
+    assert_reload: bool = False
 
 
 MODELS = [
@@ -127,6 +158,7 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.49 on 200 questions (measured on GB200).
         accuracy_threshold=0.39,
+        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-gemma-4-e4b-it",
@@ -134,6 +166,7 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.64 on 200 questions (measured on GB200).
         accuracy_threshold=0.55,
+        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-qwen3.5-35b",
@@ -165,12 +198,26 @@ MODELS = [
         cpu_offload_gib=16,
         startup_timeout=1200,
     ),
+    OffloadingModelConfig(
+        id="offloading-deepseek-v2-lite-tiering-tp2",
+        model="deepseek-ai/DeepSeek-V2-Lite",
+        connector="OffloadingConnector",
+        # Baseline 0.360/0.345 over two runs (measured on 2xA100).
+        accuracy_threshold=0.35,
+        extra_server_args=[
+            "--tensor-parallel-size",
+            "2",
+        ],
+        cpu_offload_gib=8,
+        startup_timeout=1200,
+        spec_name="TieringOffloadingSpec",
+    ),
     # ── SimpleCPUOffloadConnector ────────────────────────────────────
     OffloadingModelConfig(
         id="simple-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.45,
+        accuracy_threshold=0.43 if current_platform.is_rocm() else 0.45,
     ),
     OffloadingModelConfig(
         id="simple-gemma-4-e4b-it",
@@ -207,6 +254,21 @@ MODELS = [
         cpu_offload_gib=16,
         startup_timeout=1200,
     ),
+    # ── UMBPStoreConnector (embedded MORI DRAM store) ────────────────
+    pytest.param(
+        OffloadingModelConfig(
+            id="umbp-gemma-4-e4b-it",
+            model="google/gemma-4-E4B-it",
+            connector="UMBPStoreConnector",
+            accuracy_threshold=0.55,
+            assert_reload=True,
+        ),
+        id="umbp-gemma-4-e4b-it",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_rocm() and mori_has_umbp()),
+            reason="requires ROCm and MORI built with UMBP",
+        ),
+    ),
 ]
 
 
@@ -229,7 +291,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--enable-prefix-caching",
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
-        _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib),
+        _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib, cfg.spec_name),
         "--trust-remote-code",
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
@@ -239,7 +301,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         cfg.model,
         server_args,
         # /reset_prefix_cache requires dev mode.
-        env_dict={"VLLM_SERVER_DEV_MODE": "1"},
+        env_dict={"VLLM_SERVER_DEV_MODE": "1", **cfg.env_dict},
         max_wait_seconds=cfg.startup_timeout,
     ) as server:
         base_url = f"http://{server.host}:{server.port}"
@@ -267,3 +329,8 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
 
             if run_idx == 1:
                 _reset_gpu_prefix_cache(base_url)
+                reloaded_before = _external_kv_tokens(base_url)
+            elif cfg.assert_reload:
+                assert _external_kv_tokens(base_url) > reloaded_before, (
+                    f"GSM8K run 2/2 did not reload KV through {cfg.connector}"
+                )

@@ -41,9 +41,6 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         llm = LLM(
             model="Qwen/Qwen3-ForcedAligner-0.6B",
             runner="pooling",
-            hf_overrides={
-                "architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]
-            },
         )
         outputs = llm.encode(
             [{"prompt": prompt, "multi_modal_data": {"audio": audio}}],
@@ -59,6 +56,8 @@ class Qwen3ASRForcedAlignerForTokenClassification(
             "thinker.lm_head.": "classifier.",
             "thinker.model.": "language_model.model.",
             "thinker.": "",
+            "talker.": None,
+            "code2wav.": None,
         }
     )
 
@@ -66,20 +65,20 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = vllm_config.model_config.hf_config
-        thinker_config = config.thinker_config
 
         # Remove the unused generation head created by the base class;
         # the forced aligner uses a classifier head instead.
-        self.language_model.lm_head = None
-        self.language_model.logits_processor = None
+        language_model: nn.Module = self.language_model
+        language_model.lm_head = None
+        language_model.logits_processor = None
 
-        self.classify_num = thinker_config.classify_num
+        self.classify_num = config.num_labels
 
         # Classification head replaces lm_head for time-bin prediction.
         # Use model dtype (not head_dtype which defaults to float32 for
         # pooling models) to match the hidden state dtype.
         self.classifier = nn.Linear(
-            thinker_config.text_config.hidden_size,
+            config.text_config.hidden_size,
             self.classify_num,
             bias=False,
             dtype=vllm_config.model_config.dtype,
@@ -113,8 +112,5 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         return self.classifier(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["talker.", "code2wav."],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+import vllm.envs as envs
 from vllm.triton_utils.importing import (
     HAS_TRITON,
     TritonLanguagePlaceholder,
@@ -12,12 +13,42 @@ if TYPE_CHECKING or HAS_TRITON:
     import triton
     import triton.language as tl
     import triton.language.extra.libdevice as tldevice
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from triton.language.core import _aggregate as aggregate  # noqa: E501
 else:
     triton = TritonPlaceholder()
     tl = TritonLanguagePlaceholder()
     tldevice = TritonLanguagePlaceholder()
+    gluon = TritonLanguagePlaceholder()
+    gl = TritonLanguagePlaceholder()
+    aggregate = TritonLanguagePlaceholder()
+
+from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+
+# Replace Autotuner.run so it always picks the first valid configuration, to
+# eliminate autotune variability. Installed here rather than in
+# vllm.env_override because importing this package resolves current_platform,
+# which must not happen during `import vllm`.
+if envs.VLLM_TRITON_FORCE_FIRST_CONFIG:
+    from vllm.triton_utils.force_first_config import (
+        install as _install_force_first_config,
+    )
+
+    _install_force_first_config()
 
 LOG2E = 1.4426950408889634
 LOGE2 = 0.6931471805599453
 
-__all__ = ["HAS_TRITON", "triton", "tl", "tldevice", "LOG2E", "LOGE2"]
+__all__ = [
+    "HAS_TRITON",
+    "triton",
+    "tl",
+    "tldevice",
+    "LOG2E",
+    "LOGE2",
+    "gluon",
+    "gl",
+    "aggregate",
+    "use_tensor_descriptor",
+]

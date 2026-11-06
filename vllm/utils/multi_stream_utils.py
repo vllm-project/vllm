@@ -8,10 +8,6 @@ from typing import Any
 import torch
 
 
-class AuxStreamType(Enum):
-    Attention = 1
-
-
 class EventType(Enum):
     Main = 0
     Attention = 1
@@ -27,8 +23,9 @@ def maybe_execute_in_parallel(
     """Run two functions potentially in parallel on separate CUDA streams.
 
     When aux_stream is provided, fn0 runs on the current (default) stream and
-    fn1 runs on aux_stream, synchronized via CUDA events.  When aux_stream is
-    None, both functions execute sequentially on the current stream.
+    fn1 runs on aux_stream, synchronized via CUDA events. When aux_stream is
+    None or a breakable CUDA graph capture is active, both functions execute
+    sequentially on the current stream.
 
     This design follows TensorRT-LLM's maybe_execute_in_parallel pattern
     (tensorrt_llm/_torch/modules/multi_stream_utils.py).
@@ -39,11 +36,19 @@ def maybe_execute_in_parallel(
         event0: CUDA event recorded before fn0 so aux_stream can wait.
         event1: CUDA event recorded after fn1 so default stream can wait.
         aux_stream: The second CUDA stream for fn1.
-            Multi-stream is disabled when aux_stream is None.
+            Multi-stream is disabled when aux_stream is None or a breakable
+            CUDA graph capture is active.
 
     Returns:
         Tuple of (fn0_result, fn1_result).
+
     """
+    if aux_stream is not None:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+        if BreakableCUDAGraphCapture.is_active():
+            aux_stream = None
+
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
@@ -65,6 +70,7 @@ def execute_in_parallel(
     done_events: list[torch.cuda.Event],
     aux_streams: list[torch.cuda.Stream] | None = None,
     enable: bool = False,
+    default_first: bool = False,
 ) -> tuple[Any, list[Any]]:
     """Run default_fn on the current stream and aux_fns concurrently on
     aux_streams.
@@ -92,10 +98,15 @@ def execute_in_parallel(
             so callers that pass aux_streams must also pass enable=True
             (typically gated by an env var) to actually overlap. When False,
             execution falls back to sequential on the current stream.
+        default_first: When True, enqueue the default chain before the aux
+            chains. The default chain is typically the longest, so it starts
+            first; the aux streams still only wait on start_event, so they
+            overlap the default chain. Defaults to False.
 
     Returns:
         Tuple of (default_result, aux_results) where aux_results[i] is the
         result of aux_fns[i] (or None when skipped).
+
     """
     aux_results: list[Any]
     if aux_streams is None or not enable:
@@ -111,6 +122,8 @@ def execute_in_parallel(
     pending: list[torch.cuda.Event] = []
 
     start_event.record()
+    if default_first:
+        default_result = default_fn()
     for i, fn in enumerate(aux_fns):
         if fn is None:
             continue
@@ -119,8 +132,8 @@ def execute_in_parallel(
             aux_results[i] = fn()
             done_events[i].record()
         pending.append(done_events[i])
-
-    default_result = default_fn()
+    if not default_first:
+        default_result = default_fn()
 
     for ev in pending:
         ev.wait()

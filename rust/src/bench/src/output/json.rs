@@ -5,10 +5,33 @@ use serde_json::Value;
 
 use crate::backends::RequestFuncOutput;
 use crate::benchmark::SpecDecodeStats;
-use crate::config::BenchConfig;
+use crate::config::{BenchConfig, RampUpConfig};
 use crate::error::Result;
 use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
+
+fn insert_server_metrics(
+    result: &mut serde_json::Map<String, Value>,
+    outputs: &[RequestFuncOutput],
+) {
+    if !outputs
+        .iter()
+        .any(|output| output.server_queue_time.is_some() || output.server_ttft.is_some())
+    {
+        return;
+    }
+
+    result.insert(
+        "server_queue_times".into(),
+        serde_json::json!(
+            outputs.iter().map(|output| output.server_queue_time).collect::<Vec<_>>()
+        ),
+    );
+    result.insert(
+        "server_ttfts".into(),
+        serde_json::json!(outputs.iter().map(|output| output.server_ttft).collect::<Vec<_>>()),
+    );
+}
 
 /// Build the result JSON object matching the Python output schema exactly.
 ///
@@ -77,6 +100,9 @@ pub fn build_result_json(
         "max_concurrency".into(),
         config.max_concurrency.map(|v| Value::Number(v.into())).unwrap_or(Value::Null),
     );
+    if let Some(ramp_up) = &config.ramp_up {
+        insert_ramp_up(&mut result, ramp_up);
+    }
 
     let is_pooling = config.backend.is_pooling();
 
@@ -98,6 +124,16 @@ pub fn build_result_json(
         "request_throughput".into(),
         serde_json::json!(metrics.request_throughput),
     );
+    if is_pooling {
+        result.insert(
+            "total_input_sequences".into(),
+            serde_json::json!(metrics.total_input_sequences),
+        );
+        result.insert(
+            "input_sequence_throughput".into(),
+            serde_json::json!(metrics.input_sequence_throughput),
+        );
+    }
     if config.goodput.is_empty() {
         result.insert("request_goodput".into(), Value::Null);
     } else {
@@ -192,6 +228,7 @@ pub fn build_result_json(
             "start_times".into(),
             serde_json::json!(outputs.iter().map(|o| o.start_time).collect::<Vec<_>>()),
         );
+        insert_server_metrics(&mut result, outputs);
     }
 
     // Speculative decoding stats
@@ -547,6 +584,18 @@ fn collect_failed_turns(conversation_outputs: &[ConversationOutput]) -> Vec<Valu
     failed
 }
 
+fn insert_ramp_up(result: &mut serde_json::Map<String, Value>, ramp_up: &RampUpConfig) {
+    result.insert(
+        "ramp_up_strategy".into(),
+        Value::String(ramp_up.strategy.as_str().to_string()),
+    );
+    result.insert(
+        "ramp_up_start_rps".into(),
+        serde_json::json!(ramp_up.start_rps),
+    );
+    result.insert("ramp_up_end_rps".into(), serde_json::json!(ramp_up.end_rps));
+}
+
 fn insert_spec_decode_stats(result: &mut serde_json::Map<String, Value>, stats: &SpecDecodeStats) {
     result.insert(
         "spec_decode_acceptance_rate".into(),
@@ -629,7 +678,14 @@ pub fn compute_result_filename(config: &BenchConfig, model_id: &str, current_dt:
         config.max_concurrency.map(|mc| format!("-concurrency{mc}")).unwrap_or_default();
     let label = config.label.as_deref().unwrap_or_else(|| config.backend.as_str());
 
-    let file_name = if config.request_rate.is_infinite() {
+    let file_name = if let Some(ramp_up) = &config.ramp_up {
+        format!(
+            "{label}-ramp-up-{}-{}qps-{}qps{max_conc_str}-{base_model}-{current_dt}.json",
+            ramp_up.strategy.as_str(),
+            ramp_up.start_rps,
+            ramp_up.end_rps
+        )
+    } else if config.request_rate.is_infinite() {
         format!("{label}-infqps{max_conc_str}-{base_model}-{current_dt}.json")
     } else {
         format!(
@@ -679,6 +735,23 @@ mod tests {
             result["spec_decode_per_position_acceptance_rates"],
             serde_json::json!([0.9, 0.8, 0.7])
         );
+    }
+
+    #[test]
+    fn test_insert_ramp_up() {
+        let ramp_up = RampUpConfig {
+            strategy: crate::cli::RampUpStrategy::Exponential,
+            start_rps: 1.0,
+            end_rps: 16.0,
+        };
+
+        let mut result = serde_json::Map::new();
+        insert_ramp_up(&mut result, &ramp_up);
+
+        assert_eq!(result["ramp_up_strategy"], "exponential");
+        assert_eq!(result["ramp_up_start_rps"], 1.0);
+        assert_eq!(result["ramp_up_end_rps"], 16.0);
+        assert_eq!(result.len(), 3);
     }
 
     #[test]
@@ -772,5 +845,37 @@ mod tests {
         assert_eq!(failed[1]["ttft"], 0.5);
         assert_eq!(failed[1]["output_tokens"], 3);
         assert_eq!(failed[1]["itl"], serde_json::json!([0.1, 0.12]));
+    }
+
+    #[test]
+    fn test_insert_server_metrics_preserves_alignment() {
+        let outputs = vec![
+            RequestFuncOutput {
+                server_queue_time: Some(0.0),
+                server_ttft: Some(0.2),
+                ..Default::default()
+            },
+            RequestFuncOutput::default(),
+            RequestFuncOutput {
+                server_ttft: Some(0.3),
+                ..Default::default()
+            },
+        ];
+        let mut result = serde_json::Map::new();
+
+        insert_server_metrics(&mut result, &outputs);
+
+        assert_eq!(
+            result["server_queue_times"],
+            serde_json::json!([0.0, null, null])
+        );
+        assert_eq!(result["server_ttfts"], serde_json::json!([0.2, null, 0.3]));
+    }
+
+    #[test]
+    fn test_insert_server_metrics_omits_unavailable() {
+        let mut result = serde_json::Map::new();
+        insert_server_metrics(&mut result, &[RequestFuncOutput::default()]);
+        assert!(result.is_empty());
     }
 }

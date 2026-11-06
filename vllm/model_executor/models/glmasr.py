@@ -11,7 +11,7 @@ from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
@@ -44,6 +44,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -75,8 +76,7 @@ from .whisper import ISO639_1_SUPPORTED_LANGS, _create_fake_bias_for_k_proj
 
 
 class GlmAsrEncoderRotaryEmbedding(nn.Module):
-    """
-    Rotary Position Embedding for GLM-ASR encoder.
+    """Rotary Position Embedding for GLM-ASR encoder.
 
     Computes rotary position embeddings on-demand for efficiency.
     Only caches inv_freq as a buffer; cos/sin are computed during forward
@@ -115,8 +115,7 @@ class GlmAsrEncoderRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seq_len: int) -> torch.Tensor:
-        """
-        Compute rotary position frequencies for given sequence length.
+        """Compute rotary position frequencies for given sequence length.
 
         Args:
             seq_len: The sequence length to compute embeddings for.
@@ -124,6 +123,7 @@ class GlmAsrEncoderRotaryEmbedding(nn.Module):
         Returns:
             Frequency tensor with shape [seq_len, dim/2]. Use .cos() and
             .sin() to get the rotary embedding components.
+
         """
         # Compute on the same device as inv_freq (automatically correct after .to())
         seq = torch.arange(
@@ -134,8 +134,7 @@ class GlmAsrEncoderRotaryEmbedding(nn.Module):
 
 
 class GlmAsrEncoderAttention(nn.Module):
-    """
-    Optimized Multi-headed Grouped Query Attention for GLM-ASR encoder.
+    """Optimized Multi-headed Grouped Query Attention for GLM-ASR encoder.
 
     Uses vLLM's QKVParallelLinear for fused projections, ApplyRotaryEmb for
     rotary position embeddings, and MMEncoderAttention for hardware-optimized
@@ -208,14 +207,14 @@ class GlmAsrEncoderAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             hidden_states: [batch_size, seq_len, hidden_size]
             rotary_pos_emb_cos: [seq_len, rotary_dim/2] - cosine of rotary embeddings
             rotary_pos_emb_sin: [seq_len, rotary_dim/2] - sine of rotary embeddings
 
         Returns:
             [batch_size, seq_len, hidden_size]
+
         """
         batch_size, seq_len, _ = hidden_states.shape
 
@@ -255,8 +254,7 @@ class GlmAsrEncoderAttention(nn.Module):
 
 
 class GlmAsrEncoderMLP(nn.Module):
-    """
-    Optimized MLP for GLM-ASR encoder.
+    """Optimized MLP for GLM-ASR encoder.
     Uses vLLM's parallel linear layers for better performance.
     """
 
@@ -297,8 +295,7 @@ class GlmAsrEncoderMLP(nn.Module):
 
 
 class GlmAsrEncoderLayer(nn.Module):
-    """
-    Optimized Transformer encoder layer for GLM-ASR.
+    """Optimized Transformer encoder layer for GLM-ASR.
     Combines attention and MLP with residual connections and layer norms.
     """
 
@@ -335,14 +332,14 @@ class GlmAsrEncoderLayer(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             hidden_states: [batch_size, seq_len, hidden_size]
             rotary_pos_emb_cos: [seq_len, rotary_dim/2] - cosine of rotary embeddings
             rotary_pos_emb_sin: [seq_len, rotary_dim/2] - sine of rotary embeddings
 
         Returns:
             [batch_size, seq_len, hidden_size]
+
         """
         # Self-attention with residual
         residual = hidden_states
@@ -364,8 +361,7 @@ class GlmAsrEncoderLayer(nn.Module):
 
 
 class _GlmAsrEncoderOutput:
-    """
-    Simple output container compatible with transformers' BaseModelOutput.
+    """Simple output container compatible with transformers' BaseModelOutput.
 
     This lightweight container holds the encoder output and is compatible
     with the transformers library's output format while being more efficient
@@ -374,6 +370,7 @@ class _GlmAsrEncoderOutput:
     Attributes:
         last_hidden_state: Final layer hidden states from the encoder.
             Shape: [batch_size, seq_len, hidden_size]
+
     """
 
     __slots__ = ("last_hidden_state",)
@@ -383,8 +380,7 @@ class _GlmAsrEncoderOutput:
 
 
 class GlmAsrEncoder(nn.Module):
-    """
-    Optimized GLM-ASR Audio Encoder with vLLM native implementation.
+    """Optimized GLM-ASR Audio Encoder with vLLM native implementation.
 
     This encoder processes audio features through convolutional layers
     followed by transformer layers with rotary position embeddings.
@@ -454,14 +450,14 @@ class GlmAsrEncoder(nn.Module):
     def _get_feat_extract_output_lengths(
         self, input_lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute the output length after convolutions.
+        """Compute the output length after convolutions.
 
         Args:
             input_lengths: Input sequence lengths [batch_size]
 
         Returns:
             Tuple of (output after conv1, output after conv2)
+
         """
         # Conv1: kernel=3, stride=1, padding=1
         output_lengths_conv1 = (input_lengths + 2 * 1 - 3) // 1 + 1
@@ -472,8 +468,7 @@ class GlmAsrEncoder(nn.Module):
         return output_lengths_conv1, output_lengths_conv2
 
     def forward(self, input_features: torch.Tensor) -> _GlmAsrEncoderOutput:
-        """
-        Forward pass through the encoder.
+        """Forward pass through the encoder.
 
         Args:
             input_features: [batch_size, num_mel_bins, seq_len]
@@ -482,6 +477,7 @@ class GlmAsrEncoder(nn.Module):
             _GlmAsrEncoderOutput: Object with .last_hidden_state attribute \
                 containing [batch_size, seq_len', hidden_size] where seq_len' \
                 is the sequence length after convolutions
+
         """
         # Apply convolutional layers with GELU activation
         hidden_states = torch.nn.functional.gelu(self.conv1(input_features))
@@ -515,11 +511,10 @@ class GlmAsrEncoder(nn.Module):
 
 
 class GlmAsrFeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - num_chunks: Number of audio chunks (flattened)
-        - nmb: Number of mel bins
-        - num_audios: Number of original audio files
+    """Dimensions:
+    - num_chunks: Number of audio chunks (flattened)
+    - nmb: Number of mel bins
+    - num_audios: Number of original audio files
     """
 
     type: Literal["audio_features"]
@@ -538,12 +533,11 @@ class GlmAsrFeatureInputs(TensorSchema):
 
 
 class GlmAsrEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size
-        - naf: Number of audio features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
+    """Dimensions:
+    - bn: Batch size
+    - naf: Number of audio features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"
@@ -557,8 +551,7 @@ GlmAsrInputs: TypeAlias = GlmAsrFeatureInputs | GlmAsrEmbeddingInputs
 
 
 class GlmAsrMultiModalProjector(nn.Module):
-    """
-    Projects audio encoder outputs to language model hidden space.
+    """Projects audio encoder outputs to language model hidden space.
 
     This projector uses a two-layer MLP to map audio features from the
     encoder's intermediate size to the language model's hidden size.
@@ -601,8 +594,7 @@ class GlmAsrMultiModalProjector(nn.Module):
 def _glmasr_field_config(
     hf_inputs: Mapping[str, torch.Tensor],
 ) -> dict[str, MultiModalFieldConfig]:
-    """
-    Configure multimodal field batching strategy for GLM-ASR.
+    """Configure multimodal field batching strategy for GLM-ASR.
 
     Determines how to batch audio inputs based on whether chunking is used.
     When chunk_counts is present, features are flattened across chunks;
@@ -614,6 +606,7 @@ def _glmasr_field_config(
     Returns:
         Dictionary mapping field names to MultiModalFieldConfig objects \
             that specify batching behavior.
+
     """
     chunk_counts = hf_inputs.get("chunk_counts")
     if chunk_counts is not None:
@@ -625,19 +618,18 @@ def _glmasr_field_config(
             feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
                 "audio", chunk_counts, dim=0
             ),
-            chunk_counts=MultiModalFieldConfig.batched("audio"),
+            chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
     return dict(
         audio_embeds=MultiModalFieldConfig.batched("audio"),
         input_features=MultiModalFieldConfig.batched("audio"),
         feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        chunk_counts=MultiModalFieldConfig.batched("audio"),
+        chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
     )
 
 
 class GlmAsrMultiModalDataParser(MultiModalDataParser):
-    """
-    Custom parser for GLM-ASR multimodal data.
+    """Custom parser for GLM-ASR multimodal data.
 
     Extends the base parser to handle GLM-ASR specific audio data formats,
     including both pre-computed audio embeddings and raw audio features.
@@ -658,8 +650,7 @@ class GlmAsrMultiModalDataParser(MultiModalDataParser):
 
 
 class GlmAsrProcessingInfo(BaseProcessingInfo):
-    """
-    Processing information provider for GLM-ASR model.
+    """Processing information provider for GLM-ASR model.
 
     Provides access to model configuration, processor, and feature extractor
     needed for audio preprocessing and multimodal integration.
@@ -687,8 +678,7 @@ class GlmAsrProcessingInfo(BaseProcessingInfo):
 
 
 class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
-    """
-    Builder for dummy inputs used in profiling and testing.
+    """Builder for dummy inputs used in profiling and testing.
 
     Generates dummy text prompts and audio data that match the expected
     format for GLM-ASR model inputs. Used for memory profiling and
@@ -704,12 +694,10 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
-        num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio")
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -719,15 +707,14 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
 
 class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"]):
-    """
-    GLM-ASR processor that inherits directly from BaseMultiModalProcessor
+    """GLM-ASR processor that inherits directly from BaseMultiModalProcessor
     for better performance and cleaner implementation.
     """
 
@@ -750,48 +737,38 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             chunk_counts.append(min(n_chunks, max_windows))
         return chunk_counts
 
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: dict[str, object],
-        mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
+        )
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        # Normalize input: handle deprecated key and list conversion.
-        if "audios" in mm_data:
-            mm_data["audio"] = mm_data.pop("audios")
-
-        audio = mm_data.get("audio", [])
-        audio_list = [audio] if audio and not isinstance(audio, list) else audio
-
-        # Early return for text-only.
-        if not audio_list:
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        # Handle sampling_rate
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
-        )
-
-        # Call parent method
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        # Postprocess: rename mask and add chunk counts
         # Handle different key names from different transformers versions
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-        elif "input_features_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in processed_data:
+            processed_data["feature_attention_mask"] = processed_data.pop(
+                "input_features_mask"
+            )
+        elif "input_features" in processed_data:
             # If no mask is provided, create one from input_features
-            input_features = outputs["input_features"]
+            input_features = processed_data["input_features"]
             if isinstance(input_features, torch.Tensor):
                 # Create a mask of all ones matching the sequence length
                 mask = torch.ones(
@@ -799,18 +776,27 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                     input_features.shape[-1],
                     dtype=torch.long,
                 )
-                outputs["feature_attention_mask"] = mask
+                processed_data["feature_attention_mask"] = mask
 
-        # Get processor for chunk counts calculation
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        audio = mm_data.get("audio")
+        if audio is None:
+            audio_list: list[Any] = []
+        elif isinstance(audio, list):
+            audio_list = audio
+        else:
+            audio_list = [audio]
+        if audio_list:
+            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        # Override chunk counts calculation with GLM-ASR specific logic
-        chunk_counts = self._calculate_chunk_counts(
-            audio_list, processor.feature_extractor, processor
-        )
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+            # Override chunk counts calculation with GLM-ASR specific logic
+            chunk_counts = self._calculate_chunk_counts(
+                audio_list, processor.feature_extractor, processor
+            )
+            processed_data["chunk_counts"] = torch.tensor(
+                chunk_counts, dtype=torch.long
+            )
 
-        return outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -882,6 +868,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 audio_embeds = out_mm_data.get("audio_embeds")
                 if audio_embeds is not None:
                     embed = audio_embeds[item_idx]
+                    assert isinstance(embed, torch.Tensor)
                     num_features = embed.shape[0]
                 else:
                     raise ValueError(
@@ -900,7 +887,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_glmasr,
             )
         ]
@@ -915,6 +902,10 @@ class GlmAsrForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"audio_tower.embed_positions": None}
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1083,9 +1074,8 @@ class GlmAsrForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["audio_tower.embed_positions"]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def _get_audio_token(cls, model_config: ModelConfig) -> str:
@@ -1119,7 +1109,11 @@ class GlmAsrForConditionalGeneration(
         audio_token = cls._get_audio_token(model_config)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            full_lang_name_to = (
+                cls.supported_languages.get(to_language, to_language)
+                if to_language is not None
+                else ""
+            )
             user_content = f"{audio_token}translate the speech to {full_lang_name_to}"
         elif task_type == "transcribe":
             user_content = (

@@ -12,12 +12,21 @@ import time
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
+import numpy as np
 import pybase64 as base64
-from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
+    model_validator,
+)
 
 from vllm import PoolingParams
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.utils import random_uuid
 
 from ..base.protocol import (
@@ -155,12 +164,36 @@ class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
         return normalized
 
 
+_CHAT_ONLY_FIELDS = frozenset(EmbeddingChatRequest.model_fields).difference(
+    EmbeddingCompletionRequest.model_fields
+)
+
+
+def _validate_embedding_request(data: Any, handler: ValidatorFunctionWrapHandler):
+    # Smart-mode union validation tries every member, and the chat members are
+    # slow to reject plain inputs, so try the completion request first when no
+    # chat member could accept the body.
+    if (
+        isinstance(data, dict)
+        and "input" in data
+        and _CHAT_ONLY_FIELDS.isdisjoint(data)
+        and not _is_chat_messages(data["input"])
+        and not _is_batched_chat_messages(data["input"])
+    ):
+        try:
+            return EmbeddingCompletionRequest.model_validate(data)
+        except ValidationError:
+            pass
+    return handler(data)
+
+
 EmbeddingRequest: TypeAlias = Annotated[
     EmbeddingCompletionRequest
     | EmbeddingChatRequest
     | EmbeddingBatchChatRequest
     | EmbeddingChatInputRequest
     | EmbeddingBatchChatInputRequest,
+    WrapValidator(_validate_embedding_request),
     BeforeValidator(reject_removed_pooling_parameters),
 ]
 
@@ -235,7 +268,7 @@ class CohereEmbedRequest(BaseModel):
     embedding_types: list[CohereEmbeddingType] | None = None
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
-    priority: int = 0
+    priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
 
     @model_validator(mode="after")
     def validate_input_fields(self):
@@ -298,31 +331,28 @@ def _pack_binary_embeddings(
 ) -> list[list[int]]:
     """Bit-pack float embeddings: positive -> 1, negative -> 0.
 
-    Each bit is shifted left by ``7 - idx%8``, and every 8 bits are packed
-    into one byte.
+    Bits are packed MSB-first, eight per byte.
     """
-    result: list[list[int]] = []
-    for embedding in float_embeddings:
-        dim = len(embedding)
-        if dim % 8 != 0:
-            raise ValueError(
-                "Embedding dimension must be a multiple of 8 for binary "
-                f"embedding types, but got {dim}."
-            )
-        packed_len = dim // 8
-        packed: list[int] = []
-        byte_val = 0
-        for idx, value in enumerate(embedding):
-            bit = 1 if value >= 0 else 0
-            byte_val += bit << (7 - idx % 8)
-            if (idx + 1) % 8 == 0:
-                if signed:
-                    byte_val -= _UNSIGNED_TO_SIGNED_DIFF
-                packed.append(byte_val)
-                byte_val = 0
-        assert len(packed) == packed_len
-        result.append(packed)
-    return result
+    if not float_embeddings:
+        return []
+
+    array = np.asarray(float_embeddings, dtype=np.float64)
+    if array.ndim != 2:
+        raise ValueError(
+            f"Expected a 2D batch of embeddings, but got {array.ndim}D input."
+        )
+
+    dim = array.shape[1]
+    if dim % 8 != 0:
+        raise ValueError(
+            "Embedding dimension must be a multiple of 8 for binary "
+            f"embedding types, but got {dim}."
+        )
+
+    packed = np.packbits(array >= 0, axis=-1)
+    if signed:
+        packed = packed.astype(np.int16) - _UNSIGNED_TO_SIGNED_DIFF
+    return packed.tolist()
 
 
 def _encode_base64_embeddings(

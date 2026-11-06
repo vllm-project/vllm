@@ -15,7 +15,7 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
-MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "intfloat/multilingual-e5-base")
+MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "vllm-project/multilingual-e5-base")
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 
@@ -23,9 +23,7 @@ REVISION_ROBERTA = os.environ.get("REVISION", "main")
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
 def test_model_loading_with_params(vllm_runner, monkeypatch):
-    """
-    Test parameter weight loading with tp>1.
-    """
+    """Test parameter weight loading with tp>1."""
     # to use apply_model
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
@@ -68,9 +66,7 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
 def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
-    """
-    Test parameter weight loading with tp>1.
-    """
+    """Test parameter weight loading with tp>1."""
     # to use apply_model
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
@@ -96,7 +92,7 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.pooler_config.use_activation
 
         # asserts on the tokenizer loaded
-        assert model_config.tokenizer == "intfloat/multilingual-e5-base"
+        assert model_config.tokenizer == "vllm-project/multilingual-e5-base"
         assert model_tokenizer.model_max_length == 512
 
         def check_model(model):
@@ -113,9 +109,7 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
 def test_facebook_roberta_model_loading_with_params(vllm_runner, monkeypatch):
-    """
-    Test loading roberta-base model with no lm_head.
-    """
+    """Test loading roberta-base model with no lm_head."""
     # to use apply_model
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     model_name = "FacebookAI/roberta-base"

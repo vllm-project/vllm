@@ -26,6 +26,7 @@ class ReadSpec:
     remote_rank: int
     local_block_ids: BlockIds
     remote_block_ids: BlockIds
+    block_ids_by_region: bool = False
 
 
 def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
@@ -56,32 +57,64 @@ class TPMapping:
     # FA head offset factor for hetero-TP (D_TP > P_TP).
     rank_offset_factor: int
 
+    # Local ranks (in aggregate) that read from a given source rank. The producer frees
+    # a request's blocks only once that many notifications have come in.
+    local_consumers: int = 1
+
 
 # ======================================================================
 # TP mapping computation
 # ======================================================================
 
 
+def compute_head_offset(
+    tp_rank: int, tp_size: int, remote_tp_size: int, total_num_kv_heads: int
+) -> int:
+    """Return the offset in local head slices within the remote KV block."""
+    if tp_size <= remote_tp_size:
+        return 0
+    if tp_size > total_num_kv_heads:
+        remote_rank = tp_rank * remote_tp_size // tp_size
+        local_head = tp_rank * total_num_kv_heads // tp_size
+        remote_head = remote_rank * total_num_kv_heads // remote_tp_size
+        return local_head - remote_head
+    return tp_rank % (tp_size // remote_tp_size)
+
+
 def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
+    remote_dcp_size: int = 1,
+    head_sharded_kv_heads: int | None = None,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
     Computes source ranks, head slot assignments, and the rank offset
     factor in a single pass.
+
+    DCP support is scoped to MLA only, with a side is either fully replicated or fully
+    sharded. DCP-branch reuses the same rank set used at handshake selection.
+
+    ``head_sharded_kv_heads`` maps head-sharded KV with that many total KV heads
+    instead of the topology's, e.g. a GQA draft under an MLA target.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
-    total_num_kv_heads = transfer_topology.total_num_kv_heads
+    is_mla = transfer_topology.is_mla and head_sharded_kv_heads is None
+    total_num_kv_heads = head_sharded_kv_heads or transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
-    if transfer_topology.is_mla or tp_size >= remote_tp_size:
-        # D (local TP) > P (remote TP): multiple local ranks read different chunks from
-        # *one* remote rank, corresponding to different kv heads.
-        # For MLA, we only need one remote since cache is duplicated. When P TP=k*TP k,
-        # this will spread mla ranks to read from remote k*tp_rank.
-        attn_ranks = [tp_rank * remote_tp_size // tp_size]
+    if is_mla or tp_size >= remote_tp_size:
+        if is_mla and remote_dcp_size > 1:
+            attn_ranks = transfer_topology.dcp_source_ranks(
+                remote_tp_size, remote_dcp_size
+            )
+        else:
+            # D (local TP) > P (remote TP): multiple local ranks read different chunks
+            # from *one* remote rank, corresponding to different kv heads.
+            # For MLA, we only need one remote since cache is duplicated. When
+            # P TP=k*TP k, this will spread mla ranks to read from remote k*tp_rank.
+            attn_ranks = [tp_rank * remote_tp_size // tp_size]
     else:
         # P (remote TP) > D (local TP): one local rank
         # reads from multiple remote ranks.
@@ -123,20 +156,20 @@ def compute_tp_mapping(
     }
 
     # --- Rank offset factor ---
-    if transfer_topology.is_mla or tp_size <= remote_tp_size:
-        # We don't index into remote for reading, no offset needed.
-        rank_offset_factor = 0
-    elif tp_size > total_num_kv_heads:
-        local_head = tp_rank * total_num_kv_heads // tp_size
-        p_start = attn_ranks[0] * total_num_kv_heads // remote_tp_size
-        rank_offset_factor = local_head - p_start
-    else:
-        # D TP > P TP: we index into remote to read different heads depending on rank.
-        rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
+    rank_offset_factor = (
+        0
+        if is_mla
+        else compute_head_offset(tp_rank, tp_size, remote_tp_size, total_num_kv_heads)
+    )
+
+    local_consumers = transfer_topology.dcp_consumer_count(
+        remote_tp_size, remote_dcp_size
+    )
 
     return TPMapping(
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=tuple(all_ranks),
         rank_to_attention_slot=rank_to_attention_slot,
         rank_offset_factor=rank_offset_factor,
+        local_consumers=local_consumers,
     )

@@ -22,6 +22,7 @@ class LayerReloadingInfo:
     # track how many elements are ready for loading, used by `online_process_loader`
     load_numel: int = 0
     load_numel_total: int | None = None
+    defer_processing: bool = False
 
     # used by `online_process_loader` to buffer args and tensors until ready to load
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
@@ -32,9 +33,6 @@ class LayerReloadingInfo:
     # non-persistent buffer names captured with `kernel_tensors`, so buffer
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
-
-    # checkpoint-layout views are bound directly to kernel storage while reloading
-    runtime_bound: bool = False
 
     def reset(self):
         self.__init__(  # type: ignore[misc]

@@ -11,12 +11,13 @@ from argparse import (
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
     ArgumentTypeError,
+    BooleanOptionalAction,
     Namespace,
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
 from collections import defaultdict
-from typing import Any
+from typing import Any, NoReturn
 
 import regex as re
 import yaml
@@ -34,6 +35,7 @@ def human_readable_int(value: str) -> int:
     - '1k' -> 1,000
     - '1K' -> 1,024
     - '25.6k' -> 25,600
+
     """
     value = value.strip()
 
@@ -82,6 +84,7 @@ def human_readable_int_or_auto(value: str) -> int:
     - '1K' -> 1,024
     - '25.6k' -> 25,600
     - '-1' or 'auto' -> -1 (special value for auto-detection)
+
     """
     value = value.strip()
 
@@ -91,12 +94,16 @@ def human_readable_int_or_auto(value: str) -> int:
     return human_readable_int(value)
 
 
+def summary_line(description: str | None) -> str:
+    """Return the first paragraph of a config docstring as a single line."""
+    return " ".join((description or "").split("\n\n", 1)[0].split())
+
+
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
-        """
-        1. Sentences split across lines have their single newlines removed.
+        """1. Sentences split across lines have their single newlines removed.
         2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
@@ -110,10 +117,45 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
         super().add_arguments(actions)
 
 
+class EnableDisableAction(BooleanOptionalAction):
+    """`BooleanOptionalAction` that pairs `--enable-x` with `--disable-x`.
+
+    `--no-enable-x` and `--no-disable-x` are still accepted for backwards
+    compatibility, but are hidden from help.
+    """
+
+    _inverse_prefixes = {"--enable-": "--disable-", "--disable-": "--enable-"}
+
+    def __init__(self, option_strings, dest, *args, **kwargs):
+        super().__init__(option_strings, dest, *args, **kwargs)
+        inverses = [
+            inverse + opt.removeprefix(prefix)
+            for opt in option_strings
+            for prefix, inverse in self._inverse_prefixes.items()
+            if opt.startswith(prefix)
+        ]
+        negated = {opt for opt in self.option_strings if opt not in option_strings}
+        self.negative_option_strings = negated | set(inverses)
+        self.visible_option_strings = (
+            [*option_strings, *inverses] if inverses else list(self.option_strings)
+        )
+        self.option_strings = [*self.option_strings, *inverses]
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, option_string not in self.negative_option_strings)
+
+
+def _register_action(action: Action, deprecated: bool, deprecated_actions: set):
+    # Hidden option strings stay registered with the parser but leave help.
+    if isinstance(action, EnableDisableAction):
+        action.option_strings = action.visible_option_strings
+    if deprecated:
+        deprecated_actions.add(action)
+
+
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
-    _deprecated: set[Action] = set()
     _json_tip: str = (
         "When passing JSON CLI arguments, the following sets of arguments "
         "are equivalent:\n"
@@ -126,19 +168,38 @@ class FlexibleArgumentParser(ArgumentParser):
     _search_keyword: str | None = None
 
     def __init__(self, *args, **kwargs):
+        # Must exist before super().__init__(), which already adds arguments.
+        self._deprecated: set[Action] = set()
         # Set the default "formatter_class" to SortedHelpFormatter
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = SortedHelpFormatter
         # Pop kwarg "add_json_tip" to control whether to add the JSON tip
         self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
+        self.register("action", BooleanOptionalAction, EnableDisableAction)
+        self._show_serve_task_hint = False
+
+    def error(self, message: str) -> NoReturn:
+        if (
+            (self.prog.endswith(" serve") or self._show_serve_task_hint)
+            and message.startswith("unrecognized arguments:")
+            and re.search(r"(^|\s)--task(=|\s|$)", message)
+        ):
+            message += (
+                "\n\nHint: --task is not a vllm serve option. "
+                "For embedding, reranking, or reward models, use "
+                "--runner pooling. To adapt a generative model for pooling, "
+                "also use --convert embed, --convert classify, or "
+                "--convert reward."
+            )
+        super().error(message)
 
     if sys.version_info < (3, 13):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
             namespace, args = super().parse_known_args(args, namespace)
-            for action in FlexibleArgumentParser._deprecated:
+            for action in self._deprecated:
                 if (
                     hasattr(namespace, dest := action.dest)
                     and getattr(namespace, dest) != action.default
@@ -146,25 +207,28 @@ class FlexibleArgumentParser(ArgumentParser):
                     logger.warning_once("argument '%s' is deprecated", dest)
             return namespace, args
 
+    def add_argument(self, *args, **kwargs):
+        # Python 3.13+ handles the deprecated kwarg natively
+        deprecated = sys.version_info < (3, 13) and kwargs.pop("deprecated", False)
+        action = super().add_argument(*args, **kwargs)
+        _register_action(action, deprecated, self._deprecated)
+        return action
+
+    class _FlexibleArgumentGroup(_ArgumentGroup):
+        def __init__(self, container, *args, **kwargs):
+            super().__init__(container, *args, **kwargs)
+            self._deprecated: set[Action] = container._deprecated
+
         def add_argument(self, *args, **kwargs):
-            deprecated = kwargs.pop("deprecated", False)
+            deprecated = sys.version_info < (3, 13) and kwargs.pop("deprecated", False)
             action = super().add_argument(*args, **kwargs)
-            if deprecated:
-                FlexibleArgumentParser._deprecated.add(action)
+            _register_action(action, deprecated, self._deprecated)
             return action
 
-        class _FlexibleArgumentGroup(_ArgumentGroup):
-            def add_argument(self, *args, **kwargs):
-                deprecated = kwargs.pop("deprecated", False)
-                action = super().add_argument(*args, **kwargs)
-                if deprecated:
-                    FlexibleArgumentParser._deprecated.add(action)
-                return action
-
-        def add_argument_group(self, *args, **kwargs):
-            group = self._FlexibleArgumentGroup(self, *args, **kwargs)
-            self._action_groups.append(group)
-            return group
+    def add_argument_group(self, *args, **kwargs):
+        group = self._FlexibleArgumentGroup(self, *args, **kwargs)
+        self._action_groups.append(group)
+        return group
 
     def format_help(self):
         # Only use custom help formatting for bottom level parsers
@@ -186,7 +250,7 @@ class FlexibleArgumentParser(ArgumentParser):
             for group in self._action_groups:
                 if group.title and group.title.lower() == search_keyword:
                     formatter.start_section(group.title)
-                    formatter.add_text(group.description)
+                    formatter.add_text(summary_line(group.description))
                     formatter.add_arguments(group._group_actions)
                     formatter.end_section()
                     formatter.add_text(self._json_tip)
@@ -225,12 +289,18 @@ class FlexibleArgumentParser(ArgumentParser):
         # positionals, optionals and user-defined groups
         formatter.start_section("Config Groups")
         config_groups = ""
-        for group in self._action_groups:
-            if not group._group_actions:
-                continue
-            title = group.title
-            description = group.description or ""
-            config_groups += f"{title: <24}{description}\n"
+        groups = [g for g in self._action_groups if g._group_actions]
+        titles = [g.title or "" for g in groups]
+        title_width = max((len(title) for title in titles), default=0) + 1
+        width = max(formatter._width - formatter._current_indent, title_width + 20)
+        for title, group in zip(titles, groups):
+            lines = textwrap.wrap(
+                summary_line(group.description),
+                width,
+                initial_indent=f"{title: <{title_width}}",
+                subsequent_indent=" " * title_width,
+            )
+            config_groups += ("\n".join(lines) or title) + "\n"
         formatter.add_text(config_groups)
         formatter.end_section()
 
@@ -247,6 +317,9 @@ class FlexibleArgumentParser(ArgumentParser):
     ):
         if args is None:
             args = sys.argv[1:]
+        self._show_serve_task_hint = args[:1] == ["serve"] and any(
+            re.match(r"^--task(=.+|$)", arg) for arg in args[1:]
+        )
 
         if args and args[0] == "serve":
             # Check for --model in command line arguments first
@@ -447,7 +520,7 @@ class FlexibleArgumentParser(ArgumentParser):
         The arguments in config file will be inserted between
         the argument list.
 
-        example:
+        Example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
@@ -473,6 +546,7 @@ class FlexibleArgumentParser(ArgumentParser):
         Please note how the config args are inserted after the sub command.
         this way the order of priorities is maintained when these are args
         parsed by super().
+
         """
         assert args.count("--config") <= 1, "More than one config file specified!"
 
@@ -487,7 +561,7 @@ class FlexibleArgumentParser(ArgumentParser):
         config_args = self.load_config_file(file_path)
 
         # 0th index might be the sub command {serve,chat,complete,...}
-        # optionally followed by model_tag (only for serve)
+        # optionally followed by model_tag (serve or snapshot create)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
@@ -495,8 +569,11 @@ class FlexibleArgumentParser(ArgumentParser):
         if args[0].startswith("-"):
             # No sub command (e.g., api_server entry point)
             args = config_args + args[0:index] + args[index + 2 :]
-        elif args[0] == "serve":
-            model_in_cli = len(args) > 1 and not args[1].startswith("-")
+        elif args[0] == "serve" or args[:2] == ["snapshot", "create"]:
+            model_index = 1 if args[0] == "serve" else 2
+            model_in_cli = len(args) > model_index and not args[model_index].startswith(
+                "-"
+            )
             model_in_config = any(arg == "--model" for arg in config_args)
 
             if not model_in_cli and not model_in_config:
@@ -508,15 +585,19 @@ class FlexibleArgumentParser(ArgumentParser):
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
                 args = (
-                    [args[0]]
-                    + [args[1]]
+                    args[: model_index + 1]
                     + config_args
-                    + args[2:index]
+                    + args[model_index + 1 : index]
                     + args[index + 2 :]
                 )
             else:
                 # No model in CLI, use config if available
-                args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+                args = (
+                    args[:model_index]
+                    + config_args
+                    + args[model_index:index]
+                    + args[index + 2 :]
+                )
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
 
@@ -573,6 +654,8 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
+                elif (no_key := f"--no-{key}") in self._option_string_actions:
+                    processed_args.append(no_key)
             elif isinstance(value, list):
                 if value:
                     processed_args.append("--" + key)

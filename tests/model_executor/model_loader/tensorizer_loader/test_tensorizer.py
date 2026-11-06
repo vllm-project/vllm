@@ -8,14 +8,17 @@ import os
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.model_executor.model_loader.tensorizer
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
+from vllm.config.load import LoadConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -26,6 +29,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 )
 from vllm.model_executor.model_loader.tensorizer_loader import (
     BLACKLISTED_TENSORIZER_ARGS,
+    TensorizerLoader,
 )
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -35,7 +39,7 @@ try:
     import tensorizer
     from tensorizer import EncryptionParams
 except ImportError:
-    tensorizer = PlaceholderModule("tensorizer")  # type: ignore[assignment]
+    tensorizer = PlaceholderModule("tensorizer")
     EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
 
 
@@ -302,6 +306,64 @@ def test_vllm_tensorized_model_has_same_outputs(
         assert outputs == deserialized_outputs
 
 
+@torch.inference_mode()
+def test_deserialized_hf_weights_are_ready_for_forward(tmp_path, monkeypatch):
+    """Raw weights need CPU linear post-processing before the first forward."""
+    from vllm.model_executor.layers import linear
+    from vllm.model_executor.layers import utils as layer_utils
+    from vllm.model_executor.model_loader import base_loader
+    from vllm.platforms.cpu import CpuPlatform
+
+    # Exercise the CPU method on accelerator CI hosts too.
+    for module in (linear, layer_utils, base_loader):
+        monkeypatch.setattr(module, "current_platform", CpuPlatform())
+
+    class TinyModel(torch.nn.Sequential):
+        def __init__(self):
+            super().__init__(torch.nn.Linear(3, 2, bias=False))
+            self[0].quant_method = linear.UnquantizedLinearMethod()
+            self[0]._cpu_skip_gemm_dispatch = True
+
+        def load_weights(self, weights):
+            self.load_state_dict(dict(weights))
+
+        def forward(self, inputs):
+            return self[0].quant_method.apply(self[0], inputs)
+
+    source = torch.nn.Sequential(torch.nn.Linear(3, 2, bias=False))
+    source[0].weight.copy_(torch.tensor([[1.0, 2.0, 3.0], [-2.0, 0.5, 4.0]]))
+    inputs = torch.tensor([[1.0, 2.0, 3.0], [-1.0, 0.0, 2.0]])
+    checkpoint = tmp_path / "raw.tensors"
+    with open_stream(checkpoint, "wb+") as stream:
+        serializer = TensorSerializer(stream)
+        serializer.write_module(source)
+        serializer.close()
+
+    load_config = LoadConfig(
+        load_format="tensorizer",
+        model_loader_extra_config={
+            "tensorizer_config": {"tensorizer_uri": str(checkpoint)}
+        },
+    )
+    model_config = SimpleNamespace(
+        dtype=torch.float32,
+        quantization=None,
+        word_embeddings_untied_by_checkpoint=False,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        load_config=load_config,
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        quant_config=None,
+    )
+    monkeypatch.setattr(base_loader, "initialize_model", lambda **kwargs: TinyModel())
+
+    loaded = TensorizerLoader(load_config).load_model(config, model_config)
+
+    torch.testing.assert_close(loaded(inputs), source(inputs))
+
+
 def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
     # For backwards compatibility, ensure Tensorizer can be still be loaded
     # for inference by passing the model reference name, not a local/S3 dir,
@@ -325,7 +387,7 @@ def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
         pass
 
 
-def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
+def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path, vllm_runner):
     serialization_params = {
         "limit_cpu_concurrency": 2,
     }
@@ -333,9 +395,6 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(
         tensorizer_uri=str(model_path), serialization_kwargs=serialization_params
-    )
-    llm = LLM(
-        model=model_ref,
     )
 
     def serialization_test(self, *args, **kwargs):
@@ -365,7 +424,66 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
     kwargs = {"tensorizer_config": config.to_serializable()}
 
-    assert assert_from_collective_rpc(llm, serialization_test, kwargs)
+    with vllm_runner(model_ref) as runner:
+        assert assert_from_collective_rpc(runner.get_llm(), serialization_test, kwargs)
+
+
+@pytest.mark.parametrize(
+    (
+        "serialization_error",
+        "renderer_shutdown_error",
+        "engine_shutdown_error",
+        "expected_error",
+    ),
+    [
+        (None, None, None, None),
+        (RuntimeError("serialization failed"), None, None, "serialization failed"),
+        (
+            RuntimeError("serialization failed"),
+            ValueError("renderer shutdown failed"),
+            ValueError("engine shutdown failed"),
+            "serialization failed",
+        ),
+        (
+            None,
+            ValueError("renderer shutdown failed"),
+            None,
+            "renderer shutdown failed",
+        ),
+        (None, None, ValueError("engine shutdown failed"), "engine shutdown failed"),
+    ],
+)
+def test_tensorize_vllm_model_shuts_down_engine(
+    monkeypatch,
+    serialization_error,
+    renderer_shutdown_error,
+    engine_shutdown_error,
+    expected_error,
+):
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine_args = Mock()
+    config = Mock(encryption_keyfile=None)
+    engine = Mock()
+    engine.collective_rpc.side_effect = serialization_error
+    engine.renderer.shutdown.side_effect = renderer_shutdown_error
+    engine.engine_core.shutdown.side_effect = engine_shutdown_error
+    monkeypatch.setattr(LLMEngine, "from_vllm_config", Mock(return_value=engine))
+    monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "7")
+
+    if expected_error is None:
+        tensorize_vllm_model(engine_args, config)
+    else:
+        with pytest.raises(Exception, match=expected_error) as exc_info:
+            tensorize_vllm_model(engine_args, config)
+        notes = getattr(exc_info.value, "__notes__", ())
+        if serialization_error is not None and renderer_shutdown_error is not None:
+            assert any("renderer shutdown failed" in note for note in notes)
+        if serialization_error is not None and engine_shutdown_error is not None:
+            assert any("engine shutdown failed" in note for note in notes)
+
+    engine.engine_core.shutdown.assert_called_once_with(timeout=17.0)
+    engine.renderer.shutdown.assert_called_once_with()
 
 
 def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
@@ -522,7 +640,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
 
     try:
         await asyncio.wait_for(fut, 180)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pytest.fail("Server did not start successfully")
     finally:
         proc.terminate()

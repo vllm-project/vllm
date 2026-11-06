@@ -7,7 +7,14 @@ from enum import Enum
 import pytest
 
 from vllm.config.cache import CacheConfig
-from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
+from vllm.config.scheduler import SchedulerConfig
+from vllm.config.utils import (
+    get_attr_docs,
+    get_compile_factors,
+    hash_config,
+    hash_factors,
+    normalize_value,
+)
 
 # Helpers
 
@@ -26,7 +33,7 @@ def expected_path(p_str: str = ".") -> str:
     return p.expanduser().resolve().as_posix()
 
 
-# Minimal dataclass to test get_hash_factors.
+# Minimal dataclass to test get_compile_factors.
 # Avoid importing heavy vLLM configs.
 @dataclass
 class SimpleConfig:
@@ -39,7 +46,7 @@ class DummyLogprobsMode(Enum):
 
 
 def test_hash_factors_deterministic():
-    """Test that hash_factors produces consistent SHA-256 hashes"""
+    """Test that hash_factors produces consistent SHA-256 hashes."""
     factors = {"a": 1, "b": "test"}
     hash1 = hash_factors(factors)
     hash2 = hash_factors(factors)
@@ -113,7 +120,7 @@ def test_normalize_value_uuid_and_to_json():
     [
         (lambda x: x),
         (type("CallableInstance", (), {"__call__": lambda self: 0}))(),
-        (lambda: (lambda: 0))(),  # nested function instance
+        (lambda: lambda: 0)(),  # nested function instance
     ],
 )
 def test_error_cases(bad):
@@ -137,8 +144,8 @@ def test_enum_vs_int_disambiguation():
     assert enum_val == "raw_logits"
 
     # Build factor dicts from configs with int vs enum
-    f_int = get_hash_factors(SimpleConfig(1), set())
-    f_enum = get_hash_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
+    f_int = get_compile_factors(SimpleConfig(1), set())
+    f_enum = get_compile_factors(SimpleConfig(DummyLogprobsMode.RAW_LOGITS), set())
     # The int case remains a primitive value
     assert f_int["a"] == 1
     # The enum case becomes a tagged tuple ("module.QualName", "raw_logits")
@@ -155,6 +162,36 @@ def test_enum_vs_int_disambiguation():
     assert isinstance(h_enum, str) and len(h_enum) == 64
 
 
+@dataclass
+class NestedConfig:
+    graph_field: int = 0
+    runtime_field: int = 0
+
+    def compile_factors(self):
+        return {"graph_field": self.graph_field}
+
+
+def test_nested_config_uses_its_compile_factors():
+    """Nested configs (directly or in containers) hash only their own factors,
+    so parents need no special cases for them."""
+    base = get_compile_factors(SimpleConfig(NestedConfig(), [NestedConfig()]), set())
+    runtime = get_compile_factors(
+        SimpleConfig(NestedConfig(runtime_field=1), [NestedConfig(runtime_field=1)]),
+        set(),
+    )
+    graph = get_compile_factors(SimpleConfig(NestedConfig(graph_field=1)), set())
+    assert base["a"] == {"graph_field": 0}
+    assert hash_factors(base) == hash_factors(runtime)
+    assert hash_factors(base) != hash_factors(graph)
+
+
+def test_unknown_ignored_factor_raises():
+    """A typo in ignored_factors must not silently hash the field it meant to
+    exclude."""
+    with pytest.raises(ValueError, match="unknown fields"):
+        get_compile_factors(SimpleConfig(1), {"not_a_field"})
+
+
 def test_classes_are_types():
     """Types normalize to FQNs; include real vLLM types."""
     # Only classes allowed; functions/lambdas are rejected.
@@ -165,6 +202,53 @@ def test_classes_are_types():
         pass
 
     assert endswith_fqname(LocalDummy, ".LocalDummy")
+
+
+def test_ir_config_hash_initializes_provider_and_tracks_implementation(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.ir.op import IrOp
+    from vllm.platforms import current_platform
+
+    op = IrOp.registry["rms_norm"]
+    implementation = SimpleNamespace(uuid=lambda: "first-implementation")
+
+    def import_ir_kernels():
+        monkeypatch.setitem(op.impls, "test_lazy_provider", implementation)
+
+    monkeypatch.setattr(current_platform, "import_ir_kernels", import_ir_kernels)
+    config = IrOpPriorityConfig(rms_norm=["test_lazy_provider"])
+    first_hash = hash_config(config)
+    assert hash_config(config) == first_hash
+
+    implementation.uuid = lambda: "changed-implementation"
+    assert hash_config(config) != first_hash
+
+
+def test_get_attr_docs_includes_inherited_fields():
+    """get_attr_docs must collect attribute docstrings inherited from base
+    classes, not just those declared in the class's own body."""
+
+    @dataclass
+    class Base:
+        inherited: object = None
+        """doc for inherited (base)."""
+        overridden: object = None
+        """base version of overridden."""
+
+    @dataclass
+    class Derived(Base):
+        own: object = None
+        """doc for own (derived)."""
+        overridden: object = None
+        """derived override of overridden."""
+
+    docs = get_attr_docs(Derived)
+
+    assert docs["own"] == "doc for own (derived)."
+    assert docs["inherited"] == "doc for inherited (base)."
+    assert docs["overridden"] == "derived override of overridden."
 
 
 def test_envs_compile_factors_stable():
@@ -211,9 +295,57 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     documented fast-boot knob silently invalidates the torch.compile cache
     and forces a full recompile.
     """
-    base_hash = CacheConfig().compute_hash()
-    assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
-    assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+    base_hash = hash_config(CacheConfig())
+    assert hash_config(CacheConfig(kv_cache_memory_bytes=1 << 30)) == base_hash
+    assert hash_config(CacheConfig(gpu_memory_utilization=0.5)) == base_hash
+    config = CacheConfig()
+    config.effective_attention_block_size = 64
+    assert hash_config(config) == base_hash
+
+
+def test_scheduler_config_hash_includes_max_num_seqs():
+    """Per-request workspace sizes must invalidate compiled graphs."""
+    base_hash = hash_config(
+        SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=128,
+        )
+    )
+    larger_batch_hash = hash_config(
+        SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1024,
+        )
+    )
+
+    assert larger_batch_hash != base_hash
+
+
+def test_cache_config_default_block_size():
+    config = CacheConfig()
+    assert config.block_size == CacheConfig.DEFAULT_BLOCK_SIZE
+    assert config.user_specified_block_size is False
+    explicit = CacheConfig(block_size=16)
+    assert explicit.block_size == 16
+    assert explicit.user_specified_block_size is True
+
+
+def test_cache_config_hash_ignores_prefix_cache_retention_interval():
+    base_hash = hash_config(CacheConfig())
+    assert hash_config(CacheConfig(prefix_cache_retention_interval=64)) == base_hash
+
+
+def test_cache_config_hash_ignores_runtime_offload_sizing():
+    config = CacheConfig()
+    base_hash = hash_config(config)
+
+    config.simple_cpu_offload_num_blocks = 42
+
+    assert hash_config(config) == base_hash
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):
@@ -276,3 +408,10 @@ print(hash_factors(envs.compile_factors()))
         "HOME relocation changed the compile-cache env hash - a "
         "location-only derived var is leaking into the key"
     )
+
+
+def test_get_attr_docs_rejects_non_class():
+    """The annotation forbids it, but the runtime guard still protects
+    untyped callers, so keep asserting the documented TypeError."""
+    with pytest.raises(TypeError, match="Given object was not a class."):
+        get_attr_docs(object())  # type: ignore[arg-type]

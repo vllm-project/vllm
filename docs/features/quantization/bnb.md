@@ -4,10 +4,12 @@ vLLM now supports [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) fo
 BitsAndBytes quantizes models to reduce memory usage and enhance performance without significantly sacrificing accuracy.
 Compared to other quantization methods, BitsAndBytes eliminates the need for calibrating the quantized model with input data.
 
-Below are the steps to utilize BitsAndBytes with vLLM.
+BitsAndBytes support is provided by the out-of-tree
+[`vllm-bnb-plugin`](https://github.com/vllm-project/vllm-bnb-plugin).
+Install the plugin before using BitsAndBytes with vLLM:
 
 ```bash
-pip install bitsandbytes>=0.49.2
+uv pip install vllm-bnb-plugin
 ```
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.

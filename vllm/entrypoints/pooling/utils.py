@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 import json
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from functools import lru_cache, partial
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, Literal, cast
 
 import pybase64
 import torch
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.renderers import TokenizeParams
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
@@ -217,18 +217,6 @@ def decode_pooling_output(items: list[MetadataItem], body: bytes) -> list[torch.
     ]
 
 
-@lru_cache(maxsize=1)
-def get_json_response_cls() -> type[JSONResponse]:
-    if importlib.util.find_spec("orjson") is not None:
-        from fastapi.responses import ORJSONResponse
-
-        return ORJSONResponse
-    logger.warning_once(
-        "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
-    )
-    return JSONResponse
-
-
 def enable_scoring_api(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
@@ -248,3 +236,17 @@ def enable_scoring_api(
         return True
 
     return False
+
+
+def reserve_tokens(tok_params: TokenizeParams, num_tokens: int) -> TokenizeParams:
+    """Shrink every length limit by `num_tokens` that are appended afterwards."""
+
+    def shrink(length: int | None) -> int | None:
+        return length if length is None or length < 0 else max(length - num_tokens, 0)
+
+    return replace(
+        tok_params,
+        max_total_tokens=shrink(tok_params.max_total_tokens),
+        truncate_prompt_tokens=shrink(tok_params.truncate_prompt_tokens),
+        pad_prompt_tokens=shrink(tok_params.pad_prompt_tokens),
+    )

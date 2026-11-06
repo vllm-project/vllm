@@ -6,32 +6,30 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "vllm-bench",
-    about = "Benchmark online serving throughput",
-    version
+    about = "Benchmark online serving throughput and offline multimodal preprocessing",
+    version = vllm_build_info::VERSION
 )]
 struct Cli {
     #[command(flatten)]
     args: vllm_bench::BenchServeArgs,
+
+    /// Optional subcommand; absent by default for the online serving benchmark.
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-// TODO: unify the tracing subscriber used by different binaries.
-fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+#[derive(Subcommand)]
+enum Command {
+    /// Offline multimodal preprocessing latency benchmark.
+    MmProcessor(vllm_bench::MmProcessorArgs),
 }
 
 fn main() -> anyhow::Result<()> {
-    init_tracing();
-
     let cli = Cli::parse();
     vllm_bench::prepare_process();
 
@@ -40,5 +38,15 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("Failed to build tokio runtime")?;
 
-    runtime.block_on(vllm_bench::run(cli.args))
+    match cli.command {
+        Some(Command::MmProcessor(args)) => {
+            let (timing_layer, timing_stats) = vllm_chat::mm_timing_layer();
+            vllm_tracing::init_tracing_with("Bench", timing_layer);
+            runtime.block_on(vllm_bench::run_mm_processor(args, timing_stats))
+        }
+        None => {
+            vllm_tracing::init_tracing("Bench");
+            runtime.block_on(vllm_bench::run(cli.args))
+        }
+    }
 }

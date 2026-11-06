@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -163,7 +163,7 @@ class OrionAttention(nn.Module):
 class OrionDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -305,7 +305,7 @@ class OrionForCausalLM(nn.Module, SupportsPP):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

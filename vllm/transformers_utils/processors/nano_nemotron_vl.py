@@ -20,12 +20,13 @@ import numpy.typing as npt
 import regex as re
 import torch
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import BatchFeature, PreTrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
-from vllm.multimodal.evs import compute_retained_tokens_count
 from vllm.multimodal.inputs import AudioItem
-from vllm.multimodal.processing.processor import PromptUpdateDetails
+from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
+from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
+from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
@@ -56,12 +57,13 @@ def calculate_timestamps(
     return timestamps
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _bicubic_resize_and_normalize(
     tensor: torch.Tensor,
     size: tuple[int, int] | None = None,
     norm_mean: torch.Tensor | None = None,
     norm_std: torch.Tensor | None = None,
+    do_cpu_normalize: bool = True,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Permute NHWC→NCHW, optional bicubic resize, rescale + normalize.
@@ -69,17 +71,25 @@ def _bicubic_resize_and_normalize(
     Input must be a raw 4-D **NHWC** tensor.
 
     *size*: target ``(H, W)``; skips interpolation when ``None``.
-    *norm_mean* / *norm_std*: when both provided, fused
-    ``(x/255 - mean) / std`` + dtype cast; otherwise ``x/255`` + cast.
+    *norm_mean* / *norm_std*: when both provided, apply normalization.
+    When *do_cpu_normalize* is false, return the resized ``uint8`` tensor
+    unchanged so rescaling and normalization can run on the model device.
     """
-    tensor = tensor.permute(0, 3, 1, 2).to(dtype=torch.float32)
+    tensor = tensor.permute(0, 3, 1, 2)
+    if do_cpu_normalize:
+        tensor = tensor.to(dtype=torch.float32)
     if size is not None:
         tensor = torch.nn.functional.interpolate(
             tensor, size=size, mode="bicubic", align_corners=False, antialias=True
         )
+
+    if not do_cpu_normalize:
+        return tensor.contiguous()
+
+    tensor = tensor / 255.0
     if norm_mean is not None and norm_std is not None:
-        return ((tensor / 255.0 - norm_mean) / norm_std).to(dtype=dtype).contiguous()
-    return (tensor / 255.0).to(dtype=dtype).contiguous()
+        tensor = (tensor - norm_mean) / norm_std
+    return tensor.to(dtype=dtype).contiguous()
 
 
 def _pil_to_nhwc_tensor(image: Image.Image) -> torch.Tensor:
@@ -98,6 +108,7 @@ def dynamic_preprocess(
     use_thumbnail: bool = True,
     norm_mean: torch.Tensor | None = None,
     norm_std: torch.Tensor | None = None,
+    do_cpu_normalize: bool = True,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     orig_width, orig_height = image.size
@@ -119,6 +130,7 @@ def dynamic_preprocess(
         size=(target_height, target_width),
         norm_mean=norm_mean,
         norm_std=norm_std,
+        do_cpu_normalize=do_cpu_normalize,
         dtype=dtype,
     )
     B, C, H, W = resized_img.shape
@@ -135,6 +147,7 @@ def dynamic_preprocess(
             size=(image_size, image_size),
             norm_mean=norm_mean,
             norm_std=norm_std,
+            do_cpu_normalize=do_cpu_normalize,
             dtype=dtype,
         )
         patches = torch.cat([patches, thumb], dim=0)
@@ -224,6 +237,7 @@ def video_to_pixel_values(
     downsample_ratio: float = 0.5,
     norm_mean: torch.Tensor | None = None,
     norm_std: torch.Tensor | None = None,
+    do_cpu_normalize: bool = True,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert video ndarray (T, H, W, C) to normalized pixel tensor (T, C, H, W)."""
@@ -245,7 +259,14 @@ def video_to_pixel_values(
         size = (input_size, input_size)
 
     tensor = torch.from_numpy(video)
-    return _bicubic_resize_and_normalize(tensor, size, norm_mean, norm_std, dtype)
+    return _bicubic_resize_and_normalize(
+        tensor,
+        size=size,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        do_cpu_normalize=do_cpu_normalize,
+        dtype=dtype,
+    )
 
 
 class DynamicResolutionImageTiler:
@@ -263,6 +284,7 @@ class DynamicResolutionImageTiler:
         downsample_ratio: int,
         norm_mean: Sequence[float],
         norm_std: Sequence[float],
+        do_cpu_normalize: bool = True,
         factor_max: float = 1.0,
         use_thumbnail: bool = False,
     ) -> None:
@@ -274,6 +296,7 @@ class DynamicResolutionImageTiler:
         self._factor_max = factor_max
         self.norm_mean = torch.tensor(norm_mean).reshape(3, 1, 1)
         self.norm_std = torch.tensor(norm_std).reshape(3, 1, 1)
+        self.do_cpu_normalize = do_cpu_normalize
         assert downsample_ratio < 1
         reduction_factor = 1 / downsample_ratio
         assert reduction_factor == 2.0
@@ -291,8 +314,7 @@ class DynamicResolutionImageTiler:
         self,
         target_num_tokens_post_shuffle: int,
     ) -> tuple[int, int]:
-        """
-        TODO: optimize this so it squeezes closer to target number of tokens.
+        """TODO: optimize this so it squeezes closer to target number of tokens.
         Calculate image dimensions that produce approximately `target` tokens after
         pixel_shuffle.
 
@@ -317,6 +339,7 @@ class DynamicResolutionImageTiler:
         ...     height // PATCH_SIZE
         ... ) // 2**2 == 8100  # tokens post-shuffle
         >>> assert tiler._get_num_embeddings(width=width, height=height) == 8100
+
         """
         side_pixels = (
             math.isqrt(target_num_tokens_post_shuffle)
@@ -369,6 +392,7 @@ class DynamicResolutionImageTiler:
             size=target_size,
             norm_mean=self.norm_mean,
             norm_std=self.norm_std,
+            do_cpu_normalize=self.do_cpu_normalize,
             dtype=dtype,
         )
         return list(resized_img)
@@ -385,6 +409,7 @@ class DynamicResolutionImageTiler:
             num_tokens_available: Number of tokens available for this media
         Returns:
             DynamicResolutionParams for the media
+
         """
         current_num_tokens_available = num_tokens_available
         assert isinstance(media, Image.Image), (
@@ -472,6 +497,7 @@ class DynamicResolutionImageTiler:
             num_tokens_available: Total number of tokens available across all media
         Returns:
             List of ImageTilingParams for each media item
+
         """
         num_tokens_available = (
             num_tokens_available
@@ -548,7 +574,9 @@ class DynamicResolutionImageTiler:
         )
 
     @staticmethod
-    def stack(images: list[torch.Tensor], patch_size: int) -> torch.Tensor:
+    def stack(
+        images: list[torch.Tensor] | torch.Tensor, patch_size: int
+    ) -> torch.Tensor:
         assert len(images) > 0, "No images to stack"
 
         def rearrange_img(x):
@@ -570,8 +598,7 @@ class DynamicResolutionImageTiler:
 
 
 class BaseNanoNemotronVLProcessor(ABC):
-    """
-    This model doesn't define its own HF processor,
+    """This model doesn't define its own HF processor,
     so we implement our own one here.
 
     The code to insert image tokens is based on:
@@ -580,11 +607,12 @@ class BaseNanoNemotronVLProcessor(ABC):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         tokenizer: HfTokenizer,
         *args,
         max_model_len: int,
         max_num_tiles: int | None = None,
+        do_cpu_normalize: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -602,6 +630,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         )
         self.image_size = image_size
         self.use_thumbnail: bool = config.use_thumbnail
+        self.do_cpu_normalize = do_cpu_normalize
         self.norm_mean = torch.Tensor(config.norm_mean).reshape(1, 3, 1, 1)
         self.norm_std = torch.Tensor(config.norm_std).reshape(1, 3, 1, 1)
 
@@ -615,11 +644,12 @@ class BaseNanoNemotronVLProcessor(ABC):
                 max_num_patches=config.vision_config.args["max_num_patches"],
                 norm_mean=config.norm_mean,
                 norm_std=config.norm_std,
+                do_cpu_normalize=do_cpu_normalize,
             )
         self.dtype: torch.dtype = getattr(config, "dtype", torch.float32)
 
     @staticmethod
-    def use_dynamic_resolution(config: PretrainedConfig) -> bool:
+    def use_dynamic_resolution(config: PreTrainedConfig) -> bool:
         return "min_num_patches" in config.vision_config.args
 
     @property
@@ -632,7 +662,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         self,
         feature_size: int,
         num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         raise NotImplementedError
 
     def get_num_image_tokens(
@@ -667,6 +697,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 use_thumbnail=self.use_thumbnail,
                 norm_mean=self.norm_mean,
                 norm_std=self.norm_std,
+                do_cpu_normalize=self.do_cpu_normalize,
                 dtype=self.dtype,
             )
             for image in images
@@ -729,7 +760,12 @@ class BaseNanoNemotronVLProcessor(ABC):
             zip(num_tokens_per_image, image_num_patches, strict=True)
         ):
             image_repl = self.get_image_repl(feature_size, num_patches)
-            parts[i] = parts[i].replace("<image>", image_repl.full)
+            # image_repl.full is a list of token IDs
+            # Convert token IDs back to text for the HF processor flow
+            image_repl_text = self.tokenizer.decode(
+                image_repl.full, skip_special_tokens=False
+            )
+            parts[i] = parts[i].replace("<image>", image_repl_text)
         text = ["".join(parts)]
 
         return text, image_inputs
@@ -755,15 +791,14 @@ class BaseNanoNemotronVLProcessor(ABC):
 
 
 class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
-    """
-    HF Processor with extended video processing logic.
+    """HF Processor with extended video processing logic.
     Code for video processing is adapted from video example:
     https://huggingface.co/OpenGVLab/InternVL3-1B#inference-with-transformers
     """
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         tokenizer: HfTokenizer,
         *,
         max_model_len: int,
@@ -771,12 +806,20 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
         use_audio_in_video: bool = False,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
     ) -> None:
+        if do_rescale != do_normalize:
+            raise ValueError(
+                "NanoNemotronVLProcessor requires do_rescale and "
+                "do_normalize to have the same value"
+            )
         super().__init__(
             config=config,
             tokenizer=tokenizer,
             max_model_len=max_model_len,
             max_num_tiles=max_num_tiles,
+            do_cpu_normalize=do_normalize,
         )
         # add extra video token for video processing
         self.video_token = video_token
@@ -875,6 +918,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 downsample_ratio=self.config.downsample_ratio,
                 norm_mean=self.norm_mean,
                 norm_std=self.norm_std,
+                do_cpu_normalize=self.do_cpu_normalize,
                 dtype=dtype,
             )
             for video in videos
@@ -1000,7 +1044,11 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         for idx, part in enumerate(parts):
             if part == AUDIO_CONTEXT:
                 audio_repl = self.get_audio_repl(audios[audio_index])
-                parts[idx] = audio_repl.full
+                # audio_repl.full is a list of token IDs
+                # Convert token IDs back to text for the HF processor flow
+                parts[idx] = self.tokenizer.decode(
+                    audio_repl.full, skip_special_tokens=False
+                )
                 audio_index += 1
         text = ["".join(parts)]
         audio_inputs = extractor(audios)
@@ -1077,20 +1125,30 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         self,
         feature_size: int,
         num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+
+        return PromptUpdateDetails.select_token_ids(
+            full_ids, self._img_context_token_ids
+        )
 
     def get_audio_repl(
         self,
         audio: npt.NDArray,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         assert self.audio_extractor is not None
         num_tokens = self.audio_extractor.audio_token_count(len(audio))
         repl_full = f"{AUDIO_START}{AUDIO_CONTEXT * num_tokens}{AUDIO_END}"
-        return PromptUpdateDetails.select_text(repl_full, AUDIO_CONTEXT)
+
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+        ctx_token_ids = cached_encode(
+            self.tokenizer, AUDIO_CONTEXT, add_special_tokens=False
+        )
+
+        return PromptUpdateDetails.select_token_ids(full_ids, ctx_token_ids)
 
     @classmethod
     def get_video_repl(
@@ -1104,9 +1162,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
         video_temporal_patch_size: int = 1,
-    ) -> PromptUpdateDetails[list[int]]:
-        """
-        Build prompt replacement for a video.
+    ) -> PromptUpdateDetails:
+        """Build prompt replacement for a video.
         The replacement returned is not actually used to replace the placeholder
         tokens - it's just used to make sure we allocate the correct number
         of tokens.

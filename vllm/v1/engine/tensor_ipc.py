@@ -29,8 +29,7 @@ TensorIpcQueue = MPQueue
 
 @dataclasses.dataclass
 class TensorIpcData:
-    """
-    Data sent via torch.multiprocessing.Queue for zero-copy IPC.
+    """Data sent via torch.multiprocessing.Queue for zero-copy IPC.
 
     Contains the tensor_id and the actual tensor. The tensor is
     shared in memory (GPU or CPU) for efficient inter-process communication.
@@ -54,13 +53,6 @@ class TensorIpcSender(OOBTensorConsumer):
         self._tensor_id_counter = 0
         self._message_counter = 0
         self._sender_id = uuid.uuid4().hex[:8]
-
-    def set_target_engine(self, target_engine: int) -> None:
-        if target_engine != 0:
-            raise IndexError(
-                "TensorIpcSender only supports a single queue; "
-                f"got target engine {target_engine}"
-            )
 
     def new_message(self) -> None:
         self._message_counter += 1
@@ -130,7 +122,6 @@ class TensorIpcReceiver:
         the queue, buffering them, until the requested tensor is found.
         Works for CUDA and CPU.
         """
-
         # Create lookup key from handle
         sender_id: str = meta["sender_id"]
         message_id: int = meta["message_id"]

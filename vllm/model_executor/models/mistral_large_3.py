@@ -15,7 +15,7 @@ class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
     # (\A...\Z) and after substitution the resulting key always starts with
     # "model." or "lm_head.", so no later pattern can accidentally match again.
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex={  # noqa: B950
+        orig_to_new_regex={
             regex.compile(
                 r"\Alayers\.(\d+)\.attention_norm\.weight\Z"
             ): r"model.layers.\1.input_layernorm.weight",

@@ -1,0 +1,10 @@
+<|open|>message role="system" type="thinking-effort"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.
+Now the system is invoked with `thinking_effort=max`.<|close|>message<|sep|><|end_of_msg|><|open|>message role="user"<|sep|>Load the calculator.<|close|>message<|sep|><|end_of_msg|><|open|>message role="system" type="tool-declare"<|sep|>## New Tools Available
+The system dynamically extends the toolset via lazy-loading.
+You have access to all existing and extended tools.
+Here are the specs for the extended tools.
+
+```json
+[{"function":{"description":"Evaluate an expression","name":"calc","parameters":{"properties":{"expression":{"type":"string"}},"required":["expression"],"type":"object"}},"type":"function"}]
+```<|close|>message<|sep|><|end_of_msg|><|open|>message role="user"<|sep|>What is 2 + 2?<|close|>message<|sep|><|end_of_msg|><|open|>message role="system" type="tool-choice"<|sep|>The system is invoked with `tool_choice=none`.
+You MUST NOT call any tools in the next message.<|close|>message<|sep|><|end_of_msg|><|open|>message role="assistant"<|sep|><|open|>think<|sep|>

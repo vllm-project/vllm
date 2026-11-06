@@ -1,23 +1,26 @@
 # Speculative Decoding
 
-This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302.01318) with vLLM to reduce inter-token latency under medium-to-low QPS (query per second), memory-bound workloads.
+This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302.01318) with vLLM to reduce inter-token latency under medium-to-low QPS (queries per second), memory-bound workloads.
 
 To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless training and integration with vLLM.
 
 ## vLLM Speculation Methods
 
-vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models, PARD and MLP provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
+vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models and PARD provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
+- [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
-- [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
 - [Hidden State Extraction](extract_hidden_states.md)
-- [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
+- [Custom Speculators (Experimental)](#custom-speculators-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
+- [Adaptive Verification](adaptive_verification.md)
+- [FLy Verification (Lossy)](fly.md)
+- [Per-Request Acceptance Metrics](acceptance_metrics.md)
 
 ## Method Selection at a Glance
 
@@ -30,20 +33,90 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
-| MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
 | Custom Proposer | Varies | Varies | Bring your own proposer class (experimental). |
 | Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
+| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from drafter confidence; currently DSpark only. |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
-## Custom Proposer Backend (Experimental)
+## Custom Speculators (Experimental)
 
-You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
-Your custom class must accept a `VllmConfig` upon instantiation and implement a `propose` method.
+You can plug in your own speculator with the V2 model runner by registering it
+as a speculative method from a [vLLM plugin](../../design/plugin_system.md), and then using it
+with `"method": "<name>"`. Custom speculative methods require the V2 model
+runner.
+
+A custom speculator consists of:
+
+- The speculator itself: a subclass of
+  `vllm.v1.worker.gpu.spec_decode.speculator.BaseSpeculator`, typically of
+  `DraftModelSpeculator` (for a speculator that runs its own draft model, which
+  the model runner then loads and allocates draft KV cache for) or
+  `TargetDependentARSpeculator` (for EAGLE/MTP-style drafting from the target
+  model's hidden states). It's constructed with `(vllm_config, device)`.
+- Its config: a subclass of
+  `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`, which
+  names the speculator class and describes how it behaves (KV lookahead slots,
+  whether it needs the target's hidden states, which features it supports,
+  ...). It's used in every vLLM process, including those that never build the
+  speculator, so its module shouldn't import the speculator. A speculator that
+  behaves like a built-in one should subclass that speculator's config (e.g.
+  `Eagle3SpeculatorConfig`), which also determines how its draft model is
+  configured from `model`.
+
+```python
+# my_package/config.py
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
+
+
+class MySpeculatorConfig(Eagle3SpeculatorConfig):
+    speculator_class = "my_package.speculator.MySpeculator"
+    # Accept options in `speculator_options` (validated in `apply_options`).
+    supported_options = frozenset({"speculator_options"})
+
+    @classmethod
+    def apply_options(cls, spec):
+        options = spec.speculator_options or {}
+        if unknown := options.keys() - {"my_option"}:
+            raise ValueError(f"Unknown speculator_options: {sorted(unknown)}")
+
+
+# my_package/__init__.py, registered as a `vllm.general_plugins` entry point
+def register():
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        register_speculative_method,
+    )
+
+    register_speculative_method("my_spec", "my_package.config.MySpeculatorConfig")
+```
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{
+    "method": "my_spec",
+    "model": "<draft-model>",
+    "num_speculative_tokens": 3,
+    "speculator_options": {"my_option": 1}
+  }'
+```
+
+The speculator reads its options from
+`vllm_config.speculative_config.speculator_options`. Once set up,
+`speculative_config.custom_method` is the registered name (`"my_spec"`), and
+`speculative_config.method` is the built-in method its config is based on
+(`"eagle3"`), so vLLM treats it like that built-in speculator.
+
+### V1 Custom Proposer Backend
+
+With the V1 model runner, you can plug in your own custom proposer class by
+setting the method to `custom_class` and providing the full module path to your
+class. Your custom class must accept a `VllmConfig` upon instantiation and
+implement a `propose` method. This is not supported by the V2 model runner, and
+will be removed together with the V1 model runner.
 
 **Example configuration:**
 
@@ -82,11 +155,16 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
-| `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
+| `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
-| `rejection_sample_method` | `string` | `strict` | `strict`, `probabilistic`, or `synthetic`. |
-| `synthetic_acceptance_rate` | `float` | `None` | Average acceptance rate to target when `rejection_sample_method` is `synthetic`. Valid range is `[0, 1]`. |
- | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
+| `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
+| `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
+| `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
+| `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
+| `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. |
+| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
+| `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
+| `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
@@ -124,10 +202,11 @@ vllm serve <target-model> \
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `suffix_decoding_max_tree_depth` | `integer` | `24` | Maximum combined prefix-match and speculation tree depth. |
-| `suffix_decoding_max_cached_requests` | `integer` | `10000` | Maximum number of requests cached in the global suffix tree. Set `0` to disable the global cache. |
-| `suffix_decoding_max_spec_factor` | `float` | `1.0` | Caps speculative length as a multiple of prefix-match length. |
-| `suffix_decoding_min_token_prob` | `float` | `0.1` | Minimum estimated token probability required to speculate a token. |
+| `suffix_decoding_max_tree_depth` | `integer` | `24` | V1: maximum combined prefix-match and speculation tree depth. V2: maximum match length. |
+| `suffix_decoding_max_cached_requests` | `integer` | `10000` | V1: maximum number of requests cached in the global suffix tree. Set `0` to disable the global cache (on V2, the corpus). |
+| `suffix_decoding_corpus_tokens` | `integer` | `1048576` | V2 only: token capacity of the GPU corpus of finished responses. Set `0` to match only within each request. |
+| `suffix_decoding_max_spec_factor` | `float` | `1.0` | V1 only: caps speculative length as a multiple of prefix-match length. |
+| `suffix_decoding_min_token_prob` | `float` | `0.1` | V1 only: minimum estimated token probability required to speculate a token. |
 
 Example:
 
@@ -160,7 +239,7 @@ vllm serve <target-model> \
 
   llm = LLM(
       model="Qwen/Qwen3-8B",
-      speculative_config={                               
+      speculative_config={
           "method": "draft_model",
           "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
           "num_speculative_tokens": 3,
@@ -193,6 +272,10 @@ speculative decoding, breaking down the guarantees into three key areas:
    cause slight variations in output distributions, as discussed
    in [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/pdf/2302.01318)
 
+    !!! warning
+        These guarantees apply to the standard rejection sampler. FLy
+        deliberately relaxes verification and is not distribution preserving.
+
 2. **Algorithmic Losslessness**
    \- vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key validation tests include:
 
@@ -200,7 +283,7 @@ speculative decoding, breaking down the guarantees into three key areas:
     >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
     > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
     >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](../../../tests/v1/spec_decode).
+    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](../../../tests/v1/spec_decode)
     >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
 
 3. **vLLM Logprob Stability**
@@ -220,7 +303,7 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 ## Known Feature Incompatibility
 
 1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
-2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
+2. Speculative decoding with draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors
 
