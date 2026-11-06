@@ -574,6 +574,8 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
         pytest.param(False, None, False, id="valid-plain"),
         pytest.param(True, None, False, id="valid-convolution"),
         pytest.param(False, "missing_head", False, id="missing-head"),
+        # a weight update sends the checkpoint over several load_weights calls
+        pytest.param(False, "partial_update", False, id="partial-update"),
         pytest.param(False, "extra_head", False, id="extra-head"),
         pytest.param(True, "missing_conv", False, id="missing-convolution"),
         pytest.param(False, "extra_conv", False, id="unexpected-convolution"),
@@ -637,7 +639,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     weights = dict(wrapper.model.state_dict())
     if quantized:
         del weights["lilicorr.pass_hidden_proj.input_scale"]
-    if mismatch == "missing_head":
+    if mismatch in ("missing_head", "partial_update"):
         del weights["lilicorr.slot_embedding"]
     elif mismatch in (
         "missing_weight",
@@ -661,7 +663,14 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
         wrapper.model, "_build_fused_kv_buffers", lambda: None, raising=False
     )
     supplied = [("model." + name, value) for name, value in weights.items()]
-    if mismatch:
+    if mismatch == "partial_update":
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        with disable_mtp_completeness_check():
+            wrapper.load_weights(supplied)
+    elif mismatch:
         message = (
             "no module or parameter"
             if mismatch.startswith("extra")
@@ -671,6 +680,8 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
             wrapper.load_weights(supplied)
     else:
         wrapper.load_weights(supplied)
+        assert wrapper.model.lilicorr._attn_bias is None  # built after loading
+        wrapper.process_weights_after_loading()
         assert wrapper.model.lilicorr._attn_bias is not None
 
 
