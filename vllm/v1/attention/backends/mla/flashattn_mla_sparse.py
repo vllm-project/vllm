@@ -480,6 +480,9 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
         group_size = self._query_group_size(self.num_heads)
         if group_size is None or self.topk_indices_buffer is None:
             return
+        # Grouping packs consecutive queries of this rank's heads; ShardQ would hand
+        # prefill a token slice with every head instead.
+        self.use_shardq = False
         if is_workspace_manager_initialized():
             # Reserved before the workspace manager locks, so memory profiling
             # counts grouped prefill's scratch.
@@ -640,6 +643,11 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
             or md is None
             or md.prefill is None
             or md.prefill.query_lens_cpu is None
+            # The spans index the top-k buffer from its start and cover every
+            # prefill token, which a narrowed (ShardQ) metadata does not.
+            or md.topk_start != 0
+            or md.num_decode_tokens + int(md.prefill.query_lens_cpu.sum())
+            > q_pe.shape[0]
             or (
                 self.staged_kv_shape is None
                 and flat_kv_row_view(kv_cache, block_size)[0].shape[0]

@@ -5007,6 +5007,7 @@ def _fa4_prefill_inputs(num_heads, query_lens, seq_lens, *, topk=256, device):
             cp_kv_cache_interleave_size=1,
             prefill=SimpleNamespace(query_lens_cpu=torch.tensor(query_lens[1:])),
             prefill_max_seq_len=max(seq_lens[1:]),
+            topk_start=0,
         ),
     )
 
@@ -5231,6 +5232,21 @@ def test_fa4_sparse_grouped_prefill_sub_chunks(workspace_init, monkeypatch, num_
     assert torch.equal(outs[0], outs[1])
 
 
+def test_fa4_query_group_spans_need_the_whole_step():
+    """Grouping reads the top-k buffer from its start over every prefill token, so
+    metadata narrowed to a token slice (as ShardQ's) keeps one query per kernel row."""
+    inputs = _fa4_prefill_inputs(16, [1, 29, 17], [300, 700, 650], device="cpu")
+    impl = _fa4_impl(inputs.logical, scale=inputs.scale)
+    q_pe, md = inputs.q[1], inputs.metadata
+    impl._attn_metadata = md
+    spans = impl._query_group_spans(q_pe, inputs.kv_cache, 64)
+    assert spans == [(1, 24, 29), (30, 16, 17)]
+    impl._attn_metadata = SimpleNamespace(**{**vars(md), "topk_start": 1})
+    assert impl._query_group_spans(q_pe, inputs.kv_cache, 64) is None
+    impl._attn_metadata = md
+    assert impl._query_group_spans(q_pe[:20], inputs.kv_cache, 64) is None
+
+
 def test_fa4_grouped_prefill_warmup_covers_runtime_keys(workspace_init, monkeypatch):
     """After the compile-only warmup, grouped prefill calls compile nothing."""
     if not current_platform.is_device_capability_family(100):
@@ -5238,6 +5254,7 @@ def test_fa4_grouped_prefill_warmup_covers_runtime_keys(workspace_init, monkeypa
     if (reason := _fa4_cute_mla_available()) is not None:
         pytest.skip(reason)
     import cutlass.cute as cute
+
     from vllm.vllm_flash_attn.cute.interface import BIN_BATCH_SEARCH_THRESH
 
     num_heads, group, topk, rows = 64, 2, 256, 300
