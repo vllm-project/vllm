@@ -39,7 +39,6 @@ from vllm.model_executor.layers.quantization.modelopt import (
     NVFP4_INPUT_SCALE_DENOMINATOR,
     ModelOptNvFp4FusedMoE,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -468,14 +467,8 @@ class InklingMoE(nn.Module):
                 amax = Parameter(
                     torch.empty(1, dtype=torch.bfloat16), requires_grad=False
                 )
-                set_weight_attrs(
-                    amax,
-                    {
-                        "weight_loader": default_weight_loader,
-                        # dummy input scale 1e-2, as for other NVFP4 layers
-                        "dummy_weight_value": 1e-2 * NVFP4_INPUT_SCALE_DENOMINATOR,
-                    },
-                )
+                # dummy input scale 1e-2, as for other NVFP4 layers
+                amax.dummy_weight_value = 1e-2 * NVFP4_INPUT_SCALE_DENOMINATOR
                 routed_experts.register_parameter(f"{projection}_input_amax", amax)
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -586,8 +579,15 @@ class InklingMoE(nn.Module):
             return []
         if key.endswith(".input_amax"):
             projection = "w13" if key.startswith("w13") else "w2"
-            amax = getattr(experts, f"{projection}_input_amax")
-            amax.weight_loader(amax, weight)
+            amax = getattr(experts, f"{projection}_input_amax", None)
+            if amax is None:
+                raise ValueError(
+                    f"{name} needs ModelOpt NVFP4 routed experts, got "
+                    f"{type(experts.quant_method).__name__}"
+                )
+            # Through .data like the other expert loads, which layerwise
+            # reload doesn't track.
+            amax.data.copy_(weight)
             return [f"experts.routed_experts.{projection}_input_amax"]
 
         param = getattr(experts, key)
