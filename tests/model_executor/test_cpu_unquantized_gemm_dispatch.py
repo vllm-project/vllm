@@ -27,6 +27,8 @@ def test_dispatch_prepacks_arm_bf16_causal_conv(monkeypatch):
         return packed
 
     monkeypatch.setattr(torch.ops._C, "causal_conv1d_weight_pack", pack, raising=False)
+    for name in ("causal_conv1d_fwd_cpu", "causal_conv1d_update_cpu"):
+        monkeypatch.setattr(torch.ops._C, name, lambda *args: None, raising=False)
     original = torch.randn(32, 1, 4, dtype=torch.bfloat16)
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(original.clone(), requires_grad=False)
