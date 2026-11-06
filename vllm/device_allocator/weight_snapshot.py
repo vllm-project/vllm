@@ -470,6 +470,34 @@ def _profile_build():
     return lambda: [u() for u in undo]
 
 
+def _profile_call(obj, name: str) -> None:
+    """CProfile one method call and log the top functions by cumulative time."""
+    import cProfile
+    import io
+    import pstats
+
+    orig = getattr(obj, name)
+
+    def wrapper(*args, **kwargs):
+        prof = cProfile.Profile()
+        t0 = time.perf_counter()
+        out = prof.runcall(orig, *args, **kwargs)
+        torch.accelerator.synchronize()
+        buf = io.StringIO()
+        stats = pstats.Stats(prof, stream=buf)
+        stats.sort_stats("cumulative").print_stats(40)
+        stats.sort_stats("tottime").print_stats(25)
+        logger.info(
+            "Snapshot %s took %.2f s:\n%s",
+            name,
+            time.perf_counter() - t0,
+            buf.getvalue(),
+        )
+        return out
+
+    setattr(obj, name, wrapper)
+
+
 def _fast_profile_run(runner, tokens: int):
     """With an explicit KV size, profile_run only warms up: use fewer tokens."""
     orig = runner.profile_run
@@ -515,6 +543,8 @@ def install(worker_cls) -> None:
                 undo()
             if undo_prof is not None:
                 undo_prof()
+        if prof:
+            _profile_call(self.model_runner, "profile_run")
         fast = int(os.environ.get("VLLM_WEIGHT_SNAPSHOT_FAST_PROFILE", "0"))
         if restore and fast and self.cache_config.kv_cache_memory_bytes:
             _fast_profile_run(self.model_runner, fast)
