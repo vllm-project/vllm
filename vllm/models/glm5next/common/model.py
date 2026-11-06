@@ -101,6 +101,11 @@ from vllm.utils.math_utils import round_up
 from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
+from .modelopt_dequant import (
+    dequantize_bf16_targets,
+    is_modelopt_mixed,
+    stacked_bf16_target_fn,
+)
 from .multimodal import (
     Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
@@ -805,6 +810,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_text_config
         _validate_supported_config(config)
         self.config = config
+        self.quant_config = vllm_config.quant_config
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
@@ -1024,6 +1030,13 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             kv_a_pad_size = self.config.qk_rope_head_dim
 
         _pending_wk_fp8: dict = {}
+
+        if is_modelopt_mixed(self.quant_config):
+            # ModelOpt mixed-precision checkpoints (e.g. FP4-Local) quantize the
+            # KDA / MLA / indexer projections, which this model holds in BF16.
+            weights = dequantize_bf16_targets(
+                weights, stacked_bf16_target_fn(params_dict, stacked_params_mapping)
+            )
 
         for args in weights:
             name, loaded_weight = args[:2]
@@ -1377,6 +1390,9 @@ class Glm5NextForConditionalGeneration(
                 quant_config=None,
                 input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
+                dequantize_quantized_weights=is_modelopt_mixed(
+                    vllm_config.quant_config
+                ),
             )
 
         with self._mark_language_model(vllm_config):

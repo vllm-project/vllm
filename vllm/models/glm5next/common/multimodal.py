@@ -49,6 +49,8 @@ from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from .modelopt_dequant import dequantize_bf16_targets
+
 
 class Glm5NextVisionPatchEmbed(nn.Module):
     def __init__(
@@ -364,8 +366,13 @@ class Glm5NextVisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         input_norm: nn.Module | None = None,
         prefix: str = "",
+        dequantize_quantized_weights: bool = False,
     ) -> None:
         super().__init__()
+        # The tower is built in BF16; a ModelOpt mixed-precision checkpoint
+        # quantizes it (MXFP8 attention, W4A16_NVFP4 MLP and merger), so those
+        # weights are dequantized to BF16 on load.
+        self.dequantize_quantized_weights = dequantize_quantized_weights
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1 if use_data_parallel else get_tensor_model_parallel_world_size()
@@ -633,6 +640,8 @@ class Glm5NextVisionTransformer(nn.Module):
         return x
 
     def load_weights(self, weights) -> set[str]:
+        if self.dequantize_quantized_weights:
+            weights = dequantize_bf16_targets(weights, lambda _module: True)
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
