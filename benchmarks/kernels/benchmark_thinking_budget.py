@@ -25,6 +25,7 @@ class ReasoningConfig:
     reasoning_start_token_ids = [START_TOKEN_ID]
     reasoning_end_token_ids = [END_TOKEN_ID]
     natural_reasoning_end_token_ids = [END_TOKEN_ID]
+    turn_end_token_ids: list[int] = []
 
 
 @dataclasses.dataclass
