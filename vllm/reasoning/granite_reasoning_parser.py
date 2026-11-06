@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
@@ -9,11 +10,20 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
-from vllm.v1.token_buffer import rfind_tokens
+from vllm.v1.token_buffer import rfind_tokens, token_slice
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+
+# How far into a prompt to look for the first turn's end.
+FIRST_TURN_MAX_TOKENS = 1024
+
+
+@functools.cache
+def _colon_token_ids(tokenizer: PreTrainedTokenizerBase) -> frozenset[int]:
+    return frozenset(i for token, i in tokenizer.get_vocab().items() if ":" in token)
 
 
 class GraniteReasoningParser(ReasoningParser):
@@ -21,6 +31,31 @@ class GraniteReasoningParser(ReasoningParser):
 
     IBM granite models currently use "Here is my thought process:"
     and "Here is my response:" to separate its thinking / response outputs.
+
+    is_reasoning_end reads the prompt to tell whether a thought section was
+    asked for; a first turn that merely mentions a thought marker counts.
+    When it was not, or the prompt already ends reasoning, extraction given
+    that prompt through set_prompt_token_ids returns the output whole, as
+    streaming does. Otherwise, or given no prompt, extraction reads the
+    output alone, and markers count only at its start, after whitespace: a
+    thought marker there opens reasoning that runs to the first response
+    marker, and a response marker there is dropped. Any other output, a
+    thought section after a preamble included, is content.
+
+    The engine's gate reads token ids, so the grammar starts at the right
+    token; a streaming frontend switches to content where the extraction
+    does, through state that extract_reasoning_streaming sets, as K2
+    Horizon's parser does (a general Parser hook would replace it).
+
+    Structured output applies after the thought section the template asks
+    for, or from the first token when thinking is off. With thinking on, a
+    model that skips its thought section is not constrained: ending reasoning
+    where the output leaves the marker prefix would put that token, the "{"
+    of a direct JSON answer, outside the grammar, which then adds another.
+
+    Known limits: a prompt that ends inside an open thought section (an
+    assistant prefill) is not handled, and a stream that ends inside a
+    response-marker prefix drops those held reasoning chars.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
@@ -29,63 +64,128 @@ class GraniteReasoningParser(ReasoningParser):
         # NOTE: There have been some observed occurrences of quantized
         # instances of the current models using "Here's" instead of "Here is",
         # so to be safe, we match on both.
-        self.think_start_expr = r"(?:Here's|Here is) my thought process:"
-        self.response_start_expr = r"(?:Here's|Here is) my response:"
-
-        self.reasoning_regex = re.compile(
-            rf"{self.think_start_expr}(.*?){self.response_start_expr}(.*)", re.DOTALL
-        )
-
         self.valid_think_starts = [
             "Here's my thought process:",
             "Here is my thought process:",
         ]
         self.valid_response_starts = ["Here's my response:", "Here is my response:"]
-
-        # Substrings to match for sequence boundaries on raw text
-        self.seq_boundary_end = ":"
-        self.seq_boundary_start = "Here"
-
-        # The longest any thinking / start of response message can be
-        self.longest_think_start = max(
-            len(think_start) for think_start in self.valid_think_starts
+        self.markers = (*self.valid_think_starts, *self.valid_response_starts)
+        self.response_start_regex = re.compile(
+            "|".join(map(re.escape, self.valid_response_starts))
         )
+
         # Every token of a response marker holds at least one of its
         # characters, so its length also bounds the tokens it spans.
         self.longest_response_start = max(
             len(response_start) for response_start in self.valid_response_starts
         )
 
-        # The chat template only asks for a thought section with `thinking`.
-        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self.thinking_enabled = bool(chat_kwargs.get("thinking", False))
+        self.colon_token_ids = _colon_token_ids(tokenizer)
+        # Set by extract_reasoning_streaming, which only the frontend calls.
+        self._streamed_content: bool | None = None
+        # Set from the prompt when the caller passes one.
+        self._prompt_ends_reasoning = False
+
+    def _asks_for_thoughts(self, prompt_token_ids: Sequence[int]) -> bool:
+        # The template ignores `thinking` with a system message, tools or
+        # documents, and offline chat passes no parser kwargs, so the first
+        # turn says whether thoughts were asked for: its instruction, or a
+        # user's own system prompt, names the thought marker.
+        tokenizer = self.model_tokenizer
+        eos = tokenizer.eos_token_id
+        head = list(token_slice(prompt_token_ids, 0, FIRST_TURN_MAX_TOKENS))
+        # Granite's BOS is its EOS, so a leading one does not end the turn.
+        start = int(bool(head) and head[0] in (tokenizer.bos_token_id, eos))
+        try:
+            end = head.index(eos, start)
+        except ValueError:
+            end = len(head)
+        text = tokenizer.decode(head[start:end])
+        return any(think_start in text for think_start in self.valid_think_starts)
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        # The same decision the engine and the streaming frontend make, so
+        # non-streaming extraction keeps the output whole when they do.
+        self._prompt_ends_reasoning = self.is_reasoning_end(prompt_token_ids)
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        if not self.thinking_enabled:
+        if not self._asks_for_thoughts(input_ids):
             return True
-        # Every chat turn ends with EOS. Only the current turn counts: the
-        # thinking system prompt and earlier answers carry the markers too.
-        start = rfind_tokens(input_ids, (self.model_tokenizer.eos_token_id,)) + 1
-        text = self.model_tokenizer.decode(list(input_ids[start:]))
-        return self.reasoning_regex.search(text) is not None
+        # A response marker that ends the prompt (a prefill) ends reasoning.
+        text = self.model_tokenizer.decode(self._turn_tail(input_ids, 0))
+        return self.response_start_regex.search(text) is not None
+
+    def _turn_tail(self, input_ids: Sequence[int], num_delta: int) -> list[int]:
+        # The markers are text whose token ids depend on the character before
+        # them, so read only the ids that can hold one ending in the last
+        # `num_delta`, and none before the current turn: every chat turn ends
+        # with EOS, and the system turn and earlier answers quote the markers.
+        stop = len(input_ids)
+        start = max(0, stop - num_delta - self.longest_response_start)
+        tail = list(token_slice(input_ids, start, stop))
+        return tail[rfind_tokens(tail, (self.model_tokenizer.eos_token_id,)) + 1 :]
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        if not self.thinking_enabled:
-            return True
-        # The markers are text whose token ids depend on the character before
-        # them, so decode only the ids that can hold one ending in `delta_ids`.
-        num_delta = len(list(delta_ids))
-        start = max(0, len(input_ids) - num_delta - self.longest_response_start)
-        tail = list(input_ids[start:])
-        return self._has_response_start(tail) and not self._has_response_start(
-            tail[: len(tail) - num_delta]
+        if self._streamed_content is not None:
+            # The frontend's text can trail its token ids (a stop string holds
+            # back the last characters), so its switch follows the extraction.
+            return self._streamed_content
+        delta_ids = list(delta_ids)
+        # Every marker ends in ":", so only a delta holding one can end it.
+        if self.colon_token_ids.isdisjoint(delta_ids):
+            return False
+        num_delta = len(delta_ids)
+        tail = self._turn_tail(input_ids, num_delta)
+        decode = self.model_tokenizer.decode
+        search = self.response_start_regex.search
+        return search(decode(tail)) is not None and (
+            search(decode(tail[: max(0, len(tail) - num_delta)])) is None
         )
 
-    def _has_response_start(self, token_ids: list[int]) -> bool:
-        text = self.model_tokenizer.decode(token_ids)
-        return re.search(self.response_start_expr, text) is not None
+    def _split(self, text: str, final: bool) -> tuple[str | None, str | None]:
+        """Split `text` into reasoning and content at the response marker.
+
+        With `final` False, `text` is a prefix of the output, and text that
+        a later token can still turn into a marker is left out of both parts.
+        """
+        stripped = text.lstrip()
+        lead = len(text) - len(stripped)
+        think = next(
+            (t for t in self.valid_think_starts if stripped.startswith(t)), None
+        )
+        if think is None:
+            response = next(
+                (r for r in self.valid_response_starts if stripped.startswith(r)), None
+            )
+            if response is not None:
+                # The marker opens the response, so it is not content either.
+                content = text[:lead] + text[lead + len(response) :]
+                return None, (content or None) if final else content
+            if not final and self._is_marker_prefix(stripped):
+                return None, None
+            return None, text
+        think_end = lead + len(think)
+        response = self.response_start_regex.search(text, think_end)
+        if response is None:
+            held = 0
+            if not final:
+                # Imported here: only the frontend streams text, and the module
+                # pulls the chat protocol into the engine core.
+                from vllm.tool_parsers.utils import partial_tag_overlap
+
+                held = max(
+                    partial_tag_overlap(text, r) for r in self.valid_response_starts
+                )
+            # A thought section the response never followed is reasoning only.
+            reasoning = text[think_end : max(think_end, len(text) - held)]
+            return (reasoning or None) if final else reasoning, None
+        reasoning = text[think_end : response.start()]
+        content = text[response.end() :]
+        if final:
+            return reasoning or None, content or None
+        return reasoning, content
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Called on the delta that ends the response marker; its content text
@@ -110,13 +210,9 @@ class GraniteReasoningParser(ReasoningParser):
             reasoning content and non-reasoning content.
 
         """
-        re_match = self.reasoning_regex.findall(model_output)
-        if not re_match:
+        if self._prompt_ends_reasoning:
             return None, model_output
-        reasoning, response_content = re_match[0]
-        if not response_content:
-            return reasoning, None
-        return reasoning, response_content
+        return self._split(model_output, final=True)
 
     def extract_reasoning_streaming(
         self,
@@ -154,263 +250,28 @@ class GraniteReasoningParser(ReasoningParser):
                 DeltaMessage with either reasoning content or content, or None.
 
         """
-        reasoning, resp_seq_len, content = self._get_content_sections(current_text)
-        # Either we haven't finished the start of the reasoning sequence,
-        # or the model is generating something unexpected.
-        if not reasoning:
-            delta_message = self._get_delta_message_with_no_reasoning_bounds(
-                current_text, delta_text
-            )
-        # We have a start of reasoning message, but have not yet finished
-        # the start of response sequence.
-        elif not content:
-            delta_message = self._get_delta_message_with_no_response_bounds(
-                current_text, reasoning, delta_text
-            )
-        # We've finished both the start of reasoning and start of response seq.
-        else:
-            # This should never happen since we matched on the response
-            assert resp_seq_len is not None
-            delta_message = self._get_delta_message_with_both_bounds(
-                delta_text, reasoning, content, current_text, resp_seq_len
-            )
-        if not delta_message.content and not delta_message.reasoning:
+        previous = current_text[: max(0, len(current_text) - len(delta_text))]
+        old_reasoning, old_content = self._split(previous, final=False)
+        new_reasoning, new_content = self._split(current_text, final=False)
+        self._streamed_content = new_content is not None
+        reasoning = (new_reasoning or "")[len(old_reasoning or "") :]
+        content = (new_content or "")[len(old_content or "") :]
+        if not reasoning and not content:
             return None
-        return delta_message
+        return DeltaMessage(reasoning=reasoning or None, content=content or None)
 
-    #### Implementation details of stream parsing for granite models
-    def _is_reasoning_start_substr(self, text: str) -> bool:
-        """Check if a text matches one of the possible start reasoning seqs.
-
-        Args:
-            text (str): Text to check for leading substr.
-
-        Returns:
-            bool: True if any of the possible reasoning start seqs match.
-
-        """
-        return any(
-            think_start.startswith(text) for think_start in self.valid_think_starts
-        )
-
-    def _is_response_start_substr(self, text: str) -> bool:
-        """Check if a text matches one of the possible start response seqs.
-
-        Args:
-            text (str): Text to check for leading substr.
-
-        Returns:
-            bool: True if any of the possible response start seqs match.
-
-        """
-        return any(
-            response_start.startswith(text)
-            for response_start in self.valid_response_starts
-        )
-
-    def _get_delta_message_with_no_reasoning_bounds(
+    def get_streaming_fallback_content(
         self,
-        current_text: str,
-        delta_text: str,
-    ) -> DeltaMessage:
-        """Parse the delta message when the current text has not yet completed
-        its start of reasoning sequence.
+        previous_text: str,
+        request: "ChatCompletionRequest | ResponsesRequest",
+    ) -> str | None:
+        """Called on the last delta of a stream that never reached the
+        response marker; returns the content text held back so far. Held
+        reasoning text cannot be returned here and stays unsent."""
+        _, content = self._split(previous_text, final=True)
+        _, streamed = self._split(previous_text, final=False)
+        return (content or "")[len(streamed or "") :] or None
 
-        Args:
-            current_text (str): The full previous + delta text.
-            delta_text (str): Text to consider and parse content from.
-
-        Returns:
-            DeltaMessage: Message containing the parsed content.
-
-        """
-        prev_longest_length = len(current_text) - len(delta_text)
-        is_substr = self._is_reasoning_start_substr(current_text)
-        was_substr = self._is_reasoning_start_substr(current_text[:prev_longest_length])
-
-        # Check if we just generated something NOT in the special token seq;
-        # if so, add everything that we previously skipped with this delta
-        # message and append everything to content in the future.
-        if was_substr and not is_substr:
-            return DeltaMessage(
-                reasoning=None,
-                content=current_text,
-            )
-        if is_substr:
-            # Might still be in the special token sequence; return nothing
-            return DeltaMessage(reasoning=None, content=None)
-        # Otherwise the sequence has already been broken and we already
-        # corrected; just return the delta text as normal content.
-        return DeltaMessage(reasoning=None, content=delta_text)
-
-    def _get_delta_message_with_no_response_bounds(
-        self,
-        current_text: str,
-        reasoning: str,
-        delta_text: str,
-    ) -> DeltaMessage:
-        """Parse the delta message when the current text has both reasoning
-        content with no (response) content. NOTE that we may have overlapping
-        tokens with the start of reasoning / start of response sequences on
-        either side of the delta text.
-
-        Args:
-            current_text (str): The full previous + delta text.
-            reasoning (str): reasoning content from current_text.
-            delta_text (str): Text to consider and parse content from.
-
-        Returns:
-            DeltaMessage: Message containing the parsed content.
-
-        """
-        # If we have no reasoning content or explicitly end with the start of
-        # response sequence, we are in transition to the response; need to be
-        # careful here, since the final token (:) will match the reasoning
-        # content and fully parse it out; we should not pass the : back.
-        ends_with_start_response_seq = any(
-            current_text.endswith(response_start)
-            for response_start in self.valid_response_starts
-        )
-        if reasoning is None or ends_with_start_response_seq:
-            return DeltaMessage(reasoning=None, content=None)
-
-        # Consider previous / current text only within context of the reasoning
-        previous_text = reasoning[: -len(delta_text)]
-        current_text = reasoning
-
-        # We need to be careful about adding unfinished response sequences;
-        # Find the place at which we MIGHT be starting a response sequence
-        prev_idx = previous_text.rfind(self.seq_boundary_start)
-        delta_idx = delta_text.rfind(self.seq_boundary_start)
-
-        # Check the state of potential start of response substring matches.
-        prev_was_substr = (
-            self._is_response_start_substr(previous_text[prev_idx:])
-            if prev_idx >= 0
-            else False
-        )
-        delta_continues_substr = (
-            self._is_response_start_substr(current_text[prev_idx:])
-            if prev_idx >= 0
-            else False
-        )
-        delta_new_substr = (
-            self._is_response_start_substr(delta_text[delta_idx:])
-            if delta_idx >= 0
-            else False
-        )
-
-        # Delta only contains potential continued response sequence text.
-        if delta_continues_substr:
-            return DeltaMessage(reasoning=None, content=None)
-
-        if not prev_was_substr:
-            # Delta may be starting a new response seq but has other text too.
-            if delta_new_substr:
-                return DeltaMessage(reasoning=delta_text[:delta_idx], content=None)
-            # Normal case for most reasoning text (no potential special seqs).
-            return DeltaMessage(reasoning=delta_text, content=None)
-        # The substring that previously seemed to be a potential response
-        # seq wasn't one; we need to add the content to the delta message,
-        # and also slice off the potential response sequence
-        elif delta_new_substr:
-            reasoning = previous_text[prev_idx:] + delta_text[:delta_idx]
-            return DeltaMessage(reasoning=reasoning, content=None)
-        # No new substring yet, and we broke our old one; take the whole delta
-        return DeltaMessage(
-            reasoning=previous_text[prev_idx:] + delta_text,
-            content=None,
-        )
-
-    def _get_delta_message_with_both_bounds(
-        self,
-        delta_text: str,
-        reasoning: str,
-        response_content: str,
-        current_text: str,
-        response_seq_len: int,
-    ) -> DeltaMessage:
-        """Parse the delta message when the current text has both reasoning
-        content and normal (response) content.
-
-        Args:
-            delta_text: Text to consider and parse content from.
-            reasoning: reasoning content from current_text.
-            response_content: response content from current_text.
-            current_text: The full previous + delta text.
-            response_seq_len: Len of the complete response sequence used.
-
-        Returns:
-            DeltaMessage: Message containing the parsed content.
-
-        """
-        # Always have content; take length to the end
-        delta_content = delta_text[-len(response_content) :]
-        reasoning_end_idx = len(delta_text) - (len(response_content) + response_seq_len)
-
-        if reasoning_end_idx < 0:
-            delta_reasoning = None
-        else:
-            # Get the starting offset
-            start_reasoning_idx = (
-                len(reasoning) + response_seq_len + len(response_content) - 1
-            )
-            delta_offset = len(current_text) - len(delta_text)
-            start_offset = start_reasoning_idx - delta_offset
-            if start_offset < 0:
-                start_offset = 0
-            delta_reasoning = delta_text[start_offset:reasoning_end_idx]
-
-        return DeltaMessage(
-            reasoning=delta_reasoning,
-            content=delta_content,
-        )
-
-    def _get_content_sections(
-        self, current_text: str
-    ) -> tuple[str | None, int | None, str | None]:
-        """Parse the text to extract the reasoning content / content
-        if we have them.
-
-        Args:
-            current_text (str): The full previous + delta text.
-
-        Returns:
-            tuple[Optional[str], Optional[int], Optional[str]]: Tuple of len 3
-            containing the reasoning content, the length of the response seq
-            (if there is one) and the non-reasoning content.
-
-        """
-        current_chunk_start = 0
-        start_reasoning = None
-        parsed_content = False
-        delimiter_idxs = [
-            idx
-            for idx, char in enumerate(current_text)
-            if char == self.seq_boundary_end
-        ]
-
-        for current_chunk_end in delimiter_idxs:
-            current_chunk = current_text[current_chunk_start:current_chunk_end]
-            # Check to see if the start of reasoning seq if complete
-            if start_reasoning is None:
-                for think_start in self.valid_think_starts:
-                    if current_chunk == think_start[:-1]:
-                        start_reasoning = current_chunk_end + 1
-                        current_chunk_start = current_chunk_end + 1
-                        break
-
-            # Check to see if the start of response seq if complete
-            elif not parsed_content:
-                for response_start in self.valid_response_starts:
-                    if current_chunk[-len(response_start) + 1 :] == response_start[:-1]:
-                        # Mark end of reasoning and start response content
-                        # after the start of response sequence.
-                        end_reasoning = current_chunk_end - len(response_start)
-                        reasoning = current_text[start_reasoning:end_reasoning]
-                        response_content = current_text[current_chunk_end + 1 :]
-                        return reasoning, len(response_start), response_content
-
-        if start_reasoning and not parsed_content:
-            return current_text[start_reasoning:], None, None
-        return None, None, None
+    def _is_marker_prefix(self, text: str) -> bool:
+        """Whether `text` can still grow into a thought or response marker."""
+        return any(marker.startswith(text) for marker in self.markers)
