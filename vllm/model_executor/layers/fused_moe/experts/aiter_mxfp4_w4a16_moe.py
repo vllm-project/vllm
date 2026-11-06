@@ -346,6 +346,21 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        if moe_config.has_hash_routing and moe_config.moe_parallel_config.dp_size > 1:
+            return False, (
+                "kernel does not support hash routing with data parallelism: "
+                "the naive DP prepare/finalize all-gathers router logits across "
+                "DP ranks but not input_ids, so hash routing would index "
+                "out of range"
+            )
+        return super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    @staticmethod
     def _supports_current_device() -> bool:
         if not rocm_aiter_ops.is_enabled():
             return False
@@ -372,10 +387,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
+        # DP is served by the naive all-gather / reduce-scatter monolithic
+        # prepare/finalize, so only the all2all paths remain unsupported.
         return (
             not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
-            and moe_parallel_config.dp_size <= 1
         )
 
     @staticmethod
