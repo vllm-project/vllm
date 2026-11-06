@@ -344,10 +344,21 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     rms_numel: int = 0,
     split_mode: str = "fused",
     write_aux: bool = False,
+    h_tiles: int = 1,
 ):
     # Split modes require shifted mHC: input collapse uses a carried pre-mix.
     assert split_mode in ("fused", "stats", "input")
     assert split_mode == "fused" or save_pre_mix
+    # Repeat the full reduction to preserve its order; partition only stores.
+    assert h_tiles == 1 or (
+        h_tiles == 5
+        and hidden_size == 5120
+        and hc_mult == 4
+        and save_pre_mix
+        and rms_numel == hc_mult * hidden_size
+        and split_mode == "input"
+        and not write_aux
+    ), f"Unsupported norm store partition: {h_tiles=}, {hidden_size=}, {hc_mult=}"
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     if gemm_last_dim < 0:
@@ -370,7 +381,9 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     aux_out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
-    with T.Kernel(num_tokens, threads=96) as i:
+    with T.Kernel(num_tokens * h_tiles, threads=96) as i_block:
+        i = i_block // h_tiles
+        i_tile = i_block % h_tiles
         if ENABLE_PDL:
             T.pdl_sync()
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
@@ -507,7 +520,10 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             rsqrt_norm[0] = T.rsqrt(sumsq[0] / hidden_size + norm_eps)
 
             # Pass 2: scale by rsqrt * norm_weight and write the result to HBM.
-            for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+            for i_h_local in T.Pipelined(
+                hidden_size // hidden_block // h_tiles, num_stages=2
+            ):
+                i0_h = i_tile * (hidden_size // hidden_block // h_tiles) + i_h_local
                 w_shared = T.alloc_shared(hidden_block, T.bfloat16)
                 w_local = T.alloc_fragment(hidden_block, T.float32)
                 T.copy(norm_weight[i0_h * hidden_block], w_shared)

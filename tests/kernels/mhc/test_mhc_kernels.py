@@ -18,6 +18,7 @@ from vllm.model_executor.kernels.mhc.tilelang import (
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     _HC_PRENORM_GEMM_TILELANG_KERNEL,
     mhc_fused_post_pre_split_config,
+    mhc_pre_big_fuse_with_norm_tilelang,
 )
 from vllm.model_executor.kernels.mhc.torch import (
     mhc_post_torch,
@@ -307,7 +308,7 @@ def test_deepseek_v41_mhc_pre_delayed(
     not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
     reason="SM100 TileLang mHC required",
 )
-@pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 32, 128, 256])
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 16, 17, 32, 128, 256])
 @pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])
 @pytest.mark.parametrize("hidden_size,hc_mult", [(4096, 2), (5120, 4), (7168, 4)])
 def test_deepseek_v41_mhc_overlap_preserves_outputs_on_replay(
@@ -372,6 +373,103 @@ def test_deepseek_v41_mhc_overlap_preserves_outputs_on_replay(
             pre_mix.uniform_()
         graph.replay()
         check(captured)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
+    reason="SM100 TileLang mHC required",
+)
+@pytest.mark.parametrize(
+    "num_tokens,carried,alias",
+    [(n, carried, "none") for n in (1, 8, 9, 16, 17) for carried in (False, True)]
+    + [(1, True, alias) for alias in ("residual", "weight", "pre_mix")],
+)
+def test_delayed_norm_store_partition_preserves_bytes_on_changed_graph_replay(
+    num_tokens: int, carried: bool, alias: str
+) -> None:
+    """Input-only must keep BF16 bytes and ignore pending coefficient inputs."""
+    from vllm.model_executor.kernels.mhc.warmup import MHCPreNormKernel
+
+    set_random_seed(22)
+    residual = torch.randn(num_tokens, 4, 5120, device=DEVICE, dtype=torch.bfloat16)
+    weight = torch.randn(5120, device=DEVICE, dtype=torch.bfloat16)
+    pre_mix = torch.randn(num_tokens, 4, device=DEVICE)
+    expected = torch.empty(num_tokens, 5120, device=DEVICE, dtype=torch.bfloat16)
+    actual = torch.empty_like(expected)
+    if alias == "residual":
+        actual = residual[:, 0]
+    elif alias == "weight":
+        actual = weight.view(1, 5120)
+    elif alias == "pre_mix":
+        aliased_pre_mix = actual.view(torch.float32).flatten()[:4].view(1, 4)
+        aliased_pre_mix.copy_(pre_mix)
+        pre_mix = aliased_pre_mix
+    mixes = torch.full((4, num_tokens, 24), float("nan"), device=DEVICE)
+    sqrsum = torch.full((4, num_tokens), float("nan"), device=DEVICE)
+    scale = torch.full((3,), float("nan"), device=DEVICE)
+    bias = torch.full((24,), float("nan"), device=DEVICE)
+    post = torch.full((num_tokens, 4), float("nan"), device=DEVICE)
+    comb = torch.full((num_tokens, 16), float("nan"), device=DEVICE)
+    next_pre = torch.full_like(post, float("nan"))
+    fields = dict(
+        hidden_size=5120,
+        hc_mult=4,
+        rms_numel=20480,
+        use_pre_mix_in=carried,
+        save_pre_mix=True,
+        split_mode="input",
+        write_aux=False,
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=2.0,
+        sinkhorn_repeat=20,
+        norm_eps=1e-6,
+    )
+    kernel = MHCPreNormKernel()
+
+    def run(output, serial=False):
+        args = (
+            mixes,
+            sqrsum,
+            scale,
+            bias,
+            residual,
+            post,
+            comb,
+            output,
+            weight,
+            pre_mix if carried else post,
+            next_pre,
+            output,
+        )
+        if serial:
+            mhc_pre_big_fuse_with_norm_tilelang(*args, n_splits=4, h_tiles=1, **fields)
+        else:
+            kernel(*args, **fields)
+
+    run(expected, serial=True)
+    run(actual)
+    torch.testing.assert_close(
+        actual.view(torch.int16), expected.view(torch.int16), atol=0, rtol=0
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run(actual)
+        consumed = actual.clone()
+    for _ in range(3):
+        residual.normal_()
+        weight.normal_()
+        pre_mix.normal_()
+        if alias == "none":
+            actual.fill_(123)
+        run(expected, serial=True)
+        graph.replay()
+        torch.testing.assert_close(
+            consumed.view(torch.int16), expected.view(torch.int16), atol=0, rtol=0
+        )
+        for pending in (mixes, sqrsum, scale, bias, post, comb, next_pre):
+            assert torch.isnan(pending).all()
 
 
 def mhc_fused_post_pre_delayed_ref(

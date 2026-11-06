@@ -38,11 +38,46 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
         save_pre_mix: bool = True
         split_mode: str = "fused"
         write_aux: bool = False
+        h_tiles: int = 1
 
     kernel: Any = staticmethod(mhc_pre_big_fuse_with_norm_tilelang)
 
-    def dispatch(self, *, n_splits, **fields) -> CompileKey:  # type: ignore[override]
-        return self.CompileKey(n_splits=n_splits, **fields)
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        n_splits: int,
+        num_tokens: int = 0,
+        input_is_disjoint: bool = False,
+        hidden_size: int,
+        hc_mult: int,
+        rms_numel: int,
+        save_pre_mix: bool = True,
+        split_mode: str = "fused",
+        write_aux: bool = False,
+        **fields: Any,
+    ) -> CompileKey:
+        return self.CompileKey(
+            n_splits=n_splits,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            rms_numel=rms_numel,
+            save_pre_mix=save_pre_mix,
+            split_mode=split_mode,
+            write_aux=write_aux,
+            h_tiles=5
+            if current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and 0 < num_tokens <= 8
+            and input_is_disjoint
+            and hidden_size == 5120
+            and hc_mult == 4
+            and rms_numel == hc_mult * hidden_size
+            and save_pre_mix
+            and split_mode == "input"
+            and not write_aux
+            else 1,
+            **fields,
+        )
 
     def get_warmup_keys(
         self,
@@ -65,7 +100,12 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
                 else {1}
             )
         )
-        return self._trace_dispatch(self.dispatch)(n_splits=splits, **fields)
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=(1, min(max_tokens, 9)),
+            input_is_disjoint=(False, True),
+            n_splits=splits,
+            **fields,
+        )
 
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key not in self._compiled_cache:
@@ -89,8 +129,21 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
         self._compiled_cache.update(zip(missing, compiled, strict=True))
 
     def __call__(self, *tensors, **fields):
+        # Each spatial CTA rereads the full row, so output must not alias inputs.
+        input_is_disjoint = False
+        if fields.get("split_mode", "fused") == "input":
+            output_storage = tensors[7].untyped_storage().data_ptr()
+            inputs = [tensors[4], tensors[8]]
+            if fields["use_pre_mix_in"]:
+                inputs.append(tensors[9])
+            input_is_disjoint = all(
+                tensor.untyped_storage().data_ptr() != output_storage
+                for tensor in inputs
+            )
         compile_key = self.dispatch(
             n_splits=tensors[0].shape[0],
+            num_tokens=tensors[4].shape[0],
+            input_is_disjoint=input_is_disjoint,
             **fields,
         )
         if not current_platform.is_cuda():
