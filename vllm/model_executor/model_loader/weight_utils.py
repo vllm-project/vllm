@@ -1546,18 +1546,20 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run every module's own post-load hook after a full load or reload,
-    each module after all of its submodules.
+def finalize_model_weights(
+    model: torch.nn.Module, target_device: torch.device | None = None
+) -> None:
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
 
-    Quantization methods, the submodules of quantized layers (their quant
-    method processes them) and attention layers are skipped: the loader runs
-    them in its earlier per-layer passes, which later passes may read.
+    Quantization methods and the submodules of quantized layers are skipped:
+    their quant method processes them, in the loader's per-layer pass.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
+    from vllm.model_executor.model_loader.utils import device_loading_context
 
     seen: set[torch.nn.Module] = set()
 
@@ -1573,26 +1575,14 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
         yield module
 
     for module in children_first(model):
-        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
-            module
-        ):
+        if isinstance(module, QuantizeMethodBase):
             continue
         hook = getattr(module, "process_weights_after_loading", None)
         if callable(hook):
-            hook()
-
-
-@torch.no_grad()
-def refresh_derived_weights(model: torch.nn.Module) -> None:
-    """Call ``refresh_derived_weights()`` on every module that defines it, to
-    rebuild tensors kept out of ``state_dict()`` after the weights were
-    overwritten in place. Hooks must be idempotent, write in place and run no
-    collectives.
-    """
-    for module in model.modules():
-        refresh = getattr(module, "refresh_derived_weights", None)
-        if callable(refresh):
-            refresh()
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
