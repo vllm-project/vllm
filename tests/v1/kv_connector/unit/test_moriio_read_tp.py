@@ -483,6 +483,48 @@ def test_failed_handshake_fails_only_its_requests(monkeypatch):
     assert worker._eager_handshaked_engines == {"prefill:0"}
 
 
+def test_tp_vote_fails_an_engine_another_rank_could_not_reach(monkeypatch):
+    """This rank's handshake succeeds but a peer rank's fails: the vote makes
+    this rank skip the reads too, and the engine is handshaked again on the
+    next step that needs it."""
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    producers, (consumer,) = _ranks("mla", 1, 1, True, LAYOUTS[0], state)
+    worker = consumer.worker
+    _make_reader(consumer, producers, "xgmi")
+    _fail_handshakes_to(worker, "bad", monkeypatch)
+    handshakes = []
+    succeed = worker._moriio_handshake
+    worker._moriio_handshake = lambda *a: handshakes.append(a) or succeed(*a)
+    worker.moriio_wrapper.send_notify = lambda *a, **k: None
+    worker.moriio_wrapper.waiting_for_transfer_complete = lambda *a, **k: None
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+
+    def step(req_id, vote):
+        monkeypatch.setattr(
+            torch.distributed, "all_reduce", lambda t, *a, **k: t.fill_(vote)
+        )
+        metadata = MoRIIOConnectorMetadata()
+        meta = _meta(["full"], 1)
+        metadata.reqs_to_recv[req_id] = meta
+        worker.start_load_kv(metadata)
+        return meta
+
+    meta = step("req-1", vote=0)
+    assert worker._invalid_block_ids == set(meta.local_block_ids[0])
+    assert worker._pop_done_transfers() == set()
+    assert worker._eager_handshaked_engines == set()
+
+    worker._invalid_block_ids.clear()
+    step("req-2", vote=1)
+    worker._handshake_initiation_executor.shutdown()
+    assert len(handshakes) == 2
+    assert worker._invalid_block_ids == set()
+    assert worker._pop_done_transfers() == {"t"}
+    assert worker._eager_handshaked_engines == {"prefill:0"}
+
+
 @pytest.mark.parametrize("model", ["mla_hybrid", "sliding"])
 def test_failed_handshake_still_fails_the_step_without_block_recovery(
     model, monkeypatch
