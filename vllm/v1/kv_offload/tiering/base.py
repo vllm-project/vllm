@@ -312,16 +312,6 @@ class SecondaryTierManager(ABC):
         """Take KV events for storage state owned by this tier."""
         return ()
 
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark chunks as recently used for eviction policy.
-
-        Args:
-            keys: Offload keys to mark as recently used.
-            req_context: Per-request context.
-
-        """
-        return
-
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Called when a new request is first seen by the scheduler.
@@ -339,7 +329,7 @@ class SecondaryTierManager(ABC):
         """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
-        (submit_store, submit_load, touch) have already been issued, and none
+        (submit_store, submit_load) have already been issued, and none
         will follow. Note this does NOT imply the tier's transfers have
         completed: jobs already submitted may still be in flight and will
         report via get_finished_jobs(). This is the right place to release
