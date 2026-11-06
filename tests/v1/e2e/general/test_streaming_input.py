@@ -26,9 +26,10 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 
-if not (current_platform.is_cuda() or current_platform.is_xpu()):
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA and XPU.", allow_module_level=True
+        reason="V1 currently only supported on CUDA, ROCm and XPU.",
+        allow_module_level=True,
     )
 
 # Use a small model that doesn't require authentication for fast tests

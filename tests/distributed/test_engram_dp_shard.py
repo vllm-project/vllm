@@ -358,11 +358,12 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert result.value == 0
         return result
 
-    from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
-
     with pytest.MonkeyPatch.context() as patch:
-        # Exercise the /dev/shm path even where cuMem tables are used.
-        patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
+        if current_platform.is_cuda():
+            from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
+
+            # Exercise the /dev/shm path even where cuMem tables are used.
+            patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -414,6 +415,8 @@ def _check_shared_storage_lifetime_and_failures(failure):
 def _check_cumem_host_table(failure):
     """Chunked cuMem tables read back across ranks; a failed allocation or
     import on any rank falls back to /dev/shm on all of them."""
+    if not current_platform.is_cuda():
+        return
     from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
 
     if not engram_host_table.fabric_host_memory_supported():
@@ -805,7 +808,9 @@ def _check_prefetch_replay(
         torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
     """Check all storage modes with one process launch per TP/DP topology."""

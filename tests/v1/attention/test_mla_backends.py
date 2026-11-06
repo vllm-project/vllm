@@ -70,7 +70,10 @@ BACKENDS_TO_TEST = [
 ]
 
 if current_platform.is_rocm():
-    BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
+    BACKENDS_TO_TEST += [
+        AttentionBackendEnum.ROCM_AITER_MLA,
+        AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+    ]
 
 DEVICE_TYPE = current_platform.device_type
 
