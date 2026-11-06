@@ -44,6 +44,7 @@ from vllm.distributed.device_communicators.pynccl import (
 from vllm.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
 )
+from vllm.distributed.device_communicators.quick_all_reduce import QuickAllReduce
 from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -76,6 +77,7 @@ COMM_COLLECTIVE = {
     "aiter_ag": "all-gather",
     "pynccl_ag": "all-gather",
     "aiter_rs": "reduce-scatter",
+    "quick_rs": "reduce-scatter",
     "pynccl_rs": "reduce-scatter",
 }
 COLLECTIVE_ORDER = ["all-reduce", "all-gather", "reduce-scatter"]
@@ -120,6 +122,7 @@ class CommunicatorBenchmark:
         self.symm_mem_comm_two_shot = None
         self.fi_ar_comm = None
         self.aiter_comm = None
+        self.quick_comm = None
 
         self._init_communicators()
 
@@ -236,6 +239,31 @@ class CommunicatorBenchmark:
                     e,
                 )
                 self.aiter_comm = None
+
+        if current_platform.is_rocm():
+            try:
+                # The DP MoE combine path (VLLM_ROCM_DP_MOE_QUICK_REDUCE): a
+                # QuickReduce all-reduce of the gathered tensor, then this rank's
+                # slice. The codec is VLLM_ROCM_QUICK_REDUCE_QUANTIZATION.
+                # QuickReduce rejects inputs above its max size, so cover the
+                # largest tensor unless the caller already set one.
+                os.environ.setdefault(
+                    "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
+                    str(self.max_size_override // (1024 * 1024) + 1),
+                )
+                self.quick_comm = QuickAllReduce(
+                    group=self.cpu_group, device=self.device
+                )
+                if self.quick_comm.disabled:
+                    logger.info("Rank %s: QuickReduce disabled", self.rank)
+                    self.quick_comm = None
+                else:
+                    logger.info("Rank %s: QuickReduce initialized", self.rank)
+            except Exception as e:
+                logger.warning(
+                    "Rank %s: Failed to initialize QuickReduce: %s", self.rank, e
+                )
+                self.quick_comm = None
 
     def benchmark_allreduce(
         self, sequence_length: int, num_warmup: int, num_trials: int
@@ -443,10 +471,12 @@ class CommunicatorBenchmark:
     def benchmark_ag_rs(
         self, sequence_length: int, num_warmup: int, num_trials: int
     ) -> dict[str, float]:
-        """Benchmark all-gather and reduce-scatter: custom (AITER) vs NCCL/RCCL.
+        """Benchmark all-gather and reduce-scatter: custom (AITER), QuickReduce and
+        NCCL/RCCL.
 
-        Each collective is measured for both the AITER custom kernel and the
-        PyNccl baseline so they compare like-for-like (print_results groups
+        Each collective is measured for the AITER custom kernel, the QuickReduce
+        all-reduce + slice used by the DP MoE combine (reduce-scatter only) and
+        the PyNccl baseline so they compare like-for-like (print_results groups
         columns by collective). All-gather maps ``(seq, hidden)`` ->
         ``(world_size * seq, hidden)``; reduce-scatter maps ``(seq, hidden)`` ->
         ``(seq // world_size, hidden)`` and so only runs when ``seq`` divides
@@ -498,6 +528,20 @@ class CommunicatorBenchmark:
                         lambda t, c=c, o=rs_out: c.custom_reduce_scatter(t, o, dim=0),
                         lambda t, c=c: c.should_custom_rs(t, dim=0),
                         c.capture(),
+                    )
+                )
+            if self.quick_comm is not None:
+                c = self.quick_comm
+                rows = rs_shape[0]
+                start = self.rank * rows
+                entries.append(
+                    (
+                        "quick_rs",
+                        lambda t, c=c, s=start, n=rows: c.quick_all_reduce(t)[
+                            s : s + n
+                        ],
+                        lambda t, c=c: c.should_quick_allreduce(t),
+                        nullcontext(),
                     )
                 )
             if self.pynccl_comm is not None:
@@ -599,6 +643,7 @@ def print_results(
 
 
 def main():
+    global HIDDEN_SIZE
     parser = FlexibleArgumentParser(description="Benchmark device communicators")
 
     parser.add_argument(
@@ -617,9 +662,17 @@ def main():
         "--num-trials", type=int, default=50, help="Number of benchmark trials"
     )
 
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=HIDDEN_SIZE,
+        help="Hidden size of the benchmarked tensors (e.g. 5120 for DeepSeek-V4.1)",
+    )
+
     parser.add_argument("--output-json", type=str, help="Output results to JSON file")
 
     args = parser.parse_args()
+    HIDDEN_SIZE = args.hidden_size
 
     # Initialize distributed
     if not dist.is_initialized():

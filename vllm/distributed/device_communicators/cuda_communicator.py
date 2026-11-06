@@ -27,6 +27,12 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# Below these gathered-output sizes AITER's custom reduce-scatter beats QuickReduce
+# (MI355X, benchmarks/kernels/benchmark_device_communicators.py), so the DP MoE
+# combine keeps it there. A 2-rank group wins at every size QuickReduce accepts.
+# VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB overrides these.
+_DP_MOE_QR_MIN_SIZE = {4: 4 << 20, 8: 8 << 20}
+
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
 # non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
 NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
@@ -114,6 +120,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
+        # QuickReduce for the DP MoE combine only; generic all-reduces on the
+        # DP group must not pick up its quantization.
+        self.moe_qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
@@ -201,6 +210,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # On ROCm, 'use_custom_allreduce==True' means it must currently be
             # an MI300 series.
             self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+
+        if (
+            envs.VLLM_ROCM_DP_MOE_QUICK_REDUCE
+            and unique_name.split(":")[0] == "dp"
+            and self.world_size > 1
+            and current_platform.is_rocm()
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
+            self.moe_qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+            if self.moe_qr_comm.disabled:
+                self.moe_qr_comm = None
+            elif self.moe_qr_comm.qr_min_size is None:
+                min_size = _DP_MOE_QR_MIN_SIZE.get(self.world_size)
+                if min_size is not None and min_size <= self.moe_qr_comm.qr_max_size:
+                    self.moe_qr_comm.qr_min_size = min_size
 
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
