@@ -1092,6 +1092,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
+                    wrapped = _lora_base_layer_name(name_mapped)
+                    if wrapped in params_dict:
+                        name_mapped = wrapped
                 # QKV fusion: skip if fused module doesn't exist in model
                 if param_name == ".fused_qkv_a_proj" and name_mapped not in params_dict:
                     continue
@@ -1490,11 +1494,21 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
+def _lora_base_layer_name(name: str) -> str:
+    """Where a LoRA wrapper keeps parameter ``name``: on its ``base_layer``."""
+    module, _, leaf = name.rpartition(".")
+    return f"{module}.base_layer.{leaf}"
+
+
 def _find_unique_weight_name(params_dict, name):
-    """Resolve a checkpoint weight against the live namespace by exact suffix."""
-    if name in params_dict:
-        return name
-    matches = [candidate for candidate in params_dict if candidate.endswith(f".{name}")]
+    """Resolve a checkpoint weight against the live namespace by exact suffix,
+    looking through LoRA wrappers."""
+    names = (name, _lora_base_layer_name(name))
+    for candidate in names:
+        if candidate in params_dict:
+            return candidate
+    suffixes = tuple(f".{candidate}" for candidate in names)
+    matches = [candidate for candidate in params_dict if candidate.endswith(suffixes)]
     return matches[0] if len(matches) == 1 else None
 
 
