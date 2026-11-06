@@ -1616,6 +1616,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The skinny GEMM launchers are split per kernel family: the kernels (and the
+  # device code they instantiate) are shared through skinny_gemms.cuh, but each
+  # family gets its own translation unit so ninja compiles them in parallel.
+  set(VLLM_SKINNY_SRC
+    "csrc/rocm/skinny_gemms_llmm1.cu"
+    "csrc/rocm/skinny_gemms_wvsplitk.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkq.cu")
+
   # The int4 skinny GEMM is instantiated one unit per N_in (a template over
   # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
   # build spends its entire length compiling that single file.
@@ -1628,6 +1637,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_int4_n3.cu"
     "csrc/rocm/skinny_gemms_int4_n4.cu"
     "csrc/rocm/skinny_gemms_int4_n5.cu")
+  # Both families are built into _rocm_C_skinny below.
+  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
 
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
@@ -1719,8 +1730,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    "csrc/rocm/skinny_gemms.cu"
-    ${VLLM_SKINNY_INT4_SRC}
+    ${VLLM_SKINNY_SRC}
     "csrc/rocm/attention_dispatch.cu"
     ${VLLM_ATTENTION_PAGED_ATTN_SRC})
 
@@ -1737,15 +1747,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_INT4_SRC})
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
-    set(VLLM_SKINNY_SRC
-      "csrc/rocm/skinny_gemms.cu"
-      ${VLLM_SKINNY_INT4_SRC})
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
