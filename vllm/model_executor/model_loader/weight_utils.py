@@ -46,6 +46,9 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
 )
+from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+    is_sparse_patch_load,
+)
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
@@ -1672,6 +1675,18 @@ def composed_weight_loader(
     """Create a weight loader that post-processes the weights after loading"""
 
     def composed_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        if is_sparse_patch_load():
+            # param already holds fn(old) where loaded_weight is NaN, so apply
+            # fn only to the newly loaded elements.
+            if getattr(loader, "__self__", None) is not None:
+                raise NotImplementedError(
+                    "Sparse checkpoint patches do not support composing a bound "
+                    "parameter loader"
+                )
+            staging = torch.full_like(param.data, float("nan"))
+            loader(staging, loaded_weight)
+            param.data.copy_(fn(staging))
+            return
         loader(param, loaded_weight)
         param.data.copy_(fn(param))
         return

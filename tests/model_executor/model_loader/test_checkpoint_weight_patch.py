@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import pytest
 import torch
 
@@ -190,3 +192,132 @@ def test_dense_and_sparse_patches_follow_packed_tp_loader():
     )
     assert no_local_weight_loaded == set()
     assert torch.equal(no_local_weight_model.weight, torch.tensor([1.0]))
+
+
+class _SliceAssignModel(torch.nn.Module):
+    """Model whose loader writes with slice assignment instead of Tensor.copy_."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(4))
+
+    def load_weights(self, weights):
+        loaded = set()
+        for name, loaded_weight in weights:
+            assert name == "w"
+            self.weight.data[:] = loaded_weight
+            loaded.add("weight")
+        return loaded
+
+
+def test_sparse_patch_rejects_loader_that_bypasses_copy():
+    model = _SliceAssignModel()
+    load_checkpoint_weight_patches(
+        model, [_make_patch("w", values=[1.0, 2.0, 3.0, 4.0])]
+    )
+
+    with pytest.raises(RuntimeError, match="NaN markers.*weight"):
+        load_checkpoint_weight_patches(
+            model, [_make_patch("w", indices=[2], values=[30.0])]
+        )
+
+
+class _MambaConvModel(torch.nn.Module):
+    """One TP rank of a GatedDeltaNet-style conv1d weight (Qwen3.5, Qwen3-Next)."""
+
+    KEY_DIM, VALUE_DIM, KERNEL = 4, 8, 3
+
+    def __init__(self, tp_size: int, tp_rank: int):
+        from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+            mamba_v2_sharded_weight_loader,
+        )
+
+        super().__init__()
+        conv_dim = 2 * self.KEY_DIM + self.VALUE_DIM
+        self.conv_weight = torch.nn.Parameter(
+            torch.zeros(conv_dim // tp_size, 1, self.KERNEL), requires_grad=False
+        )
+        qk = (self.KEY_DIM, 0, False)
+        v = (self.VALUE_DIM, 0, False)
+        self.conv_weight.weight_loader = mamba_v2_sharded_weight_loader(
+            [qk, qk, v], tp_size, tp_rank
+        )
+
+    @classmethod
+    def checkpoint_shape(cls) -> tuple[int, ...]:
+        return (2 * cls.KEY_DIM + cls.VALUE_DIM, 1, cls.KERNEL)
+
+    def load_weights(self, weights):
+        for name, loaded_weight in weights:
+            assert name == "conv1d.weight"
+            self.conv_weight.weight_loader(self.conv_weight, loaded_weight)
+        return {"conv_weight"}
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_sparse_patch_through_mamba_v2_sharded_loader(tp_size):
+    shape = _MambaConvModel.checkpoint_shape()
+    numel = math.prod(shape)
+    v1 = torch.arange(numel, dtype=torch.float32)
+    v2 = v1.clone()
+    changed = torch.tensor([0, 5, numel - 1])
+    v2[changed] = -v2[changed] - 1
+
+    for tp_rank in range(tp_size):
+        sparse_model = _MambaConvModel(tp_size, tp_rank)
+        dense_model = _MambaConvModel(tp_size, tp_rank)
+        dense = lambda values: CheckpointWeightPatch(  # noqa: E731
+            "conv1d.weight", shape, torch.float32, values
+        )
+        load_checkpoint_weight_patches(sparse_model, [dense(v1)])
+        load_checkpoint_weight_patches(dense_model, [dense(v2)])
+
+        load_checkpoint_weight_patches(
+            sparse_model,
+            [
+                CheckpointWeightPatch(
+                    "conv1d.weight",
+                    shape,
+                    torch.float32,
+                    v2[changed],
+                    changed.to(torch.int32),
+                )
+            ],
+        )
+        assert not torch.isnan(sparse_model.conv_weight).any()
+        assert torch.equal(sparse_model.conv_weight, dense_model.conv_weight)
+
+
+class _ComposedLoaderModel(torch.nn.Module):
+    """A Mamba2-style parameter stored as -exp(checkpoint value)."""
+
+    def __init__(self):
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            default_weight_loader,
+        )
+
+        super().__init__()
+        self.A = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+        self.A.weight_loader = composed_weight_loader(
+            default_weight_loader, lambda x: -torch.exp(x.float())
+        )
+
+    def load_weights(self, weights):
+        for name, loaded_weight in weights:
+            assert name == "A_log"
+            self.A.weight_loader(self.A, loaded_weight)
+        return {"A"}
+
+
+def test_sparse_patch_through_composed_loader_transforms_once():
+    v1 = [0.0, 0.5, 1.0, 1.5]
+    v2 = [0.0, 0.5, -2.0, 1.5]
+    sparse_model, dense_model = _ComposedLoaderModel(), _ComposedLoaderModel()
+    load_checkpoint_weight_patches(sparse_model, [_make_patch("A_log", values=v1)])
+    load_checkpoint_weight_patches(dense_model, [_make_patch("A_log", values=v2)])
+
+    load_checkpoint_weight_patches(
+        sparse_model, [_make_patch("A_log", indices=[2], values=[-2.0])]
+    )
+    assert torch.equal(sparse_model.A, dense_model.A)

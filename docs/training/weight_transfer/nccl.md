@@ -310,6 +310,10 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
   large or expert-parallel models, see [sharded RDT](sharded_rdt.md) or
   [NCCL M2N](m2n.md).
 - Sparse NCCL's pipeline-parallel behavior is untested.
+- **Sparse updates need copy-based weight loaders.** Unchanged elements are
+  staged as NaN and kept by the loader's final `Tensor.copy_`. If a model's
+  loader writes another way, the update raises instead of storing NaN; the
+  model must then be reloaded before serving.
 
 ## Examples
 
