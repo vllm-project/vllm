@@ -77,6 +77,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -502,9 +503,12 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
-        # In-flight requests still prefilling (prefill chunks + in-progress
-        # async KV loads). Their remaining-block reservation gates async loads.
+        # Remaining-block reservations of in-flight prefills gate async loads.
+        # Parked async KV loads can number thousands, so theirs are cached until
+        # they are scheduled; prefill chunks are few and summed on demand.
         self._inflight_prefills: set[Request] = set()
+        self._parked_reservations: dict[Request, int] = {}
+        self._parked_reserved_blocks = 0
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
         # None when not tracked (no KV connector, or no stats or load cap).
@@ -1603,7 +1607,7 @@ class Scheduler(SchedulerInterface):
                         self.aux_output_connector.request_loading(
                             request, num_computed_tokens
                         )
-                    self._inflight_prefills.add(request)
+                    self._reserve_parked(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
                     continue
@@ -1652,9 +1656,14 @@ class Scheduler(SchedulerInterface):
                 # and every remote-KV resume, since those set
                 # num_computed_tokens = num_tokens - 1.
                 prefill_admitted |= num_computed_tokens < request.num_tokens - 1
-                # Only track requests that will still be prefilling after this chunk.
-                if num_computed_tokens + num_new_tokens < request.num_tokens:
+                # Track requests still prefilling after this chunk. A promoted load
+                # also stays tracked until _update_after_schedule drops it.
+                if (
+                    num_computed_tokens + num_new_tokens < request.num_tokens
+                    or request in self._parked_reservations
+                ):
                     self._inflight_prefills.add(request)
+                self._unreserve_parked(request)
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -1954,15 +1963,17 @@ class Scheduler(SchedulerInterface):
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
-        kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : keep_end
-        ]
         del session._all_token_ids[keep_end:]
         del session.block_hashes[keep_end // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
-        session.prompt_token_ids.extend(kept_output_tokens)
+        extend_from_slice(
+            session.prompt_token_ids,
+            session._all_token_ids,
+            session.num_prompt_tokens,
+            keep_end,
+        )
 
         if update.mm_features:
             base = session.num_tokens
@@ -3196,6 +3207,7 @@ class Scheduler(SchedulerInterface):
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
+        self._unreserve_parked(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -3591,9 +3603,24 @@ class Scheduler(SchedulerInterface):
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
-        return sum(
+        return self._parked_reserved_blocks + sum(
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
+
+    def _reserve_parked(self, request: Request) -> None:
+        """Cache a parked async KV load's reservation. Set when parked and refreshed
+        at promotion, the only points where the load's held blocks change."""
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            # HiSparse's depends on free host blocks, so it is summed on demand.
+            self._inflight_prefills.add(request)
+            return
+        blocks = self._request_remaining_blocks(request)
+        cached = self._parked_reservations.get(request, 0)
+        self._parked_reserved_blocks += blocks - cached
+        self._parked_reservations[request] = blocks
+
+    def _unreserve_parked(self, request: Request) -> None:
+        self._parked_reserved_blocks -= self._parked_reservations.pop(request, 0)
 
     def _load_restores_replay_window(self, request: Request) -> bool:
         """Whether the KV connector's load for ``request`` restores every DSV41
@@ -3687,6 +3714,7 @@ class Scheduler(SchedulerInterface):
                 return False
             # Promote request to waiting or preempted.
             self._update_waiting_for_remote_kv(request)
+            self._reserve_parked(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:

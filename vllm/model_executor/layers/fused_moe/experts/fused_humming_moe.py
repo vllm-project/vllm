@@ -300,7 +300,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @classmethod
     def is_batched(cls) -> bool:
-        return cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+        return cls.activation_format().is_batched
 
     @staticmethod
     def _supports_quant_scheme(
@@ -668,7 +668,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
@@ -880,7 +880,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
