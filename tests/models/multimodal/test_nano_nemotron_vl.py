@@ -458,6 +458,51 @@ def test_nemotron_device_resize_rounds_fp32_resize_once(
     assert (diff > 0).float().mean() < 1e-3
 
 
+def _non_torch_device_bytes() -> int:
+    torch.accelerator.synchronize()
+    free, total = torch.accelerator.get_memory_info()
+    return total - free - torch.accelerator.memory_reserved()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
+def test_nemotron_device_resize_scratch_memory_stays_flat():
+    # CV-CUDA keeps every scratch buffer it allocates and reuses one only for
+    # requests no larger than it. Each video in this sweep (128 frames, two
+    # pixels taller and wider than the last) needs more scratch than the one
+    # before: without the cap and the reserved buffer, each one keeps another
+    # ~0.5 GiB of device memory.
+    pytest.importorskip("cvcuda")
+    frames = torch.randint(0, 256, (128, 716, 716, 3), dtype=torch.uint8)
+    cvcuda_bicubic_resize(frames[:, :686, :686].contiguous(), (512, 512), _DEVICE)
+    before = _non_torch_device_bytes()
+    for side in range(688, 718, 2):
+        video = frames[:, :side, :side].contiguous()
+        cvcuda_bicubic_resize(video, (512, 512), _DEVICE)
+    assert _non_torch_device_bytes() - before < 64 * 1024 * 1024
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
+def test_nemotron_device_resize_does_not_wait_for_the_gpu():
+    # CV-CUDA calls cudaDeviceSynchronize for a tensor whose stream it does not
+    # know, which waits for every stream, and cvcuda.clear_cache() waits for
+    # the current one. Only the upload from pageable memory may wait, and only
+    # for the current stream: frames already on the device must not wait at all.
+    pytest.importorskip("cvcuda")
+    frames = torch.randint(0, 256, (8, 360, 640, 3), dtype=torch.uint8)
+    stream, other = torch.cuda.Stream(_DEVICE), torch.cuda.Stream(_DEVICE)
+    with torch.cuda.stream(stream):
+        expected = cvcuda_bicubic_resize(frames, (224, 384), _DEVICE)
+        on_device = frames.to(_DEVICE)
+        for busy, video in ((other, frames), (stream, on_device)):
+            torch.accelerator.synchronize()
+            with torch.cuda.stream(busy):
+                torch.cuda._sleep(1_000_000_000)
+            actual = cvcuda_bicubic_resize(video, (224, 384), _DEVICE)
+            assert not busy.query()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _uninitialized_model() -> NemotronH_Nano_VL_V2:
     return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
 

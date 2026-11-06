@@ -103,6 +103,34 @@ def _cvcuda_available() -> bool:
     return current_platform.is_cuda() and importlib.util.find_spec("cvcuda") is not None
 
 
+# CV-CUDA's bicubic resize needs a scratch buffer that grows with the frame
+# count, source height and target width. CV-CUDA keeps every scratch buffer it
+# allocates until the process exits, and reuses one only for requests no larger
+# than it. So each resize is chunked to need at most this much, and the first
+# one reserves exactly this much: one buffer, allocated in the startup memory
+# profile, serves every resize.
+_CVCUDA_SCRATCH_BYTES = 512 * 1024 * 1024
+_cvcuda_scratch_reserved: set[int] = set()  # device indices
+
+
+class _CudaArrayOnStream:
+    """CUDA Array Interface v3 view of a torch tensor written on *stream*.
+
+    CV-CUDA orders its work after *stream*. Given a torch tensor directly
+    (interface v2, which names no stream) it calls cudaDeviceSynchronize
+    instead. The view keeps no reference to the tensor, so CV-CUDA's object
+    cache holds no torch memory: torch reuses it in stream order, after the
+    queued CV-CUDA work.
+    """
+
+    def __init__(self, tensor: torch.Tensor, stream: int) -> None:
+        self.__cuda_array_interface__ = {
+            **tensor.__cuda_array_interface__,
+            "version": 3,
+            "stream": stream,
+        }
+
+
 def cvcuda_bicubic_resize(
     frames: torch.Tensor,
     size: tuple[int, int],
@@ -115,35 +143,64 @@ def cvcuda_bicubic_resize(
     Resizes uint8 NHWC RGB *frames* to *size* ``(H, W)`` on *device* with
     CV-CUDA and returns uint8 NCHW pixels; the cast to float, rescaling and
     normalization stay with the model's input norm. Frames are uploaded in
-    chunks of at most *max_chunk_bytes*.
+    chunks of at most *max_chunk_bytes*. Only the upload from pageable host
+    memory waits for the current stream; the resize itself is queued on it.
     """
     import cvcuda
 
-    num_frames, height, width, _ = frames.shape
-    out = torch.empty((num_frames, 3, *size), dtype=torch.uint8, device=device)
-    stream = cvcuda.as_stream(torch.cuda.current_stream(device))
-    step = max(1, max_chunk_bytes // (height * width * 3))
-    for start in range(0, num_frames, step):
-        src = frames[start : start + step].to(device, non_blocking=True)
-        if (height, width) != tuple(size):
-            # The destination's shape sets the output size.
-            resized = src.new_empty((src.shape[0], *size, 3))
-            cvcuda.tvresize_into(
-                cvcuda.as_tensor(resized, "NHWC"),
-                cvcuda.as_tensor(src, "NHWC"),
-                interp=cvcuda.Interp.CUBIC,
-                antialias=True,
-                stream=stream,
-            )
-            src = resized
-        cvcuda.reformat_into(
-            cvcuda.as_tensor(out[start : start + step], "NCHW"),
-            cvcuda.as_tensor(src, "NHWC"),
+    torch_stream = torch.cuda.current_stream(device)
+    stream = cvcuda.as_stream(torch_stream)
+    # CUDA Array Interface v3 numbers the legacy default stream 1.
+    stream_id = torch_stream.cuda_stream or 1
+
+    def tvresize(dst: torch.Tensor, src: torch.Tensor) -> None:
+        # The destination's shape sets the output size.
+        cvcuda.tvresize_into(
+            cvcuda.as_tensor(_CudaArrayOnStream(dst, stream_id), "NHWC"),
+            cvcuda.as_tensor(_CudaArrayOnStream(src, stream_id), "NHWC"),
+            interp=cvcuda.Interp.CUBIC,
+            antialias=True,
             stream=stream,
         )
-    # CV-CUDA caches the torch buffers it last wrapped; release them. Queued
-    # work is safe: it runs on the current stream, which orders reuse.
-    cvcuda.clear_cache()
+
+    if torch_stream.device_index not in _cvcuda_scratch_reserved:
+        # One frame from 16 columns to 4096 needs exactly the cap.
+        rows = -(-_CVCUDA_SCRATCH_BYTES // (12 * 4096))
+        tvresize(
+            torch.empty((1, 16, 4096, 3), dtype=torch.uint8, device=device),
+            torch.zeros((1, rows, 16, 3), dtype=torch.uint8, device=device),
+        )
+        _cvcuda_scratch_reserved.add(torch_stream.device_index)
+
+    num_frames, height, width, _ = frames.shape
+    out = torch.empty((num_frames, 3, *size), dtype=torch.uint8, device=device)
+    resize = (height, width) != tuple(size)
+    step = max(1, max_chunk_bytes // (height * width * 3))
+    if resize:
+        # CV-CUDA 0.19's scratch: 12 bytes per frame, source row and target
+        # column, plus 136 bytes per target row and column. Only frames of
+        # extreme aspect ratio need more than the cap on their own.
+        frame_scratch = 12 * height * size[1]
+        filter_scratch = 136 * (size[0] + size[1])
+        step = max(
+            1, min(step, (_CVCUDA_SCRATCH_BYTES - filter_scratch) // frame_scratch)
+        )
+    for start in range(0, num_frames, step):
+        # A copy from pageable memory waits for the current stream. Pinning
+        # the frames first would avoid that, but its host copy costs more on
+        # the engine's single torch thread.
+        src = frames[start : start + step].to(device, non_blocking=True)
+        if resize:
+            resized = src.new_empty((src.shape[0], *size, 3))
+            tvresize(resized, src)
+            src = resized
+        cvcuda.reformat_into(
+            cvcuda.as_tensor(
+                _CudaArrayOnStream(out[start : start + step], stream_id), "NCHW"
+            ),
+            cvcuda.as_tensor(_CudaArrayOnStream(src, stream_id), "NHWC"),
+            stream=stream,
+        )
     return out
 
 
