@@ -1937,9 +1937,190 @@ def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
     mag = mag[:, None, None]
     torch.testing.assert_close(out.float() / mag, ref / mag, atol=3e-3, rtol=0.02)
     # The max error is set by BF16/FP8 rounding. A row sum built from P values
-    # other than the rounded BF16 ones fed to PV shows up only in the RMS.
+    # other than the rounded BF16 ones fed to PV shows up only in the RMS:
+    # over seeds 1-12 it is 2.1-2.3e-4 with the rounded P, 3.1-3.4e-4 without.
     rms = ((out.float() - ref) / mag).pow(2).mean().sqrt().item()
-    assert rms < 2.5e-4, rms
+    assert rms < 2.7e-4, rms
+
+
+def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
+    """A CDNA3 mega layer with only the attention state, over one prefill
+    request and ``n_decode`` one-token decode requests."""
+    from vllm.forward_context import ForwardContext
+    from vllm.models.deepseek_v41.amd.rocm_mega_attn import (
+        DeepseekV41ROCMAiterMegaAttnAttention,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        build_ragged_indices_from_dense,
+    )
+
+    heads, window, ratio, topk, block = 16, 32, 2, 64, 16
+    n_tokens = n_decode + n_prefill
+    seq_len = ratio * topk + n_prefill
+    layer = DeepseekV41ROCMAiterMegaAttnAttention.__new__(
+        DeepseekV41ROCMAiterMegaAttnAttention
+    )
+    torch.nn.Module.__init__(layer)
+    layer.n_local_heads = layer.padded_heads = heads
+    layer.head_dim, layer.rope_head_dim = HEAD_DIM, ROPE_HEAD_DIM
+    layer.nope_head_dim = NOPE_HEAD_DIM
+    layer.scale, layer.eps, layer.kv_mxfp8 = HEAD_DIM**-0.5, 1e-6, False
+    layer.window_size, layer.compress_ratio = window, ratio
+    layer.max_model_len, layer.max_num_batched_tokens = seq_len, n_tokens
+    layer.PREFILL_CHUNK_SIZE = 1
+    layer._use_aiter_sparse_mla = layer._has_kv_transfer = False
+    layer._attn_rotates_q_from, layer._prefill_rotate_q = None, False
+    layer.kv_cache_dtype = "fp8_ds_mla"
+    layer.compressed_cache_prefix = "compressed"
+    fnuz = current_platform.is_fp8_fnuz()
+    swa_kv = torch.randn(seq_len, HEAD_DIM, device=device).bfloat16() * 0.25
+    extra_kv = torch.randn(seq_len // ratio, HEAD_DIM, device=device).bfloat16() * 0.25
+    layer.swa_cache_layer = SimpleNamespace(
+        prefix="swa", kv_cache=_pack_fp8_ds_mla_cache(swa_kv, block, fnuz)
+    )
+    extra = _pack_fp8_ds_mla_cache(extra_kv, block, False)
+    layer._compressed_kv_cache = lambda: extra
+    layer.rotary_emb = SimpleNamespace(
+        cos_sin_cache=_random_cos_sin_cache(seq_len, device)
+    )
+    layer.attn_sink = torch.linspace(-1, 1, heads, device=device)
+    layer._index_source_prefix = "source"
+    layer._static_forward_context = {"source": layer}
+    layer._topk_ragged_cache = {}
+    prefill_start = seq_len - n_prefill
+    topk_rows = torch.randint(
+        0, prefill_start // ratio, (n_tokens, topk), device=device, dtype=torch.int32
+    )
+    topk_rows[1::2, topk // 2 :] = -1
+    layer.topk_indices_buffer = topk_rows
+    swa_rows = torch.randint(
+        0, seq_len, (n_decode, window), device=device, dtype=torch.int32
+    )
+    swa_lens = torch.full((n_decode,), window, device=device, dtype=torch.int32)
+    ragged, indptr = build_ragged_indices_from_dense(swa_rows, swa_lens)
+    starts = torch.tensor([*range(n_decode + 1), n_tokens], dtype=torch.int32)
+    n_reqs = n_decode + 1
+    swa_table = torch.arange(
+        layer.swa_cache_layer.kv_cache.shape[0], device=device, dtype=torch.int32
+    ).repeat(n_reqs, 1)
+    seq_lens = torch.tensor([seq_len], device=device, dtype=torch.int32)
+    gather_len = window + n_prefill
+    compressed_rows = seq_len // ratio
+    swa_metadata = SimpleNamespace(
+        num_decodes=n_decode,
+        num_decode_tokens=n_decode,
+        num_prefills=1,
+        num_prefill_tokens=n_prefill,
+        block_size=block,
+        slot_mapping=torch.empty(0, device=device, dtype=torch.int64),
+        block_table=swa_table,
+        decode_swa_indices=swa_rows,
+        decode_swa_lens=swa_lens,
+        decode_swa_ragged_indices=ragged,
+        decode_swa_ragged_indptr=indptr,
+        token_to_req_indices=torch.cat(
+            (
+                torch.arange(n_decode, device=device, dtype=torch.int32),
+                torch.full((n_prefill,), n_decode, device=device, dtype=torch.int32),
+            )
+        ),
+        is_valid_token=torch.ones(n_tokens, device=device, dtype=torch.bool),
+        prefill_seq_lens=seq_lens,
+        prefill_seq_lens_cpu=seq_lens.cpu(),
+        prefill_gather_lens=torch.tensor([gather_len], device=device).int(),
+        query_start_loc_cpu=starts,
+        query_start_loc=starts.to(device),
+        get_prefill_chunk_plan=lambda **kwargs: [
+            (0, 1, compressed_rows, compressed_rows + gather_len)
+        ],
+    )
+    compressed_metadata = SimpleNamespace(
+        block_size=block * ratio,
+        block_table=torch.arange(
+            extra.shape[0], device=device, dtype=torch.int32
+        ).repeat(n_reqs, 1),
+    )
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={"swa": swa_metadata, "compressed": compressed_metadata},
+        slot_mapping={},
+    )
+    positions = torch.cat(
+        (
+            torch.full((n_decode,), seq_len - 1, device=device),
+            torch.arange(prefill_start, seq_len, device=device),
+        )
+    )
+
+    # FP32 attention over the dequantized caches, then inverse RoPE.
+    swa = _read_fp8_ds_mla_cache_rows(
+        layer.swa_cache_layer.kv_cache,
+        torch.arange(seq_len, device=device),
+        block,
+        fnuz,
+    )
+    comp = _read_fp8_ds_mla_cache_rows(
+        extra, torch.arange(compressed_rows, device=device), block, False
+    )
+
+    def reference(q_rope: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(n_tokens, heads, HEAD_DIM, device=device)
+        for row in range(n_tokens):
+            if row < n_decode:
+                slots = swa_rows[row].tolist()
+                candidates = topk_rows[row].tolist()
+            else:
+                pos = prefill_start + row - n_decode
+                slots = list(range(max(0, pos - window + 1), pos + 1))
+                candidates = topk_rows[row, : (pos + 1) // ratio].tolist()
+            kv = torch.cat([swa[slots], comp[[i for i in candidates if i >= 0]]])
+            logits = q_rope[row].float() @ kv.T * layer.scale
+            probs = torch.softmax(torch.cat((logits, layer.attn_sink[:, None]), -1), -1)
+            out[row] = probs[:, :-1] @ kv
+        out = out.bfloat16().float()
+        cos, sin = layer.rotary_emb.cos_sin_cache[positions, None].chunk(2, dim=-1)
+        even, odd = out[..., 448::2].clone(), out[..., 449::2].clone()
+        out[..., 448::2] = even * cos + odd * sin
+        out[..., 449::2] = odd * cos - even * sin
+        return out
+
+    return layer, context, positions, reference
+
+
+@requires_cdna3
+@pytest.mark.parametrize("kernel_rotates_q", [False, True])
+@torch.inference_mode()
+def test_hip_mega_forward_mqa_decode_and_prefill(kernel_rotates_q: bool) -> None:
+    """A decode+prefill step through the CDNA3 mega layer's forward_mqa. Q
+    arrives rotated, or raw for the prefill kernel and forward_mqa to rotate.
+    Prefill rows come back inverse-RoPE'd once: rotating them again, as a layer
+    with ``_prefill_rotates_bf16 = False`` would, fails the check."""
+    from vllm.forward_context import override_forward_context
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda")
+    torch.manual_seed(31)
+    init_workspace_manager(device)
+    n_decode, n_prefill = 3, 37
+    layer, context, positions, reference = _mega_layer(n_decode, n_prefill, device)
+    q = torch.randn(n_decode + n_prefill, 16, HEAD_DIM, device=device).bfloat16()
+    q_rope = _rope_q(q, positions, layer.rotary_emb.cos_sin_cache)
+    expected = reference(q_rope)
+    kv = torch.zeros(q.shape[0], HEAD_DIM, device=device, dtype=torch.bfloat16)
+    layer._attn_rotates_q_from = 1 if kernel_rotates_q else None
+
+    def run() -> torch.Tensor:
+        out = layer._alloc_attn_out(q.shape[0], q)
+        with override_forward_context(context):
+            layer.forward_mqa(
+                (q if kernel_rotates_q else q_rope).clone(), kv, positions, out
+            )
+        return out.float()
+
+    torch.testing.assert_close(run(), expected, atol=3e-3, rtol=0.02)
+    layer._prefill_rotates_bf16 = False
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(run(), expected, atol=3e-3, rtol=0.02)
 
 
 @requires_gfx950

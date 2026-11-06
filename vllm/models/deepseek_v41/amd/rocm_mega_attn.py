@@ -204,18 +204,20 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
             self.rotary_emb.cos_sin_cache,
             current_platform.is_fp8_fnuz(),
         )
-        if mxfp8_out is None:
-            assert output is not None
+        if get_cdna_version() == 3:
+            assert output is not None and mxfp8_out is None
             torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(
                 *args, self._prefill_rotate_q, output[:tokens]
             )
         else:
+            assert mxfp8_out is not None
             torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_prefill(
                 *args, mxfp8_out[0][:tokens], mxfp8_out[1][:tokens]
             )
 
     def _reserve_prefill_workspace(self, q: torch.Tensor) -> None:
         # The CDNA3 prefill reads the caches in place and stores into the
-        # layer output, so it needs no gather workspace.
+        # layer output, so it needs no gather workspace. The base class only
+        # skips it for the AITER sparse MLA, which is gfx950-only.
         if get_cdna_version() != 3:
             super()._reserve_prefill_workspace(q)

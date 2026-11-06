@@ -1240,7 +1240,17 @@ steps:
   - tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
   - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+  - csrc/flashmla/fused_norm_rope_attn_rope_cast_fwd_rocm.cu
+  - vllm/models/deepseek_v41/common/ops/fused_compress_quant_cache.py
+  - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+  - tests/kernels/test_compressor_kv_cache.py
   commands:
+  - >-
+    pytest -v -s
+    tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_paged_prefill_bf16_output
+    tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_paged_prefill_bf16_long_ramp
+    tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_forward_mqa_decode_and_prefill
+    tests/kernels/test_compressor_kv_cache.py::test_v41_fp8_ds_mla_record_has_no_negative_zero
   - >-
     pytest -v -s
     tests/kernels/models/amd/test_dsv41_gfx942_topk.py
