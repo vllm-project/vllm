@@ -500,6 +500,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_use_nope,
+                # MTP draft steps reuse each token slot's top-k, which
+                # ShardQ's compact per-rank layout would break.
+                shardq_eligible=not is_mtp_layer,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -1354,9 +1357,6 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
-
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
