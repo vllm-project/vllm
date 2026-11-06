@@ -93,6 +93,7 @@ constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
 constexpr int kMaxMtpTokens = 9;
+constexpr int kTokenPasses = (kMaxMtpTokens + kWarps - 1) / kWarps;
 constexpr int kDtBiasFloat32 = 0;
 constexpr int kDtBiasBFloat16 = 1;
 constexpr int kDtBiasFloat16 = 2;
@@ -223,7 +224,10 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       &shared_state[0][0][0], source_state, first_chunk, tid, kThreads);
 
   // One warp per token. kMaxMtpTokens exceeds kWarps, so warps stride.
-  for (int t = warp; t < num_tokens; t += kWarps) {
+  // kTokenPasses bounds the trip count, so the compiler unrolls the passes.
+#pragma unroll
+  for (int pass = 0, t = warp; pass < kTokenPasses && t < num_tokens;
+       ++pass, t += kWarps) {
     const int token = bos + t;
     const int64_t mixed_base = static_cast<int64_t>(token) * strides.mixed_row;
     float q_values[4];
@@ -384,7 +388,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     }
   };
 
-  for (int t = warp; t < num_tokens; t += kWarps) {
+#pragma unroll
+  for (int pass = 0, t = warp; pass < kTokenPasses && t < num_tokens;
+       ++pass, t += kWarps) {
     float sum_square = 0.0f;
 #pragma unroll
     for (int i = 0; i < kValuesPerLane; ++i) {
