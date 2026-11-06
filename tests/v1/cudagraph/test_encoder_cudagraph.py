@@ -255,6 +255,15 @@ class TestFindBudgetGraph:
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
 
+    def test_capture_skipped_without_supported_modalities(self):
+        mgr = _make_manager_with_budgets([2048, 4096])
+        mgr.config.modalities = []
+        mgr.model = None  # capture must not touch the model
+
+        assert mgr.get_num_graphs_to_capture() == 0
+        mgr.capture(graph_pool=object())
+        assert not mgr.is_captured()
+
 
 # ---------------------------------------------------------------------------
 # _execute_local greedy packing with budget-cliff deferral (no GPU required)
@@ -1348,6 +1357,24 @@ class TestEncoderCudaGraphVideoReplay:
     def test_capture_creates_one_graph_per_budget(self):
         assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
         assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
+
+    def test_frame_slots_capped_by_budget(self):
+        """A large per-video frame limit must not inflate small graphs."""
+        mgr = _make_manager_for_gpu(
+            self.model,
+            _BUDGETS,
+            _VIDEO_MAX_BATCH,
+            self.device,
+            self.dtype,
+            max_frames_per_batch=1000,
+        )
+        mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        for budget, meta in mgr.budget_graphs["default"].items():
+            assert meta.max_frames_per_batch == budget
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        result = mgr.execute(_make_video_mm_kwargs(grid_thw, self.device, self.dtype))
+        assert result is not None
+        assert [r.shape[0] for r in result] == [8, 4]
 
     # --- output shape ---
 
