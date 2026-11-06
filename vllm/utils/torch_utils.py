@@ -6,7 +6,7 @@ import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -93,6 +93,14 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+def token_ids_to_tensor(
+    token_ids: Sequence[int], dtype: torch.dtype = torch.int64
+) -> torch.Tensor:
+    """CPU tensor of token ids. A TokenBuffer is copied as one block rather than
+    read token by token; the copy keeps the buffer resizable."""
+    return torch.tensor(np.asarray(token_ids), dtype=dtype)
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:
@@ -859,7 +867,6 @@ def current_stream() -> torch.cuda.Stream:
 #
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
-#   - DeepSeek-V4.1 mHC gate projection overlap on ROCm
 _aux_stream: torch.cuda.Stream | None = None
 
 
