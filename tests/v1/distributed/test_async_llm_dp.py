@@ -69,7 +69,7 @@ async def generate(
     "model",
     [
         "ibm-research/PowerMoE-3b",
-        "hmellor/tiny-random-LlamaForCausalLM",
+        "vllm-project/tiny-random-LlamaForCausalLM",
     ],
 )
 @pytest.mark.parametrize(
@@ -277,7 +277,7 @@ async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
 # When expert_parallel=False: uses non-MoE model (DP replicas as separate engines).
 # When expert_parallel=True: uses MoE model + EP (DPEngineCoreProc, sync pause path).
 
-DP_PAUSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+DP_PAUSE_MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 DP_PAUSE_MODEL_MOE = "ibm-research/PowerMoE-3b"
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
 

@@ -5,9 +5,8 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 
 DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
 DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
@@ -67,7 +66,7 @@ class LoadConfig:
     Specifies the loading strategy for safetensors weights.
 
     - None (default): Uses memory-mapped (lazy) loading. When an NFS
-      filesystem is detected and the total checkpoint size fits within 90%%
+      filesystem is detected and the total checkpoint size fits within 90%
       of available RAM, prefetching is enabled automatically.
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
@@ -116,22 +115,14 @@ class LoadConfig:
     the original doc for `map_location` parameter in [`torch.load`][] parameter.
     """
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     @field_validator("load_format", mode="after")
     def _lowercase_load_format(cls, load_format: str) -> str:
