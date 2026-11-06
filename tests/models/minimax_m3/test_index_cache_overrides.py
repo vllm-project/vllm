@@ -19,7 +19,10 @@ pytestmark = pytest.mark.skipif(
 def checkpoint(tmp_path_factory):
     path = tmp_path_factory.mktemp("minimax_m3")
     MiniMaxM3VLConfig(
-        architectures=["MiniMaxM3SparseForConditionalGeneration"]
+        architectures=["MiniMaxM3SparseForConditionalGeneration"],
+        text_config={
+            "layer_types": ["full_attention"] * 3 + ["minimax_m3_sparse"] * 57
+        },
     ).save_pretrained(path)
     return str(path)
 
