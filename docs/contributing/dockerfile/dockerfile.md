@@ -25,10 +25,9 @@ Mount only the requirement files a dependency stage reads. Mounting the entire
 invalidate CUDA dependency layers and their downstream native builds.
 
 The `hybrid-test-wheels` stage builds the `mamba-ssm` and `causal-conv1d`
-wheels that `test-deps` installs. It branches from `base-toolchain`, before
-`base` installs the requirements, and takes only the torch version from `base`,
-so it rebuilds when torch or `tools/build_hybrid_test_wheels.sh` changes, not on
-every requirements change.
+wheels that `test-deps` installs. It branches from `base`, so it rebuilds with
+`base` or when `tools/build_hybrid_test_wheels.sh` changes, in parallel with
+`csrc-build`.
 
 The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 `ca-certificates` package so clients using the system trust store receive
