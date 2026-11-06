@@ -1688,7 +1688,7 @@ def test_finalize_runs_every_module_hook_after_its_submodules():
     for child, parent in [("a.x", "a"), ("shared", "a"), ("shared", "b")]:
         assert log.index(child) < log.index(parent)
     assert log[-1] == "root"
-    # attention-like layers run too, before the other modules
+    # attention-like layers run in the same traversal
     assert model.attn.post_load_called
 
 

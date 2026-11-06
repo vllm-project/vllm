@@ -208,7 +208,6 @@ def process_weights_after_loading(
             # the caching allocator, which starves the OS on UMA devices.
             release_device_memory_under_pressure(target_device)
 
-    # Attention layers, then every other module's own post-load hook.
     finalize_model_weights(model, target_device)
 
     # Needed for torchao model reloading via model.reload_weights
@@ -218,8 +217,8 @@ def process_weights_after_loading(
 
 
 @contextmanager
-def device_loading_context(module: torch.nn.Module, target_device: torch.device):
-    if target_device.type == "cpu":
+def device_loading_context(module: torch.nn.Module, target_device: torch.device | None):
+    if target_device is None or target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
         return

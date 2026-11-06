@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -1530,9 +1530,8 @@ def multi_thread_pt_weights_iterator(
 def finalize_model_weights(
     model: torch.nn.Module, target_device: torch.device | None = None
 ) -> None:
-    """Run every module's own post-load hook after a full load or reload:
-    attention-like layers first, then every other module after all of its
-    submodules. Every load and update path finishes here.
+    """Run every module's own post-load hook after a full load or reload, each
+    after all of its submodules. Every load and update path finishes here.
 
     Quantization methods and the submodules of quantized layers are skipped:
     their quant method processes them, in the loader's per-layer pass.
@@ -1542,16 +1541,6 @@ def finalize_model_weights(
         QuantizeMethodBase,
     )
     from vllm.model_executor.model_loader.utils import device_loading_context
-
-    # Attention hooks read weights their layers' quant methods processed.
-    for module in model.modules():
-        if is_deferred_attention_layer(module):
-            with (
-                device_loading_context(module, target_device)
-                if target_device is not None
-                else nullcontext()
-            ):
-                module.process_weights_after_loading()
 
     seen: set[torch.nn.Module] = set()
 
@@ -1567,13 +1556,14 @@ def finalize_model_weights(
         yield module
 
     for module in children_first(model):
-        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
-            module
-        ):
+        if isinstance(module, QuantizeMethodBase):
             continue
         hook = getattr(module, "process_weights_after_loading", None)
         if callable(hook):
-            hook()
+            # only attention hooks need offloaded weights on the device
+            device = target_device if is_deferred_attention_layer(module) else None
+            with device_loading_context(module, device):
+                hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
