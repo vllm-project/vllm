@@ -11,10 +11,12 @@ steps:
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
+  - tests/distributed/test_eplb_communicator.py
   - tests/distributed/test_eplb_migration_scheduler.py
   - tests/distributed/test_eplb_utils.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
+  - pytest -v -s distributed/test_eplb_communicator.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
@@ -29,6 +31,7 @@ steps:
       source_file_dependencies:
       - vllm/distributed/eplb
       - tests/distributed/test_eplb_algo.py
+      - tests/distributed/test_eplb_communicator.py
       - tests/distributed/test_eplb_utils.py
       - vllm/platforms/rocm.py
 
@@ -99,3 +102,25 @@ steps:
 #   commands:
 #   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
 #   - pytest -v -s distributed/test_elastic_ep.py
+
+- label: ":amd: (MI355) Elastic EP Scaling"
+  key: elastic-ep-scaling-mi355
+  # Nightly only: 4-GPU pods wait behind smaller jobs on per-PR runs.
+  optional: true
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
+  - vllm/engine/
+  - vllm/v1/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py
