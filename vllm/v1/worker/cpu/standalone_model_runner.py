@@ -1024,7 +1024,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_tokens = scheduler_output.total_num_scheduled_tokens
-        _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
+        _, num_tokens_across_dp, _, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens,
             num_tokens_padded=num_tokens,
             allow_microbatching=False,
