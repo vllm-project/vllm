@@ -45,6 +45,11 @@ pub enum UnifiedParserEvent {
     Reasoning(DecodedText),
     /// A tool-call update extracted from visible assistant text.
     ToolCall(ToolCallDelta),
+    /// A complete call with its final arguments.
+    ToolCallEnd {
+        tool_index: usize,
+        arguments: String,
+    },
 }
 
 /// Result of advancing unified parsing with one assistant-text input.
@@ -93,6 +98,15 @@ impl UnifiedParserOutput {
             match event {
                 ToolParserEvent::Text(text) => self.push_text(text),
                 ToolParserEvent::ToolCall(call) => self.push_call(call),
+                ToolParserEvent::ToolCallEnd {
+                    tool_index,
+                    arguments,
+                } => {
+                    self.events.push(UnifiedParserEvent::ToolCallEnd {
+                        tool_index,
+                        arguments,
+                    });
+                }
             }
         }
     }
@@ -104,6 +118,7 @@ impl UnifiedParserOutput {
                 UnifiedParserEvent::Text(text) => self.push_text(text),
                 UnifiedParserEvent::Reasoning(reasoning) => self.push_reasoning(reasoning),
                 UnifiedParserEvent::ToolCall(call) => self.push_call(call),
+                event @ UnifiedParserEvent::ToolCallEnd { .. } => self.events.push(event),
             }
         }
     }
@@ -231,6 +246,11 @@ mod tests {
 
 /// Incremental parser that extracts reasoning and tool-call events from assistant output.
 pub trait UnifiedParser: Send {
+    /// Whether each completed call emits a `ToolCallEnd` event.
+    fn reports_tool_call_end(&self) -> bool {
+        false
+    }
+
     /// Construct a boxed parser instance for one request stream.
     fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
     where

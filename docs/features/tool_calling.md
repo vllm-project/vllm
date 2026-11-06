@@ -537,6 +537,25 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+With the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`), `qwen3_xml` and its alias
+`qwen3_coder` stream string parameters before they close, as Python does. Only
+parameters whose schema type is exactly `string` use this path. Other values
+wait for `</parameter>` so their schema-based conversion can finish.
+
+The shared Rust parsers for `seed_oss` and `mimo` use the same behavior. Qwen
+and Seed-OSS remove one newline at each parameter boundary. MiMo preserves it.
+
+Non-stream Chat Completions responses include only complete calls, with each
+argument key once. A call is complete at `</function>`, so a stop string can remove
+`</tool_call>` without loss of arguments. Rust drops an unfinished call. An aborted
+call does not change `finish_reason` from `stop` to `tool_calls` in either response
+mode. Python may return the parameters it can recover instead. A stream can still contain partial arguments if generation
+stops inside a call. If the model repeats a key, Rust emits it again so clients
+with last-value-wins JSON decoders retain the final value. This differs from
+Python, which stops argument deltas when an earlier value changes. Clients that
+reject repeated keys may reject such streamed output. After a parse error, Rust
+returns only the text suffix that it has not yet emitted.
+
 ### MiMo-V2.6 Models (`mimo`)
 
 Supported models:

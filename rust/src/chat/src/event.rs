@@ -231,6 +231,12 @@ pub enum ChatEvent {
         index: usize,
         call: AssistantToolCall,
     },
+    /// An incomplete call. Its earlier deltas remain in the stream, but the
+    /// call is absent from the final assistant message.
+    ToolCallAbort {
+        index: usize,
+        call: AssistantToolCall,
+    },
     /// Terminal event carrying the final assembled assistant message and finish
     /// metadata.
     Done {

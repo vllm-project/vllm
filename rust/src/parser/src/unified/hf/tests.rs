@@ -189,6 +189,12 @@ fn message(events: &[UnifiedParserEvent]) -> Value {
                 }
                 call.1.push_str(&delta.arguments);
             }
+            UnifiedParserEvent::ToolCallEnd {
+                tool_index,
+                arguments,
+            } => {
+                calls.entry(*tool_index).or_default().1.clone_from(arguments);
+            }
         }
     }
     let mut out = serde_json::Map::new();
