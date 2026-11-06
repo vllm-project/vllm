@@ -341,7 +341,8 @@ for output in outputs:
 
 ## Automatic `enable_thinking` Activation
 
-Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
+Some models (such as Gemma 4 and DeepSeek-V4-Pro) require `enable_thinking: true` in their chat template kwargs to activate thinking mode; without it, reasoning tokens are never generated regardless of other settings.
+IBM Granite 3.2 reads `thinking` instead (see above), which `reasoning_effort` does not set.
 
 When you set `reasoning_effort` in a Chat Completions request (or `reasoning.effort` in a Responses API request), vLLM automatically injects `enable_thinking` into the chat template kwargs:
 
