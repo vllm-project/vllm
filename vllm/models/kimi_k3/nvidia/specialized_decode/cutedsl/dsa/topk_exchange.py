@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DCP top-k candidate exchange over NVLink and its exact merge (K3.1 DSA decode).
 
-The #63 one-round merge (``vllm/v1/attention/ops/dcp_topk_merge``) all-gathers
+The #63 one-round merge (``vllm/models/kimi_k3/nvidia/ops/dcp_topk_merge``) all-gathers
 every rank's local top-N B' rows with NCCL (a 1-CTA ring all-gather of ~19 us
 at DCP8 plus its launch gap), then selects (one kernel) and rescues saturated
 rows (a second kernel). Here, instead:
@@ -36,7 +36,7 @@ from cutlass import Int32, Int64, Uint16, Uint32, Uint64
 from cutlass.cute.runtime import make_fake_stream
 
 from vllm.cute_utils import recast_val
-from vllm.v1.attention.ops.dcp_topk_merge import (
+from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
     LOCAL_INDEX_BITS,
     packed_row_words,
     rescue_slots,
@@ -112,7 +112,7 @@ def reserve(group, device, world, rank, rows, local_topk):
 @functools.cache
 def build_merge(rows, topk, local_topk, world, block_size, emit_ids):
     """``ExchangeMerge`` of ``rows`` rows (see the module docstring)."""
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels as stock
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels as stock
 
     assert world <= 16 and local_topk < topk and block_size > 0
     assert stock._TB_SIZE == TB

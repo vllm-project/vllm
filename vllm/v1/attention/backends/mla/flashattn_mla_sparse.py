@@ -222,7 +222,6 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not isinstance(q, tuple):
             raise NotImplementedError(
@@ -376,7 +375,6 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not is_decode:
             out, lse = super()._forward_mqa_kernel(
@@ -387,7 +385,6 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
                 layer=layer,
                 block_size=block_size,
                 is_decode=is_decode,
-                return_lse=return_lse,
             )
             return out, None if lse is None else lse * math.log(2.0)
         if isinstance(q, tuple):

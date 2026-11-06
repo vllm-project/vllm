@@ -2234,7 +2234,7 @@ class FusedIndexer:
         self.exchange, self.workspace = exchange, None
         self.exchange_kernels: dict = {}
         if exchange is not None and self.packed:
-            from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+            from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
                 get_dcp_topk_rescue_workspace,
             )
 
