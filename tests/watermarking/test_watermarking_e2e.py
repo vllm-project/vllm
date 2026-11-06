@@ -115,3 +115,53 @@ def test_sbw_greedy_decoding_is_watermarked(vllm_runner):
     assert not result_greedy_no_wm.is_watermarked, (
         f"Non-watermarked greedy output falsely detected: {result_greedy_no_wm}"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_sbw_beam_search_is_watermarked(vllm_runner):
+    """SBW watermarking must watermark beam search output.
+
+    Beam expansion ranks candidates by the returned logprobs, so the engine
+    must run a processed logprobs mode for the bias to be visible; on the raw
+    default the request runs unwatermarked with a warning.
+    """
+    from vllm.sampling_params import BeamSearchParams
+    from vllm.v1.watermarking import SBWWatermarkDetector
+
+    watermark_config = {"key": 42, "algorithm": "sbw", "context_width": 4}
+    detector = SBWWatermarkDetector(key=42, context_width=4)
+
+    runner = vllm_runner(
+        "facebook/opt-125m",
+        watermark_config=watermark_config,
+        logprobs_mode="processed_logprobs",
+        seed=0,
+        enforce_eager=True,
+        max_model_len=512,
+        gpu_memory_utilization=0.2,
+    )
+    request = "Tell me a story about an explorer who discovers a mysterious island."
+    params_wm = BeamSearchParams(beam_width=4, max_tokens=64)
+    params_no_wm = BeamSearchParams(beam_width=4, max_tokens=64, watermarking=False)
+
+    with runner:
+        output_wm = runner.llm.beam_search([request], params_wm)[0]
+        output_no_wm = runner.llm.beam_search([request], params_no_wm)[0]
+
+    best_wm = output_wm.sequences[0]
+    best_no_wm = output_no_wm.sequences[0]
+    assert len(best_wm.tokens) > 0
+
+    # The detector consumes the generated tokens only, matching the
+    # detector's convention elsewhere (cf. offline.py's generated split).
+    prompt_len = len(best_wm.orig_prompt["prompt_token_ids"])
+    result_wm = detector.detect(list(best_wm.tokens[prompt_len:]))
+    result_no_wm = detector.detect(list(best_no_wm.tokens[prompt_len:]))
+
+    assert result_wm.is_watermarked, f"SBW beam watermark not detected: {result_wm}"
+    assert result_no_wm.num_scored_tokens > 0
+    assert not result_no_wm.is_watermarked, (
+        f"Non-watermarked beam output falsely detected: {result_no_wm}"
+    )
