@@ -1525,6 +1525,11 @@ class CompilationConfig:
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
+        """Resolve the CUDA Graphs mode the attention backends can support.
+
+        Downgrades the configured mode to the best supported one and stores it, or
+        raises a `ValueError` if the requested CUDA Graphs cannot be supported.
+        """
         from vllm.v1.attention.backend import AttentionCGSupport
 
         cudagraph_mode = self.cudagraph_mode

@@ -1136,7 +1136,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         )
         batch_descriptor = BatchDescriptor(
             num_tokens=input_batch.num_tokens_after_padding,
-            has_lora=self.lora_config is not None,
             num_active_loras=num_active_loras,
         )
         with set_forward_context(
