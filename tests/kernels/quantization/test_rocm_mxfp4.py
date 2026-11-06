@@ -871,7 +871,8 @@ def test_rdna4_flydsl_compiled_graph_reads_changed_inputs(dynamic, dist_init):
 
 @pytest.mark.skipif(not on_rdna4(), reason="requires ROCm RDNA4")
 @pytest.mark.slow_test
-def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override(capfd, tmp_path):
+@pytest.mark.parametrize("explicit_backend", [False, True])
+def test_rdna4_mxfp4_serves_checkpoint(explicit_backend, capfd, tmp_path):
     """Load real weights and serve unseen prefills without request-time JIT."""
     from tests.utils import RemoteOpenAIServer
 
@@ -888,17 +889,25 @@ def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override(capfd, tmp_path)
         "4",
         "--max-num-batched-tokens",
         "1024",
-        "--quantization-config",
-        '{"linear":{"activation":"fp8_per_token"}}',
-        "--kernel-config",
-        '{"linear_backend_per_quant":{"mxfp4":"flydsl"}}',
+        "--gpu-memory-utilization",
+        "0.95",
         "--disable-uvicorn-access-log",
         "--jit-monitor-verbose",
     ]
+    if explicit_backend:
+        server_args += [
+            "--quantization-config",
+            '{"linear":{"activation":"fp8_per_token"}}',
+            "--kernel-config",
+            '{"linear_backend_per_quant":{"mxfp4":"flydsl"}}',
+        ]
     with RemoteOpenAIServer(
         model,
         server_args,
-        env_dict={"FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl")},
+        env_dict={
+            "FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl"),
+            "NCCL_PROTO": "Simple",
+        },
         max_wait_seconds=1200,
     ) as server:
         response = server.get_client().chat.completions.create(
@@ -927,5 +936,7 @@ def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override(capfd, tmp_path)
     captured = capfd.readouterr()
     logs = captured.out + captured.err
     (tmp_path / "server.log").write_text(logs)
-    assert "FlydslMxfp4LinearKernel" in logs
+    assert "Rdna4Mxfp4LinearKernel" in logs
+    if not explicit_backend:
+        assert "Using per-token FP8 activations for RDNA4 MXFP4" in logs
     assert "FlyDSL JIT compilation during inference" not in logs

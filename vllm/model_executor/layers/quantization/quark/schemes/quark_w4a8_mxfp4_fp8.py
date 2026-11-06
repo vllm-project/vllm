@@ -60,7 +60,7 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         self.fp8_dtype = current_platform.fp8_dtype()
 
         from vllm.model_executor.kernels.linear import (
-            FlydslMxfp4LinearKernel,
+            Rdna4Mxfp4LinearKernel,
             _get_linear_backend,
             init_mxfp4_linear_kernel,
         )
@@ -70,8 +70,8 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
         self.use_aiter_kernel = False
         if backend == "flydsl" or (
             backend == "auto"
-            and FlydslMxfp4LinearKernel.__name__ not in envs.VLLM_DISABLED_KERNELS
-            and FlydslMxfp4LinearKernel.is_supported()[0]
+            and Rdna4Mxfp4LinearKernel.__name__ not in envs.VLLM_DISABLED_KERNELS
+            and Rdna4Mxfp4LinearKernel.is_supported()[0]
         ):
             self.kernel = init_mxfp4_linear_kernel(activation_quant_key)
             return

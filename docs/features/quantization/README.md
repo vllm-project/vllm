@@ -47,17 +47,20 @@ gfx1200/gfx1201. It accepts packed E2M1 weights with E8M0 scales per 32 weights
 and static per-tensor or dynamic per-token FP8 E4M3 activations. Compatible
 Quark and compressed-tensors checkpoints use the shared MXFP4 kernel interface.
 
-Install a FlyDSL build providing `flydsl.kernels.gemm.rdna4_mxfp4`. To request
-per-token FP8 activations and explicitly select this backend, use
+Install a FlyDSL build providing `flydsl.kernels.gemm.rdna4_mxfp4`. FlyDSL is the
+default dense MXFP4 backend on RDNA4 when this package is available. Automatic
+selection uses per-token FP8 activations for checkpoints declaring MXFP4 or
+unquantized activations. Checkpoints with a supported FP8 activation scheme use
+that scheme.
 
 ```bash
-vllm serve <model> \
-  --quantization-config '{"linear":{"activation":"fp8_per_token"}}' \
-  --kernel-config '{"linear_backend_per_quant":{"mxfp4":"flydsl"}}'
+vllm serve <model>
 ```
 
-Automatic selection uses FlyDSL on RDNA4 when its kernel package and a supported
-FP8 activation scheme are available.
+Explicit activation overrides and backend choices take precedence. For example,
+`--kernel-config '{"linear_backend_per_quant":{"mxfp4":"emulation"}}'` selects
+emulation, and `--quantization-config '{"linear":{"activation":"mxfp4"}}'`
+requests MXFP4 activations. The kernel class is `Rdna4Mxfp4LinearKernel`.
 
 ## Hadamard Input Transforms (QuIP)
 

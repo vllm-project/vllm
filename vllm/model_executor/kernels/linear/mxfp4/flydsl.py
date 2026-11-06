@@ -153,7 +153,7 @@ direct_register_custom_op(
 )
 
 
-class FlydslMxfp4LinearKernel(MxFp4LinearKernel):
+class Rdna4Mxfp4LinearKernel(MxFp4LinearKernel):
     """Lossless MXFP4 weights and FP8 activations on ROCm RDNA4."""
 
     @classmethod

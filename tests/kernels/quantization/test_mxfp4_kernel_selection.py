@@ -15,10 +15,10 @@ from vllm.model_executor.kernels.linear import (
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
-    FlydslMxfp4LinearKernel,
     MarlinMxFp4LinearKernel,
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
+    Rdna4Mxfp4LinearKernel,
     XPUMxFp4LinearKernel,
     init_mxfp4_linear_kernel,
     register_linear_kernel,
@@ -70,7 +70,7 @@ def test_can_implement_is_abstract():
 @pytest.mark.parametrize("activation", [None, kMxfp4Dynamic, kMxfp6E3M2Dynamic])
 def test_flydsl_rejects_non_static_fp8_activation(activation):
     config = MxFp4LinearLayerConfig(activation_quant_key=activation)
-    supported, reason = FlydslMxfp4LinearKernel.can_implement(config)
+    supported, reason = Rdna4Mxfp4LinearKernel.can_implement(config)
     assert not supported and reason
 
 
@@ -82,12 +82,12 @@ def test_flydsl_accepts_fp8_activation_schemes():
     )
 
     config = MxFp4LinearLayerConfig(activation_quant_key=kFp8StaticTensorSym)
-    assert FlydslMxfp4LinearKernel.can_implement(config) == (True, None)
-    assert FlydslMxfp4LinearKernel._supports_quant_scheme(
+    assert Rdna4Mxfp4LinearKernel.can_implement(config) == (True, None)
+    assert Rdna4Mxfp4LinearKernel._supports_quant_scheme(
         kMxfp4Static, kFp8StaticTensorSym
     )
-    assert not FlydslMxfp4LinearKernel._supports_quant_scheme(kMxfp4Static, None)
-    assert FlydslMxfp4LinearKernel._supports_quant_scheme(
+    assert not Rdna4Mxfp4LinearKernel._supports_quant_scheme(kMxfp4Static, None)
+    assert Rdna4Mxfp4LinearKernel._supports_quant_scheme(
         kMxfp4Static, kFp8DynamicTokenSym
     )
 
@@ -97,6 +97,107 @@ def test_flydsl_backend_is_an_explicit_kernel_config_option():
 
     config = KernelConfig(linear_backend_per_quant={"mxfp4": "flydsl"})
     assert config.linear_backend_per_quant == {"mxfp4": "flydsl"}
+
+
+@pytest.mark.parametrize("activation", [None, kMxfp4Dynamic])
+def test_rdna4_mxfp4_auto_uses_per_token_fp8(activation):
+    """A checkpoint's A4 or weight-only default selects native FP8 on RDNA4."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+    )
+
+    supported, reason = Rdna4Mxfp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    with set_current_vllm_config(VllmConfig()):
+        kernel = init_mxfp4_linear_kernel(activation)
+    assert type(kernel) is Rdna4Mxfp4LinearKernel
+    assert kernel.config.activation_quant_key == kFp8DynamicTokenSym
+
+
+@pytest.mark.parametrize("activation", [None, "mxfp4"])
+def test_rdna4_mxfp4_explicit_activation_precedes_backend_default(activation):
+    """Explicit A16/A4 requests with an FP8-only backend fail clearly."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.config.quantization import QuantSpec, layer_target_spec_scope
+
+    supported, reason = Rdna4Mxfp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    config = VllmConfig(
+        kernel_config=KernelConfig(linear_backend_per_quant={"mxfp4": "flydsl"}),
+    )
+    with (
+        set_current_vllm_config(config),
+        layer_target_spec_scope(QuantSpec(activation=activation)),
+        pytest.raises(ValueError),
+    ):
+        init_mxfp4_linear_kernel(kMxfp4Dynamic)
+
+
+@pytest.mark.parametrize(
+    "global_backend,per_quant_backend",
+    [("emulation", None), ("flydsl", "emulation")],
+)
+def test_rdna4_mxfp4_emulation_override_keeps_checkpoint_activation(
+    global_backend, per_quant_backend
+):
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+
+    pytest.importorskip("quark")
+    supported, reason = Rdna4Mxfp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            linear_backend=global_backend,
+            linear_backend_per_quant={"mxfp4": per_quant_backend}
+            if per_quant_backend
+            else None,
+        )
+    )
+    with set_current_vllm_config(config):
+        kernel = init_mxfp4_linear_kernel(kMxfp4Dynamic)
+    assert type(kernel) is EmulationMxfp4LinearKernel
+    assert kernel.config.activation_quant_key == kMxfp4Dynamic
+
+
+def test_rdna4_mxfp4_disabled_kernel_keeps_checkpoint_activation(monkeypatch):
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    pytest.importorskip("quark")
+    supported, reason = Rdna4Mxfp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "Rdna4Mxfp4LinearKernel")
+    with set_current_vllm_config(VllmConfig()):
+        kernel = init_mxfp4_linear_kernel(kMxfp4Dynamic)
+    assert type(kernel) is EmulationMxfp4LinearKernel
+    assert kernel.config.activation_quant_key == kMxfp4Dynamic
+
+
+def test_rdna4_mxfp4_missing_package_keeps_checkpoint_activation(monkeypatch):
+    import importlib.util
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    pytest.importorskip("quark")
+    supported, reason = Rdna4Mxfp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    original_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "flydsl.kernels.gemm.rdna4_mxfp4":
+            return None
+        return original_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    with set_current_vllm_config(VllmConfig()):
+        kernel = init_mxfp4_linear_kernel(kMxfp4Dynamic)
+    assert type(kernel) is EmulationMxfp4LinearKernel
+    assert kernel.config.activation_quant_key == kMxfp4Dynamic
 
 
 @pytest.mark.parametrize("kernel_cls", _TRUE_W4A4_KERNELS)
