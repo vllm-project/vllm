@@ -43,6 +43,8 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4
 
 vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
     --quantization-config '{"linear":{"activation":null,"weight":null}}'
+
+vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 ```
 
 ## Supported Schemes
@@ -53,6 +55,7 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
+| `lut_b_moe` | MoE only: 3-bit indices into an E4M3 codebook with an e8m0 scale per 8x64 tile | MoE only: fp8_e4m3 data, e8m0 per-1x32-block scale | Native on Rubin (SM 10.7) via the tensor core LUT decode. Other GPUs emulate the same numerics for accuracy checks with dequantized weights. Dense layers stay unquantized. |
 | `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
 
 ## Advanced Configuration
