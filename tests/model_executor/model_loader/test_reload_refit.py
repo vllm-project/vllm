@@ -70,8 +70,9 @@ MAX_DEPTH = 8  # attribute hops from a registered module
 # runtime state, not weights: compared by address only
 RUNTIME_STATE = (".kv_cache", ".expert_load_view", ".num_unpadded_tokens_tensors")
 # differs between engines by construction: direct-mode bookkeeping (absent
-# from the layerwise reference) and compile-cache paths keyed by model path
-ENGINE_STATE = ("._ckpt_", "._direct_reload", "._aot_")
+# from the layerwise reference), compile-cache paths keyed by model path, and
+# a memo that cold-start backend selection fills on the first quant config
+ENGINE_STATE = ("._ckpt_", "._direct_reload", "._aot_", "._ocp_mx_scheme")
 SCALARS = (bool, int, float, str, type(None), enum.Enum)
 # engine and model configs: same in both engines but for paths and cache keys
 NOT_WALKED = ("torch", "builtins", "vllm.config", "transformers")
@@ -247,8 +248,9 @@ def _counts(t: torch.Tensor) -> bool:
 def _perturb(name: str, t: torch.Tensor) -> torch.Tensor:
     b = t.roll(1, 0) if t.dim() and t.shape[0] > 1 else t
     if t.dtype in FLOATS:
-        # a factor that isn't a power of two changes every maximum and ratio
-        b = b * 3
+        # a factor that isn't a power of two changes every maximum; a small
+        # one keeps the model's activations in range
+        b = b * 1.25
         if bool((t == t.reshape(-1)[0]).all()):
             # constant: an offset of its own keeps it distinct from the others
             b = b + 1 + zlib.crc32(name.encode()) % 1000 / 1000
@@ -520,15 +522,15 @@ async def test_refit_equals_fresh(case: RefitCase, checkpoints, monkeypatch):
             for key, value in (("", reload), ("_differs", {}), ("_moved", {}))
         },
     }
-    check_logprobs_close(
-        outputs_0_lst=fresh_b_tokens,
-        outputs_1_lst=tokens["b"],
-        name_0="fresh B",
-        name_1="reloaded B",
-    )
-    check_logprobs_close(
-        outputs_0_lst=cold_a_tokens,
-        outputs_1_lst=tokens["a"],
-        name_0="cold A",
-        name_1="reloaded A",
-    )
+    mismatches = []
+    for reference, name in ((fresh_b_tokens, "B"), (cold_a_tokens, "A")):
+        try:
+            check_logprobs_close(
+                outputs_0_lst=reference,
+                outputs_1_lst=tokens[name.lower()],
+                name_0=f"fresh {name}",
+                name_1=f"reloaded {name}",
+            )
+        except AssertionError as e:
+            mismatches.append(str(e))
+    assert not mismatches, "\n".join(mismatches)
