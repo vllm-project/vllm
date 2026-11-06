@@ -5668,6 +5668,26 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 12) is None
 
 
+def test_block_lookup_cache_prefix_blocks():
+    """Same block per hash as get_one_block, in order, stopping at the first
+    miss, scoped to one group."""
+    blocks = [KVCacheBlock(i) for i in range(6)]
+    cache = BlockHashToBlockMap(blocks)
+    hashes = [BlockHash(f"hash{i}".encode()) for i in range(4)]
+    cache.insert(make_block_hash_with_group_id(hashes[0], 0), blocks[1])
+    cache.insert(make_block_hash_with_group_id(hashes[1], 0), blocks[2])
+    cache.insert(make_block_hash_with_group_id(hashes[1], 0), blocks[5])
+    cache.insert(make_block_hash_with_group_id(hashes[2], 0), blocks[3])
+    cache.insert(make_block_hash_with_group_id(hashes[1], 1), blocks[4])
+
+    assert cache.get_prefix_blocks(hashes, 0) == [blocks[1], blocks[2], blocks[3]]
+    assert cache.get_prefix_blocks(hashes, 1) == []
+    assert cache.get_prefix_blocks(hashes[1:], 1) == [blocks[4]]
+    cache.pop(make_block_hash_with_group_id(hashes[1], 0), 2)
+    cache.pop(make_block_hash_with_group_id(hashes[1], 0), 5)
+    assert cache.get_prefix_blocks(hashes, 0) == [blocks[1]]
+
+
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     """Hybrid full+SWA model with a pool sized at the startup minimum should
     admit a prompt longer than the SWA cap, because SlidingWindowManager

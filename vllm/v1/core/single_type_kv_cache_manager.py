@@ -164,7 +164,7 @@ class SingleTypeKVCacheManager(ABC):
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
-        return sum(blk.ref_cnt == 0 and not blk.is_null for blk in blocks)
+        return len([blk for blk in blocks if blk.ref_cnt == 0 and not blk.is_null])
 
     def _has_partial_local_hit(
         self,
@@ -791,17 +791,26 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         else:
             full_block_hashes = block_hashes
 
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [] for _ in range(len(kv_cache_group_ids))
-        )
         # Phase 1: longest run of cached full blocks from the start. A missing
         # block implies every later block misses too (chained hashes).
-        for block_hash in itertools.islice(full_block_hashes, max_length // block_size):
-            cached_block = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
-            if not cached_block:
-                break
-            for computed, cached in zip(computed_blocks, cached_block):
-                computed.append(cached)
+        prefix_hashes = itertools.islice(full_block_hashes, max_length // block_size)
+        computed_blocks: tuple[list[KVCacheBlock], ...]
+        if len(kv_cache_group_ids) == 1:
+            computed_blocks = (
+                block_pool.cached_block_hash_to_block.get_prefix_blocks(
+                    prefix_hashes, kv_cache_group_ids[0]
+                ),
+            )
+        else:
+            computed_blocks = tuple([] for _ in range(len(kv_cache_group_ids)))
+            for block_hash in prefix_hashes:
+                cached_block = block_pool.get_cached_block(
+                    block_hash, kv_cache_group_ids
+                )
+                if not cached_block:
+                    break
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed.append(cached)
         hit_length = len(computed_blocks[0]) * block_size
 
         # Phase 2 (fine-grained only): extend into the first non-full block by
