@@ -200,7 +200,8 @@ class BaseFrontendArgs:
     priority."""
     anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
     """The ``reasoning_effort`` used for Anthropic Messages, token counting,
-    and render requests with ``thinking: {"type": "disabled"}``.
+    and render requests with ``thinking: {"type": "disabled"}`` or
+    ``thinking: {"type": "between_tools"}``.
     ``none`` turns thinking off for models that support it; ``low`` suits
     models that always think
     (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
@@ -336,11 +337,11 @@ class FrontendArgs(BaseFrontendArgs):
     """If provided, the server will require one of these keys to be presented in
     the header.
 
-    Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same server, including
-    `/invocations` (which exposes the same inference capabilities as `/v1`),
-    remain unauthenticated. Do not rely on `--api-key` alone to secure vLLM;
-    see
+    Warning: this only authenticates endpoints under the `/v1`, `/v2`,
+    `/inference`, and `/cohere` path prefixes. Other endpoints on the same
+    server, including `/invocations` (which exposes the same inference
+    capabilities as `/v1`), remain unauthenticated. Do not rely on `--api-key`
+    alone to secure vLLM; see
     https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
     for what it does and does not protect."""
     ssl_keyfile: str | None = None

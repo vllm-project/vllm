@@ -11,7 +11,7 @@ torchvision==0.29.0 # Required for phi3v processor. See https://github.com/pytor
 torchcodec >= 0.14
 PyNvVideoCodec==2.0.4
 cvcuda-cu13==0.19.0 # Nemotron VL GPU image and video frame resize
-flashinfer-python==0.7.2.post1
+flashinfer-python==0.7.3
 apache-tvm-ffi==0.1.11
 tilelang==0.1.12
 # >=1.31.0 keeps execution plans alive for the CUDA graphs recorded from them
@@ -31,4 +31,4 @@ quack-kernels==0.6.5  # Required by MSA
 tokenspeed-mla==2.0.3; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13]==0.1.18
+humming-kernels[cu13]==0.1.19
