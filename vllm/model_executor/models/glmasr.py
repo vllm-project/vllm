@@ -1102,7 +1102,9 @@ class GlmAsrForConditionalGeneration(
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
         if stt_params.task_type != "transcribe":
-            raise ValueError("GLM-ASR does not support translation")
+            raise ValueError(
+                f'GLM-ASR only supports "transcribe", got {stt_params.task_type}'
+            )
         audio = stt_params.audio
         model_config = stt_params.model_config
         tokenizer = cached_tokenizer_from_config(model_config)

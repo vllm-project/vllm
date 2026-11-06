@@ -194,9 +194,7 @@ async def test_transcription_only_model_rejects_translation(mary_had_lamb):
         model_name, _get_server_args(attention_config)
     ) as remote_server:
         client = remote_server.get_async_client()
-        with pytest.raises(
-            openai.BadRequestError, match="does not support translation"
-        ):
+        with pytest.raises(openai.BadRequestError, match="only supports"):
             await client.audio.translations.create(
                 model=model_name,
                 file=mary_had_lamb,
