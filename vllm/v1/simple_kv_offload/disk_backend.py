@@ -15,7 +15,7 @@ import queue
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 
 import torch
 
@@ -179,7 +179,7 @@ class DiskBackend:
                 load_stream,
                 src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
             )
-        if self._max_load_slots > num_buffer_slots:
+        if num_hot_slots:
             self._read_executor = ThreadPoolExecutor(
                 max_workers=self._max_load_slots, thread_name_prefix="kv_read"
             )
@@ -451,7 +451,7 @@ class DiskBackend:
         disk_slots: list[int],
         gpu_blocks: list[int],
         stream: torch.cuda.Stream,
-        before_read: Callable[[], bool] | None = None,
+        while_read: Callable[[Future[None]], bool] | None = None,
     ) -> None:
         """Disk (preadv) -> buffer -> GPU (DMA), interleaved double-buffer."""
         assert self._load_params is not None
@@ -464,18 +464,21 @@ class DiskBackend:
             if prev is not None:
                 prev.synchronize()
 
-            if before_read is not None:
-                before_read()
-            self._readv_slot(buf_slot, disk_slot * self._total_block_bytes)
+            offset = disk_slot * self._total_block_bytes
+            if while_read is not None:
+                assert self._read_executor is not None
+                if not while_read(
+                    self._read_executor.submit(self._readv_slot, buf_slot, offset)
+                ):
+                    while_read = None
+            else:
+                self._readv_slot(buf_slot, offset)
 
             copy_blocks([buf_slot], [gpu_blk], self._load_params)
             ev = torch.Event()
             ev.record(stream)
             prev_dma_events[buf_slot] = ev
 
-        if before_read is not None:
-            while before_read():
-                pass
         for ev in prev_dma_events:
             if ev is not None:
                 ev.synchronize()
@@ -499,33 +502,47 @@ class DiskBackend:
         if active > self._peak_load_slots:
             self._peak_load_slots = active
             logger.info("Hybrid KV load-slot peak: %d", active)
-        hot_iter = iter(hot)
+        hot_index = 0
         previous_hot: torch.Event | None = None
 
-        def hot_batch() -> bool:
-            nonlocal previous_hot
-            pair = next(hot_iter, None)
-            if pair is None:
+        def hot_batch(read: Future[None] | None = None) -> bool:
+            nonlocal hot_index, previous_hot
+            if hot_index == len(hot):
                 return False
             if previous_hot is not None:
                 previous_hot.synchronize()
+            # A cold read may finish while the preceding hot DMA is draining.
+            if read is not None and read.done():
+                return False
             assert self._hot_load_params is not None
-            row, gpu = pair
+            row, gpu = hot[hot_index]
             copy_blocks([row], [gpu], self._hot_load_params)
+            hot_index += 1
             previous_hot = torch.Event()
             previous_hot.record(stream)
             return True
 
+        def while_read(read: Future[None]) -> bool:
+            try:
+                while not read.done() and hot_batch(read):
+                    pass
+            finally:
+                # Even a failed hot copy must drain the read before releasing rows.
+                read.result()
+            return hot_index < len(hot)
+
         try:
             if leased:
-                self._do_load_parallel(cold, leased, stream, hot_batch)
+                self._do_load_parallel(cold, leased, stream, while_read)
             else:
                 self._do_load(
                     [disk for disk, _ in cold],
                     [gpu for _, gpu in cold],
                     stream,
-                    hot_batch,
+                    while_read if hot else None,
                 )
+            while hot_batch():
+                pass
         finally:
             stream.synchronize()
             with self._hot_lock:
@@ -538,7 +555,7 @@ class DiskBackend:
         cold: list[tuple[int, int]],
         leased: list[int],
         stream: torch.cuda.Stream,
-        hot_batch: Callable[[], bool],
+        while_read: Callable[[Future[None]], bool],
     ) -> None:
         assert self._read_executor is not None
         executor = self._read_executor
@@ -558,7 +575,6 @@ class DiskBackend:
         pending = []
 
         def read(i: int):
-            hot_batch()
             return executor.submit(
                 self._read_into,
                 slots[i % len(slots)][0],
@@ -570,7 +586,7 @@ class DiskBackend:
                 pending.append(read(i))
             for i, (_, gpu) in enumerate(cold):
                 index = i % len(slots)
-                pending[index].result()
+                while_read(pending[index])
                 _, params, row = slots[index]
                 copy_blocks([row], [gpu], params)
                 if i + len(slots) < len(cold):
@@ -578,8 +594,6 @@ class DiskBackend:
                     event.record(stream)
                     event.synchronize()
                     pending[index] = read(i + len(slots))
-            while hot_batch():
-                pass
         finally:
             for future in pending:
                 future.cancel()
