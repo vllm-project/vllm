@@ -23,7 +23,6 @@ import math
 from collections.abc import Iterable
 from itertools import islice
 
-import regex as re
 import torch
 from torch import nn
 from transformers import BloomConfig
@@ -314,10 +313,18 @@ class BloomModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+def _add_transformer_prefix(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        if not name.startswith("transformer."):
+            name = "transformer." + name
+        yield name, tensor
+
+
 class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex={re.compile(r"^(?!transformer\.)"): "transformer."}
-    )
+    # A transform, because `SupportsQuant` applies name rules to the quant config.
+    hf_to_vllm_mapper = WeightsMapper(weights_transforms=[_add_transformer_prefix])
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

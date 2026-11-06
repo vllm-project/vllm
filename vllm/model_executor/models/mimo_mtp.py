@@ -151,6 +151,11 @@ class MiMoMultiTokenPredictor(nn.Module):
         return logits
 
 
+# The checkpoint carries the full model; keep only the MTP layers and the shared
+# embedding/head.
+_NON_MTP_WEIGHT = re.compile(r"^(?!.*(?:mtp_layers|embed_tokens|lm_head))")
+
+
 class MiMoMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -167,11 +172,7 @@ class MiMoMTP(nn.Module):
         # wrapper around the transformer block; remap onto the offset index.
         start = self.config.num_hidden_layers
         self.hf_to_vllm_mapper = WeightsMapper(
-            # The checkpoint carries the full model; keep only the MTP layers
-            # and the shared embedding/head.
-            orig_to_new_regex={
-                re.compile(r"^(?!.*(?:mtp_layers|embed_tokens|lm_head))"): None
-            },
+            orig_to_new_regex={_NON_MTP_WEIGHT: None},
             orig_to_new_substr={
                 ".self_attn.": ".mtp_block.self_attn.",
                 ".mlp.": ".mtp_block.mlp.",

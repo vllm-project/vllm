@@ -86,10 +86,12 @@ class DeinterleaveQKV(ConversionOps):
         source_patterns: list[str],
         target_patterns: list[str],
         *,
-        model: nn.Module,
+        model: nn.Module | None,
         full_layer_name: str,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
+        if model is None:
+            raise ValueError("`DeinterleaveQKV` needs the model to find `output_dim`")
         ((tensor,),) = input_dict.values()
         try:
             param = model.get_parameter(full_layer_name)

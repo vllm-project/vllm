@@ -5,13 +5,17 @@ import pytest
 import regex as re
 import torch
 from transformers.conversion_mapping import WeightConverter, WeightRenaming
-from transformers.core_model_loading import Chunk, Transpose
+from transformers.core_model_loading import Chunk, Concatenate, Transpose
 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models import ernie_mtp, mimo_mtp
+from vllm.model_executor.models.bloom import BloomForCausalLM
 from vllm.model_executor.models.falcon import DeinterleaveQKV
+from vllm.model_executor.models.openvla import OpenVLAForActionPrediction
+from vllm.model_executor.models.qwen2_moe import Qwen2MoeForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -388,13 +392,20 @@ def test_weights_mapper_transform_rejects_one_to_many_converters():
         list(mapper.apply([("w", torch.ones(2))]))
 
 
-def test_rename_mapper_keeps_renames_but_not_converters():
-    """Consumers that name modules must keep the rename but never run a converter."""
-    renaming = WeightRenaming("old", "new")
-    converter = WeightConverter("w", "w", [Transpose()])
-    mapper = WeightsMapper(orig_to_new_transform=[renaming, converter])
+def test_weights_mapper_transform_rejects_many_to_one_converters():
+    converter = WeightConverter(["a.x", "a.y"], "a.z", [Concatenate()])
+    mapper = WeightsMapper(orig_to_new_transform=[converter])
 
-    assert mapper.get_rename_mapper().orig_to_new_transform == [renaming]
+    with pytest.raises(ValueError, match="one-to-one"):
+        list(mapper.apply([("a.x", torch.ones(2)), ("a.y", torch.zeros(2))]))
+
+
+def test_rename_mapper_keeps_converter_renames():
+    """Name-only consumers never run operations, but need the renamed name."""
+    converter = WeightConverter("old.w", "new.w", [Transpose()])
+    mapper = WeightsMapper(orig_to_new_transform=[converter])
+
+    assert mapper.get_rename_mapper().map_name("old.w.weight") == "new.w.weight"
 
 
 def _falcon_qkv_module(output_dim: int | None, shape: tuple[int, ...]):
@@ -454,3 +465,70 @@ def test_deinterleave_qkv_skips_weights_without_a_local_output_dim():
 
     assert missing is weight
     assert untagged is weight
+
+
+def test_deinterleave_qkv_requires_the_model():
+    mapper = _deinterleave_mapper(2, 2)
+
+    with pytest.raises(ValueError, match="needs the model"):
+        list(mapper.apply([("qkv.weight", torch.ones(6, 2))]))
+
+
+def test_deinterleave_qkv_loads_through_auto_weights_loader():
+    module = _falcon_qkv_module(0, (6, 1))
+    interleaved = torch.tensor([[0.0], [2.0], [4.0], [1.0], [3.0], [5.0]])
+
+    loader = AutoWeightsLoader(module)
+    weights = [("qkv.weight", interleaved)]
+    loader.load_weights(weights, mapper=_deinterleave_mapper(2, 2))
+
+    assert module.qkv.weight.equal(torch.arange(6.0).unsqueeze(1))
+
+
+def test_bloom_mapper_adds_the_prefix_without_renaming_quant_config_names():
+    mapper = BloomForCausalLM.hf_to_vllm_mapper
+
+    mapped = [name for name, _ in mapper.apply([("h.0.w", torch.ones(1))])]
+
+    assert mapped == ["transformer.h.0.w"]
+    assert mapper.get_rename_mapper().map_name("mlp.dense") == "mlp.dense"
+
+
+@pytest.mark.parametrize(
+    ("module", "name", "kept"),
+    [
+        (mimo_mtp, "model.mtp_layers.0.self_attn.q_proj.weight", True),
+        (mimo_mtp, "model.embed_tokens.weight", True),
+        (mimo_mtp, "lm_head.weight", True),
+        (mimo_mtp, "model.layers.0.self_attn.q_proj.weight", False),
+        (ernie_mtp, "mtp_block.0.mlp.gate_proj.weight", True),
+        (ernie_mtp, "model.embed_tokens.weight", True),
+        (ernie_mtp, "model.layers.0.mlp.gate_proj.weight", False),
+    ],
+)
+def test_mtp_mappers_keep_only_mtp_weights(module, name, kept):
+    mapper = WeightsMapper(orig_to_new_regex={module._NON_MTP_WEIGHT: None})
+
+    assert (mapper.map_name(name) == name) is kept
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("vision_backbone.featurizer.x", "vision_backbone.dinov2_featurizer.x"),
+        ("vision_backbone.fused_featurizer.x", "vision_backbone.siglip_featurizer.x"),
+        ("a.ls1.scale_factor", "a.ls1.gamma"),
+        ("a.ls2.scale_factor", "a.ls2.gamma"),
+    ],
+)
+def test_openvla_mapper_renames_vision_weights(name, expected):
+    assert OpenVLAForActionPrediction.hf_to_vllm_mapper.map_name(name) == expected
+
+
+def test_qwen2_moe_mapper_unsqueezes_only_1d_shared_expert_gates():
+    name = "model.layers.0.mlp.shared_expert_gate.weight"
+    weights = [(name, torch.ones(4)), (name, torch.ones(1, 4))]
+
+    mapped = Qwen2MoeForCausalLM.hf_to_vllm_mapper.apply(weights)
+
+    assert [tensor.dim() for _, tensor in mapped] == [2, 2]

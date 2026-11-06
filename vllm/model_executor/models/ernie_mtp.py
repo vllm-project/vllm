@@ -141,6 +141,11 @@ class ErnieMultiTokenPredictor(nn.Module):
         return logits
 
 
+# Checkpoint bundles the full base model; only MTP, embed_tokens and lm_head weights
+# belong to this module.
+_NON_MTP_WEIGHT = re.compile(r"^(?!.*(?:mtp|embed_tokens|lm_head))")
+
+
 class ErnieMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -150,11 +155,7 @@ class ErnieMTP(nn.Module):
         # checkpoint; rewrite them into `model.layers.{spec_layer}.*`.
         spec_layer = self.config.num_hidden_layers
         self.hf_to_vllm_mapper = WeightsMapper(
-            # Checkpoint bundles the full base model; only MTP, embed_tokens and
-            # lm_head weights belong to this module.
-            orig_to_new_regex={
-                re.compile(r"^(?!.*(?:mtp|embed_tokens|lm_head))"): None
-            },
+            orig_to_new_regex={_NON_MTP_WEIGHT: None},
             orig_to_new_substr={
                 "model.mtp_emb_norm.0.": f"model.layers.{spec_layer}.mtp_emb_norm.",
                 "model.mtp_hidden_norm.0.": (

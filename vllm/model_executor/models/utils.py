@@ -171,20 +171,19 @@ class WeightsMapper:
             key, matched = transform.rename_source_key(key)
             if matched is None:
                 continue
-            for op in getattr(transform, "operations", ()):
+            operations = getattr(transform, "operations", ())
+            sources, targets = transform.source_patterns, transform.target_patterns
+            if operations and (len(sources) != 1 or len(targets) != 1):
+                raise ValueError(f"Only one-to-one conversions work: {transform!r}")
+            for op in operations:
                 converted = op.convert(
                     {matched: [data]},
-                    source_patterns=transform.source_patterns,
-                    target_patterns=transform.target_patterns,
+                    source_patterns=sources,
+                    target_patterns=targets,
                     full_layer_name=out_name,
                     model=model,
                     config=getattr(model, "config", None),
                 )
-                if len(converted) != 1:
-                    raise ValueError(
-                        f"{op!r} produced {len(converted)} tensors from {key!r}, "
-                        "but only one-to-one conversions are supported"
-                    )
                 data = next(iter(converted.values()))
                 data = data[0] if isinstance(data, list) else data
         return data
@@ -242,9 +241,6 @@ class WeightsMapper:
         remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
         return replace(
             self,
-            orig_to_new_transform=[
-                t for t in self.orig_to_new_transform if not hasattr(t, "operations")
-            ],
             orig_to_new_regex=remove_none(self.orig_to_new_regex),
             orig_to_new_substr=remove_none(self.orig_to_new_substr),
             orig_to_new_stacked={},
