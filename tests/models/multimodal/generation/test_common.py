@@ -373,6 +373,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25,)],
         # TP=2 regression test for the vision tower QKV split in dots_ocr.
         tensor_parallel_size=2,
+        patch_hf_runner=model_utils.dots_ocr_patch_hf_runner,
         marks=multi_gpu_marks(num_gpus=2),
     ),
     "gemma3": VLMTestInfo(

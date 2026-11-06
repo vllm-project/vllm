@@ -1119,6 +1119,26 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def dots_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Strip ``mm_token_type_ids`` from the processor output.
+
+    dots.ocr's processor emits it, but its HF ``forward`` does not accept it,
+    so ``generate()`` rejects the kwargs as unused.
+    """
+    hf_processor = hf_model.processor
+    if hf_processor is None:
+        return hf_model
+
+    def processor(*args, **kwargs):
+        inputs = hf_processor(*args, **kwargs)
+        if hasattr(inputs, "pop"):
+            inputs.pop("mm_token_type_ids", None)
+        return inputs
+
+    hf_model.processor = processor
+    return hf_model
+
+
 def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Declare the video modality that CohereCompass omits upstream.
 
