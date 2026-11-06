@@ -1,0 +1,164 @@
+meta:
+  title: "Seed-OSS-36B"
+  slug: "seed-oss-36b"
+  provider: "Seed (ByteDance)"
+  description: "ByteDance Seed-OSS 36B dense model with unique 'thinking budget' control and 512K context support"
+  date_added: 2025-08-28
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  related_recipes: []
+
+model:
+  model_id: "ByteDance-Seed/Seed-OSS-36B-Instruct"
+  min_vllm_version: "0.11.0"
+  architecture: dense
+  parameter_count: "36B"
+  active_parameters: "36B"
+  context_length: 524288
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Pinned transformers commit required for Seed-OSS tokenizer compatibility"
+    command: "uv pip install git+https://github.com/huggingface/transformers.git@56d68c6706ee052b445e1e476056ed92ac5eb383"
+
+features:
+  tool_calling:
+    description: "Seed-OSS tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "seed_oss"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 86
+    description: "Native BF16 weights on 8x GPU (TP=8)"
+    extra_args:
+      - "--tensor-parallel-size"
+      - "8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Seed-OSS-36B is a dense language model from ByteDance Seed with a unique **thinking
+  budget** feature for controlled reasoning, and up to 512K context. Users can choose
+  tensor-parallel (low latency) or data-parallel (high throughput).
+
+  ## Prerequisites
+
+  - Hardware: 8x GPU recommended (TP=8); also runs on consumer hardware like RTX 3090
+  - vLLM >= 0.11.0 (support may require main branch)
+  - Latest transformers for compatibility
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  uv pip install git+https://github.com/huggingface/transformers.git@56d68c6706ee052b445e1e476056ed92ac5eb383
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Launch commands
+
+  NVIDIA:
+
+  ```bash
+  vllm serve ByteDance-Seed/Seed-OSS-36B-Instruct \
+    --host localhost --port 8000 \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser seed_oss
+  ```
+
+  AMD:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve ByteDance-Seed/Seed-OSS-36B-Instruct \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice --tool-call-parser seed_oss \
+    --trust-remote-code
+  ```
+
+  Tuning:
+  - `--max-model-len=65536` works well; max is 512K.
+  - `--max-num-batched-tokens=32768` for prompt-heavy; reduce to 8K–16K for latency.
+  - `--gpu-memory-utilization=0.95` to maximize KV cache.
+
+  ## Thinking Budget
+
+  Control the model's chain-of-thought length via `chat_template_kwargs`. Recommended
+  values are multiples of 512 (512, 1K, 2K, 4K, 8K, 16K). Use `0` for direct answers.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  model = client.models.list().data[0].id
+
+  response = client.chat.completions.create(
+      model=model,
+      messages=[
+          {"role": "system", "content": "You are a helpful assistant"},
+          {"role": "user", "content": "Janet's ducks lay 16 eggs per day..."},
+      ],
+      extra_body={"chat_template_kwargs": {"thinking_budget": 512}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  curl:
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "ByteDance-Seed/Seed-OSS-36B-Instruct",
+      "messages": [{"role": "user", "content": "Explain quantum computing"}],
+      "chat_template_kwargs": {"thinking_budget": 512}
+    }'
+  ```
+
+  The model emits `<seed:think>` blocks with `<seed:cot_budget_reflect>` markers that
+  report token usage against the budget.
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm --model ByteDance-Seed/Seed-OSS-36B-Instruct \
+    --endpoint /v1/completions --host localhost --port 8000 \
+    --dataset-name random --random-input 800 --random-output 100 \
+    --request-rate 2 --num-prompt 100
+  ```
+
+  ## References
+
+  - [Seed-OSS-36B-Instruct on Hugging Face](https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct)

@@ -160,6 +160,8 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     Skips the parts of __init__ that require a real VllmConfig / model
     by patching the attributes directly after construction.
     """
+    from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(budgets)
     mgr.path_token_budgets = {"default": mgr.token_budgets}
@@ -252,6 +254,15 @@ class TestFindBudgetGraph:
     def test_num_graphs_to_capture_tracks_budgets(self):
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
+
+    def test_capture_skipped_without_supported_modalities(self):
+        mgr = _make_manager_with_budgets([2048, 4096])
+        mgr.config.modalities = []
+        mgr.model = None  # capture must not touch the model
+
+        assert mgr.get_num_graphs_to_capture() == 0
+        mgr.capture(graph_pool=object())
+        assert not mgr.is_captured()
 
 
 # ---------------------------------------------------------------------------
@@ -1045,6 +1056,278 @@ class TestGetInputModality:
 
 
 # ---------------------------------------------------------------------------
+# GPU tests — DeepSeek-VL2 batched-tile encoder CUDA graph
+# ---------------------------------------------------------------------------
+
+# DeepSeek-VL2 mock constants (kept small for fast capture)
+_DSV2_H = 2  # projector output side per tile (h = w)
+_DSV2_DIM = 16  # hidden size
+_DSV2_IMG_SIZE = 4  # each tile is 4×4 pixels
+_DSV2_BUDGETS = [16, 64]
+_DSV2_MAX_BATCH = 4
+
+
+def _dsv2_output_tokens(tw: int, th: int) -> int:
+    """Expected output tokens for an image with (tw, th) local tiles."""
+    h = w = _DSV2_H
+    return h * (w + 1) + th * h * (tw * w + 1) + 1
+
+
+def _make_deepseek_vl2_mm_kwargs(
+    spatial_crops: list[list[int]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, Any]:
+    """spatial_crops: [[tw, th], ...] per image."""
+    total_tiles = sum(1 + int(tw) * int(th) for tw, th in spatial_crops)
+    pixel_values = torch.randn(
+        total_tiles, 3, _DSV2_IMG_SIZE, _DSV2_IMG_SIZE, device=device, dtype=dtype
+    )
+    return {
+        "pixel_values": pixel_values,
+        "images_spatial_crop": torch.tensor(
+            spatial_crops, dtype=torch.long, device=device
+        ),
+    }
+
+
+class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
+    """Mock of DeepseekVLV2ForCausalLM for CUDA graph tests.
+
+    Simulates the batched-tile ViT pattern: pixel_values is
+    [N_tiles, 3, H, W], output is assembled with newlines and
+    view-separator in postprocess_encoder_output.
+    """
+
+    def __init__(self):
+        super().__init__()
+        hw = _DSV2_H * _DSV2_H
+        in_features = 3 * _DSV2_IMG_SIZE * _DSV2_IMG_SIZE
+        self.proj = torch.nn.Linear(in_features, hw * _DSV2_DIM)
+        self.image_newline = torch.nn.Parameter(torch.randn(_DSV2_DIM))
+        self.view_seperator = torch.nn.Parameter(torch.randn(_DSV2_DIM))
+        self.global_view_pos = "head"
+
+    def get_max_frames_per_video(self) -> int:
+        return 1
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=_DSV2_DIM,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
+        return (_dsv2_output_tokens(1, 1), 128)
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        h = w = _DSV2_H
+        specs = []
+        for row in mm_kwargs["images_spatial_crop"].tolist():
+            tw, th = int(row[0]), int(row[1])
+            if tw == 0 or th == 0:
+                break
+            specs.append(
+                EncoderItemSpec(
+                    input_size=1 + tw * th,
+                    output_tokens=h * (w + 1) + th * h * (tw * w + 1) + 1,
+                )
+            )
+        return specs
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        images_spatial_crop = mm_kwargs["images_spatial_crop"]
+
+        if not indices:
+            return {
+                "pixel_values": pixel_values[:0],
+                "images_spatial_crop": images_spatial_crop[:0],
+            }
+
+        tiles_per_image = [
+            1 + int(row[0]) * int(row[1]) for row in images_spatial_crop.tolist()
+        ]
+        cum = [0]
+        for t in tiles_per_image:
+            cum.append(cum[-1] + t)
+
+        selected_pv = torch.cat([pixel_values[cum[i] : cum[i + 1]] for i in indices])
+        return {
+            "pixel_values": selected_pv,
+            "images_spatial_crop": images_spatial_crop[list(indices)],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        hw = _DSV2_H * _DSV2_H
+        max_tiles = (token_budget + hw - 1) // hw
+        dummy = torch.randn(
+            max_tiles, 3, _DSV2_IMG_SIZE, _DSV2_IMG_SIZE, device=device, dtype=dtype
+        )
+        return EncoderCudaGraphCaptureInputs(values={"pixel_values": dummy})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]}
+        )
+
+    def _tile_forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Project tiles: [N, 3, H, W] → [N, hw, DIM]."""
+        n = pixel_values.shape[0]
+        flat = pixel_values.view(n, -1)
+        hw = _DSV2_H * _DSV2_H
+        return self.proj(flat).view(n, hw, _DSV2_DIM)
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return self._tile_forward(values["pixel_values"])
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        # Manager always runs `postprocess_encoder_output` after this, whether
+        # the batch went through eager or CUDA graph replay, so this must
+        # return the same raw per-tile shape as `encoder_cudagraph_forward`.
+        return self._tile_forward(mm_kwargs["pixel_values"])
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        assert batch_mm_kwargs is not None
+        output = outputs["default"]
+        images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
+        _, hw, n_dim = output.shape
+        h = w = int(hw**0.5)
+
+        tile_offset = 0
+        for rank, img_idx in enumerate(indices):
+            tw = int(images_spatial_crop[rank][0])
+            th = int(images_spatial_crop[rank][1])
+            n_tiles = 1 + tw * th
+            tiles = output[tile_offset : tile_offset + n_tiles]
+            tile_offset += n_tiles
+
+            global_f = tiles[0].view(h, w, n_dim)
+            newline_g = self.image_newline.view(1, 1, n_dim).expand(h, 1, n_dim)
+            global_f = torch.cat([global_f, newline_g], dim=1).view(-1, n_dim)
+
+            local_f = tiles[1:].view(th, tw, h, w, n_dim)
+            local_f = local_f.permute(0, 2, 1, 3, 4).reshape(th * h, tw * w, n_dim)
+            newline_l = self.image_newline.view(1, 1, n_dim).expand(th * h, 1, n_dim)
+            local_f = torch.cat([local_f, newline_l], dim=1).view(-1, n_dim)
+
+            if self.global_view_pos == "head":
+                emb = torch.cat([global_f, self.view_seperator[None], local_f])
+            else:
+                emb = torch.cat([local_f, self.view_seperator[None], global_f])
+
+            if isinstance(dest, dict):
+                dest[img_idx] = emb.clone() if clone else emb
+            else:
+                dest[rank] = emb.clone() if clone else emb
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+class TestDeepseekVL2CudaGraph:
+    """CUDA graph tests for the batched-tile encoder pattern (DeepSeek-VL2)."""
+
+    def setup_method(self):
+        self.device = torch.device("cuda:0")
+        self.dtype = torch.float16
+        self.model = MockDeepseekVL2Model().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.model, _DSV2_BUDGETS, _DSV2_MAX_BATCH, self.device, self.dtype
+        )
+        self.graph_pool = current_platform.graph_pool_handle()
+        self.mgr.capture(graph_pool=self.graph_pool)
+
+    def test_capture_creates_one_graph_per_budget(self):
+        assert set(self.mgr.budget_graphs["default"].keys()) == set(_DSV2_BUDGETS)
+
+    def test_execute_returns_one_tensor_per_image(self):
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs(
+            [[1, 1], [1, 1]], self.device, self.dtype
+        )
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_output_tokens_1x1_tile(self):
+        # global=h*(w+1)=2*3=6, local=1*2*(1*2+1)=6, sep=1 → 13
+        expected = _dsv2_output_tokens(1, 1)
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs([[1, 1]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (expected, _DSV2_DIM)
+
+    def test_output_tokens_2x1_tile(self):
+        # global=6, local=1*2*(2*2+1)=10, sep=1 → 17
+        expected = _dsv2_output_tokens(2, 1)
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs([[2, 1]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (expected, _DSV2_DIM)
+
+    def test_output_tokens_multi_image(self):
+        # Image 0: tw=1,th=1 → 13;  Image 1: tw=2,th=1 → 17
+        e0 = _dsv2_output_tokens(1, 1)
+        e1 = _dsv2_output_tokens(2, 1)
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs(
+            [[1, 1], [2, 1]], self.device, self.dtype
+        )
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (e0, _DSV2_DIM)
+        assert result[1].shape == (e1, _DSV2_DIM)
+
+    def test_eager_fallback_when_tokens_exceed_all_budgets(self):
+        # tw=4,th=4: global=6, local=4*2*(4*2+1)=72, sep=1 → 79 > max budget 64
+        tw, th = 4, 4
+        expected = _dsv2_output_tokens(tw, th)
+        assert expected > _DSV2_BUDGETS[-1], "test precondition: must exceed max budget"
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs([[tw, th]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (expected, _DSV2_DIM)
+        assert self.mgr.graph_misses >= 1
+
+    def test_graph_hit_counter(self):
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs(
+            [[1, 1], [1, 1]], self.device, self.dtype
+        )
+        self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_hits == 2
+
+
+# ---------------------------------------------------------------------------
 # GPU tests — video capture, replay, fallback, and mixed image+video
 # ---------------------------------------------------------------------------
 
@@ -1074,6 +1357,24 @@ class TestEncoderCudaGraphVideoReplay:
     def test_capture_creates_one_graph_per_budget(self):
         assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
         assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
+
+    def test_frame_slots_capped_by_budget(self):
+        """A large per-video frame limit must not inflate small graphs."""
+        mgr = _make_manager_for_gpu(
+            self.model,
+            _BUDGETS,
+            _VIDEO_MAX_BATCH,
+            self.device,
+            self.dtype,
+            max_frames_per_batch=1000,
+        )
+        mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        for budget, meta in mgr.budget_graphs["default"].items():
+            assert meta.max_frames_per_batch == budget
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        result = mgr.execute(_make_video_mm_kwargs(grid_thw, self.device, self.dtype))
+        assert result is not None
+        assert [r.shape[0] for r in result] == [8, 4]
 
     # --- output shape ---
 
@@ -1248,3 +1549,95 @@ class TestInitInvariantValidation:
 
         with pytest.raises(ValueError, match="must be positive"):
             CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
+
+
+# ---------------------------------------------------------------------------
+# FlashInfer cu_seqlens replay padding (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+class TestFlashInferCuSeqlensPadding:
+    """A replay pads its cu_seqlens into the buffer captured at a larger batch
+    size. The padded buffer must equal the cu_seqlens computed for the same
+    inputs at the capture batch size. FlashInfer packs the q/k/o and v offsets
+    into one tensor and splits it at its midpoint, so each half has to stay in
+    its own half of the capture buffer."""
+
+    HIDDEN_SIZE = 16
+
+    def _cu_seqlens(self, flashinfer: bool, seq_lens: list[int], pad_to: int):
+        import numpy as np
+
+        from vllm.model_executor.layers.attention.mm_encoder_attention import (
+            MMEncoderAttention,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        backend = (
+            AttentionBackendEnum.FLASHINFER
+            if flashinfer
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        cu_seqlens = np.concatenate([[0], np.cumsum(seq_lens)]).astype(np.int32)
+        cu_seqlens = np.concatenate(
+            [cu_seqlens, np.full(pad_to - len(seq_lens), cu_seqlens[-1], np.int32)]
+        )
+        return MMEncoderAttention.maybe_recompute_cu_seqlens(
+            backend,
+            cu_seqlens,
+            self.HIDDEN_SIZE,
+            1,
+            torch.device("cpu"),
+        )
+
+    @staticmethod
+    def _qwen3_vl_padding_fn(flashinfer: bool):
+        from vllm.model_executor.models.qwen3_vl import (
+            Qwen3VLForConditionalGeneration,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        backend = (
+            AttentionBackendEnum.FLASHINFER
+            if flashinfer
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        model = SimpleNamespace(
+            is_multimodal_pruning_enabled=False,
+            get_max_frames_per_video=lambda: 16,
+            visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
+        )
+        config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
+            cast(Any, model)
+        )
+        # Same lookup as EncoderCudaGraphManager replay.
+        return config.padding_logics.get(
+            "cu_seqlens", EncoderCudaGraphManager._copy_padded_buffer
+        )
+
+    # (seq_lens, replay batch size, capture batch size). The FlashInfer batch
+    # buckets are 8, 16, 32 and 64.
+    CASES = [
+        ([49], 2, 16),  # bucket 8 replayed into bucket 16
+        ([49, 196], 2, 16),
+        ([64] * 9, 9, 32),  # bucket 16 replayed into bucket 32
+        ([49] * 3, 3, 8),  # same bucket
+    ]
+
+    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
+    def test_replay_padding_matches_capture_size_metadata(
+        self,
+        flashinfer: bool,
+        seq_lens: list[int],
+        replay_batch: int,
+        capture_batch: int,
+    ):
+        capture = self._cu_seqlens(flashinfer, [49] * capture_batch, capture_batch)
+        replay = self._cu_seqlens(flashinfer, seq_lens, replay_batch)
+        want = self._cu_seqlens(flashinfer, seq_lens, capture_batch)
+        assert want.shape == capture.shape
+
+        buf = torch.full_like(capture, -1)
+        self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
+        assert torch.equal(buf, want)

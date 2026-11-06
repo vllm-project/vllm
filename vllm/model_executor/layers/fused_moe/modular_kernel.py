@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import final
+from typing import Any, final
 
 import torch
 
@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
@@ -94,6 +95,49 @@ class FusedMoEActivationFormat(Enum):
     The batched experts format (num experts, max tokens per expert, hidden dim)
     """
     BatchedExperts = ("batched_experts",)
+    """
+    Like 'Standard' (num_tokens, hidden dim), but the row count is an upper
+    bound rather than the exact token count, so some rows are inactive padding.
+
+    Produced by all2all backends (DeepEP v2) that cannot report the received
+    token count on the host without a device sync. Padding comes from the
+    worst-case recv allocation (decode/cudagraph mode, where the tail rows are
+    left uninitialized) and from per-expert block alignment (prefill mode,
+    where the gaps are zeroed).
+
+    Inactive rows are marked by setting all of their `topk_ids` slots to -1;
+    when available, `ExpertTokensMetadata.psum_recv_per_rank` carries the
+    real/padding boundary on device. Consuming kernels must therefore either
+    skip such rows or produce results for them that are safe to discard --
+    padding rows may hold uninitialized garbage, so an expert that derives
+    routing by scanning every row will corrupt real tokens if it ignores the
+    -1 markers. Only experts declaring this format are paired with such a
+    prepare/finalize step; see `is_superset`.
+    """
+    PaddedStandard = ("padded_standard",)
+
+    def is_superset(self, pf_format: "FusedMoEActivationFormat") -> bool:
+        """Whether this (experts) format is a superset of ``pf_format``, i.e.
+        an experts kernel declaring ``self`` can consume activations produced
+        by a prepare/finalize step in ``pf_format``.
+
+        The relation is directional: ``self`` is the experts format and
+        ``pf_format`` is the prepare/finalize format. ``PaddedStandard`` is a
+        superset of ``Standard`` (a padding-aware kernel treats unpadded input
+        as the zero-padding case), but not vice versa. All other formats are
+        only supersets of themselves.
+        """
+        if self == pf_format:
+            return True
+        return (
+            self == FusedMoEActivationFormat.PaddedStandard
+            and pf_format == FusedMoEActivationFormat.Standard
+        )
+
+    @property
+    def is_batched(self) -> bool:
+        """Whether this is the disjoint ``BatchedExperts`` format."""
+        return self == FusedMoEActivationFormat.BatchedExperts
 
 
 @dataclass
@@ -257,6 +301,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
+
+    def supports_dbo(self) -> bool:
+        """Indicates whether or not this class can run under DBO.
+
+        Defaults to supports_async(). A class whose synchronous prepare and
+        finalize do their own DBO compute/comm handoff can return True here
+        while keeping supports_async() False.
+        """
+        return self.supports_async()
 
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether ``finalize`` can be skipped for a deferring consumer.
@@ -482,6 +535,10 @@ class FusedMoEExperts(ABC):
     # the active experts kernel.
     consumes_expert_mask: bool = False
 
+    # Called with the unweighted GEMM2 rows and the output to weight and reduce
+    # into, replacing the experts' own top-k reduction.
+    post_gemm2_hook: Callable[[UnfinalizedMoEOutput, torch.Tensor], None] | None = None
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -492,16 +549,15 @@ class FusedMoEExperts(ABC):
         """moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+        is_batched = self.activation_format().is_batched
+        if not is_batched and (
             max_num_tokens is not None or num_dispatchers is not None
         ):
             raise ValueError(
                 "max_num_tokens and num_dispatchers should only be set for "
                 "BatchedExperts activation format."
             )
-        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
-            max_num_tokens is None or num_dispatchers is None
-        ):
+        elif is_batched and (max_num_tokens is None or num_dispatchers is None):
             raise ValueError(
                 "max_num_tokens and num_dispatchers must be set for "
                 "BatchedExperts activation format."
@@ -517,6 +573,38 @@ class FusedMoEExperts(ABC):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
+
+    # Tensors this object allocates that its kernels read.
+    kept_constants: tuple[str, ...] = ()
+
+    def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
+        """Point ``kept_constants`` at tensors kept on ``layer`` (as ``prefix +
+        name.lstrip("_")``), refilled in place: every post-load rerun builds a
+        new experts object, and captured CUDA graphs read the first one's."""
+        for name in self.kept_constants:
+            value = getattr(self, name, None)
+            if isinstance(value, torch.Tensor):
+                setattr(
+                    self, name, refill_derived(layer, prefix + name.lstrip("_"), value)
+                )
+
+    def _uses_post_gemm2_hook(self, num_tokens: int) -> bool:
+        return self.post_gemm2_hook is not None and num_tokens > 0
+
+    def _run_post_gemm2_hook(
+        self,
+        unfinalized: torch.Tensor | UnfinalizedMoEOutput,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.post_gemm2_hook is not None
+        assert isinstance(unfinalized, UnfinalizedMoEOutput)
+        if output is None:
+            rows = unfinalized.gemm2_permuted
+            output = rows.new_empty(
+                (unfinalized.expanded_idx_to_permuted_idx.shape[0], rows.shape[1])
+            )
+        self.post_gemm2_hook(unfinalized, output)
+        return output
 
     @staticmethod
     def is_monolithic() -> bool:
@@ -535,8 +623,9 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
-        """A property which is a tuple of the input and output activation formats
-        for the 'apply' method.
+        """The activation format this experts kernel consumes. A kernel declaring
+        ``PaddedStandard`` also accepts ``Standard`` input (see
+        ``FusedMoEActivationFormat.is_superset``).
         """
         raise NotImplementedError
 
@@ -570,7 +659,11 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
-        elif moe_config.has_hash_routing and cls.is_monolithic():
+        elif (
+            moe_config.has_hash_routing
+            and cls.is_monolithic()
+            and not cls._supports_hash_routing()
+        ):
             return False, _make_reason("hash routing")
         elif moe_config.require_decomposed_backend and cls.is_monolithic():
             return False, _make_reason("routes adjusted after routing")
@@ -589,7 +682,7 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"{moe_config.hidden_dim} hidden dim is not supported"
             )
-        elif activation_format != cls.activation_format():
+        elif not cls.activation_format().is_superset(activation_format):
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
@@ -649,6 +742,15 @@ class FusedMoEExperts(ABC):
         in addition to the experts if certain routers are not supported.
         """
         return True
+
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        """Whether a monolithic kernel implements hash routing itself.
+
+        Kernels that return True receive `input_ids` and `hash_indices_table`
+        in `apply()` for layers with a hash-routing table.
+        """
+        return False
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -820,6 +922,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
+
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        """Hidden size of the finalized output. Experts that drop the hidden
+        padding return the unpadded size."""
+        return hidden_dim
 
     @abstractmethod
     def workspace_shapes(
@@ -1206,7 +1313,7 @@ class FusedMoEKernelModularImpl:
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             (
                 a1q,
@@ -1299,7 +1406,8 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            return torch.empty_like(a1q, dtype=in_dtype)
+            out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
+            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(
@@ -1394,7 +1502,7 @@ class FusedMoEKernelModularImpl:
 
         """
         if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled()
+            assert not dbo_enabled() or self.prepare_finalize.supports_dbo()
 
             self.prepare_finalize.finalize(
                 output,
@@ -1483,7 +1591,12 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
-        output = torch.empty_like(hidden_states)
+        output = hidden_states.new_empty(
+            (
+                *hidden_states.shape[:-1],
+                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
+            )
+        )
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1575,11 +1688,20 @@ class FusedMoEKernelMonolithicImpl:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
+        # Only experts with _supports_hash_routing() accept these.
+        hash_kwargs: dict[str, Any] = {}
+        if hash_indices_table is not None:
+            hash_kwargs = {
+                "input_ids": input_ids,
+                "hash_indices_table": hash_indices_table,
+            }
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1612,6 +1734,7 @@ class FusedMoEKernelMonolithicImpl:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_replay_out=routing_replay_out,
+            **hash_kwargs,
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
@@ -1693,9 +1816,8 @@ class FusedMoEKernel:
         and self.fused_experts here.
         """
         self.prepare_finalize.post_init_setup(self.impl.fused_experts)
-        assert (
+        assert self.fused_experts.activation_format().is_superset(
             self.prepare_finalize.activation_format
-            == self.fused_experts.activation_format()
         )
 
     def output_is_reduced(self) -> bool:
@@ -1724,6 +1846,8 @@ class FusedMoEKernel:
         topk_group: int | None = None,
         *,
         routing_sink: RoutedExpertsSink | None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1740,6 +1864,8 @@ class FusedMoEKernel:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_sink=routing_sink,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
     def apply(

@@ -101,12 +101,12 @@ def _vllm_config(heads_per_rank: int, qlen: int, fp8_kv: bool):
     return config
 
 
-def _ctx_layer():
+def _ctx_layer(monkeypatch: pytest.MonkeyPatch):
     """The registered-layer fields MLACommonMetadataBuilder.__init__ reads."""
     from vllm.v1.attention.ops.dcp import MLADCPManager
 
     dcp_manager = object.__new__(MLADCPManager)
-    dcp_manager.init_kv_gather = lambda *args, **kwargs: None
+    monkeypatch.setattr(dcp_manager, "init_kv_gather", lambda *args, **kwargs: None)
     # Only chunked-context prefill uses the cloned backend.
     prefill_backend = SimpleNamespace()
     prefill_backend.clone = lambda: prefill_backend
@@ -192,6 +192,7 @@ def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
     )
     impl = _impl(rank, heads, kv_cache_src.dtype != torch.bfloat16)
     output, lse = impl.forward_mqa(q.flatten(0, 1), kv_cache, metadata, layer)
+    assert metadata.decode is not None
     return metadata.decode.dcp_route.name, output, lse
 
 
@@ -206,7 +207,7 @@ def _run_rank(config, spec, layer_name, group, rank, q, kv_cache_src, k_scale):
 )
 @torch.inference_mode()
 def test_dcp_verify_matches_attention(
-    fake_dcp_groups, heads_per_rank, qlen, block_size, fp8_kv, route
+    monkeypatch, fake_dcp_groups, heads_per_rank, qlen, block_size, fp8_kv, route
 ):
     from vllm.config import set_current_vllm_config
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -240,7 +241,9 @@ def test_dcp_verify_matches_attention(
     config = _vllm_config(heads_per_rank, qlen, fp8_kv)
     layer_name = "model.layers.0.self_attn.attn"
     with set_current_vllm_config(config):
-        config.compilation_config.static_forward_context[layer_name] = _ctx_layer()
+        config.compilation_config.static_forward_context[layer_name] = _ctx_layer(
+            monkeypatch
+        )
         spec = MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,

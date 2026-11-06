@@ -196,6 +196,11 @@ class Platform:
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        """Return the device implementation for the common HiSparse runtime."""
+        return None
+
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
 
@@ -869,7 +874,8 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            with set_current_vllm_config(vllm_config):
+                return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -950,6 +956,7 @@ class Platform:
         from vllm.model_executor.layers.mamba.abstract import (
             get_mamba_prefill_checkpoint_alignment,
         )
+        from vllm.model_executor.layers.mamba.mamba_utils import mamba_state_alignment
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1035,9 +1042,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    attn_spec
+                ).page_size_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -1054,6 +1063,7 @@ class Platform:
             mamba_page_size = MambaSpec(
                 shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
                 dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+                state_alignment=mamba_state_alignment(vllm_config),
                 block_size=-1,
             ).page_size_bytes
 
@@ -1221,9 +1231,9 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         """Returns whether the GPU is an integrated (UMA) device that shares
-        system memory with the CPU.
+        system memory with the CPU. device_id None means the current device.
 
         On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
@@ -1353,6 +1363,12 @@ class Platform:
         return False
 
     @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        """Returns if Model Runner V2 runs as the standalone (no-Triton) CPU
+        runner instead of the Triton-based one."""
+        return False
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         """Returns if the graph mode is supported by the current platform."""
         return False
@@ -1457,6 +1473,8 @@ class Platform:
         from vllm import envs
 
         for env in os.environ:
+            if hint := envs.removed_environment_variables.get(env):
+                raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in envs.environment_variables:
                 if hard_fail:
                     raise ValueError(
@@ -1466,6 +1484,28 @@ class Platform:
                     logger.warning(
                         "Unknown vLLM environment variable detected: %s", env
                     )
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        """Resolve the fully-qualified class path of the platform's KV cache
+        config builder.
+
+        .. note::
+            Experimental, like the ``KVCacheConfigBuilder`` interface it selects.
+
+        The builder supplies grouping (``get_kv_cache_groups``) and tensor
+        placement (``get_kv_cache_config_from_groups``). Vendors may override
+        this to return a platform-specific builder. The default builder honors a
+        model implementing
+        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`;
+        a builder that overrides ``get_kv_cache_groups`` owns grouping and
+        bypasses that model hook unless it calls ``super()``.
+
+        Returns:
+            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
+
+        """
+        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
 
 class UnspecifiedPlatform(Platform):

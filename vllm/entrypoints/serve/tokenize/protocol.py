@@ -7,7 +7,11 @@ from typing import Annotated, Any, TypeAlias
 from pydantic import ConfigDict, Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.generate.base.protocol import AnyResponseFormat
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -98,6 +102,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    response_format: AnyResponseFormat | None = Field(
+        default=None,
+        description="Output format to include in model-specific chat templating.",
+    )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
         default=None,
         description=(
@@ -147,6 +155,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
                 ),
             ),
             media_io_kwargs=self.media_io_kwargs,
+            response_format=self.response_format,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -155,6 +164,26 @@ class TokenizeChatRequest(OpenAIBaseModel):
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
         )
+
+    def to_chat_completion_request(self) -> ChatCompletionRequest:
+        """Build the chat completion request with this request's chat fields."""
+        data = self.model_dump(
+            include={
+                "model",
+                "messages",
+                "tools",
+                "add_generation_prompt",
+                "continue_final_message",
+                "add_special_tokens",
+                "chat_template",
+                "chat_template_kwargs",
+                "media_io_kwargs",
+                "mm_processor_kwargs",
+                "response_format",
+            },
+            exclude_none=True,
+        )
+        return ChatCompletionRequest.model_validate(data)
 
 
 TokenizeRequest: TypeAlias = TokenizeCompletionRequest | TokenizeChatRequest
