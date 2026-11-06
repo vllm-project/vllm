@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Weight updates of the Inkling NVFP4 routed experts under direct reload."""
+"""Weight updates of the Inkling NVFP4 routed experts (input_amax)."""
 
 import pytest
 import torch
@@ -17,6 +17,7 @@ from vllm.model_executor.model_loader.reload import (
     start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.utils import kernel_parameters
 from vllm.models.inkling.configs import InklingModelConfig
 from vllm.models.inkling.nvidia.moe import InklingMoE
 from vllm.platforms import current_platform
@@ -88,8 +89,16 @@ def _cold_start(
 
 
 def _state(model: _Model) -> dict[str, torch.Tensor]:
+    """The routed experts' state dict plus tensor attributes (such as the
+    ``_a1_gscale`` the kernels read, derived from the input scale)."""
     experts = model.mlp.experts.routed_experts
-    return {n: t.clone() for n, t in experts.state_dict(keep_vars=True).items()}
+    tensors = dict(experts.state_dict(keep_vars=True))
+    for module_name, module in experts.named_modules():
+        prefix = f"{module_name}." if module_name else ""
+        for attr, value in vars(module).items():
+            if isinstance(value, torch.Tensor):
+                tensors[prefix + attr] = value
+    return {n: t.detach().clone() for n, t in tensors.items()}
 
 
 @pytest.mark.skipif(
@@ -168,7 +177,10 @@ def test_layerwise_reload_keeps_routed_experts(dist_init, monkeypatch) -> None:
     not current_platform.has_device_capability(100), reason="NVFP4 MoE needs SM100"
 )
 def test_eplb_skips_input_amax(dist_init) -> None:
-    """EPLB views every expert weight as [E, -1]; the [1] amax is none."""
+    """The amax is retired after post-load processing, so EPLB (which views
+    every expert weight as [E, -1]) and the kernels skip it."""
     model = _cold_start(_checkpoint(seed=0), ModelConfig())
     experts = model.mlp.experts.routed_experts
-    assert all(w.shape[0] == E for w in experts.get_expert_weights())
+    live = kernel_parameters(experts)
+    assert "w13_input_amax" not in live and "w2_input_amax" not in live
+    experts.get_expert_weights()  # a live [1] amax would fail view(E, -1)

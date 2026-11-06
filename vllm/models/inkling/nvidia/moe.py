@@ -467,8 +467,10 @@ class InklingMoE(nn.Module):
                 amax = Parameter(
                     torch.empty(1, dtype=torch.bfloat16), requires_grad=False
                 )
-                # dummy input scale 1e-2, as for other NVFP4 layers
-                amax.dummy_weight_value = 1e-2 * NVFP4_INPUT_SCALE_DENOMINATOR
+                # dummy input scale ~1e-2, as for other NVFP4 layers
+                set_weight_attrs(
+                    amax, {"dummy_weight_value": 1e-2 * NVFP4_INPUT_SCALE_DENOMINATOR}
+                )
                 routed_experts.register_parameter(f"{projection}_input_amax", amax)
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -581,6 +583,9 @@ class InklingMoE(nn.Module):
             projection = "w13" if key.startswith("w13") else "w2"
             amax = getattr(experts, f"{projection}_input_amax", None)
             if amax is None:
+                # Online requantization computes its own activation scales.
+                if getattr(experts.quant_method, "requantization_source", None):
+                    return []
                 raise ValueError(
                     f"{name} needs ModelOpt NVFP4 routed experts, got "
                     f"{type(experts.quant_method).__name__}"
