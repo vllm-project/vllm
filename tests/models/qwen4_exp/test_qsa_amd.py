@@ -2,20 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
+import itertools
 import math
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+from torch import nn
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.warmup import qwen4_exp_qsa_warmup
 from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
+from vllm.models.qwen4_exp.amd import qsa as qsa_owner
 from vllm.models.qwen4_exp.amd import qsa_indexer
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
+from vllm.models.qwen4_exp.amd.ops import qsa_flydsl_prefill as fly
 from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
     qsa_prepare,
     supports_fused_pre_indexer,
@@ -25,9 +30,12 @@ from vllm.models.qwen4_exp.amd.qsa_indexer import (
     apply_qsa_rmsnorm,
     apply_qsa_rope,
 )
+from vllm.models.qwen4_exp.common.qsa import QSAPrefillLayout, host_prefill_layout
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
+from vllm.v1.attention.backend import CommonAttentionMetadata
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -818,27 +826,44 @@ def test_qsa_mfma_scorer_warmup_covers_served_launches(
 @requires_qsa_kernels
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
-    "num_rows,num_query_heads,num_kv_heads,page_size",
+    "num_rows,num_query_heads,num_kv_heads,page_size,flydsl",
     [
-        pytest.param(1, 24, 2, 1792, id="tp1_split64"),
-        pytest.param(16, 12, 1, 1792, id="tp2_split32"),
-        pytest.param(32, 6, 1, 1024, id="tp4_split8"),
-        pytest.param(257, 6, 1, 1024, id="tp4_split4"),
-        pytest.param(513, 6, 1, 1024, id="tp4_split1"),
+        pytest.param(1, 24, 2, 1792, None, id="tp1_split64"),
+        pytest.param(16, 12, 1, 1792, None, id="tp2_split32"),
+        pytest.param(32, 6, 1, 1024, None, id="tp4_split8"),
+        pytest.param(257, 6, 1, 1024, None, id="tp4_split4"),
+        pytest.param(513, 6, 1, 1024, None, id="tp4_split1"),
+        # AITER's FlyDSL sparse prefill takes the prefilling requests' rows:
+        # both requests (direct kernels), or the second one (union tiles from
+        # 1536 rows) after rows left to the Triton kernel.
+        pytest.param(1024, 12, 1, 1792, "both", id="tp2_flydsl_direct"),
+        pytest.param(4096, 12, 1, 1792, "last", id="tp2_flydsl_union"),
     ],
 )
 def test_qsa_sparse_paged_attention_matches_reference(
+    monkeypatch: pytest.MonkeyPatch,
     num_rows: int,
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    flydsl: str | None,
     use_fp8: bool,
 ) -> None:
+    if flydsl is not None and (use_fp8 or not fly.flydsl_prefill_available()):
+        pytest.skip("AITER's FlyDSL sparse prefill takes bf16 caches on gfx950")
     torch.manual_seed(2)
     head_dim = 256
     num_requests = 2
     num_selected_pages = 64
     num_pages_per_request = num_selected_pages + 1
+    rows_per_request = math.ceil(num_rows / num_requests)
+    page_padding = 0
+    if flydsl is not None:
+        # The op takes causal selections only: the selected pages end before
+        # the first query row. Its cache pages sit further apart than they
+        # hold, as a layer's pages do in a served pool.
+        num_pages_per_request += cdiv(rows_per_request, page_size)
+        page_padding = 4
     num_cache_blocks = num_requests * num_pages_per_request
     indexer_budget = 2048
     indexer_compress_ratio = 4
@@ -848,12 +873,12 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
     kv_cache = torch.randn(
         num_cache_blocks,
-        page_size,
+        page_size + page_padding,
         num_kv_heads,
         2 * head_dim,
         device="cuda",
         dtype=torch.bfloat16,
-    )
+    )[:, :page_size]
     if use_fp8:
         fp8_dtype = current_platform.fp8_dtype()
         # The kernel's contract is that the cache already holds values in
@@ -871,7 +896,6 @@ def test_qsa_sparse_paged_attention_matches_reference(
         .reshape(num_requests, num_pages_per_request)
         .to(torch.int32)
     )
-    rows_per_request = math.ceil(num_rows / num_requests)
     row_indices = torch.arange(num_rows, device="cuda", dtype=torch.int32)
     token_to_req = row_indices // rows_per_request
     request_row_counts = torch.tensor(
@@ -908,6 +932,24 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
     assert logical_indices.shape == (num_rows, selection_width)
 
+    prefill_layout = None
+    flydsl_rows: list[int] = []
+    if flydsl is not None:
+        rows = (rows_per_request, num_rows - rows_per_request)
+        first = 0 if flydsl == "both" else 1
+        prefill_layout = QSAPrefillLayout(
+            first,
+            sum(rows[:first]),
+            rows[first:],
+            tuple(context_length - n for n in rows[first:]),
+        )
+        op = fly._flydsl_op()
+
+        def counted(q, *args, **kwargs):
+            flydsl_rows.append(q.shape[0])
+            return op(q, *args, **kwargs)
+
+        monkeypatch.setattr(fly, "_flydsl_op", lambda: counted)
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
         k_cache,
@@ -915,7 +957,10 @@ def test_qsa_sparse_paged_attention_matches_reference(
         logical_indices,
         block_table,
         token_to_req,
+        prefill_layout=prefill_layout,
     )
+    if prefill_layout is not None:
+        assert flydsl_rows == [prefill_layout.num_rows]
     expected = _qsa_sparse_paged_attention_reference(
         q,
         ref_k,
@@ -926,7 +971,9 @@ def test_qsa_sparse_paged_attention_matches_reference(
         q.shape[-1] ** -0.5,
     )
 
-    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    # Tight enough with the op that one wrong key in a row fails
+    tolerance = 2e-2 if flydsl is None else 2e-3
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
 @requires_qsa_kernels
@@ -943,3 +990,671 @@ def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
         kv_cache_dtype=kv_cache_dtype,
     )
     assert impl.kv_cache_dtype == kv_cache_dtype
+
+
+# AITER's FlyDSL sparse prefill (gfx950): the host layout, the gate, the cache
+# read in place, the hook and the warmup. The op itself runs in
+# test_qsa_sparse_paged_attention_matches_reference.
+_PAGE = 8  # tokens per page of the synthetic caches
+_D = fly.HEAD_DIM
+_WIDTH = 4 * 512 + 3  # the served selection width
+_LAYOUTS = {
+    # (first_req, first_row, query_lens, prefix_lens)
+    "one short request": (0, 0, (5,), (0,)),
+    "one token past a page": (1, 3, (1,), (_PAGE,)),
+    "queries across pages": (2, 6, (_PAGE + 2, 3), (_PAGE - 1, 2 * _PAGE)),
+    "ragged requests": (1, 3, (2 * _PAGE - 1, 1, 17), (0, 3 * _PAGE, 5)),
+}
+
+
+def _metadata(
+    requests, *, pad_tokens=0, host_seq=True, prefilling=True, device_seq=None
+) -> CommonAttentionMetadata:
+    """A batch of (prefix, query, is_prefilling) requests. The device seq_lens
+    are zeros unless given, so that nothing can read them."""
+    query = [q for _, q, _ in requests]
+    seq = [p + q for p, q, _ in requests]
+    starts = torch.tensor([0, *itertools.accumulate(query)], dtype=torch.int32)
+    tokens = sum(query) + pad_tokens
+    return CommonAttentionMetadata(
+        query_start_loc=starts.clone(),
+        query_start_loc_cpu=starts,
+        seq_lens=torch.zeros(len(seq), dtype=torch.int32)
+        if device_seq is None
+        else device_seq,
+        num_reqs=len(requests),
+        num_actual_tokens=tokens,
+        max_query_len=max(query),
+        max_seq_len=max(seq),
+        block_table_tensor=torch.zeros(len(seq), 1, dtype=torch.int32),
+        slot_mapping=torch.zeros(tokens, dtype=torch.int64),
+        is_prefilling=torch.tensor([r[2] for r in requests]) if prefilling else None,
+        seq_lens_cpu_upper_bound=torch.tensor(seq, dtype=torch.int32)
+        if host_seq
+        else None,
+    )
+
+
+def _interleaved_cache(num_pages, heads=1, per_page=None, base_rows=0):
+    """K and V as the QSA owner views its cache: the two halves of one K|V
+    record per token. With ``per_page`` the pages sit that many records apart,
+    ``base_rows`` records into a larger allocation (a layer's pages among every
+    layer's)."""
+    g = torch.Generator().manual_seed(0)
+    if per_page is None:
+        raw = torch.randn(num_pages, heads, _PAGE, 2 * _D, generator=g)
+    else:
+        assert heads == 1
+        flat = torch.randn(base_rows + num_pages * per_page, 2 * _D, generator=g)
+        # bf16 before the view: a cast after it would pack the pages together
+        raw = flat.to(torch.bfloat16).as_strided(
+            (num_pages, 1, _PAGE, 2 * _D),
+            (per_page * 2 * _D, 2 * _D, 2 * _D, 1),
+            base_rows * 2 * _D,
+        )
+    k, v = raw.to(torch.bfloat16).transpose(1, 2).split(_D, dim=-1)
+    return canonicalize_singleton_dim_strides(k), canonicalize_singleton_dim_strides(v)
+
+
+def _planes(num_pages, heads, per_page, base_rows=0):
+    """K and V in separate token pools viewed as pages ``per_page`` rows apart."""
+    g = torch.Generator().manual_seed(0)
+    shape = (num_pages, _PAGE, heads, _D)
+    stride = (per_page * heads * _D, heads * _D, _D, 1)
+    return tuple(
+        torch.randn(base_rows + num_pages * per_page, heads, _D, generator=g)
+        .to(torch.bfloat16)
+        .as_strided(shape, stride, base_rows * heads * _D)
+        for _ in range(2)
+    )
+
+
+def _block_table(lengths, num_pages=40, seed=0):
+    """int32 [requests, width]: each request's pages, drawn without repeats."""
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(num_pages, generator=g).tolist()
+    pages = [cdiv(n, _PAGE) for n in lengths]
+    table = torch.zeros(len(pages), max(pages) + 1, dtype=torch.int32)
+    for r, start in enumerate(itertools.accumulate([0, *pages[:-1]])):
+        table[r, : pages[r]] = torch.tensor(perm[start : start + pages[r]])
+    return table
+
+
+def _layout_table(layout, seed=0):
+    """A block table for the layout's requests, after a few short requests."""
+    own = [q + p for q, p in zip(layout.query_lens, layout.prefix_lens)]
+    return _block_table([3] * layout.first_req + own, seed=seed)
+
+
+def _reference_kv(k_cache, v_cache, block_table, layout):
+    """K and V of every key of the layout's requests, one token at a time."""
+    tokens = [
+        (int(block_table[layout.first_req + i, t // _PAGE]), t % _PAGE)
+        for i, (q, p) in enumerate(zip(layout.query_lens, layout.prefix_lens))
+        for t in range(q + p)
+    ]
+    return tuple(
+        torch.stack([cache[page, offset] for page, offset in tokens])
+        for cache in (k_cache, v_cache)
+    )
+
+
+_HOST_LAYOUTS = {
+    # requests (prefix, query, prefilling) -> the layout, or None
+    "one prompt": ([(0, 4096, True)], (0, 0, (4096,), (0,))),
+    "a chunk of a long prompt": ([(8192, 8192, True)], (0, 0, (8192,), (8192,))),
+    "decodes, then prefills": (
+        [(70, 3, False), (90, 3, False), (0, 1000, True), (4096, 2048, True)],
+        (2, 6, (1000, 2048), (0, 4096)),
+    ),
+    "a prefilling short extend starts the tail": (
+        [(10, 3, False), (500, 5, True), (0, 300, True)],
+        (1, 3, (5, 300), (500, 0)),
+    ),
+    "decodes only": ([(100, 3, False), (50, 3, False)], None),
+    "a decode after a prefill": ([(0, 100, True), (10, 3, False)], None),
+}
+
+
+@pytest.mark.parametrize(
+    "requests,expected",
+    [pytest.param(r, e, id=name) for name, (r, e) in _HOST_LAYOUTS.items()],
+)
+def test_qsa_host_prefill_layout(requests, expected) -> None:
+    layout = host_prefill_layout(_metadata(requests))
+    assert layout == (None if expected is None else QSAPrefillLayout(*expected))
+
+
+def test_qsa_host_prefill_layout_reads_host_data_only() -> None:
+    junk = torch.full((3,), 99, dtype=torch.int32)
+    batch = [(70, 3, False), (0, 1000, True), (4096, 2048, True)]
+    layout = host_prefill_layout(_metadata(batch, device_seq=junk))
+    assert layout == QSAPrefillLayout(1, 3, (1000, 2048), (0, 4096))
+
+
+def _sequence_shorter_than_its_query() -> CommonAttentionMetadata:
+    metadata = _metadata([(0, 100, True), (0, 50, True)])
+    assert metadata.seq_lens_cpu_upper_bound is not None
+    metadata.seq_lens_cpu_upper_bound[1] = 40
+    return metadata
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param({"pad_tokens": 4}, id="rows past the requests"),
+        pytest.param({"host_seq": False}, id="no host seq_lens"),
+        pytest.param({"prefilling": False}, id="no is_prefilling"),
+        pytest.param(_sequence_shorter_than_its_query, id="sequence below query"),
+        pytest.param(
+            lambda: _metadata([(0, 0, True), (0, 50, True)]),
+            id="empty prefilling request",
+        ),
+    ],
+)
+def test_qsa_host_prefill_layout_declines_what_the_host_cannot_give(
+    metadata,
+) -> None:
+    batch = [(70, 3, False), (0, 1000, True)]
+    assert host_prefill_layout(_metadata(batch)) is not None
+    if isinstance(metadata, dict):
+        metadata = _metadata(batch, **metadata)
+    else:
+        metadata = metadata()
+    assert host_prefill_layout(metadata) is None
+
+
+@pytest.mark.parametrize(
+    "available,dtype,prompt,collects",
+    [
+        (True, torch.bfloat16, 765, True),  # 768 rows with the decodes
+        (True, torch.bfloat16, 764, False),
+        (False, torch.bfloat16, 1000, False),
+        (True, torch.uint8, 1000, False),  # fp8 or Octave storage
+    ],
+)
+def test_qsa_rocm_builder_collects_layouts_when_the_op_runs(
+    monkeypatch: pytest.MonkeyPatch, available, dtype, prompt, collects
+) -> None:
+    monkeypatch.setattr(fly, "flydsl_prefill_available", lambda: available)
+    spec = SimpleNamespace(dtype=dtype, kv_quant_mode=SimpleNamespace(is_octave=False))
+    builder = qsa_owner.Qwen4ExpROCmQSAMetadataBuilder(
+        spec, [], None, torch.device("cpu")
+    )
+    metadata = builder.build(0, _metadata([(70, 3, False), (0, prompt, True)]))
+    expected = QSAPrefillLayout(1, 3, (prompt,), (0,)) if collects else None
+    assert metadata.prefill_layout == expected
+    # the layout survives a block-table swap (hybrid cache groups)
+    swapped = builder.update_block_table(
+        metadata, torch.zeros(2, 3, dtype=torch.int32), metadata.slot_mapping
+    )
+    assert swapped.prefill_layout == expected
+
+
+def test_qsa_flydsl_op_needs_an_aiter_that_supports_gfx950(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aiter_op = object()
+
+    def importer(platforms):
+        def import_module(name):
+            if platforms is None:
+                raise ImportError(f"No module named {name!r}")
+            if name.endswith("qsa_sparse_prefill"):
+                return SimpleNamespace(flydsl_qsa_sparse_prefill=aiter_op)
+            return SimpleNamespace(PLATFORMS=platforms)
+
+        return import_module
+
+    try:
+        for platforms, expected in [
+            (None, None),
+            ({("gfx942", 80): 1}, None),
+            ({("gfx942", 80): 1, ("gfx950", 256): 2}, aiter_op),
+        ]:
+            fly._flydsl_op.cache_clear()
+            monkeypatch.setattr(
+                fly, "importlib", SimpleNamespace(import_module=importer(platforms))
+            )
+            assert fly._flydsl_op() is expected
+    finally:
+        fly._flydsl_op.cache_clear()
+
+
+def test_qsa_flydsl_prefill_runs_where_vllm_uses_aiter_on_gfx950(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    on = {"aiter": True, "gfx950": True, "op": True}
+    aiter_ops = SimpleNamespace(is_enabled=lambda: on["aiter"])
+    monkeypatch.setattr(fly, "rocm_aiter_ops", aiter_ops)
+    monkeypatch.setattr(fly, "_on_gfx950", lambda: on["gfx950"])
+    monkeypatch.setattr(fly, "_flydsl_op", lambda: object() if on["op"] else None)
+    for values in itertools.product((False, True), repeat=3):
+        on.update(zip(on, values))
+        assert fly.flydsl_prefill_available() is all(values)
+
+
+def test_qsa_flydsl_prefill_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """bf16 caches, at least 768 rows, heads and a selection width the op
+    takes, a contiguous selection and a contiguous 16-byte aligned output, on a
+    device and AITER that run the op, outside graph capture."""
+    available, capturing = [True], [False]
+    monkeypatch.setattr(fly, "flydsl_prefill_available", lambda: available[0])
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing[0])
+
+    def applies(rows=768, heads=12, head_dim=_D, width=_WIDTH, dtype=None, **kw):
+        q = torch.empty(rows, heads, head_dim, dtype=torch.bfloat16)
+        k_cache = torch.empty(2, _PAGE, 1, head_dim, dtype=dtype or torch.bfloat16)
+        indices = kw.get("indices", torch.empty(rows, width, dtype=torch.int32))
+        out = kw.get("out", torch.empty_like(q))
+        return fly.flydsl_prefill_applies(rows, q, k_cache, indices, out)
+
+    assert applies() and applies(heads=16)
+    assert applies(width=4 * 256 + 3) and applies(width=4 * 1024 + 3)
+    assert not applies(rows=767)
+    assert not applies(dtype=current_platform.fp8_dtype())
+    assert not applies(head_dim=128) and not applies(heads=17)
+    assert not applies(width=_WIDTH - 1) and not applies(width=4 * 1280 + 3)
+    wide = torch.empty(768, _WIDTH + 1, dtype=torch.int32)
+    assert not applies(indices=wide[:, :_WIDTH])
+    assert not applies(out=torch.empty(768, 24, _D, dtype=torch.bfloat16)[:, ::2])
+    shifted = torch.empty(768 * 12 * _D + 1, dtype=torch.bfloat16)[1:]
+    assert not applies(out=shifted.view(768, 12, _D))
+    capturing[0] = True
+    assert not applies()
+    capturing[0], available[0] = False, False
+    assert not applies()
+
+
+_IN_PLACE_CACHES = {
+    "interleaved K|V records": lambda: _interleaved_cache(
+        40, per_page=_PAGE + 4, base_rows=8
+    ),
+    "interleaved, pages back to back": lambda: _interleaved_cache(
+        40, per_page=_PAGE, base_rows=8
+    ),
+    "two heads in separate planes": lambda: _planes(40, 2, _PAGE, base_rows=8),
+}
+
+
+@pytest.mark.parametrize("cache", _IN_PLACE_CACHES.values(), ids=_IN_PLACE_CACHES)
+@pytest.mark.parametrize("layout", _LAYOUTS.values(), ids=_LAYOUTS)
+def test_qsa_flydsl_reads_the_cache_in_place(layout, cache) -> None:
+    layout = QSAPrefillLayout(*layout)
+    k_cache, v_cache = cache()
+    table = _layout_table(layout)
+    expected = _reference_kv(k_cache, v_cache, table, layout)
+    # the requests before the layout's are not read
+    table[: layout.first_req] = 10**6
+    pools = fly._pools(k_cache, v_cache)
+    assert pools is not None
+    k, v, per_page = pools
+    slots = fly.token_slots(layout, table, _PAGE, per_page)
+    lengths = [q + p for q, p in zip(layout.query_lens, layout.prefix_lens)]
+    assert slots.dtype == torch.int32 and slots.shape == (sum(lengths),)
+    # what the op does with a slot: row ``slot`` of each pool
+    assert torch.equal(k[slots.long()], expected[0])
+    assert torch.equal(v[slots.long()], expected[1])
+    # in place: each pool starts where its cache starts, a token row apart
+    assert k.data_ptr() == k_cache.data_ptr() and v.data_ptr() == v_cache.data_ptr()
+    assert k.stride(0) == v.stride(0) == k_cache.stride(1)
+    # the op reads four-token blocks at four consecutive rows from a multiple
+    # of four
+    for start, n in zip(itertools.accumulate([0, *lengths]), lengths):
+        for block in slots[start : start + n].long().split(4):
+            assert block[0] % 4 == 0
+            assert torch.equal(block, block[0] + torch.arange(len(block)))
+
+
+def test_qsa_flydsl_slots_copy_the_lengths_once_per_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copies = []
+
+    def h2d(data, device, dtype):
+        copies.append(list(data))
+        return torch.tensor(data, dtype=dtype, device=device)
+
+    monkeypatch.setattr(fly, "async_tensor_h2d", h2d)
+    layout = QSAPrefillLayout(*_LAYOUTS["queries across pages"])
+    table = _layout_table(layout)
+    first = fly.token_slots(layout, table, _PAGE, _PAGE + 4)
+    assert fly.token_slots(layout, table, _PAGE, _PAGE + 4) is first
+    assert copies == [[q + p for q, p in zip(layout.query_lens, layout.prefix_lens)]]
+    # another block table (another KV cache group) gets its own slots
+    assert (
+        fly.token_slots(layout, _layout_table(layout, 5), _PAGE, _PAGE + 4) is not first
+    )
+    assert len(copies) == 2
+
+
+def _paged(page_stride):
+    """K and V halves of 2 D records, pages ``page_stride`` elements apart."""
+    storage = torch.zeros(41 * page_stride, dtype=torch.bfloat16)
+    shape, stride = (40, _PAGE, 1, _D), (page_stride, 2 * _D, _D, 1)
+    return storage.as_strided(shape, stride), storage.as_strided(shape, stride, _D)
+
+
+_NOT_IN_PLACE = {
+    "two heads whose vectors are not adjacent (TP1)": lambda: _interleaved_cache(40, 2),
+    "pages 10 rows apart": lambda: _paged(10 * 2 * _D),
+    "pages 9.5 rows apart": lambda: _paged(19 * _D),
+    "views off a 16-byte boundary": lambda: tuple(
+        c.as_strided(c.shape, c.stride(), c.storage_offset() + 1)
+        for c in _interleaved_cache(40, per_page=_PAGE + 4, base_rows=8)
+    ),
+}
+
+
+@pytest.mark.parametrize("cache", _NOT_IN_PLACE.values(), ids=_NOT_IN_PLACE)
+def test_qsa_flydsl_leaves_a_cache_it_cannot_read_in_place_to_triton(cache) -> None:
+    assert fly._pools(*cache()) is None
+
+
+def test_qsa_flydsl_reads_the_served_cache_in_place() -> None:
+    # K and V of one QSA layer in the served pool (Qwen3.8-Flash-Next, TP2,
+    # bf16): 1568-token pages 10,235,904 elements apart, a 512-element K|V
+    # record per token
+    pool = torch.empty(10175 * 10235904, dtype=torch.bfloat16, device="meta")
+    shape, stride = (10175, 1568, 1, 256), (10235904, 512, 256, 1)
+    k, v = pool.as_strided(shape, stride), pool.as_strided(shape, stride, 256)
+    pools = fly._pools(k, v)
+    assert pools is not None and pools[2] == 19992
+    for view, cache in zip(pools[:2], (k, v)):
+        assert view.shape == (10174 * 19992 + 1568, 1, 256)
+        assert view.stride() == (512, 256, 1)
+        assert view.storage_offset() == cache.storage_offset()
+
+
+class _FakeOp:
+    """Stands for flydsl_qsa_sparse_prefill: records each call and writes ones."""
+
+    def __init__(self):
+        self.calls: list[SimpleNamespace] = []
+
+    def __call__(self, q, k, v, indices, *, query_lens, prefix_lens, **kwargs):
+        self.calls.append(
+            SimpleNamespace(
+                q=q,
+                k=k,
+                v=v,
+                indices=indices,
+                query_lens=query_lens,
+                prefix_lens=prefix_lens,
+                **kwargs,
+            )
+        )
+        if kwargs.get("out") is not None:
+            kwargs["out"].fill_(1)
+
+
+@pytest.fixture
+def flydsl_op(monkeypatch: pytest.MonkeyPatch) -> _FakeOp:
+    """A fake op where vLLM uses AITER on gfx950, outside graph capture."""
+    op = _FakeOp()
+    monkeypatch.setattr(fly, "rocm_aiter_ops", SimpleNamespace(is_enabled=lambda: True))
+    monkeypatch.setattr(fly, "_on_gfx950", lambda: True)
+    monkeypatch.setattr(fly, "_flydsl_op", lambda: op)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    return op
+
+
+def _step_inputs(layout, heads=12):
+    rows = layout.first_row + layout.num_rows
+    g = torch.Generator().manual_seed(1)
+    q = torch.randn(rows, heads, _D, generator=g).to(torch.bfloat16)
+    indices = torch.randint(0, 50, (rows, _WIDTH), generator=g, dtype=torch.int32)
+    return q, indices, torch.zeros(rows, heads, _D, dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("strided_q", [False, True])
+def test_qsa_flydsl_takes_the_prefill_rows_with_the_hosts_lengths(
+    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp, strided_q: bool
+) -> None:
+    monkeypatch.setattr(fly, "FLYDSL_PREFILL_MIN_ROWS", 1)
+    layout = QSAPrefillLayout(*_LAYOUTS["ragged requests"])
+    k_cache, v_cache = _interleaved_cache(40, per_page=_PAGE + 4, base_rows=8)
+    table = _layout_table(layout)
+    q, indices, out = _step_inputs(layout)
+    if strided_q:
+        wide = torch.zeros(*q.shape[:2], 2 * _D, dtype=q.dtype)
+        wide[..., :_D] = q
+        q = wide[..., :_D]
+    first = layout.first_row
+    args = (q, k_cache, v_cache, indices, table, out, layout)
+    assert fly.try_flydsl_prefill(*args) == first
+    (call,) = flydsl_op.calls
+    assert call.q.is_contiguous() and torch.equal(call.q, q[first:])
+    assert torch.equal(call.indices, indices[first:])
+    expected = _reference_kv(k_cache, v_cache, table, layout)
+    assert torch.equal(call.k[call.kv_slots.long()], expected[0])
+    assert torch.equal(call.v[call.kv_slots.long()], expected[1])
+    assert (call.query_lens, call.prefix_lens) == (
+        layout.query_lens,
+        layout.prefix_lens,
+    )
+    assert call.softmax_scale == _D**-0.5
+    # the op wrote the prefill rows of the output and nothing else
+    assert call.out.data_ptr() == out[first:].data_ptr()
+    assert not out[:first].any() and out[first:].eq(1).all()
+
+
+def test_qsa_flydsl_leaves_a_step_it_declines_untouched(
+    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp
+) -> None:
+    layout = QSAPrefillLayout(*_LAYOUTS["ragged requests"])
+    k_cache, v_cache = _interleaved_cache(40, per_page=_PAGE + 4, base_rows=8)
+    table = _layout_table(layout)
+    q, indices, out = _step_inputs(layout)
+    monkeypatch.setattr(fly, "FLYDSL_PREFILL_MIN_ROWS", layout.num_rows + 1)
+    assert (
+        fly.try_flydsl_prefill(q, k_cache, v_cache, indices, table, out, layout) is None
+    )
+    monkeypatch.setattr(fly, "FLYDSL_PREFILL_MIN_ROWS", layout.num_rows)
+    # rows that do not match the layout (a sliced micro-batch)
+    sliced = (q[:-1], k_cache, v_cache, indices[:-1], table, out[:-1], layout)
+    assert fly.try_flydsl_prefill(*sliced) is None
+    # a cache the op cannot read in place
+    k_heads, v_heads = _interleaved_cache(40, 2)
+    args = (q, k_heads, v_heads, indices, table, out, layout)
+    assert fly.try_flydsl_prefill(*args) is None
+    assert not flydsl_op.calls and not out.any()
+    args = (q, k_cache, v_cache, indices, table, out, layout)
+    assert fly.try_flydsl_prefill(*args) == layout.first_row
+
+
+class _Launches:
+    """Stands for a Triton kernel: records the grid of each launch."""
+
+    def __init__(self):
+        self.grids: list[tuple] = []
+
+    def __getitem__(self, grid):
+        return lambda *args, **kwargs: self.grids.append(grid)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    "taken,launched",
+    [("no layout", [12]), (None, [12]), (3, [3]), (0, [])],
+    ids=["no layout", "declined", "decodes left to Triton", "no rows left"],
+)
+def test_qsa_sparse_paged_attention_runs_triton_on_the_rows_the_op_leaves(
+    monkeypatch: pytest.MonkeyPatch, taken, launched
+) -> None:
+    launches = _Launches()
+    monkeypatch.setattr(qsa_ops, "_qsa_sparse_paged_gqa_splitk_kernel", launches)
+    monkeypatch.setattr(qsa_ops, "_qsa_merge_splitk_kernel", _Launches())
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    layout = None if taken == "no layout" else QSAPrefillLayout(1, 3, (9,), (0,))
+    seen = []
+
+    def try_flydsl_prefill(q, k, v, indices, table, out, prefill_layout):
+        seen.append(prefill_layout)
+        return taken
+
+    monkeypatch.setattr(fly, "try_flydsl_prefill", try_flydsl_prefill)
+    k_cache, v_cache = _interleaved_cache(4)
+    q = torch.zeros(12, 12, _D, dtype=torch.bfloat16)
+    indices = torch.zeros(12, _WIDTH, dtype=torch.int32)
+    table, token_to_req = (
+        torch.zeros(3, 2, dtype=torch.int32),
+        torch.zeros(12, dtype=torch.int32),
+    )
+    out = torch.zeros_like(q)
+    result = qsa_ops.qsa_sparse_paged_attention(
+        q, k_cache, v_cache, indices, table, token_to_req, out, prefill_layout=layout
+    )
+    assert result is out and seen == ([] if layout is None else [layout])
+    # the Triton kernel's rows (the entry checks every input against q's rows)
+    assert [grid[0] for grid in launches.grids] == launched
+
+
+def test_qsa_owner_passes_the_metadata_layout_to_the_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        qsa_ops,
+        "qsa_sparse_paged_attention",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+    impl = qsa_owner.Qwen4ExpQSAImpl.__new__(qsa_owner.Qwen4ExpQSAImpl)
+    impl.octave_fmt, impl.head_size, impl.kv_cache_dtype = None, _D, "auto"
+    rows = 12
+    layer = SimpleNamespace(
+        topk_indices_buffer=torch.zeros(rows, _WIDTH, dtype=torch.int32),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
+    layout = QSAPrefillLayout(1, 3, (9,), (0,))
+    for prefill_layout in (None, layout):
+        metadata = SimpleNamespace(
+            num_actual_tokens=rows,
+            block_table=torch.zeros(3, 2, dtype=torch.int32),
+            prefill_layout=prefill_layout,
+        )
+        impl.forward(
+            layer,
+            torch.zeros(rows, 12, _D, dtype=torch.bfloat16),
+            torch.zeros(4, 1, _PAGE, 2 * _D, dtype=torch.bfloat16),
+            metadata,
+            torch.zeros(rows, 12, _D, dtype=torch.bfloat16),
+            token_to_req=torch.zeros(rows, dtype=torch.int32),
+        )
+    assert calls == [{"prefill_layout": None}, {"prefill_layout": layout}]
+
+
+def _assert_the_ops_selection(row: list[int], v: int, blocks: int) -> None:
+    """The op's contract for a row whose causal window holds v tokens:
+    columns [0, 4 min(v // 4, T)) hold that many distinct complete blocks
+    j < v // 4 of four tokens, the next v % 4 columns the tail tokens, the
+    rest -1."""
+    whole = min(v // 4, blocks)
+    starts = row[: 4 * whole : 4]
+    assert len(set(starts)) == whole
+    for j, start in enumerate(starts):
+        assert start % 4 == 0 and start // 4 < v // 4
+        assert row[4 * j : 4 * j + 4] == [start + i for i in range(4)]
+    tail = [4 * (v // 4) + i for i in range(v % 4)]
+    assert row[4 * whole : 4 * whole + v % 4] == tail
+    assert set(row[4 * whole + v % 4 :]) <= {-1}
+
+
+def test_qsa_flydsl_warmup_calls_through_the_layers_cache(
+    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp
+) -> None:
+    synced = []
+    monkeypatch.setattr(
+        torch.accelerator, "synchronize", lambda device=None: synced.append(device)
+    )
+    k_cache, v_cache = _interleaved_cache(3, per_page=_PAGE + 4, base_rows=8)
+    layouts = ((768,), (4096,), (2048, 2048))
+    assert fly.warmup_flydsl_qsa_prefill(12, k_cache, v_cache, _WIDTH) == layouts
+    assert [call.query_lens for call in flydsl_op.calls] == list(layouts)
+    for call in flydsl_op.calls:
+        assert call.prefix_lens == (0,) * len(call.query_lens)
+        assert call.q.shape == (sum(call.query_lens), 12, _D)
+        # the layer's own cache, read in place at its record pitch: the row
+        # stride and pool span the served steps compile for
+        assert call.k.data_ptr() == k_cache.data_ptr()
+        assert call.v.data_ptr() == v_cache.data_ptr()
+        assert call.k.stride(0) == call.v.stride(0) == 2 * _D
+        assert call.k.shape[0] == 2 * (_PAGE + 4) + _PAGE
+        # every key on block 0, the one block an extensible cache has mapped
+        positions = torch.cat([torch.arange(n) for n in call.query_lens])
+        assert torch.equal(call.kv_slots.long(), positions % _PAGE)
+        # a selection the op takes: the first rows, the rows around 4 T = 2048
+        # tokens (from where a row selects its last T blocks) and each last row
+        ends = set(itertools.accumulate(call.query_lens))
+        for row, position in enumerate(positions.tolist()):
+            if position < 8 or 2044 <= position < 2060 or row + 1 in ends:
+                indices = call.indices[row].tolist()
+                _assert_the_ops_selection(indices, position + 1, 512)
+    assert synced == [k_cache.device]
+
+
+@pytest.mark.parametrize(
+    "heads,width,fp8,op",
+    [
+        pytest.param(12, _WIDTH, False, False, id="no op"),
+        pytest.param(12, _WIDTH - 1, False, True, id="odd width"),
+        pytest.param(17, _WIDTH, False, True, id="17 heads per KV head"),
+        pytest.param(12, _WIDTH, True, True, id="fp8 cache"),
+    ],
+)
+def test_qsa_flydsl_warmup_skips_what_the_op_does_not_take(
+    monkeypatch: pytest.MonkeyPatch, flydsl_op: _FakeOp, heads, width, fp8, op
+) -> None:
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda device=None: None)
+    if not op:
+        monkeypatch.setattr(fly, "_flydsl_op", lambda: None)
+    k_cache, v_cache = _interleaved_cache(3, per_page=_PAGE + 4, base_rows=8)
+    if fp8:
+        k_cache, v_cache = (
+            c.to(current_platform.fp8_dtype()) for c in (k_cache, v_cache)
+        )
+    assert fly.warmup_flydsl_qsa_prefill(heads, k_cache, v_cache, width) == ()
+    assert not flydsl_op.calls
+
+
+@pytest.mark.parametrize(
+    "dtype,available,warms",
+    [
+        (torch.bfloat16, True, True),
+        (torch.bfloat16, False, False),
+        # fp8 and Octave storage: an Octave cache does not split into K and V
+        (torch.uint8, True, False),
+    ],
+)
+def test_qsa_server_warmup_compiles_flydsl_on_the_owners_cache(
+    monkeypatch: pytest.MonkeyPatch, dtype, available, warms
+) -> None:
+    layer = qsa_owner.Qwen4ExpQSAAttention.__new__(qsa_owner.Qwen4ExpQSAAttention)
+    nn.Module.__init__(layer)
+    layer.num_heads = 12
+    layer.kv_cache = torch.empty(0, dtype=dtype)
+    layer.indexer = SimpleNamespace(output_width=_WIDTH)
+    views = []
+
+    def kv_cache_views(kv_cache):
+        views.append(kv_cache)
+        return "k", "v"
+
+    layer.impl = SimpleNamespace(kv_cache_views=kv_cache_views)
+    model = nn.Module()
+    model.add_module("layer", layer)
+    calls = []
+
+    def warmup(*args):
+        calls.append(args)
+        return ()
+
+    monkeypatch.setattr(fly, "flydsl_prefill_available", lambda: available)
+    monkeypatch.setattr(fly, "warmup_flydsl_qsa_prefill", warmup)
+    monkeypatch.setattr(qwen4_exp_qsa_warmup, "_amd_qsa_triton_warmup", lambda w: None)
+    qwen4_exp_qsa_warmup.qwen4_exp_qsa_triton_warmup(
+        SimpleNamespace(get_model=lambda: model)
+    )
+    assert views == ([layer.kv_cache] if warms else [])
+    assert calls == ([(12, "k", "v", _WIDTH)] if warms else [])

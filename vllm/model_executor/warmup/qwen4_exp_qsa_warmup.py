@@ -65,11 +65,49 @@ def _amd_qsa_triton_warmup(worker: "Worker") -> None:
     logger.info("Warmed up Qwen4Exp QSA MFMA scorer at score widths %s.", widths)
 
 
+def _amd_qsa_flydsl_warmup(worker: "Worker") -> None:
+    """Compile AITER's FlyDSL sparse prefill kernels for the QSA cache, which a
+    served step would otherwise compile on its first long prefill."""
+    qsa_module = sys.modules.get("vllm.models.qwen4_exp.amd.qsa")
+    if qsa_module is None:
+        return
+    owner = next(
+        (
+            layer
+            for layer in worker.get_model().modules()
+            if isinstance(layer, qsa_module.Qwen4ExpQSAAttention)
+        ),
+        None,
+    )
+    if owner is None:
+        return
+
+    from vllm.models.qwen4_exp.amd.ops.qsa_flydsl_prefill import (
+        flydsl_prefill_available,
+        warmup_flydsl_qsa_prefill,
+    )
+
+    # The op reads bf16 caches only; fp8 and Octave caches are uint8 storage.
+    if owner.kv_cache.dtype != torch.bfloat16 or not flydsl_prefill_available():
+        return
+    k_cache, v_cache = owner.impl.kv_cache_views(owner.kv_cache)
+    layouts = warmup_flydsl_qsa_prefill(
+        owner.num_heads, k_cache, v_cache, owner.indexer.output_width
+    )
+    if layouts:
+        logger.info(
+            "Warmed up Qwen4Exp QSA FlyDSL sparse prefill for prefill requests "
+            "of %s rows.",
+            layouts,
+        )
+
+
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
     profiles plus the sparse attention split-K/merge configs (NVIDIA), the
     prefill MFMA scorer (AMD)."""
     _amd_qsa_triton_warmup(worker)
+    _amd_qsa_flydsl_warmup(worker)
     qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa_indexer")
     attn_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa")
     if qsa_module is None or attn_module is None:

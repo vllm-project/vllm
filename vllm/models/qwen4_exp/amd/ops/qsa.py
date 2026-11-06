@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -14,6 +15,9 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv, round_up
 
 from .qsa_mfma_scorer import launch_qsa_mqa_paged_mfma, mfma_scorer_applies
+
+if TYPE_CHECKING:
+    from ...common.qsa import QSAPrefillLayout
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
@@ -887,8 +891,14 @@ def qsa_sparse_paged_attention(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     out: torch.Tensor | None = None,
+    prefill_layout: QSAPrefillLayout | None = None,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged bf16 or fp8 K/V caches."""
+    """Run sparse GQA directly over paged bf16 or fp8 K/V caches.
+
+    ``prefill_layout`` (host lengths of the trailing prefilling requests) is
+    given when AITER's FlyDSL sparse prefill runs on this device; the step's
+    prefill rows may then run that op, and the rows before them run here.
+    """
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA sparse attention requires a GPU and Triton")
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
@@ -927,6 +937,24 @@ def qsa_sparse_paged_attention(
     assert out.stride(2) == 1
     if not q.shape[0]:
         return out
+    if prefill_layout is not None:
+        from .qsa_flydsl_prefill import try_flydsl_prefill
+
+        head_rows = try_flydsl_prefill(
+            q, k_cache, v_cache, logical_indices, block_table, out, prefill_layout
+        )
+        if head_rows is not None:
+            if head_rows:
+                qsa_sparse_paged_attention(
+                    q[:head_rows],
+                    k_cache,
+                    v_cache,
+                    logical_indices[:head_rows],
+                    block_table,
+                    token_to_req[:head_rows],
+                    out[:head_rows],
+                )
+            return out
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
