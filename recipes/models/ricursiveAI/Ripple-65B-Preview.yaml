@@ -74,16 +74,6 @@ hardware_overrides:
 
 strategy_overrides: {}
 
-notes:
-  - title: "Attention backend on AMD"
-    when:
-      hardware: [amd]
-    body: |
-      `ROCM_AITER_UNIFIED_ATTN` is set explicitly. The auto-selected
-      `ROCM_ATTN` backend runs every multi-token query, including each
-      DFlash2 verify step, through a Triton prefix-prefill kernel, which makes
-      speculative decoding far slower than with the AITER backends.
-
 guide: |
   ## Overview
 
