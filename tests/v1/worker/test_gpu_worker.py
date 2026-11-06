@@ -290,7 +290,7 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
 def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
     """The minimal Worker surface the startup-plan entry points touch."""
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(compute_hash=lambda: config_hash),
+        vllm_config=SimpleNamespace(compile_factors=lambda: {"id": config_hash}),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
@@ -537,6 +537,7 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
 def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     """Under the extensible cache the connector is created at the final extend,
     not at init, and the config is kept for it."""
+    from vllm.v1.kv_cache_layout import KVCacheLayout
     from vllm.v1.worker import gpu_worker
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -544,6 +545,7 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         raise AssertionError("connector created at init")
 
     monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
+    monkeypatch.setattr(gpu_worker, "granule_size", lambda device: 2 << 20)
     log: list[str] = []
     runner = SimpleNamespace(
         initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
@@ -559,7 +561,11 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         cache_hit_alignment_tokens=16,
     )
     worker = SimpleNamespace(
-        cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=True,
+            # Block-outermost layouts are not padded, so the config is kept as is.
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
         vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,

@@ -8,6 +8,7 @@ import pytest
 
 from vllm.config import AuxOutputConfig, VllmConfig
 from vllm.config.kv_transfer import KVRole, KVTransferConfig
+from vllm.config.utils import hash_config
 from vllm.engine.arg_utils import EngineArgs
 
 pytestmark = pytest.mark.cpu_test
@@ -73,7 +74,7 @@ def test_aux_output_capture_changes_compilation_hash():
     disabled = AuxOutputConfig()
     enabled = AuxOutputConfig(enable_return_routed_experts=True)
 
-    assert disabled.compute_hash() != enabled.compute_hash()
+    assert hash_config(disabled) != hash_config(enabled)
 
 
 def test_legacy_routed_experts_flag_updates_aux_output_config():
