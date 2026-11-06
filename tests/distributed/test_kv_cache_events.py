@@ -190,15 +190,15 @@ def test_block_stored_locality_is_wire_compatible():
         kv_cache_spec_sliding_window=128,
     )
     legacy_payload = msgspec.msgpack.encode(legacy)
-    assert (
+    # More fields can widen the MessagePack map header, not change its contents.
+    assert msgspec.msgpack.decode(
         msgspec.msgpack.encode(
             _make_block_stored(
                 group_idx=2,
                 kv_cache_spec_sliding_window=128,
             )
         )
-        == legacy_payload
-    )
+    ) == msgspec.msgpack.decode(legacy_payload)
     assert msgspec.msgpack.decode(legacy_payload, type=BlockStored).locality is None
     new_payload = msgspec.msgpack.encode(_make_block_stored(locality="LOCAL"))
     assert msgspec.msgpack.decode(new_payload)["locality"] == "LOCAL"
@@ -229,7 +229,7 @@ def test_block_stored_session_id_is_wire_compatible():
         locality="LOCAL",
     )
     pre_session_payload = msgspec.msgpack.encode(pre_session)
-    assert (
+    assert msgspec.msgpack.decode(
         msgspec.msgpack.encode(
             _make_block_stored(
                 group_idx=2,
@@ -237,8 +237,7 @@ def test_block_stored_session_id_is_wire_compatible():
                 locality="LOCAL",
             )
         )
-        == pre_session_payload
-    )
+    ) == msgspec.msgpack.decode(pre_session_payload)
     assert (
         msgspec.msgpack.decode(pre_session_payload, type=BlockStored).session_id is None
     )

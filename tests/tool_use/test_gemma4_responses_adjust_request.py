@@ -8,8 +8,8 @@ calling for parsers relying on special-token delimiters (Gemma4):
 1. :class:`Gemma4ToolParser.adjust_request` used an
    ``isinstance(request, ChatCompletionRequest)`` guard, so a
    :class:`ResponsesRequest` with tools never had
-   ``skip_special_tokens`` flipped to ``False``. The default (``True``)
-   stripped ``<|tool_call>`` / ``<tool_call|>`` delimiters, causing
+   ``skip_special_tokens`` flipped to ``False``. The resolved default
+   (``True``) stripped ``<|tool_call>`` / ``<tool_call|>`` delimiters, causing
    :meth:`Gemma4ToolParser.extract_tool_calls_streaming` to fall through
    to the content branch and leak the raw ``call:fn{...}`` body via
    ``response.output_text.delta``.
@@ -132,8 +132,9 @@ def test_gemma4_adjust_request_sets_skip_special_tokens_on_responses() -> None:
     parser = Gemma4ToolParser(_StubTokenizer())
 
     request = _build_responses_request(tool_choice="auto")
-    assert request.skip_special_tokens is True, (
-        "Precondition: ResponsesRequest.skip_special_tokens default is True"
+    assert request.skip_special_tokens is None, (
+        "Precondition: ResponsesRequest.skip_special_tokens defaults to None "
+        "(resolves to True unless the model's generation config overrides it)"
     )
 
     parser.adjust_request(request)

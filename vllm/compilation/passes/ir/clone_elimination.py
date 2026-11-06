@@ -4,6 +4,7 @@ import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._higher_order_ops.triton_kernel_wrap import TritonKernelWrapperFunctional
+from torch._inductor.fx_utils import get_node_storage
 from torch._ops import HigherOrderOperator, OpOverload
 
 from vllm.config import VllmConfig
@@ -69,12 +70,27 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
     return False
 
 
+def would_alias_graph_io(clone: fx.Node, original: fx.Node) -> bool:
+    """Whether replacing clone with original makes a graph output share storage
+    with a graph input or another output, which callers may mutate in place.
+    Unknown storage is treated as aliasing."""
+    clone_storage = get_node_storage(clone)
+    original_storage = get_node_storage(original)
+    if clone_storage is None or original_storage is None:
+        return True
+
+    graph = clone.graph
+    outputs = {get_node_storage(n) for n in graph.output_node().all_input_nodes}
+    inputs = {get_node_storage(n) for n in graph.find_nodes(op="placeholder")}
+    return clone_storage in outputs and original_storage in inputs | outputs
+
+
 class UnsafeCloneEliminationPass(VllmInductorPass):
     """This pass removes clone nodes that are no longer needed after vLLM IR lowering.
     It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
     contents of non-donated graph inputs.
 
-    It is "unsafe" because it does not (yet) take aliasing into account. Solving
+    It is "unsafe" because it only handles aliasing of graph outputs. Solving
     aliasing is an open problem, so this pass intends to support known vLLM cases
     and not guarantee soundness on general graphs. In the future, this pass will likely
     support basic forms of aliasing to handle simple views (e.g. qkv -> q,k,v).
@@ -141,6 +157,14 @@ class UnsafeCloneEliminationPass(VllmInductorPass):
                         original_node,
                     )
                     continue
+            elif would_alias_graph_io(node, original_node):
+                logger.debug(
+                    "Clone removal not possible, returned clone %s would alias "
+                    "graph input or output %s",
+                    node,
+                    original_node,
+                )
+                continue
 
             logger.debug(
                 "Node %s is a redundant clone node of %s, removing it",

@@ -6,7 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.compilation.compiler_interface import InductorStandaloneAdaptor
+from vllm.compilation.compiler_interface import (
+    CompilerInterface,
+    InductorStandaloneAdaptor,
+)
 
 
 @pytest.mark.parametrize("save_format", ["binary", "unpacked"])
@@ -167,3 +170,12 @@ def test_failed_save_keeps_previous_cache_index(tmp_path, monkeypatch):
     manager.initialize_cache(str(tmp_path))
     assert manager.cache == saved
     assert [p.name for p in tmp_path.iterdir()] == ["vllm_compile_cache.py"]
+
+
+def test_subclass_with_compute_hash_fails_loudly():
+    """A stale override would otherwise drop out of the compile cache key."""
+    with pytest.raises(TypeError, match="compile_factors"):
+
+        class StaleCompiler(CompilerInterface):
+            def compute_hash(self, vllm_config) -> str:
+                return "stale"

@@ -11,7 +11,6 @@ import regex as re
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -59,7 +58,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -82,7 +85,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
-from .config import (
+from ..common.config import (
     Step5SparseConfig,
     checkpoint_has_step5_sparse_config,
     get_step5_sparse_config,
@@ -175,6 +178,12 @@ def step5_swa_attention_with_output(
         layer, query, key, value, kv_cache, metadata, output, gate
     )
 
+
+STEP5_SHARE_EXPERT_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(r"(?<!\.moe)\.share_expert\."): ".moe.share_expert.",
+    },
+)
 
 STEP5_PACKED_MODULES_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -467,6 +476,7 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     """
 
     INDEXER_SHARD_IDS = ("index_q", "index_k", "index_z", "index_g")
+    shard_ids = ("q", "k", "v", *INDEXER_SHARD_IDS)
 
     def __init__(
         self,
@@ -564,7 +574,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         )
         self.register_parameter("weight", weight)
         self.update_param_tp_status()
-        self._loaded_shards: set[str] = set()
 
     @property
     def local_index_q_size(self) -> int:
@@ -577,11 +586,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     @property
     def local_index_z_size(self) -> int:
         return self.local_index_kv_heads * self.proxy_dim
-
-    def validate_shard_id(self, loaded_shard_id: Any) -> TypeIs[str | None]:
-        if loaded_shard_id in self.INDEXER_SHARD_IDS:
-            return True
-        return super().validate_shard_id(loaded_shard_id)
 
     def _indexer_source_offset(self, shard_id: str) -> tuple[int, int]:
         if shard_id == "index_q":
@@ -624,16 +628,13 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
                 "tensors; a pre-fused qkv_indexer_proj weight is not supported."
             )
         if loaded_shard_id in self.INDEXER_SHARD_IDS:
+            self.validate_shard_id(loaded_shard_id, param)
             src_offset, shard_size = self._indexer_source_offset(loaded_shard_id)
             dst_offset = self._indexer_dest_offset(loaded_shard_id)
             shard = loaded_weight.narrow(0, src_offset, shard_size)
             param.data.narrow(0, dst_offset, shard_size).copy_(shard)
         else:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        self._loaded_shards.add(loaded_shard_id)
-
-    def required_shard_ids(self) -> set[str]:
-        return {"q", "k", "v", "index_q", "index_k", "index_z", "index_g"}
 
     def assert_fully_loaded(self, prefix: str) -> None:
         """Fail unless this load covered every shard, then forget the record.
@@ -643,17 +644,17 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         storage for the whole parameter, so a shard the new weight stream omits
         would otherwise silently become garbage.
         """
-        required = self.required_shard_ids()
-        missing = sorted(required - self._loaded_shards)
+        loaded = self.loaded_shard_ids.pop("weight", set())
+        self.loaded_shard_ids.clear()
+        missing = [shard for shard in self.shard_ids if shard not in loaded]
         if missing:
             raise ValueError(
                 f"Incomplete fused qkv+indexer weight for {prefix}: "
                 f"missing shards {missing}."
             )
-        self._loaded_shards.clear()
 
     def reset_load_state(self) -> None:
-        self._loaded_shards.clear()
+        self.loaded_shard_ids.clear()
 
     def forward(  # type: ignore[override]
         self,
@@ -695,7 +696,7 @@ def _validate_fused_qkv_indexer_weights(module: nn.Module) -> set[str]:
     return loaded_params
 
 
-class Step5SparseIndexerIndexTPLinear(nn.Module):
+class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
     """Sparse-indexer linear sharded by its own tensor-parallel size."""
 
     def __init__(
@@ -705,14 +706,12 @@ class Step5SparseIndexerIndexTPLinear(nn.Module):
         *,
         params_dtype: torch.dtype,
         index_tp_size: int,
+        prefix: str = "",
     ) -> None:
-        super().__init__()
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
-        self.index_group_start, local_groups, _ = _step5_group_partition(
+        index_group_start, local_groups, _ = _step5_group_partition(
             total_groups=index_tp_size,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
+            tp_size=get_tensor_model_parallel_world_size(),
+            tp_rank=get_tensor_model_parallel_rank(),
         )
         if output_size <= 0 or output_size % index_tp_size != 0:
             raise ValueError(
@@ -720,22 +719,25 @@ class Step5SparseIndexerIndexTPLinear(nn.Module):
                 f"index_tp_size, got output_size={output_size}, "
                 f"index_tp_size={index_tp_size}."
             )
-        self.output_size_per_group = output_size // index_tp_size
-        self.output_size_per_partition = self.output_size_per_group * local_groups
-        self.weight = Parameter(
-            torch.empty(
-                self.output_size_per_partition,
-                input_size,
-                dtype=params_dtype,
-            )
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            params_dtype=params_dtype,
+            prefix=prefix,
+            tp_rank=index_group_start // local_groups,
+            tp_size=index_tp_size // local_groups,
         )
-        self.weight.weight_loader = self.weight_loader
+        self.index_group_start = index_group_start
+        self.output_size_per_group = output_size // index_tp_size
         self.weight.data.zero_()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor) -> None:
         start = self.index_group_start * self.output_size_per_group
         shard = loaded_weight.narrow(0, start, self.output_size_per_partition)
         param.data.copy_(shard)
+
+    weight_loader_v2 = weight_loader
 
     def forward(
         self,
@@ -747,8 +749,7 @@ class Step5SparseIndexerIndexTPLinear(nn.Module):
 def _step5_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     return (
-        parallel.pipeline_parallel_size == 1
-        and parallel.enable_expert_parallel
+        parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
         and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
     )
@@ -1017,7 +1018,7 @@ class Step5Attention(nn.Module):
                 Step5DSAAttentionBackend.supports_compute_capability(capability)
             ):
                 raise NotImplementedError(
-                    f"Step5 DSA requires SM90 or SM103; got {capability}."
+                    f"Step5 DSA requires SM90, SM100 or SM103; got {capability}."
                 )
             if self.head_dim not in (128, 192):
                 raise ValueError(
@@ -1197,8 +1198,8 @@ class Step5Attention(nn.Module):
             **sparse_impl_args,
         )
         if self.use_dsa_backend:
-            from .csa_tail_ring import Step5CSATailRing
-            from .sparse_summary_cache import Step5SparseSummaryCacheLayer
+            from ..common.csa_tail_ring import Step5CSATailRing
+            from ..common.sparse_summary_cache import Step5SparseSummaryCacheLayer
 
             sparse_config = typing.cast(Step5SparseConfig, sparse_config)
             proxy_dim = int(sparse_config.proxy_dim)
@@ -1208,6 +1209,7 @@ class Step5Attention(nn.Module):
                 indexer_num_heads,
                 params_dtype=self.params_dtype,
                 index_tp_size=int(sparse_config.index_tp_size),
+                prefix=f"{prefix}.sparse_indexer_w",
             )
             # The sparse indexer uses weighted ReLU instead of scalable softmax,
             # so this checkpoint tensor is intentionally unused. Keep it
@@ -1632,7 +1634,7 @@ class Step5SparseAttention:
         torch.Tensor,
         bool,
     ]:
-        from .ops.indexer_norm_rope import indexer_norm_rope
+        from ..common.ops.indexer_norm_rope import indexer_norm_rope
 
         owner = self.owner
         index_q, index_k, index_z, extra_dims = owner.qkv_indexer_proj.split_indexer(
@@ -2310,15 +2312,17 @@ class Step5Model(nn.Module):
         return loaded_params
 
 
-class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
     # Required so quantization exclude lists match fused module prefixes.
     packed_modules_mapping = STEP5_PACKED_MODULES_MAPPING
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex={
-            re.compile(r"^vit_large_projector\.weight$"): None,
-        },
-        orig_to_new_substr={".share_expert.": ".moe.share_expert."},
+    hf_to_vllm_mapper = (
+        WeightsMapper(
+            orig_to_new_regex={
+                re.compile(r"^vit_large_projector\.weight$"): None,
+            },
+        )
+        | STEP5_SHARE_EXPERT_MAPPER
     )
 
     def __init__(

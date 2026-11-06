@@ -149,6 +149,11 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    /// Whether the sampler watermarks this request, after EngineCore applied
+    /// `watermark_config.enforce`. Set on the first output, and only when the
+    /// engine has a `watermark_config`.
+    #[serde(default)]
+    pub watermarking: Option<bool>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -163,6 +168,19 @@ pub struct RequestError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+}
+
+impl RequestError {
+    /// `code` of an error caused by the request itself, e.g. a structured-output
+    /// constraint the engine's backend cannot compile. Python raises
+    /// `VLLMValidationError` for it.
+    pub const VALIDATION_ERROR: &str = "validation_error";
+
+    /// Whether the request itself is invalid, so frontends report a client
+    /// error.
+    pub fn is_validation_error(&self) -> bool {
+        self.code == Self::VALIDATION_ERROR
+    }
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -582,6 +600,7 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            watermarking: None,
                         },
                     ],
                     scheduler_stats: None,
