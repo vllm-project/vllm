@@ -47,6 +47,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -206,6 +207,26 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     def num_deferred_release_chunks(self) -> int:
         return len(self._deferred_release_chunk_ids)
 
+    @property
+    def num_chunks(self) -> int:
+        return self._num_chunks
+
+    @property
+    def num_write_pending_chunks(self) -> int:
+        return self._num_write_pending_chunks
+
+    @property
+    def num_evictable_chunks(self) -> int:
+        return self._num_evictable_cache_chunks
+
+    def num_admissible_chunks(self) -> int:
+        """Chunks a store could claim now: free plus evictable."""
+        return self._get_num_free_chunks() + self._num_evictable_cache_chunks
+
+    def get_chunk(self, key: OffloadKey) -> ChunkStatus | None:
+        """Return the resident chunk for ``key`` without touching recency."""
+        return self._policy.get(key)
+
     @override
     def reset_cache(self) -> None:
         assert not self._deferred_release_chunk_ids, (
@@ -301,6 +322,12 @@ class TieringOffloadingManager(OffloadingManager):
         self.secondary_tiers = secondary_tiers or []
 
         self._job_id_counter: int = 0
+        # Opt-in PUT admission (configure_put_batching); None means disabled.
+        self._put_max_inflight: int | None = None
+        self._put_get_reserve = 0
+        # Keys holding PUT credit until their D2H write, cascade readers and
+        # parked request-level cascades are all done.
+        self._put_staging_keys: set[OffloadKey] = set()
         # Job tracking: maps job_id to metadata for all in-flight transfers.
         # TransferJob.is_promotion distinguishes direction:
         #   True:  secondary → primary (promotion)
@@ -958,7 +985,7 @@ class TieringOffloadingManager(OffloadingManager):
             return None
 
         if primary_result.keys_to_store:
-            if hasattr(self, "_put_max_inflight"):
+            if self._put_max_inflight is not None:
                 self._put_staging_keys.update(primary_result.keys_to_store)
             state = self._req_state[req_context.req_id]
             state.pending_primary_stores += 1
@@ -971,7 +998,7 @@ class TieringOffloadingManager(OffloadingManager):
                 k for k in keys if k not in keys_to_store_set
             )
             if keys_already_in_primary:
-                if hasattr(self, "_put_max_inflight"):
+                if self._put_max_inflight is not None:
                     self._put_staging_keys.update(keys_already_in_primary)
                 self._cascade_existing_chunks_to_request_level_tiers(
                     keys_already_in_primary, req_context, request_level_tiers
@@ -1305,7 +1332,7 @@ class TieringOffloadingManager(OffloadingManager):
             finished_req_ids.append(req_id)
 
         self.primary_tier.reset_cache()
-        if hasattr(self, "_put_max_inflight"):
+        if self._put_max_inflight is not None:
             self._put_staging_keys.clear()
 
         for req_id in finished_req_ids:
@@ -1447,19 +1474,18 @@ class TieringOffloadingManager(OffloadingManager):
         ):
             raise ValueError("Invalid PUT batching limits")
         admissible = min(
-            max_inflight_chunks, self.primary_tier._num_chunks - get_reserve_chunks
+            max_inflight_chunks, self.primary_tier.num_chunks - get_reserve_chunks
         )
         if min_unit_chunks > admissible:
             raise ValueError(
                 f"PUT batching can admit at most {admissible} chunks (max inflight "
                 f"{max_inflight_chunks}, primary pool "
-                f"{self.primary_tier._num_chunks} minus GET reserve "
+                f"{self.primary_tier.num_chunks} minus GET reserve "
                 f"{get_reserve_chunks}), but one aligned unit needs "
                 f"{min_unit_chunks}"
             )
         self._put_max_inflight = max_inflight_chunks
         self._put_get_reserve = get_reserve_chunks
-        self._put_staging_keys: set[OffloadKey] = set()
 
     def keys_needing_put_credit(
         self, keys: Iterable[OffloadKey], req_context: ReqContext
@@ -1468,12 +1494,12 @@ class TieringOffloadingManager(OffloadingManager):
         resident but about to be pinned by a request-level cascade."""
         state = self._req_state.get(req_context.req_id)
         request_level = state is not None and bool(state.request_level_tiers)
-        policy = self.primary_tier._policy
+        primary = self.primary_tier
         return {
             key
             for key in keys
             if key not in self._put_staging_keys
-            and (request_level or policy.get(key) is None)
+            and (request_level or primary.get_chunk(key) is None)
         }
 
     def get_put_admission_budget(self) -> int:
@@ -1483,6 +1509,7 @@ class TieringOffloadingManager(OffloadingManager):
         Keep its credit until ALL such references are gone, including after
         request finalization. Never return it at GPU->primary completion alone.
         """
+        assert self._put_max_inflight is not None, "PUT batching is disabled"
         self._maybe_process_finished_jobs()
         primary = self.primary_tier
         parked_keys = {
@@ -1493,12 +1520,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._put_staging_keys = {
             key
             for key in self._put_staging_keys
-            if (chunk := primary._policy.get(key)) is not None
+            if (chunk := primary.get_chunk(key)) is not None
             and (chunk.ref_cnt != 0 or key in parked_keys)
         }
-        admissible = (
-            primary._get_num_free_chunks() + primary._num_evictable_cache_chunks
-        )
+        admissible = primary.num_admissible_chunks()
         return max(
             0,
             min(
@@ -1512,8 +1537,8 @@ class TieringOffloadingManager(OffloadingManager):
         primary = self.primary_tier
         return (
             self.get_put_admission_budget(),
-            primary._num_write_pending_chunks,
-            primary._num_evictable_cache_chunks,
+            primary.num_write_pending_chunks,
+            primary.num_evictable_chunks,
             self._job_id_counter,
             len(self._jobs),
         )

@@ -6984,9 +6984,9 @@ def _make_put_scheduler(
 
     config = _make_vllm_config(
         extra_config={
-            "guard_put_batch_chunks": batch,
-            "guard_put_max_inflight_chunks": capacity,
-            "guard_put_get_reserve_chunks": reserve,
+            "put_batch_chunks": batch,
+            "put_max_inflight_chunks": capacity,
+            "put_get_reserve_chunks": reserve,
         }
     )
     config.speculative_config = None
@@ -7222,8 +7222,10 @@ def test_put_preemption_clears_admission_priority():
     _put_request(scheduler)
     output = _put_output(put=128)
     assert scheduler._build_store_jobs(output)
+    assert scheduler._put_retry_after == "put"
     output.preempted_req_ids = {"put"}
-    assert scheduler._build_store_jobs(output) == {}
+    meta = scheduler.build_connector_meta(output)
+    assert meta.store_jobs == {}
     assert scheduler._put_retry_after is None
 
 

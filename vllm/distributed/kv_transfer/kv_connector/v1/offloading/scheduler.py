@@ -71,6 +71,13 @@ logger = init_logger(__name__)
 # A cache reset fence held this long is reported once.
 _RESET_FENCE_WARN_S = 60
 
+# Opt-in PUT batching defaults (extra_config ``put_*``; see the usage docs).
+_DEFAULT_PUT_MAX_INFLIGHT_CHUNKS = 512
+_DEFAULT_PUT_GET_RESERVE_CHUNKS = 128
+# Steps a blocked request skips while admission state is unchanged, before
+# re-planning anyway (bounds both scan cost and retry latency).
+_PUT_RETRY_MAX_SKIPS = 15
+
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
@@ -618,7 +625,7 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
-        self._put_batch_chunks = spec.extra_config.get("guard_put_batch_chunks", 0)
+        self._put_batch_chunks = spec.extra_config.get("put_batch_chunks", 0)
         self._put_retry_after: ReqId | None = None
         self._put_retry_gate: dict[ReqId, tuple[tuple[int, ...], int]] = {}
         self._put_manager: TieringOffloadingManager | None = None
@@ -640,8 +647,12 @@ class OffloadingConnectorScheduler:
             )
             self.manager.configure_put_batching(
                 self._put_batch_chunks,
-                spec.extra_config.get("guard_put_max_inflight_chunks", 512),
-                spec.extra_config.get("guard_put_get_reserve_chunks", 128),
+                spec.extra_config.get(
+                    "put_max_inflight_chunks", _DEFAULT_PUT_MAX_INFLIGHT_CHUNKS
+                ),
+                spec.extra_config.get(
+                    "put_get_reserve_chunks", _DEFAULT_PUT_GET_RESERVE_CHUNKS
+                ),
                 min_unit_chunks=max(1, min_unit_chunks),
             )
         self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
@@ -2083,15 +2094,13 @@ class OffloadingConnectorScheduler:
             req = req_status.req
             if self._put_batch_chunks:
                 if req_id in (scheduler_output.preempted_req_ids or ()):
-                    self._put_retry_gate.pop(req_id, None)
-                    if self._put_retry_after == req_id:
-                        self._put_retry_after = None
+                    # Admission state was cleared in _build_connector_meta().
                     continue
                 budget: int | None = admission_state[0]
                 previous, retries = self._put_retry_gate.get(req_id, ((), 0))
                 if (
                     previous == admission_state
-                    and retries < 15
+                    and retries < _PUT_RETRY_MAX_SKIPS
                     and not req.is_finished()
                 ):
                     self._put_retry_gate[req_id] = (previous, retries + 1)
@@ -2308,7 +2317,9 @@ class OffloadingConnectorScheduler:
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
                 if self._put_batch_chunks:
+                    # Expected under batching: retried once capacity changes.
                     self._put_retry_gate[req_id] = (admission_state, 0)
+                    logger.debug("Request %s: PUT batch deferred", req_id)
                 else:
                     logger.warning("Request %s: cannot store chunks", req_id)
                 continue
