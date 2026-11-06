@@ -75,7 +75,6 @@ steps:
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/cpu/
-  - vllm/v1/worker/cpu_model_runner.py
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/attention/backends/cpu_attn.py
   - vllm/config/speculative.py
@@ -174,8 +173,6 @@ steps:
   - csrc/cpu/shm.cpp
   - vllm/v1/worker/cpu_worker.py
   - vllm/v1/worker/gpu_worker.py
-  - vllm/v1/worker/cpu_model_runner.py
-  - vllm/v1/worker/gpu_model_runner.py
   - vllm/platforms/cpu.py
   - vllm/distributed/parallel_state.py
   - vllm/distributed/device_communicators/cpu_communicator.py
