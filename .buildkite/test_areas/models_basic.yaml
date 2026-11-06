@@ -384,6 +384,7 @@ steps:
   device: h200_35gb
   source_file_dependencies:
   - vllm/models/qwen4_exp/
+  - vllm/model_executor/layers/quantization/ngq2.py
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py

@@ -27,6 +27,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLENgq2EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -41,6 +42,7 @@ __all__ = [
     "Qwen4ExpPLEEmbeddingMethod",
     "Qwen4ExpPLEDiskOffloadEmbedding",
     "Qwen4ExpPLEFp8EmbeddingMethod",
+    "Qwen4ExpPLENgq2EmbeddingMethod",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
@@ -83,6 +85,10 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         data_parallel_rank: int = 0,
         reduce_results: bool = True,
     ) -> None:
+        # shortcut: staging serves file rows in one fixed width, and NGQ2 gains are
+        # 1-D. Stage the gain plane too when someone needs NGQ2 served from disk.
+        if isinstance(embedding_method, Qwen4ExpPLENgq2EmbeddingMethod):
+            raise NotImplementedError("NGQ2 PLE tables do not support disk offload")
         super().__init__(
             num_embeddings,
             embedding_dim,
@@ -653,8 +659,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         nvfp4_method = (
             method if isinstance(method, Qwen4ExpPLENvFp4EmbeddingMethod) else None
         )
-        # NVFP4 tables split their block scales into shards like the rows.
-        shard_parameters = ("weight", "weight_scale") if nvfp4_method else ("weight",)
+        shard_parameters = getattr(method, "shard_parameters", {"weight": "weight"})
         shard_size = (
             embedding.org_vocab_size + self.split_ngram_parts - 1
         ) // self.split_ngram_parts
@@ -689,7 +694,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     0,
                     min(shard_size, embedding.org_vocab_size - checkpoint_start),
                 )
-                parameter = getattr(embedding, suffix)
+                parameter_name = shard_parameters[suffix]
+                parameter = getattr(embedding, parameter_name)
+                # A per-row vector (one value per row) loads as a column.
+                if loaded_weight.dim() == 1:
+                    loaded_weight = loaded_weight.unsqueeze(1)
                 expected_shape = (expected_rows, parameter.shape[1])
                 if tuple(loaded_weight.shape) != expected_shape:
                     raise ValueError(
@@ -697,10 +706,19 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"{suffix}: expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
                     )
-                # A cast would silently reinterpret packed E2M1 bytes.
-                if nvfp4_method is not None and loaded_weight.dtype != parameter.dtype:
+                # A cast would silently reinterpret packed bytes.
+                if (
+                    isinstance(
+                        method,
+                        (
+                            Qwen4ExpPLENvFp4EmbeddingMethod,
+                            Qwen4ExpPLENgq2EmbeddingMethod,
+                        ),
+                    )
+                    and loaded_weight.dtype != parameter.dtype
+                ):
                     raise ValueError(
-                        f"NVFP4 PLE shard {shard_index} {suffix} requires "
+                        f"Packed PLE shard {shard_index} {suffix} requires "
                         f"{parameter.dtype}, got {loaded_weight.dtype}"
                     )
                 if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
@@ -713,7 +731,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         loaded_weight,
                         checkpoint_start=checkpoint_start,
                     )
-                loaded.add(f"ngram_embedding.{suffix}")
+                loaded.add(f"ngram_embedding.{parameter_name}")
                 continue
             if nvfp4_method is not None and name in (
                 "ngram_embedding.weight",

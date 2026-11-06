@@ -16,6 +16,7 @@ The following are the supported quantization formats for vLLM:
     - [INT4 W4A16](llm_compressor/int4.md)
     - [INT8 W4A8](llm_compressor/int8_w4a8.md)
     - [INT8 W8A8](llm_compressor/int8_w8a8.md)
+- [NGQ2 N-gram Tables](ngq2.md)
 - [NVIDIA Model Optimizer](modelopt.md)
 - [Online Quantization](online.md)
 - [AMD Quark](quark.md)

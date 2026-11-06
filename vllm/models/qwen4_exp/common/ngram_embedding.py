@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptQuantConfigBase,
 )
+from vllm.model_executor.layers.quantization.ngq2 import Ngq2Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
@@ -179,6 +180,8 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
 
     # PLE post-load processing only validates scales in their current storage.
     requires_device_loading: bool = False
+    # Checkpoint shard suffix -> table parameter.
+    shard_parameters: dict[str, str] = {"weight": "weight"}
 
     @staticmethod
     def from_quant_config(
@@ -222,6 +225,10 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             isinstance(quant_config, INCConfig)
             and not quant_config.config_parser.resolve(None, prefix).quantized
         ):
+            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if isinstance(quant_config, Ngq2Config):
+            if quant_config.is_table_quantized(prefix):
+                return Qwen4ExpPLENgq2EmbeddingMethod()
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         # Quark quantizes only Linear and MoE layers; PLE tables stay BF16.
         if isinstance(quant_config, QuarkConfig):
@@ -399,6 +406,9 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
 # NVFP4 packs two E2M1 values per byte and shares one E4M3 scale per block.
 _NVFP4_VALUES_PER_BYTE = 2
 _NVFP4_BLOCK_SIZE = 16
+# NGQ2 stores two values per 4-bit symbol, so four values per byte.
+_NGQ2_VALUES_PER_BYTE = 4
+_NGQ2_CODEBOOK_ENTRIES = 512
 
 
 class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
@@ -407,6 +417,9 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
     Rows stay packed in storage. A lookup decodes only the selected rows to
     the activation dtype, before the ETP reduction.
     """
+
+    # Block scales are split into shards like the rows.
+    shard_parameters = {"weight": "weight", "weight_scale": "weight_scale"}
 
     def create_weights(
         self,
@@ -585,6 +598,184 @@ def _lookup_nvfp4_ple_embedding_kernel(
     global_scale = tl.load(global_scale_ptr).to(tl.float32)
     values = _e2m1_inline(codes) * scales * global_scale
     tl.store(output_ptr + row * embedding_dim + offsets, values, mask=in_row)
+
+
+class Qwen4ExpPLENgq2EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
+    """NGQ2 PLE embedding: 2-bit trellis symbols, one gain per row, one codebook.
+
+    Rows stay packed in storage. A lookup decodes only the selected rows to
+    the activation dtype, before the ETP reduction.
+    """
+
+    shard_parameters = {"ngq2_symbols": "weight", "ngq2_gain": "weight_gain"}
+
+    def create_weights(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size, params_dtype
+        if input_size_per_partition % _NGQ2_VALUES_PER_BYTE:
+            raise ValueError(
+                "NGQ2 PLE embedding dimension must be divisible by "
+                f"{_NGQ2_VALUES_PER_BYTE}, got {input_size_per_partition}"
+            )
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        num_rows = sum(output_partition_sizes)
+        for name, width, dtype in (
+            ("weight", input_size_per_partition // _NGQ2_VALUES_PER_BYTE, torch.uint8),
+            ("weight_gain", 1, torch.bfloat16),
+        ):
+            parameter = ModelWeightParameter(
+                data=layer.allocate_embedding_weight(num_rows, width, dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter(name, parameter)
+        codebook = nn.Parameter(
+            torch.full(
+                (_NGQ2_CODEBOOK_ENTRIES, 2),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("ngq2_codebook", codebook)
+        if layer.weight_gain.is_pinned():
+            self._uva_weight_gain = get_accelerator_view_from_cpu_tensor(
+                layer.weight_gain
+            )
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Reject NGQ2 PLE checkpoints without a codebook."""
+        if torch.any(layer.ngq2_codebook == torch.finfo(torch.float32).min):
+            raise ValueError("NGQ2 PLE checkpoint is missing its codebook")
+        super().process_weights_after_loading(layer)
+
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        return layer.params_dtype
+
+    def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        ids = input_.reshape(-1)
+        output = torch.empty(
+            (*input_.shape, layer.embedding_dim),
+            dtype=layer.params_dtype,
+            device=input_.device,
+        )
+        # Device rows are already local, so every ID in range is owned.
+        self.decode_rows(
+            layer.weight,
+            layer.weight_gain,
+            layer.ngq2_codebook,
+            ids,
+            output,
+            0,
+            layer.weight.shape[0],
+        )
+        return output
+
+    @staticmethod
+    def decode_rows(
+        symbols: torch.Tensor,
+        gain: torch.Tensor,
+        codebook: torch.Tensor,
+        ids: torch.Tensor,
+        output: torch.Tensor,
+        vocab_start: int,
+        vocab_end: int,
+    ) -> None:
+        """Decode the rows of `ids` in `[vocab_start, vocab_end)` into `output`."""
+        if ids.numel():
+            _lookup_ngq2_ple_embedding_kernel[(ids.numel(),)](
+                symbols,
+                gain,
+                codebook,
+                ids,
+                output,
+                output.shape[-1],
+                vocab_start,
+                vocab_end,
+                BLOCK_T=triton.next_power_of_2(output.shape[-1] // 2),
+            )
+
+    def lookup_from_pinned(
+        self,
+        layer: "Qwen4ExpPLEPinnedHostEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        self.decode_rows(
+            layer._uva_weight,
+            self._uva_weight_gain,
+            layer.ngq2_codebook,
+            ids,
+            output,
+            layer.shard_indices.org_vocab_start_index,
+            layer.shard_indices.org_vocab_end_index,
+        )
+
+    def dequantize(
+        self,
+        layer: nn.Module,
+        embeddings: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        del layer
+        # The lookup already decoded the rows to the activation dtype.
+        return embeddings.to(output_dtype)
+
+
+@triton.jit
+def _ngq2_symbol(symbols_ptr, step, mask):
+    """Read a 4-bit symbol: the even step is the high nibble of its byte."""
+    byte = tl.load(symbols_ptr + step // 2, mask=mask, other=0).to(tl.uint32)
+    return (byte >> ((1 - step % 2) * 4)) & 0xF
+
+
+@triton.jit
+def _lookup_ngq2_ple_embedding_kernel(
+    symbols_ptr,
+    gain_ptr,
+    codebook_ptr,
+    ids_ptr,
+    output_ptr,
+    embedding_dim,
+    vocab_start,
+    vocab_end,
+    BLOCK_T: tl.constexpr,
+):
+    """Decode owned NGQ2 PLE rows; write zeros for rows another rank owns."""
+    row = tl.program_id(0).to(tl.int64)
+    idx = tl.load(ids_ptr + row).to(tl.int64)
+    owned = (idx >= vocab_start) & (idx < vocab_end)
+    local_idx = tl.where(owned, idx - vocab_start, 0)
+    num_steps = embedding_dim // 2
+    steps = tl.arange(0, BLOCK_T)
+    in_row = steps < num_steps
+    mask = owned & in_row
+    row_ptr = symbols_ptr + local_idx * (num_steps // 2)
+    # Tail-biting trellis: a step's state is its symbol and the three before it.
+    state = (
+        (_ngq2_symbol(row_ptr, (steps + num_steps - 3) % num_steps, mask) << 12)
+        | (_ngq2_symbol(row_ptr, (steps + num_steps - 2) % num_steps, mask) << 8)
+        | (_ngq2_symbol(row_ptr, (steps + num_steps - 1) % num_steps, mask) << 4)
+        | _ngq2_symbol(row_ptr, steps, mask)
+    )
+    mixed = (state + 1) * state
+    sign = tl.where(((mixed >> 15) & 1) == 1, -1.0, 1.0)
+    entry = ((mixed >> 6) & 511).to(tl.int64)
+    gain = tl.load(gain_ptr + local_idx, mask=owned, other=0).to(tl.float32)
+    first = tl.load(codebook_ptr + entry * 2, mask=mask, other=0.0) * sign * gain
+    second = tl.load(codebook_ptr + entry * 2 + 1, mask=mask, other=0.0) * gain
+    row_output = output_ptr + row * embedding_dim
+    tl.store(row_output + steps * 2, first.to(tl.bfloat16), mask=in_row)
+    tl.store(row_output + steps * 2 + 1, second.to(tl.bfloat16), mask=in_row)
 
 
 class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):

@@ -23,8 +23,9 @@ import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
 import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import SpeculativeConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.engram import EngramConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
@@ -40,6 +41,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.ngq2 import Ngq2Config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
@@ -51,12 +53,17 @@ from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     PLEVocabParallelEmbedding,
 )
+from vllm.models.qwen4_exp.nvidia.model import (
+    Qwen4ExpForCausalLM,
+    Qwen4ExpForConditionalGeneration,
+)
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEDiskOffloadEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLENgq2EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -509,6 +516,238 @@ def test_nvfp4_ple_cuda_lookup_and_graph_replay(monkeypatch, pinned):
         atol=0,
         rtol=0,
     )
+
+
+_NGQ2_TABLE = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+_NGQ2_CONFIG = {
+    "quant_method": "ngq2",
+    "version": 1,
+    "bits": 2,
+    "code": "qtip_hyb_trellis",
+    "L": 16,
+    "K": 2,
+    "V": 2,
+    "codebook": {"tensor": "ngq2.codebook", "type": "hyb", "base_entries": 512},
+    "gain": "ncc_bf16",
+    "granularity": "row",
+    "modules_to_quantize": [_NGQ2_TABLE],
+    "checkpoint_parts": "shard_{j}",
+}
+
+
+def _make_ngq2_ngram_embedding(*, device="cpu", pinned=False):
+    """Build the real PLE module with an NGQ2 table and matching checkpoint shards."""
+    config = Qwen4ExpTextConfig(
+        ngram_size=2,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+        split_ngram_parts=3,
+        ple_embed_dim=160,
+        eos_token_id=0,
+        vocab_size=64,
+    )
+    vllm_config = VllmConfig()
+    # VllmConfig only accepts an EngramConfig next to a model config; set it
+    # afterwards, as the config's own engram resolution does.
+    vllm_config.engram_config = EngramConfig(cpu_offload=pinned)
+    with set_current_vllm_config(vllm_config), torch.device(device):
+        module = Qwen4ExpNGramEmbedding(
+            config,
+            160,
+            0,
+            4,
+            data_parallel_rank=0,
+            prefix="model.layers.1.ple.ple_embedding",
+            quant_config=Ngq2Config.from_config(_NGQ2_CONFIG),
+            params_dtype=torch.bfloat16,
+        )
+    rows = module.ngram_embedding.org_vocab_size
+    generator = torch.Generator().manual_seed(0)
+    symbols = torch.randint(0, 256, (rows, 40), generator=generator).to(torch.uint8)
+    gain = torch.rand(rows, generator=generator).to(torch.bfloat16) / 16
+    codebook = torch.randn(512, 2, generator=generator)
+    shard_rows = -(-rows // config.split_ngram_parts)
+    tensors = []
+    # Shards arrive out of order, and a shard's gain can arrive before its symbols.
+    for shard in (2, 0, 1):
+        for suffix, tensor in (("ngq2_gain", gain), ("ngq2_symbols", symbols)):
+            tensors.append(
+                (
+                    f"ngram_embedding.shard_{shard}.{suffix}",
+                    tensor[shard * shard_rows :][:shard_rows],
+                )
+            )
+    tensors.append(("ngram_embedding.ngq2_codebook", codebook))
+    return module, tensors, symbols, gain, codebook
+
+
+def _reference_ngq2_ple(symbols, gain, codebook):
+    """Decode rows one step at a time, in the order the checkpoint format defines."""
+    rows = torch.empty(*symbols.shape[:-1], 160, dtype=torch.bfloat16)
+    for row, (row_symbols, row_gain) in enumerate(zip(symbols.tolist(), gain.float())):
+        nibbles = [n for byte in row_symbols for n in (byte >> 4, byte & 15)]
+        values = []
+        for step in range(80):
+            state = 0
+            for back in (3, 2, 1, 0):
+                state = (state << 4) | nibbles[(step - back) % 80]
+            mixed = (state + 1) * state
+            first, second = codebook[(mixed >> 6) & 511]
+            values += [-first if (mixed >> 15) & 1 else first, second]
+        rows[row] = (torch.stack(values) * row_gain).to(torch.bfloat16)
+    return rows
+
+
+def test_ngq2_ple_loads_streamed_shards(dist_init):
+    module, tensors, symbols, gain, codebook = _make_ngq2_ngram_embedding()
+    loaded = set()
+    for start in range(0, len(tensors), 3):
+        loaded.update(module.load_weights(iter(tensors[start : start + 3])))
+    layer = module.ngram_embedding
+    layer.embedding_method.process_weights_after_loading(layer)
+
+    assert isinstance(layer.embedding_method, Qwen4ExpPLENgq2EmbeddingMethod)
+    assert loaded == {
+        "ngram_embedding.weight",
+        "ngram_embedding.weight_gain",
+        "ngram_embedding.ngq2_codebook",
+    }
+    torch.testing.assert_close(layer.weight, symbols)
+    torch.testing.assert_close(layer.weight_gain[:, 0], gain)
+    torch.testing.assert_close(layer.ngq2_codebook, codebook)
+
+
+def test_ngq2_ple_rejects_missing_codebook(dist_init):
+    module, tensors, *_ = _make_ngq2_ngram_embedding()
+    module.load_weights(tensors[:-1])
+    layer = module.ngram_embedding
+    with pytest.raises(ValueError, match="missing its codebook"):
+        layer.embedding_method.process_weights_after_loading(layer)
+
+
+def test_ngq2_ple_rejects_a_mismatched_shard_dtype(dist_init):
+    module, tensors, *_ = _make_ngq2_ngram_embedding()
+    name, gain = tensors[0]
+    with pytest.raises(ValueError, match="requires torch.bfloat16"):
+        module.load_weights([(name, gain.float())])
+
+
+def test_ngq2_ple_rejects_disk_offload():
+    with pytest.raises(NotImplementedError, match="disk offload"):
+        Qwen4ExpPLEDiskOffloadEmbedding(
+            8,
+            160,
+            params_dtype=torch.bfloat16,
+            padding_size=2,
+            prefix="t",
+            embedding_method=Qwen4ExpPLENgq2EmbeddingMethod(),
+        )
+
+
+def test_ngq2_config_selects_only_the_listed_table():
+    config = Ngq2Config.from_config(_NGQ2_CONFIG)
+    for prefix in (_NGQ2_TABLE, "model.language_model.model." + _NGQ2_TABLE[21:]):
+        assert isinstance(
+            Qwen4ExpPLEEmbeddingMethod.from_quant_config(config, prefix),
+            Qwen4ExpPLENgq2EmbeddingMethod,
+        )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            config, _NGQ2_TABLE.replace("layers.1", "layers.11")
+        ),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "table"),
+    [
+        (Qwen4ExpForCausalLM, "model.layers.1.ple.ple_embedding.ngram_embedding"),
+        (
+            Qwen4ExpForConditionalGeneration,
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding",
+        ),
+    ],
+)
+def test_ngq2_codebook_routes_to_the_table(model_cls, table):
+    mapper = (
+        model_cls.hf_to_vllm_mapper
+        | Ngq2Config.from_config(_NGQ2_CONFIG).get_checkpoint_weight_mapper()
+    )
+    assert mapper.map_name("ngq2.codebook") == f"{table}.ngq2_codebook"
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {"granularity": "block16"},
+        {"code": "other"},
+        {"L": 12},
+        {"base_quantization_config": {"quant_method": "fp8"}},
+        {"modules_to_quantize": [_NGQ2_TABLE, _NGQ2_TABLE]},
+    ],
+)
+def test_ngq2_config_rejects_formats_the_kernel_cannot_decode(unsupported):
+    with pytest.raises(NotImplementedError, match="NGQ2"):
+        Ngq2Config.from_config(_NGQ2_CONFIG | unsupported)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("pinned", [False, True])
+def test_ngq2_ple_cuda_lookup_and_graph_replay(dist_init, pinned):
+    module, tensors, symbols, gain, codebook = _make_ngq2_ngram_embedding(
+        device="cuda", pinned=pinned
+    )
+    module.load_weights(iter(tensors))
+    layer = module.ngram_embedding
+    layer.embedding_method.process_weights_after_loading(layer)
+    ids = torch.tensor([[3], [4], [10], [0]], device="cuda")
+    lookup_fn = layer._lookup if pinned else torch.compile(layer, fullgraph=True)
+
+    def lookup():
+        return lookup_fn(ids)
+
+    for _ in range(3):
+        lookup()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = lookup()
+    reference = _reference_ngq2_ple(symbols, gain, codebook)
+    for new_ids in ([[3], [4], [10], [0]], [[0], [10], [4], [3]]):
+        ids.copy_(torch.tensor(new_ids, device="cuda"))
+        graph.replay()
+        expected = reference[ids.cpu()]
+        torch.testing.assert_close(output.cpu(), expected, atol=0, rtol=0)
+        if pinned:
+            layer.start_prefetch(ids)
+            torch.testing.assert_close(
+                layer.finalize_prefetch(total_tokens=ids.shape[0]).cpu(),
+                expected.flatten(-2),
+                atol=0,
+                rtol=0,
+            )
+    assert layer.weight.device.type == ("cpu" if pinned else "cuda")
+    assert layer.weight_gain.device == layer.weight.device
+    assert layer.ngq2_codebook.device.type == "cuda"
+    assert lookup_fn(ids[:0]).shape == (0, 1, 160)
+
+    # A rank that owns rows [4, 8) decodes its rows and writes zeros for the rest.
+    out = torch.empty(4, 160, dtype=torch.bfloat16, device="cuda")
+    owned = torch.tensor([3, 4, 7, 8], device="cuda")
+    # Shard views keep real neighbor rows in memory, so a missed mask reads them.
+    Qwen4ExpPLENgq2EmbeddingMethod.decode_rows(
+        symbols.cuda()[4:8],
+        gain[:, None].cuda()[4:8],
+        codebook.cuda(),
+        owned,
+        out,
+        4,
+        8,
+    )
+    expected = reference[[3, 4, 7, 8]]
+    expected[[0, 3]] = 0
+    torch.testing.assert_close(out.cpu(), expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize(("dp_rank", "local_tokens"), [(0, 2), (1, 3)])
