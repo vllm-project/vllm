@@ -337,6 +337,10 @@ class FrontendArgs(BaseFrontendArgs):
     """If provided, the server will require one of these keys to be presented in
     the header.
 
+    API keys (this option or `VLLM_API_KEY`) are not enforced on gRPC:
+    `--grpc` refuses to start when one is set, and with `--grpc-port` they
+    only protect the HTTP endpoints.
+
     Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
     `/inference` path prefixes. Other endpoints on the same server, including
     `/invocations` (which exposes the same inference capabilities as `/v1`),
@@ -477,8 +481,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Launch the Python gRPC (SMG VllmEngine) server on --port instead "
         "of the HTTP OpenAI-compatible server. Requires: pip install vllm[grpc]. "
-        "Cannot be combined with --grpc-port, which enables the Rust "
-        "frontend's gRPC services.",
+        "Cannot be combined with --grpc-port, which enables the Rust frontend's "
+        "gRPC services, or with --api-key/VLLM_API_KEY, since this server does "
+        "not implement authentication.",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -516,6 +521,18 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
         raise ValueError("--grpc-port must be between 0 and 65535")
     if args.grpc_port != 0 and args.grpc_port == args.port and not args.uds:
         raise ValueError("--grpc-port must differ from --port when HTTP uses TCP")
+
+
+def validate_grpc_auth_args(args: argparse.Namespace) -> None:
+    """Reject API keys, which the Python gRPC server cannot enforce."""
+    # Same keys the HTTP AuthenticationMiddleware would enforce.
+    if any(getattr(args, "api_key", None) or [envs.VLLM_API_KEY]):
+        raise ValueError(
+            "The Python gRPC server (--grpc) does not support API keys "
+            "(--api-key, api_key in --config, or VLLM_API_KEY): it does not "
+            "implement authentication. Remove the API key and restrict access "
+            "to the gRPC port with network-level controls."
+        )
 
 
 def validate_reasoning_effort_map(effort_map: Any) -> None:

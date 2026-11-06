@@ -867,7 +867,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
         os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
     ),
-    # API key for vLLM API server
+    # API key for the vLLM HTTP API server, used when --api-key is not set.
+    # Not enforced on gRPC: `vllm serve --grpc` refuses to start when it is set.
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: (
