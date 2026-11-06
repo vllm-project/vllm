@@ -3,6 +3,7 @@
 """Custom Sparse Attention Indexer layers."""
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -78,6 +79,9 @@ from vllm.v1.attention.ops.dcp_topk_merge import (
 )
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQContext
 
 logger = init_logger(__name__)
 
@@ -557,6 +561,22 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def dcp_shardq_context(
+    forward_context, k_cache_prefix: str
+) -> "tuple[str, DcpShardQContext] | None":
+    """The MLA layer and gathered context of a DCP ShardQ step whose MLA
+    layer this indexer cache follows (``shardq_layer_name``), or None."""
+    k_cache = forward_context.no_compile_layers.get(k_cache_prefix)
+    mla_layer_name = getattr(k_cache, "shardq_layer_name", "")
+    if not mla_layer_name:
+        return None
+    shardq = getattr(forward_context.attn_metadata.get(mla_layer_name), "shardq", None)
+    gathered_context = getattr(shardq, "gathered_context", None)
+    if gathered_context is None:
+        return None
+    return mla_layer_name, gathered_context
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -818,6 +838,34 @@ def sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
+        prefill_chunks = prefill_metadata.chunks
+        prefill_kv_cache = kv_cache
+        prefill_dcp_world_size = dcp_world_size
+        indices = prefill_metadata.shardq_gather_indices
+        if dcp_world_size > 1 and (
+            dcp_shardq := dcp_shardq_context(forward_context, k_cache_prefix)
+        ):
+            # A DCP ShardQ step scores its prefill rows over a gathered copy
+            # of their keys, as a non-DCP ShardQ step does: no top-k merge
+            # across ranks. Its decode rows keep the DCP decode path.
+            mla_layer_name, gathered_context = dcp_shardq
+            assert num_decode_tokens == gathered_context.num_decode_tokens
+            prefill_kv_cache = gathered_context.gather(
+                forward_context.no_compile_layers[mla_layer_name].kv_cache,
+                attn_metadata[mla_layer_name].block_table,
+                kv_cache,
+                attn_metadata_narrowed.block_table,
+            )
+            prefill_chunks = gathered_context.indexer_chunks
+            prefill_dcp_world_size = 1
+            indices = gathered_context.gather_indices
+        # Under ShardQ the chunks index the gather indices' tokens. The caller
+        # may have computed the query and weights of just those.
+        prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
+        if indices is not None and q_quant.shape[0] != indices.shape[0]:
+            prefill_q, prefill_weights = q_quant[indices], weights[indices]
+            if q_scale is not None:
+                prefill_q_scale = q_scale[indices]
 
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
@@ -827,7 +875,7 @@ def sparse_attn_indexer(
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            max(c.max_local_total_seq_lens for c in prefill_metadata.chunks),
+            max(c.max_local_total_seq_lens for c in prefill_chunks),
             head_dim,
             fp8_dtype,
             use_fp4_cache,
@@ -836,7 +884,7 @@ def sparse_attn_indexer(
         # and the de-interleaved result.
         pcp_chunks = [
             (c, c.pcp_deinterleave_idx)
-            for c in prefill_metadata.chunks
+            for c in prefill_chunks
             if c.pcp_deinterleave_idx is not None
         ]
         gather_specs: list[tuple[tuple[int, int], torch.dtype]] = []
@@ -854,14 +902,8 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Under ShardQ the chunks index the shardq_gather_indices tokens.
-        prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
-        if (indices := prefill_metadata.shardq_gather_indices) is not None:
-            assert candidate_blocks is None
-            prefill_q, prefill_weights = q_quant[indices], weights[indices]
-            if q_scale is not None:
-                prefill_q_scale = q_scale[indices]
-        for chunk in prefill_metadata.chunks:
+        assert indices is None or candidate_blocks is None
+        for chunk in prefill_chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
             assert chunk.local_cu_seq_lens is not None
@@ -869,14 +911,12 @@ def sparse_attn_indexer(
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
             if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                 ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
+                    prefill_kv_cache,
                     k_quant,
                     k_scale,
                     chunk.block_table,
                     chunk.local_cu_seq_lens,
                 )
-
-            row_start, row_end = chunk.token_start, chunk.token_end
 
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
@@ -895,13 +935,13 @@ def sparse_attn_indexer(
                     out_scales,
                 )
 
-            q_slice = prefill_q[row_start:row_end]
+            chunk_rows = slice(chunk.token_start, chunk.token_end)
+            q_slice = prefill_q[chunk_rows]
             q_scale_slice = (
-                prefill_q_scale[row_start:row_end]
-                if prefill_q_scale is not None
-                else None
+                prefill_q_scale[chunk_rows] if prefill_q_scale is not None else None
             )
-            topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
+            chunk_weights = prefill_weights[chunk_rows]
+            topk_indices = topk_indices_buffer[chunk_rows, :topk_tokens]
 
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
@@ -923,7 +963,7 @@ def sparse_attn_indexer(
                     q_slice,
                     k_quant,
                     fused_mqa_topk_key_scales(k_scale),
-                    prefill_weights[row_start:row_end],
+                    chunk_weights,
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_indices,
@@ -948,7 +988,8 @@ def sparse_attn_indexer(
                 # rows).
                 for sub in range(0, q_slice.shape[0], dense_rows):
                     rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
-                    tokens = slice(row_start + rows.start, row_start + rows.stop)
+                    rows_ks = cu_seqlen_ks[rows]
+                    rows_ke = cu_seqlen_ke[rows]
                     if current_platform.is_xpu():
                         if q_scale_slice is not None:
                             raise RuntimeError(
@@ -958,26 +999,26 @@ def sparse_attn_indexer(
                             q_slice_cast[rows],
                             k_quant_cast,
                             k_scale_cast,
-                            prefill_weights[tokens],
-                            cu_seqlen_ks[rows],
-                            cu_seqlen_ke[rows],
+                            chunk_weights[rows],
+                            rows_ks,
+                            rows_ke,
                         )
-                        row_starts = cu_seqlen_ks[rows]
-                        row_ends = cu_seqlen_ke[rows]
+                        row_starts = rows_ks
+                        row_ends = rows_ke
                     else:
-                        q_scale_rows, chunk_weights = mqa_logits_mx_inputs(
+                        q_scale_rows, rows_weights = mqa_logits_mx_inputs(
                             q_slice_cast[rows],
                             q_scale_slice[rows] if q_scale_slice is not None else None,
-                            prefill_weights[tokens],
+                            chunk_weights[rows],
                             logits_dtype,
                         )
-                        row_ends = cu_seqlen_ke[rows] - cu_seqlen_ks[rows]
+                        row_ends = rows_ke - rows_ks
                         logits = fp8_fp4_mqa_logits(
                             (q_slice_cast[rows], q_scale_rows),
                             (k_quant_cast, k_scale_cast),
-                            chunk_weights,
-                            cu_seqlen_ks[rows],
-                            cu_seqlen_ke[rows],
+                            rows_weights,
+                            rows_ks,
+                            rows_ke,
                             chunk.max_seqlen_k,
                             logits_dtype=logits_dtype,
                         )
@@ -986,17 +1027,19 @@ def sparse_attn_indexer(
                         use_deep_select = (
                             topk_backend == "deep_select"
                             and logits.dtype == torch.bfloat16
-                            and dcp_world_size == 1
+                            and prefill_dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
                         )
                         if not use_deep_select:
                             logits = as_fp32_logits(logits, row_ends)
-                    num_rows = logits.shape[0]
                     if candidate_blocks is not None:
                         # Two-level selection (v4.1): the candidate source
                         # publishes its top blocks; later indexers mask their
                         # scores to them. Both before the row top-k.
-                        chunk_candidates = candidate_blocks[tokens]
+                        chunk_candidates = candidate_blocks[
+                            chunk.token_start + rows.start : chunk.token_start
+                            + rows.stop
+                        ]
                         if candidate_write:
                             _select_candidate_blocks(
                                 logits,
@@ -1029,7 +1072,7 @@ def sparse_attn_indexer(
                             else row_starts,
                             row_ends,
                             topk_indices[rows],
-                            num_rows,
+                            logits.shape[0],
                             logits.stride(0),
                             logits.stride(1),
                             topk_tokens,
@@ -1043,13 +1086,15 @@ def sparse_attn_indexer(
                     topk_indices,
                     topk_tokens,
                     dcp_rank,
-                    dcp_world_size,
+                    prefill_dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
                     logits_dtype=logits_dtype,
                     num_positions=max_model_len,
                 )
-            # Free this chunk's logits before the next chunk allocates its own.
+            # Free this chunk's logits before the next chunk allocates its own:
+            # the profile run has one chunk, so two live chunks would exceed
+            # the logits budget it reserved.
             del logits
 
     if has_decode:

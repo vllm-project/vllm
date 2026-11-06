@@ -154,8 +154,10 @@ class AttentionConfig:
     the query and the attention output between the layouts. Applies to steps
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
-    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
-    sharded by head."""
+    KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
+    the DCP group equal to the TP group), each rank attends a gathered copy of
+    its tokens' context instead of the DCP-local cache. A mixed step's decode
+    tokens stay sharded by head (on the DCP path under DCP)."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most

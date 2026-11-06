@@ -804,6 +804,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     supports_dcp: bool = True
     lse_base_on_e: bool = False
     supports_shardq: ClassVar[bool] = True
+    supports_dcp_shardq: ClassVar[bool] = True
     # fp8 query quantization is required when using fp8 kv_cache,
     # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
     # for query and kv_cache (mixed bf16+fp8 is not supported).

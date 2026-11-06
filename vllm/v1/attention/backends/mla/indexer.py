@@ -565,12 +565,17 @@ class BuildPrefillChunkMetadataKernel(
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
         dcp_cases = [dict(DCP_RANK=dcp_rank, DCP_WORLD=dcp_world)]
-        if parallel_config.prefill_context_parallel_size > 1 and dcp_world > 1:
+        if dcp_world > 1 and (
+            parallel_config.prefill_context_parallel_size > 1
+            or getattr(vllm_config.attention_config, "sparse_mla_shard_q", False)
+        ):
             # PCP+DCP prefill constructs a global PCP chunk plan and therefore
-            # dispatches this kernel with already-localized row starts. The
-            # runtime key is normalized to rank 0/world 1 in that path; warm it
-            # explicitly so one PCP rank cannot enter a collective while
-            # another rank is still compiling the first real inference batch.
+            # dispatches this kernel with already-localized row starts, and a
+            # DCP ShardQ step plans its chunks over a gathered, non-DCP
+            # context. The runtime key is normalized to rank 0/world 1 in those
+            # paths; warm it explicitly so one rank cannot enter a collective
+            # while another rank is still compiling the first real inference
+            # batch.
             dcp_cases.append(dict(DCP_RANK=0, DCP_WORLD=1))
         compress_ratios = tuple(
             dict.fromkeys(
@@ -986,6 +991,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
+    @staticmethod
+    def get_decode_threshold(vllm_config: VllmConfig) -> int:
+        """Rows of at most this many query tokens take the decode path."""
+        speculative_config = vllm_config.speculative_config
+        return 1 + (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
@@ -997,8 +1010,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # Whether a main MLA layer reads these indexers' top-k token-sharded.
+        # Under DCP the MLA layer's gathered context plans them instead
+        # (vllm.v1.attention.ops.dcp_shardq).
         layers = self.vllm_config.compilation_config.static_forward_context
-        self.use_shardq = any(
+        self.use_shardq = self.dcp_world_size == 1 and any(
             getattr(layers.get(name), "use_shardq", False) for name in self.layer_names
         )
         if self.use_shardq:
@@ -1050,7 +1065,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             full_context=self.dcp_world_size == 1,
         )
 
-        next_n = self.num_speculative_tokens + 1
+        next_n = self.get_decode_threshold(self.vllm_config)
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
         self.use_flattening = _use_flattening(self.vllm_config)
@@ -1999,7 +2014,13 @@ def build_prefill_chunk_metadata(
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]
     )
     if positions is not None:
-        positions = positions[query_start_loc_cpu[start_idx] :]
+        positions = positions[
+            query_start_loc_cpu[start_idx] : query_start_loc_cpu[end_idx]
+        ]
+        if positions.data_ptr() % 16:
+            # The kernel is warmed up for a 16-byte aligned pointer; leading
+            # decode rows shift a chunk's slice off it.
+            positions = positions.clone()
 
     total_query_len = int(
         (query_start_loc_cpu[end_idx] - query_start_loc_cpu[start_idx]).item()
