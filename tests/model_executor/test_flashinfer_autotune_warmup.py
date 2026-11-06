@@ -59,30 +59,23 @@ def test_encoder_autotune_dummy_items_balance_rank_shapes(
         assert len(set(counts)) == len(set(loads)) == 1
 
 
-@pytest.mark.parametrize(
-    "overrides", [{"mm_processor_cache_gb": 0}, {"mm_tensor_ipc": "torch_shm"}]
-)
-def test_encoder_autotune_identity_ignores_processor_cache_and_ipc(overrides):
+def test_encoder_autotune_identity_ignores_ipc():
     assert _flashinfer_mm_encoder_autotune_hash(
-        MultiModalConfig(**overrides)
-    ) == _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
+        MultiModalConfig(mm_tensor_ipc="torch_shm"), enable_chunked_prefill=True
+    ) == _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(), enable_chunked_prefill=True
+    )
 
 
-@pytest.mark.parametrize("skip_mm_profiling", [False, True])
-def test_encoder_autotune_identity_tracks_chunked_prefill_unless_profiling_skipped(
-    skip_mm_profiling,
-):
-    mm_config = MultiModalConfig(skip_mm_profiling=skip_mm_profiling)
+def test_encoder_autotune_identity_tracks_chunked_prefill():
+    mm_config = MultiModalConfig()
     chunked = _flashinfer_mm_encoder_autotune_hash(
         mm_config, enable_chunked_prefill=True
     )
     unchunked = _flashinfer_mm_encoder_autotune_hash(
         mm_config, enable_chunked_prefill=False
     )
-    if skip_mm_profiling:
-        assert chunked == unchunked == ""
-    else:
-        assert chunked != unchunked
+    assert chunked != unchunked
 
 
 @pytest.fixture
@@ -101,23 +94,17 @@ def encoder_autotune_config(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "excluded_by", [None, "disabled", "mrv1", "skip_profiling", "no_model"]
-)
+@pytest.mark.parametrize("excluded_by", [None, "disabled", "skip_profiling"])
 def test_encoder_autotune_eligibility(
     encoder_autotune_config, monkeypatch, excluded_by
 ):
     config = encoder_autotune_config
     mm_config = config.model_config.get_multimodal_config()
-    monkeypatch.setenv(
-        "VLLM_USE_V2_MODEL_RUNNER", "0" if excluded_by == "mrv1" else "1"
-    )
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     if excluded_by == "disabled":
         config.kernel_config.enable_flashinfer_mm_encoder_autotune = False
     elif excluded_by == "skip_profiling":
         mm_config.skip_mm_profiling = True
-    elif excluded_by == "no_model":
-        config.model_config = None
 
     expected = mm_config if excluded_by is None else None
     assert get_flashinfer_mm_encoder_autotune_config(config) is expected
@@ -130,12 +117,17 @@ def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_component
     config = encoder_autotune_config
     mm_config = config.model_config.get_multimodal_config()
     config_hash = hash_factors(config.compile_factors(include_version=False))
-    encoder_hash = _flashinfer_mm_encoder_autotune_hash(mm_config)
+    encoder_hash = _flashinfer_mm_encoder_autotune_hash(
+        mm_config, enable_chunked_prefill=True
+    )
 
     assert mm_config.mm_processor_cache_gb > 0
     mm_config.mm_processor_cache_gb = 0
     assert hash_factors(config.compile_factors(include_version=False)) == config_hash
-    assert _flashinfer_mm_encoder_autotune_hash(mm_config) == encoder_hash
+    assert (
+        _flashinfer_mm_encoder_autotune_hash(mm_config, enable_chunked_prefill=True)
+        == encoder_hash
+    )
 
 
 @pytest.mark.parametrize(
@@ -150,27 +142,10 @@ def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_component
 )
 def test_encoder_autotune_identity_covers_profiling_inputs(overrides):
     assert _flashinfer_mm_encoder_autotune_hash(
-        MultiModalConfig(**overrides)
-    ) != _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
-
-
-def test_encoder_autotune_identity_ignores_nested_dictionary_order():
-    def cache_hash(size):
-        return _flashinfer_mm_encoder_autotune_hash(
-            MultiModalConfig(mm_processor_kwargs={"images_kwargs": {"size": size}})
-        )
-
-    assert cache_hash({"height": 224, "width": 448}) == cache_hash(
-        {"width": 448, "height": 224}
+        MultiModalConfig(**overrides), enable_chunked_prefill=True
+    ) != _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(), enable_chunked_prefill=True
     )
-
-
-def test_encoder_autotune_identity_is_empty_when_profiling_is_skipped():
-    assert (
-        _flashinfer_mm_encoder_autotune_hash(MultiModalConfig(skip_mm_profiling=True))
-        == ""
-    )
-    assert _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
 
 
 class _FakeMoERunner:

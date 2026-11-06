@@ -31,7 +31,7 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
 
 
 def _flashinfer_mm_encoder_autotune_hash(
-    mm_config: MultiModalConfig, *, enable_chunked_prefill: bool = True
+    mm_config: MultiModalConfig, *, enable_chunked_prefill: bool
 ) -> str:
     if mm_config.skip_mm_profiling:
         return ""
