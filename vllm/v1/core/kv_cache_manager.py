@@ -252,6 +252,28 @@ class KVCacheManager:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and request.prefix_cache_hit_limit != 0
 
+    def get_num_cached_tokens(self, request: Request) -> int:
+        """How many of a request's tokens are already in the prefix cache.
+
+        Unlike `get_computed_blocks`, this only probes the cache: it takes no
+        references, allocates no blocks and emits no events, so it is safe to
+        call for a request that may not be scheduled.
+
+        Args:
+            request: The request to probe.
+
+        Returns:
+            The number of cached tokens, or 0 if lookup is disabled.
+
+        """
+        if not self.prefix_cache_lookup_enabled(request):
+            return 0
+        # Mirrors `get_computed_blocks`: the last token is always recomputed.
+        _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+        return num_computed_tokens
+
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
         if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
@@ -767,12 +789,12 @@ class KVCacheManager:
                 # Cross-attention and encoder-only groups are not prefix cached.
                 continue
 
+            # Coverage grows along the block table: the last hashed block has the most.
             group_cached_tokens = 0
-            for block in blocks:
-                group_cached_tokens = max(
-                    group_cached_tokens,
-                    block.block_hash_num_tokens or 0,
-                )
+            for block in reversed(blocks):
+                if block.block_hash_num_tokens:
+                    group_cached_tokens = block.block_hash_num_tokens
+                    break
 
             cached_tokens = (
                 group_cached_tokens
