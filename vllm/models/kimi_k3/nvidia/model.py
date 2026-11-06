@@ -1537,13 +1537,6 @@ class KimiLinearForCausalLM(
         # applies it in forward.
         self.needs_norm_in_logits = True
 
-    def process_weights_after_loading(self) -> None:
-        # The specialized decode packs the DSA projections its own way.
-        if self.specialized_decode_config is None:
-            for module in self.model.modules():
-                if isinstance(module, KimiK3DSAAttention):
-                    module.pack_projections()
-
     def build_specialized_decode(self) -> None:
         from .specialized_decode.runtime.decode import SpecializedDecode
 
@@ -1648,6 +1641,11 @@ class KimiLinearForCausalLM(
     def process_weights_after_loading(self) -> None:
         """The specialized decode is built after the first load and keeps copies
         derived from the weights; refresh them after a reload."""
+        # The specialized decode packs the DSA projections its own way.
+        if self.specialized_decode_config is None:
+            for module in self.model.modules():
+                if isinstance(module, KimiK3DSAAttention):
+                    module.pack_projections()
         if self.specialized_decode is not None:
             self.specialized_decode.process_weights_after_loading()
 

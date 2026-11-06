@@ -30,14 +30,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     TransferRegion,
     _mamba_hetero_tp_segments,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    MambaConvSplitInfo,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
     NixlPushConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum

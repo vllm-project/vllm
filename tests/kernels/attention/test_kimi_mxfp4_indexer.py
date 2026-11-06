@@ -4,6 +4,7 @@
 
 import pytest
 import torch
+
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(

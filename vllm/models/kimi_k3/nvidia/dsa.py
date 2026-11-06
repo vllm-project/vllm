@@ -697,6 +697,9 @@ class KimiK3DSAAttention(nn.Module):
         ``[q_a | kv_a | wk | weights_proj]`` and ``[q_b | wq_index]`` into one
         weight each, the linears becoming views. Other configurations keep the
         wrapper forward."""
+        if self._packed is not None:
+            # A rerun after a reload: the loader refilled the views in place.
+            return
         attn = cast(Any, self.mla_attn.mla_attn)
         indexer = cast(Any, self.dsa_indexer)
         if not (
