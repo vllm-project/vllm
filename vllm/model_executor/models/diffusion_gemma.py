@@ -1539,10 +1539,12 @@ class DiffusionSampler:
                 # Gumbel sampling, probs, and entropy all see the filtered
                 # distribution. The committed argmax (always the top-1 token)
                 # is unaffected; only the canvas exploration is constrained.
-                top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
-                    tile_slots.repeat_interleave(W, output_size=n * W),
-                    decode_slots_np[sel_np],
-                    tile_logits.shape[-1],
+                top_k, top_p, has_topp_only_rows, max_top_k = (
+                    self.sampling_states.get_top_k_top_p(
+                        tile_slots.repeat_interleave(W, output_size=n * W),
+                        decode_slots_np[sel_np],
+                        tile_logits.shape[-1],
+                    )
                 )
                 if top_k is not None or top_p is not None:
                     tile_logits = apply_top_k_top_p(
@@ -1550,6 +1552,7 @@ class DiffusionSampler:
                         top_k,
                         top_p,
                         has_topp_only_rows=has_topp_only_rows,
+                        max_top_k=max_top_k,
                     )
                     if phantom is not None:
                         tile_logits.masked_fill_(phantom, 0)

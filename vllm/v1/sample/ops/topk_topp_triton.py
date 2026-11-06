@@ -8,6 +8,7 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 """
 
+from functools import cache
 from typing import Any
 
 import torch
@@ -1615,12 +1616,246 @@ def _apply_topp_split(
     )
 
 
+# ---------------------------------------------------------------------------
+# Split-row top-k pipeline for small batches.
+# ---------------------------------------------------------------------------
+
+_TOPK_SPLIT_MAX_K = 64
+# More chunks widen the merge faster than they shorten each chunk's sweep.
+_TOPK_SPLIT_CHUNKS = 64
+# (bound on k, rows): the most rows the split still wins at for that bound.
+_TOPK_SPLIT_MAX_ROWS = ((24, 64), (32, 32), (40, 16), (48, 8), (_TOPK_SPLIT_MAX_K, 4))
+# Below this the monolithic kernel is cheap enough to beat the split.
+_TOPK_SPLIT_MIN_VOCAB = 150_000
+
+
+@cache
+def _topk_split_supported() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    # vllm.platforms.rocm probes the GPU at import.
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() == 3
+
+
+@triton.jit(do_not_specialize=["K_MAX"])
+def _topk_split_chunk_kernel(
+    LOGITS,
+    LOGITS_STRIDE_0,
+    CAND_V,
+    CAND_I,
+    VOCAB,
+    K_MAX,
+    MASK_VALUE: tl.constexpr,
+    CHUNK: tl.constexpr,
+    CHUNKS: tl.constexpr,
+    KTILE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Each chunk's own top-K_MAX logits and their indices, ties by lowest
+    index, then masks the chunk.
+
+    Grid is (rows, CHUNKS). Writes the first K_MAX of every KTILE slots of
+    [rows, CHUNKS * KTILE]. Exact: fewer than k elements of a row precede a
+    global top-k element, so fewer than k precede it within its chunk.
+    """
+    row = tl.program_id(0)
+    chunk = tl.program_id(1)
+    base = chunk * CHUNK
+
+    lane = tl.arange(0, BLOCK)
+    offs = base + lane
+    # BLOCK can reach past both the chunk and the row.
+    live = (lane < CHUNK) & (offs < VOCAB)
+    row_logits = LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0
+    vals = tl.load(row_logits + offs, mask=live, other=float("-inf"))
+    # VOCAB doubles as the "no such index" sentinel: it sorts above every real
+    # index under tl.min, so a tie is won by the lowest real index.
+    idxs = tl.where(live, offs, VOCAB)
+
+    out = (row * CHUNKS + chunk) * KTILE
+    for i in range(K_MAX):
+        best = tl.max(vals, 0)
+        at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
+        tl.store(CAND_V + out + i, best)
+        tl.store(CAND_I + out + i, at)
+        # Retire by index rather than by value, so duplicates are emitted once
+        # each instead of vanishing together.
+        vals = tl.where(idxs == at, float("-inf"), vals)
+
+    # Not before the loop: small tiles replicate elements across waves.
+    tl.store(row_logits + offs, tl.full((BLOCK,), MASK_VALUE, tl.float32), mask=live)
+
+
+@triton.jit(do_not_specialize=["K_MAX", "LOGITS_STRIDE_0"])
+def _topk_split_combine_kernel(
+    CAND_V,
+    CAND_I,
+    K,
+    P,
+    LOGITS,
+    LOGITS_STRIDE_0,
+    VOCAB,
+    K_MAX,
+    NUM_CAND: tl.constexpr,
+    KTILE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    TOPP_ENABLED: tl.constexpr,
+):
+    """Merge the per-chunk candidates, cut at the row's k, then apply top-p.
+
+    Grid is (rows,). Writes the survivors back into the masked row; the
+    row's largest logit always survives.
+    """
+    row = tl.program_id(0)
+    lane = tl.arange(0, BLOCK)
+    live = (lane < NUM_CAND) & (lane % KTILE < K_MAX)
+    vals = tl.load(CAND_V + row * NUM_CAND + lane, mask=live, other=float("-inf"))
+    idxs = tl.load(CAND_I + row * NUM_CAND + lane, mask=live, other=VOCAB)
+
+    k = tl.minimum(tl.load(K + row), K_MAX)
+
+    # Triton cannot index a register tile with a loop variable, so each
+    # extracted element is placed by a predicate.
+    sorted_v = tl.full((BLOCK,), float("-inf"), tl.float32)
+    sorted_i = tl.full((BLOCK,), VOCAB, tl.int32)
+    # Unrolled with a runtime guard; a plain loop to K_MAX is slower here.
+    for i in tl.static_range(KTILE):
+        if i < K_MAX:
+            best = tl.max(vals, 0)
+            at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
+            sorted_v = tl.where(lane == i, best, sorted_v)
+            sorted_i = tl.where(lane == i, at, sorted_i)
+            vals = tl.where(idxs == at, float("-inf"), vals)
+
+    head = (lane < k) & (sorted_v > float("-inf"))
+    v = tl.where(head, sorted_v, float("-inf"))
+
+    if TOPP_ENABLED:
+        p = tl.load(P + row)
+        e = tl.where(head, tl.exp(v - tl.max(v, 0)), 0.0)
+        total = tl.sum(e, 0)
+        # Mass before a token < p, written on the suffix: a float32 prefix
+        # sum saturates at 1.0 and would truncate rows with p = 1.
+        suffix = tl.flip(tl.cumsum(tl.flip(e, 0), 0), 0)
+        kept = head & (suffix > (1.0 - p) * total)
+    else:
+        kept = head
+
+    keep = (kept | (lane == 0)) & (sorted_v > float("-inf"))
+    tl.store(
+        LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0 + sorted_i, sorted_v, mask=keep
+    )
+
+
+def _topk_split_chunk_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    vocab_size = vllm_config.model_config.get_vocab_size()
+    logits_stride: Any = WarmupChoices(16, 2)
+    ktile: Any = WarmupChoices(16, 32, _TOPK_SPLIT_MAX_K)
+    _when(vocab_size >= _TOPK_SPLIT_MIN_VOCAB)
+    logits = TritonWarmupTensor(
+        torch.float32, shape=(1, vocab_size), strides=(logits_stride, 1)
+    )
+    return dict(
+        logits=logits,
+        cand_v=TritonWarmupTensor(torch.float32),
+        cand_i=TritonWarmupTensor(torch.int32),
+        k_max=_TOPK_SPLIT_MAX_K,
+        ktile=ktile,
+        mask_value=float("-inf"),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_topk_split_chunk_kernel,
+    warmup_inputs=_topk_split_chunk_warmup_inputs,
+)
+def _topk_split_chunk(
+    logits: torch.Tensor,
+    cand_v: torch.Tensor,
+    cand_i: torch.Tensor,
+    k_max: int,
+    ktile: int,
+    mask_value: float,
+) -> DispatchSpec:
+    rows, vocab_size = logits.shape
+    chunk = triton.cdiv(vocab_size, _TOPK_SPLIT_CHUNKS)
+    return (rows, _TOPK_SPLIT_CHUNKS), dict(
+        VOCAB=vocab_size,
+        CHUNK=chunk,
+        CHUNKS=_TOPK_SPLIT_CHUNKS,
+        BLOCK=next_power_of_2(chunk),
+        num_warps=4,
+    )
+
+
+def _topk_split_combine_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    vocab_size = vllm_config.model_config.get_vocab_size()
+    ktile: Any = WarmupChoices(16, 32, _TOPK_SPLIT_MAX_K)
+    has_p: Any = WarmupChoices(False, True)
+    _when(vocab_size >= _TOPK_SPLIT_MIN_VOCAB)
+    return dict(
+        cand_v=TritonWarmupTensor(torch.float32),
+        cand_i=TritonWarmupTensor(torch.int32),
+        k=TritonWarmupTensor(torch.int32),
+        p=TritonWarmupTensor(torch.float32) if has_p else None,
+        logits=TritonWarmupTensor(torch.float32, shape=(1, vocab_size)),
+        k_max=_TOPK_SPLIT_MAX_K,
+        ktile=ktile,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_topk_split_combine_kernel,
+    warmup_inputs=_topk_split_combine_warmup_inputs,
+)
+def _topk_split_combine(
+    cand_v: torch.Tensor,
+    cand_i: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor | None,
+    logits: torch.Tensor,
+    k_max: int,
+    ktile: int,
+) -> DispatchSpec:
+    rows, vocab_size = logits.shape
+    num_cand = _TOPK_SPLIT_CHUNKS * ktile
+    return (rows,), dict(
+        P=p if p is not None else cand_v,
+        VOCAB=vocab_size,
+        NUM_CAND=num_cand,
+        BLOCK=next_power_of_2(num_cand),
+        TOPP_ENABLED=p is not None,
+        num_warps=8,
+    )
+
+
+def _apply_topk_split(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor | None,
+    max_top_k: int,
+    mask_value: float,
+) -> None:
+    """Split-row top-k/top-p pipeline for small batches; masks in place."""
+    rows = logits.shape[0]
+    ktile = max(16, next_power_of_2(max_top_k))
+    num_cand = _TOPK_SPLIT_CHUNKS * ktile
+
+    cand_v = logits.new_empty((rows, num_cand))
+    cand_i = logits.new_empty((rows, num_cand), dtype=torch.int32)
+    _topk_split_chunk(logits, cand_v, cand_i, max_top_k, ktile, mask_value)
+    _topk_split_combine(cand_v, cand_i, k, p, logits, max_top_k, ktile)
+
+
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     mask_value: float = float("-inf"),
     has_topp_only_rows: bool = True,
+    max_top_k: int | None = None,
 ) -> torch.Tensor:
     """Apply combined top-k and top-p masking using Triton.
 
@@ -1638,6 +1873,9 @@ def apply_top_k_top_p_triton(
         has_topp_only_rows: Whether any row has p < 1 and k >= vocab_size.
             False lets small batches skip the split top-p pipeline; pass it
             only if no such row exists, as such a row would get no top-p.
+        max_top_k: An upper bound on every row's k, or None if unknown. Lets
+            small batches take the split top-k pipeline. Callers holding a
+            host mirror of top_k can supply it without a device sync.
 
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
@@ -1683,6 +1921,22 @@ def apply_top_k_top_p_triton(
     )
     if use_split and not topk_enabled:
         _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)
+        return logits
+
+    # Rows with an active top-k are latency-bound in the monolithic kernel
+    # for the same reason. Measured on gfx942 only.
+    if (
+        topk_enabled
+        and max_top_k is not None
+        and max_top_k >= 1
+        and any(max_top_k <= b and batch_size <= r for b, r in _TOPK_SPLIT_MAX_ROWS)
+        and vocab_size >= _TOPK_SPLIT_MIN_VOCAB
+        and logits.device.type == "cuda"
+        and _topk_split_supported()
+    ):
+        _apply_topk_split(
+            logits, k_ptr, p_ptr if topp_enabled else None, max_top_k, mask_value
+        )
         return logits
 
     NUM_PROGRAMS = min(num_sm, batch_size)
