@@ -2058,11 +2058,11 @@ class EngineCoreProc(EngineCore):
             )
 
     def _config_hash(self) -> str | None:
-        """`compute_hash()` of the initialized config, the hash part of a
+        """`hash_config()` of the initialized config, the hash part of a
         frontend's `system_fingerprint`. Like the frontend, never fail startup
         over the fingerprint."""
         try:
-            return self.vllm_config.compute_hash()
+            return hash_config(self.vllm_config)
         except Exception:
             return None
 
