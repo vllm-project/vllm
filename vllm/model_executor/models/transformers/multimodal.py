@@ -57,7 +57,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import get_submodel_config_name
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
 from .base import Base
 
@@ -1471,7 +1471,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
-            input_ids=torch.tensor(input_tokens).unsqueeze(0),
+            input_ids=token_ids_to_tensor(input_tokens).unsqueeze(0),
             **kwargs,
         )
 

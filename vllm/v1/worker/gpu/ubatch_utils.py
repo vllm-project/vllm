@@ -20,6 +20,7 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -498,6 +499,7 @@ class UBatchRunner:
 
         outputs: dict[int, Any] = {}
         errors: dict[int, BaseException] = {}
+        dtype = self.vllm_config.model_config.dtype
 
         @torch.inference_mode()
         def run_ubatch(ubatch_context, inputs: dict[str, Any]) -> None:
@@ -509,6 +511,12 @@ class UBatchRunner:
                     for stream in (compute_stream, self.comm_stream):
                         with torch.cuda.stream(stream):
                             torch.cuda.current_blas_handle()
+                            if current_platform.is_rocm():
+                                # hipBLASLt handles are per thread and stream and
+                                # only a GEMM creates one; creating it in capture
+                                # fails.
+                                x = torch.zeros(1, 1, dtype=dtype, device=self.device)
+                                torch.mm(x, x)
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001

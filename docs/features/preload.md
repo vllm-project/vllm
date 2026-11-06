@@ -141,6 +141,12 @@ Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
 
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory; fallback does not
+stop the daemon or release its cached weights in zero-copy mode.
+
 ## Multi-node and data parallelism
 
 CUDA IPC handles are node-local, so each node serves only its local GPUs'
@@ -250,6 +256,25 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
+  Online `fp8_per_tensor`, `fp8_per_channel`, and `fp8_per_block` dense
+  linear layers support CUDA IPC with the CUTLASS linear backend. Set
+  `--kernel-config '{"linear_backend": "cutlass"}'` on both the daemon and
+  engine; the block variant additionally requires a GPU supported by the
+  CUTLASS block-FP8 kernel. Online `mxfp8` linear layers can reuse weights
+  with an MXFP8 kernel that supports pre-processed weights, including
+  FlashInfer CUTLASS on Blackwell.
+  The engine reuses the quantized weights and scales without running online
+  quantization again. This does not enable online MoE quantization or
+  conversion from an already quantized checkpoint.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
+  ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
+  CUTLASS, the daemon fuses activation scales once; engines reuse the fused
+  scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
@@ -281,10 +306,18 @@ threat model.
 
 - Each GPU's socket path is guarded by an exclusive lock file, so a second
   daemon for the same GPU fails fast instead of clobbering the live socket.
-- `vllm preload` reports readiness once every rank is serving; if any rank
-  dies during startup, the remaining ranks are terminated and the command
-  exits with that rank's exit code.
+- `vllm preload` reports readiness once every rank is serving. If any rank
+  exits during startup or serving, the launcher terminates and reaps the
+  remaining ranks, stops its health endpoint, and exits with a nonzero status.
+  The failing rank's nonzero exit code is preserved. Signal failures use
+  `128 + signal number` (for example, 137 for `SIGKILL`); an unexpected clean
+  rank exit is reported as status 1. Restart the entire preload group before
+  attaching new engines.
 - `SIGINT`/`SIGTERM` to the `vllm preload` process terminates all daemon
-  ranks, which unlinks their sockets and releases the GPU memory.
+  ranks and exits with status 130/143.
+- In either shutdown path, ranks that do not stop within ten seconds are
+  killed and reaped, releasing their GPU memory. A forcibly
+  terminated rank may leave a stale socket; the next daemon replaces it
+  after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.
