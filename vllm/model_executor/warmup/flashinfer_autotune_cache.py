@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, MultiModalConfig, VllmConfig, replace
-from vllm.config.utils import hash_config, hash_factors
+from vllm.config.utils import hash_config, hash_factors, normalize_value
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -36,26 +36,18 @@ def _flashinfer_mm_encoder_autotune_hash(
     if mm_config.skip_mm_profiling:
         return ""
 
-    from vllm.multimodal.hasher import MultiModalHasher
-
-    def sort_dicts(value: object) -> object:
-        if isinstance(value, dict):
-            return {key: sort_dicts(item) for key, item in sorted(value.items())}
-        if isinstance(value, (list, tuple)):
-            return [sort_dicts(item) for item in value]
-        return value
-
-    return MultiModalHasher.hash_kwargs(
-        "sha256",
-        encoder_config=hash_config(mm_config),
-        enable_chunked_prefill=enable_chunked_prefill,
-        mm_processor_kwargs=sort_dicts(mm_config.mm_processor_kwargs or {}),
-        limit_per_prompt=sort_dicts(
-            {
-                modality: asdict(opts)
-                for modality, opts in mm_config.limit_per_prompt.items()
-            }
-        ),
+    return hash_factors(
+        {
+            "encoder_config": hash_config(mm_config),
+            "enable_chunked_prefill": enable_chunked_prefill,
+            "mm_processor_kwargs": normalize_value(mm_config.mm_processor_kwargs or {}),
+            "limit_per_prompt": normalize_value(
+                {
+                    modality: asdict(opts)
+                    for modality, opts in mm_config.limit_per_prompt.items()
+                }
+            ),
+        }
     )
 
 

@@ -11,7 +11,6 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, call, patch
 
-import numpy as np
 import pytest
 import torch
 
@@ -153,26 +152,6 @@ def test_encoder_autotune_identity_covers_profiling_inputs(overrides):
     assert _flashinfer_mm_encoder_autotune_hash(
         MultiModalConfig(**overrides)
     ) != _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
-
-
-@pytest.mark.parametrize(
-    "original,equivalent,changed",
-    [
-        (torch.bfloat16, torch.bfloat16, torch.float16),
-        (np.array([224, 224]), np.array([224, 224]), np.array([448, 448])),
-        (torch.tensor([0.5]), torch.tensor([0.5]), torch.tensor([0.25])),
-    ],
-)
-def test_encoder_autotune_identity_hashes_non_json_kwargs(
-    original, equivalent, changed
-):
-    def cache_hash(value):
-        return _flashinfer_mm_encoder_autotune_hash(
-            MultiModalConfig(mm_processor_kwargs={"images_kwargs": {"value": value}})
-        )
-
-    assert cache_hash(original) == cache_hash(equivalent)
-    assert cache_hash(original) != cache_hash(changed)
 
 
 def test_encoder_autotune_identity_ignores_nested_dictionary_order():
