@@ -99,6 +99,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     # Step-dependent fields reference persistent input buffers directly.
     supports_draft_decode_metadata_update = True
+    # Whether to half the 2d/3d threshold for pure decode batches on gfx1201 (RDNA4)
     gfx1201_decode_threshold: ClassVar[bool] = True
 
     def __init__(
@@ -139,6 +140,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.seq_threshold_3D = self._snap_to_CG_capture_size(
             MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
         )
+        # Half 2d/3d threshold for pure decode batches on gfx1201 (RDNA4)
         self.seq_threshold_3D_decode = self.seq_threshold_3D
         if (
             self.gfx1201_decode_threshold
@@ -225,7 +227,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
     def _snap_to_CG_capture_size(self, threshold: int) -> int:
-        # Each captured decode graph must take a single 2D/3D path.
+        # Move 2d/3d threshold to the nearest CG capture size so each captured decode
+        # graph takes a single 2D/3D path.
         if not self.decode_cudagraph_enabled:
             return threshold
         capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes

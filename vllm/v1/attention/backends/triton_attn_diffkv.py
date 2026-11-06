@@ -42,7 +42,7 @@ class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
     re-allocate with ``next_power_of_2(head_size_v)`` instead.
     """
 
-    # The DiffKV launcher was not tuned for the gfx1201 decode threshold.
+    # The DiffKV kernel shouldn't half 2d/3d threshold on gfx1201 (RDNA4)
     gfx1201_decode_threshold: ClassVar[bool] = False
 
     def __init__(
