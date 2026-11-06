@@ -91,6 +91,22 @@ pub struct WaitingReasonLabels {
     pub reason: &'static str,
 }
 
+/// Labels for `vllm:engine_sleep_state`: one series per engine and state,
+/// `awake`, `weights_offloaded` (sleep level 1) or `discard_all` (level 2).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct EngineSleepStateLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub sleep_state: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct KvFetchStageLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub stage: &'static str,
+}
+
 /// Labels for per-operation Mooncake store connector telemetry. `operation`
 /// and `status` are dynamic (not known ahead of time), unlike the other
 /// fixed-label families in this module.
@@ -109,6 +125,19 @@ pub type MooncakeOperationHistogramFamily =
     Family<MooncakeOperationLabels, Histogram, fn() -> Histogram>;
 pub type MooncakeOperationCounterFamily = Family<MooncakeOperationLabels, U64Counter>;
 
+/// Labels for per-operation UMBP store connector telemetry.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct UmbpOperationLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub operation: &'static str,
+}
+
+/// Family type alias for the UMBP connector telemetry, exposed so
+/// `engine-core-client` can hold onto the `Family` directly, since an
+/// operation's series appears once the connector first reports it.
+pub type UmbpOperationCounterFamily = Family<UmbpOperationLabels, U64Counter>;
+
 /// Adapter names encoded as a deterministic comma-joined Prometheus label value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct LoraAdapterNames(pub BTreeSet<String>);
@@ -119,9 +148,12 @@ impl EncodeLabelValue for LoraAdapterNames {
     }
 }
 
-/// Labels for `vllm:lora_requests_info`.
+/// Labels for `vllm:lora_requests_info`. Field order is the exposition order,
+/// which matches Python's (sorted by name).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct LoraInfoLabels {
+    /// The engine's `max_loras`, constant for the server's lifetime.
+    pub max_lora: u32,
     pub running_lora_adapters: LoraAdapterNames,
     pub waiting_lora_adapters: LoraAdapterNames,
 }
@@ -216,11 +248,20 @@ pub struct SchedulerMetrics {
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
+    pub scheduler_kv_fetch_by_stage: Family<KvFetchStageLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
+
+    /// `vllm:engine_sleep_state`, set by the engine client's sleep and wake
+    /// calls rather than from `SchedulerStats`.
+    pub engine_sleep_state: Family<EngineSleepStateLabels, U64Gauge>,
 
     /// `vllm:lora_requests_info`. Value is the emit-time unix timestamp in
     /// seconds.
     pub lora_info: Family<LoraInfoLabels, F64Gauge>,
+
+    /// `vllm:cache_config_info`, one series per engine, always `1`. Labeled
+    /// with every `CacheConfig.metrics_info()` field plus `engine`.
+    pub cache_config_info: Family<Vec<(String, String)>, F64Gauge>,
 
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
@@ -270,6 +311,12 @@ pub struct SchedulerMetrics {
     pub nixl_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
     pub nixl_num_notifications_after_expiry: Family<EngineLabels, U64Counter>,
 
+    // UMBP store connector telemetry. Mirrors `UMBPStorePromMetrics`.
+    pub umbp_transfer_submitted_total: UmbpOperationCounterFamily,
+    pub umbp_transfer_completed_total: UmbpOperationCounterFamily,
+    pub umbp_transfer_failed_total: UmbpOperationCounterFamily,
+    pub umbp_transfer_bytes_total: UmbpOperationCounterFamily,
+
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
 }
@@ -303,6 +350,16 @@ impl SchedulerMetrics {
             scheduler_waiting_by_reason.clone(),
         );
 
+        let scheduler_kv_fetch_by_stage = Family::default();
+        registry.register(
+            "vllm:num_requests_kv_fetch_by_stage",
+            "Number of waiting requests by async KV load stage. \
+             Stage labels: 'waiting_to_start' = needs an async KV load that has not started; \
+             'in_progress' = load started and not yet reported finished; \
+             'completed_waiting' = load finished, request not running yet.",
+            scheduler_kv_fetch_by_stage.clone(),
+        );
+
         let kv_cache_usage = Family::default();
         registry.register(
             "vllm:kv_cache_usage_perc",
@@ -310,11 +367,28 @@ impl SchedulerMetrics {
             kv_cache_usage.clone(),
         );
 
+        let engine_sleep_state = Family::default();
+        registry.register(
+            "vllm:engine_sleep_state",
+            "Engine sleep state; awake = 0 means engine is sleeping; \
+             awake = 1 means engine is awake; \
+             weights_offloaded = 1 means sleep level 1; \
+             discard_all = 1 means sleep level 2.",
+            engine_sleep_state.clone(),
+        );
+
         let lora_info = Family::default();
         registry.register(
             "vllm:lora_requests_info",
             "Running stats on lora requests.",
             lora_info.clone(),
+        );
+
+        let cache_config_info = Family::default();
+        registry.register(
+            "vllm:cache_config_info",
+            "Information of the LLMEngine CacheConfig",
+            cache_config_info.clone(),
         );
 
         // Prefix-cache counters, including the connector-backed external cache path.
@@ -591,12 +665,44 @@ impl SchedulerMetrics {
             nixl_num_notifications_after_expiry.clone(),
         );
 
+        // UMBP store connector telemetry.
+        let umbp_transfer_submitted_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_submitted",
+            "Number of UMBP objects submitted",
+            umbp_transfer_submitted_total.clone(),
+        );
+
+        let umbp_transfer_completed_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_completed",
+            "Number of UMBP objects completed",
+            umbp_transfer_completed_total.clone(),
+        );
+
+        let umbp_transfer_failed_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_failed",
+            "Number of UMBP objects failed",
+            umbp_transfer_failed_total.clone(),
+        );
+
+        let umbp_transfer_bytes_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_bytes",
+            "Bytes in successfully completed UMBP transfer ranges",
+            umbp_transfer_bytes_total.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
             scheduler_waiting_by_reason,
+            scheduler_kv_fetch_by_stage,
             kv_cache_usage,
+            engine_sleep_state,
             lora_info,
+            cache_config_info,
             prefix_cache_queries,
             prefix_cache_hits,
             external_prefix_cache_queries,
@@ -631,6 +737,10 @@ impl SchedulerMetrics {
             nixl_num_failed_notifications,
             nixl_num_kv_expired_reqs,
             nixl_num_notifications_after_expiry,
+            umbp_transfer_submitted_total,
+            umbp_transfer_completed_total,
+            umbp_transfer_failed_total,
+            umbp_transfer_bytes_total,
             log_stats: Family::default(),
         }
     }
