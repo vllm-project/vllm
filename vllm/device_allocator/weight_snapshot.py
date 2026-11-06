@@ -35,26 +35,26 @@ def snapshot_path(root: str, config_hash: str, rank: int) -> Path:
 
 
 def _checkpoint_id(path) -> object:
-    """Location-independent identity of a checkpoint: HF repo@commit when the path
-    is an HF cache snapshot, plus name/size of weight files and config.json bytes."""
+    """Location-independent identity of a checkpoint.
+
+    For an HF cache snapshot, repo@commit already pins the files, so the weights
+    need not be present when restoring; elsewhere use weight file names/sizes."""
     import hashlib
 
     if path is None or not os.path.isdir(str(path)):
         return path
     p = Path(path).resolve()
-    ident = p.name
+    cfg = p / "config.json"
+    digest = hashlib.sha256(cfg.read_bytes()).hexdigest()[:16] if cfg.exists() else None
     if p.parent.name == "snapshots" and p.parent.parent.name.startswith("models--"):
-        ident = (
-            p.parent.parent.name[len("models--") :].replace("--", "/") + "@" + p.name
-        )
+        repo = p.parent.parent.name[len("models--") :].replace("--", "/")
+        return [f"{repo}@{p.name}", digest]
     files = sorted(
         (f.name, f.stat().st_size)
         for f in p.iterdir()
         if f.suffix in (".safetensors", ".bin", ".pt", ".gguf")
     )
-    cfg = p / "config.json"
-    digest = hashlib.sha256(cfg.read_bytes()).hexdigest()[:16] if cfg.exists() else None
-    return [ident, files, digest]
+    return [p.name, files, digest]
 
 
 def weights_key(vllm_config) -> str:
