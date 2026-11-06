@@ -708,8 +708,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             self.init_breakable_cg_runner(model)
 
         if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
-            self.use_breakable_cg
-            or has_compiled_submodule(model)
+            self.use_breakable_cg or has_compiled_submodule(model)
         ):
             raise RuntimeError(
                 f"{type(model).__name__}: piecewise CUDA graphs "
@@ -940,7 +939,6 @@ def prepare_inputs_to_capture(
 
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
-
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
     if slot_mappings_buffer is not None:
         # CUDA graphs capture the slot-mapping pointer, so use the same buffer
