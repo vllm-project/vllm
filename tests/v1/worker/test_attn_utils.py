@@ -24,6 +24,7 @@ from tests.v1.attention.utils import (
     dense_kv_cache_views,
 )
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
+from vllm.model_executor.layers.state import PersistentStateLayerBase
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
@@ -98,7 +99,13 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             is_draft_layer=False,
             kv_sharing_target_layer_name=None,
         )
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda config, layer_type: {}
+        if layer_type is PersistentStateLayerBase
+        else layers,
+    )
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
     )
@@ -134,7 +141,13 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
         )
         for name in ("target", "draft")
     }
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda config, layer_type: {}
+        if layer_type is PersistentStateLayerBase
+        else layers,
+    )
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
 
     specs = attn_utils.get_kv_cache_spec(config)

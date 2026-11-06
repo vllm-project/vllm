@@ -1221,8 +1221,11 @@ def get_kv_cache_groups_from_builder(
     Core checks every grouping, whether it comes from the default grouping, a
     model's ``SupportsKVCacheGrouping`` or a platform builder.
     """
+    state_spec = _check_persistent_state_layout(vllm_config, kv_cache_spec)
     groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
     _check_exact_partition(groups, kv_cache_spec)
+    if state_spec is not None and [g.kv_cache_spec for g in groups] != [state_spec]:
+        raise ValueError("Persistent state requires one state cache group")
     return groups
 
 
@@ -1507,6 +1510,14 @@ def get_kv_cache_configs(
 
     """
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    if any(
+        isinstance(spec, PersistentStateSpec)
+        for specs in kv_cache_specs
+        for spec in specs.values()
+    ) and (len(kv_cache_specs), len(available_memory)) != (1, 1):
+        raise ValueError("Persistent state requires one engine worker")
 
     builder = get_kv_cache_config_builder(vllm_config)
 
@@ -1533,6 +1544,14 @@ def get_kv_cache_configs(
             bytes_per_block = _pool_bytes_per_block_from_builder(
                 builder, vllm_config, groups
             )
+            if (
+                get_max_num_blocks(vllm_config, groups) is not None
+                and override * bytes_per_block > avail_mem
+            ):
+                raise ValueError(
+                    f"num_gpu_blocks_override={override} exceeds the KV budget "
+                    f"of {avail_mem // bytes_per_block} blocks"
+                )
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -1583,6 +1602,9 @@ def get_kv_cache_configs(
         num_blocks = (
             available_memory_one_worker // bytes_per_block if projected_groups else 1
         )
+        max_num_blocks = get_max_num_blocks(vllm_config, projected_groups)
+        if override is None and max_num_blocks is not None:
+            num_blocks = min(num_blocks, max_num_blocks)
         kv_cache_configs.append(
             builder.get_kv_cache_config_from_groups(
                 vllm_config, projected_groups, num_blocks
@@ -1619,6 +1641,40 @@ def get_kv_cache_configs(
         cfg.needs_kv_cache_zeroing = needs_kv_cache_zeroing
 
     return kv_cache_configs
+
+
+def get_max_num_blocks(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int | None:
+    """The tightest `KVCacheSpec.max_num_blocks` bound of the groups, if any."""
+    bounds = [
+        bound
+        for group in kv_cache_groups
+        if (bound := group.kv_cache_spec.max_num_blocks(vllm_config)) is not None
+    ]
+    return min(bounds, default=None)
+
+
+def _check_persistent_state_layout(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> KVCacheSpec | None:
+    """Refuse unsupported persistent-state layouts and configurations.
+
+    Returns the state spec, or None when the model has no persistent state.
+    """
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    states = [s for s in kv_cache_spec.values() if isinstance(s, PersistentStateSpec)]
+    if not states:
+        return None
+    from vllm.v1.core.state_slot_manager import validate_state_config
+
+    validate_state_config(vllm_config)
+    if len(states) != len(kv_cache_spec):
+        raise ValueError("Persistent state requires a state-only cache layout")
+    if len(states) != 1:
+        raise ValueError("Persistent state requires one aggregate state spec")
+    return states[0]
 
 
 def get_global_kv_cache_groups(

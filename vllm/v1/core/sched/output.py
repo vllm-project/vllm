@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.kv_cache_interface import StateSlotHandle
 
 if TYPE_CHECKING:
     import numpy as np
@@ -147,8 +148,8 @@ class CachedRequestData:
     # the request's block IDs. For those in the set, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_req_ids: set[str]
-    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
-    # When PP is not used, new_token_ids will be empty.
+    # Scheduled host token slices for synchronous PP and persistent-state
+    # consumers. Empty for ordinary single-rank execution.
     new_token_ids: list[list[int]]
     # MRV1-only: For requests not scheduled in the last step, propagate the token ids
     # to the connector. Won't contain requests scheduled in the prior step.
@@ -325,6 +326,9 @@ class SchedulerOutput:
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
     skip_drafts: bool = False
+    state_step_seq: int = 0
+    state_slot_handles: dict[str, dict[str, StateSlotHandle]] | None = None
+    state_cleanup_handles: dict[str, dict[str, StateSlotHandle]] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

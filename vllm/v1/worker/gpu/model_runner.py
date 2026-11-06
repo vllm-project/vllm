@@ -78,10 +78,12 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    PersistentStateSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
@@ -179,6 +181,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
 )
+from vllm.v1.worker.gpu.state_slots import StateCompletionOutput, StateSlotBindings
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.gpu.ubatch_utils import (
@@ -300,6 +303,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Speculative decoding.
+        self.state_slots: StateSlotBindings | None = None
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
@@ -664,6 +668,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 self.cache_config.get_resolved_kv_cache_layout(),
             )
+        self.state_slots = None
+        state_groups = [
+            g
+            for g in kv_cache_config.kv_cache_groups
+            if isinstance(g.kv_cache_spec, PersistentStateSpec)
+        ]
+        if state_groups:
+            from vllm.v1.core.state_slot_manager import (
+                validate_state_config,
+                validate_state_groups,
+            )
+
+            validate_state_config(self.vllm_config)
+            validate_state_groups(kv_cache_config.kv_cache_groups)
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -852,8 +870,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 allocate=allocate_fn,
             )
         self.kv_caches = [
-            cache for cache in kv_caches_dict.values() if cache.device == self.device
+            cache
+            for name, cache in kv_caches_dict.items()
+            if cache.device == self.device
+            and name not in {g.layer_names[0] for g in state_groups}
         ]
+        if state_groups:
+            self.state_slots = StateSlotBindings(state_groups, kv_caches_dict)
+            self.model_state.initialize_state_slots(self.state_slots)
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
@@ -1076,6 +1100,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector = get_aux_output_connector(
                 self.model, self.vllm_config
             )
+        prepare_memory = getattr(self.model, "prepare_execution_memory", None)
+        if prepare_memory is not None:
+            prepare_memory()
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
@@ -1820,6 +1847,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
         )
 
+    def _finish_state_step(
+        self, output: AsyncModelRunnerOutput | ModelRunnerOutput
+    ) -> StateCompletionOutput:
+        assert self.state_slots is not None
+        return self.state_slots.finish_step(output, self.main_stream)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1831,13 +1864,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
+    ) -> AsyncModelRunnerOutput | ModelRunnerOutput | IntermediateTensors | None:
+        if self.state_slots is not None or getattr(
+            getattr(self, "model", None), "supports_persistent_state", False
+        ):
+            self.model_state.prepare_step(
+                scheduler_output, dummy_run=dummy_run, is_profile=is_profile
+            )
         if not dummy_run:
             self.draft_tokens_handler.begin_step(scheduler_output)
             # Update the request states.
             self.update_pp_decode_requests()
+            if self.state_slots is not None:
+                self.state_slots.begin_step(scheduler_output, self.main_stream)
             self.finish_requests(scheduler_output)
             self.free_states(scheduler_output)
+            if self.state_slots is not None:
+                self.state_slots.activate_requests()
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             if self.encoder_cache is not None:
@@ -1853,9 +1896,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                return self._merge_ec_connector_no_forward(
+                output = self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
                 )
+                if self.state_slots is not None:
+                    return self._finish_state_step(output)
+                return output
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
@@ -2214,7 +2260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
-    ) -> AsyncOutput | ModelRunnerOutput | None:
+    ) -> AsyncModelRunnerOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -2410,6 +2456,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
+        if self.state_slots is not None:
+            return self._finish_state_step(async_output)
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -2417,7 +2465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     @step_eplb_after()
-    def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
+    def pool(self) -> AsyncModelRunnerOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None
@@ -2457,6 +2505,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.postprocess_num_computed_tokens(input_batch)
+        if self.state_slots is not None:
+            return self._finish_state_step(async_output)
         return async_output
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
@@ -2482,6 +2532,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_manager = None
         self.fast_prefill = None
         self.pooling_runner = None
+        self.state_slots = None
+        if hasattr(self, "model_state"):
+            self.model_state.state_slots = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "replayssm_block_copy_tensors"):

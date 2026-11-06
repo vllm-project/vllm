@@ -433,3 +433,19 @@ def get_kv_cache_configs(
         available_memory,
         kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
     )
+
+
+def create_state_spec():
+    from vllm.v1.kv_cache_interface import (
+        PersistentStateDescriptor,
+        PersistentStateSpec,
+    )
+
+    return PersistentStateSpec(
+        state_name="test",
+        descriptors=(
+            PersistentStateDescriptor("hidden", (4,), torch.float32, 0, 16, torch.ones),
+            PersistentStateDescriptor("count", (2,), torch.int64, 16, 16, torch.zeros),
+        ),
+        page_size_bytes=32,
+    )

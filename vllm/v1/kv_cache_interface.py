@@ -4,15 +4,17 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 from collections import Counter
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Self, TypeVar
 
 import torch
 
@@ -287,6 +289,17 @@ class KVCacheSpec:
 
         """
         return cdiv(max_len, self.block_size)
+
+    def max_num_blocks(self, vllm_config: VllmConfig) -> int | None:
+        """An upper bound on the blocks in the KV cache pool, including the
+        null block, or None (the default) for no bound.
+
+        A spec that returns a bound opts in to three planning rules: the pool
+        holds at most that many blocks unless `num_gpu_blocks_override` is set,
+        an override larger than the profiled memory is refused, and profiling
+        allocates exactly that many blocks, whatever the override.
+        """
+        return None
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """Create a new KVCacheSpec from self but replacing the block size."""
@@ -1353,6 +1366,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         )
         return next(iter(widths))
 
+    def max_num_blocks(self, vllm_config: VllmConfig) -> int | None:
+        bounds = [
+            bound
+            for spec in self.kv_cache_specs.values()
+            if (bound := spec.max_num_blocks(vllm_config)) is not None
+        ]
+        return min(bounds, default=None)
+
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
         """Whether all layers have the same type of KV cache spec.
@@ -1478,6 +1499,260 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
     if isinstance(kv_cache_spec, SlidingWindowSpec):
         return kv_cache_spec.sliding_window
     return None
+
+
+StateInitializer = Callable[..., torch.Tensor]
+
+
+@dataclass(frozen=True)
+class PersistentStateDescriptor:
+    """One typed component inside an aggregate persistent-state page."""
+
+    name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    offset_bytes: int
+    alignment_bytes: int
+    initializer: StateInitializer
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("persistent-state descriptor name must be nonempty")
+        if not self.shape or any(
+            not isinstance(dimension, int) or dimension <= 0 for dimension in self.shape
+        ):
+            raise ValueError(f"invalid persistent-state shape for {self.name!r}")
+        if not isinstance(self.dtype, torch.dtype):
+            raise TypeError(f"invalid persistent-state dtype for {self.name!r}")
+        if self.offset_bytes < 0:
+            raise ValueError(f"negative persistent-state offset for {self.name!r}")
+        if self.alignment_bytes <= 0:
+            raise ValueError(f"invalid persistent-state alignment for {self.name!r}")
+        if self.offset_bytes % self.alignment_bytes:
+            raise ValueError(f"misaligned persistent-state offset for {self.name!r}")
+        if self.offset_bytes % self.element_size_bytes:
+            raise ValueError(
+                f"dtype-misaligned persistent-state offset for {self.name!r}"
+            )
+        if not callable(self.initializer):
+            raise TypeError(
+                f"persistent-state initializer for {self.name!r} must be callable"
+            )
+
+    @property
+    def element_size_bytes(self) -> int:
+        return torch.empty((), dtype=self.dtype).element_size()
+
+    @property
+    def size_bytes(self) -> int:
+        return math.prod(self.shape) * self.element_size_bytes
+
+
+@dataclass(frozen=True, init=False)
+class PersistentStateSpec(KVCacheSpec):
+    """One immutable allocation record for an atomic persistent-state bundle."""
+
+    descriptors: tuple[PersistentStateDescriptor, ...]
+    state_name: str
+    persistence_class: str
+    schema_id: str = field(compare=True)
+    _page_size_bytes: int = field(compare=True, repr=False)
+
+    def __init__(
+        self,
+        *,
+        descriptors: Sequence[PersistentStateDescriptor],
+        page_size_bytes: int,
+        block_size: int = 1,
+        state_name: str,
+        persistence_class: str = "resident",
+    ) -> None:
+        descriptor_tuple = tuple(descriptors)
+        if block_size != 1:
+            raise ValueError("persistent state requires block_size=1")
+        if not state_name:
+            raise ValueError("persistent-state name must be nonempty")
+        if persistence_class != "resident":
+            raise ValueError("initial persistent-state capability is resident-only")
+        self._validate_layout(descriptor_tuple, page_size_bytes)
+
+        object.__setattr__(self, "block_size", 1)
+        object.__setattr__(self, "descriptors", descriptor_tuple)
+        object.__setattr__(self, "state_name", state_name)
+        object.__setattr__(self, "persistence_class", persistence_class)
+        object.__setattr__(self, "_page_size_bytes", page_size_bytes)
+        object.__setattr__(
+            self,
+            "schema_id",
+            self._schema_digest(
+                descriptor_tuple,
+                page_size_bytes,
+                state_name,
+                persistence_class,
+            ),
+        )
+
+    @staticmethod
+    def _validate_layout(
+        descriptors: tuple[PersistentStateDescriptor, ...],
+        page_size_bytes: int,
+    ) -> None:
+        if not descriptors:
+            raise ValueError("persistent-state layout must not be empty")
+        if page_size_bytes <= 0:
+            raise ValueError("persistent-state page size must be positive")
+        names = [descriptor.name for descriptor in descriptors]
+        if len(set(names)) != len(names):
+            raise ValueError("persistent-state descriptor names must be unique")
+        maximum_alignment = math.lcm(*(d.alignment_bytes for d in descriptors))
+        if page_size_bytes % maximum_alignment:
+            raise ValueError(
+                "persistent-state page size must satisfy descriptor alignment"
+            )
+        if any(
+            page_size_bytes % descriptor.element_size_bytes
+            for descriptor in descriptors
+        ):
+            raise ValueError("persistent-state page size must satisfy dtype alignment")
+        intervals = sorted(
+            (
+                descriptor.offset_bytes,
+                descriptor.offset_bytes + descriptor.size_bytes,
+                descriptor.name,
+            )
+            for descriptor in descriptors
+        )
+        for start, end, name in intervals:
+            if end > page_size_bytes:
+                raise ValueError(
+                    f"persistent-state descriptor {name!r} exceeds its page"
+                )
+        for (_, previous_end, previous_name), (
+            next_start,
+            _,
+            next_name,
+        ) in zip(intervals, intervals[1:]):
+            if previous_end > next_start:
+                raise ValueError(
+                    "persistent-state descriptors overlap: "
+                    f"{previous_name!r}, {next_name!r}"
+                )
+        aligned_extent = (
+            (max(end for _, end, _ in intervals) + maximum_alignment - 1)
+            // maximum_alignment
+            * maximum_alignment
+        )
+        if page_size_bytes != aligned_extent:
+            raise ValueError(
+                "persistent-state page size is not the aligned layout extent"
+            )
+
+    @staticmethod
+    def _schema_digest(
+        descriptors: tuple[PersistentStateDescriptor, ...],
+        page_size_bytes: int,
+        state_name: str,
+        persistence_class: str,
+    ) -> str:
+        payload = {
+            "state_name": state_name,
+            "persistence_class": persistence_class,
+            "block_size": 1,
+            "page_size_bytes": page_size_bytes,
+            "descriptors": [
+                {
+                    "name": descriptor.name,
+                    "shape": descriptor.shape,
+                    "dtype": str(descriptor.dtype),
+                    "offset_bytes": descriptor.offset_bytes,
+                    "alignment_bytes": descriptor.alignment_bytes,
+                    "initializer_module": getattr(
+                        descriptor.initializer, "__module__", ""
+                    ),
+                    "initializer_name": getattr(
+                        descriptor.initializer, "__qualname__", ""
+                    ),
+                }
+                for descriptor in descriptors
+            ],
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    @property
+    def has_layer_views(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def num_heads(self) -> int:
+        # The aggregate is one opaque content bundle in core's byte layout.
+        return 1
+
+    @property
+    def tokens_per_state(self) -> int:
+        # Core's fixed-state sentinel: no token-history dimension.
+        return -1
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        return self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: Any, max_len: int) -> int:
+        del vllm_config, max_len
+        return 1
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self._page_size_bytes
+
+    def max_memory_usage_bytes(self, vllm_config: Any) -> int:
+        # A persistent page is one resident slot, never a token-history bound.
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_num_blocks(self, vllm_config: Any) -> int | None:
+        # One slot per running request, plus the null block.
+        return vllm_config.scheduler_config.max_num_seqs + 1
+
+    @classmethod
+    def merge(cls, specs: list[PersistentStateSpec]) -> PersistentStateSpec:
+        # The spec is immutable; sharing it keeps the initializer objects, whose
+        # copies (e.g. of a functools.partial) would not compare equal.
+        if any(spec != specs[0] for spec in specs[1:]):
+            raise AssertionError("All persistent-state layers must be the same.")
+        return specs[0]
+
+    def copy_with_new_block_size(self, block_size: int) -> PersistentStateSpec:
+        if block_size != 1:
+            raise ValueError("persistent-state block size is fixed at one")
+        return self
+
+
+@dataclass(frozen=True)
+class StateSlotHandle:
+    engine_epoch: str
+    slot: int
+    generation: int
+
+
+@dataclass(frozen=True)
+class StateCompletion:
+    step_seq: int
+    handles: dict[str, dict[str, StateSlotHandle]]
+    cleanup_handles: dict[str, dict[str, StateSlotHandle]] = field(default_factory=dict)
+    failed_req_ids: frozenset[str] = frozenset()
 
 
 @dataclass

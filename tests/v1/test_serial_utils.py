@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
 from dataclasses import dataclass
+from pathlib import Path
 
 import msgspec
 import numpy as np
 import pytest
+import regex as re
 import torch
 
 from vllm.multimodal.inputs import (
@@ -17,6 +19,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.cpu_test
@@ -583,3 +586,20 @@ def test_zero_copy_frames_survive_without_caller_side_references():
         assert torch.equal(decoded.prompt_embeds, expected)
         push.close(linger=0)
         pull.close(linger=0)
+
+
+def test_engine_core_request_fields_extend_rust_client_layout():
+    """EngineCoreRequest is array-like, so the Rust engine-core client's fields
+    must keep their positions; Python-only fields go after them."""
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "rust/src/engine-core-client/src/protocol/request.rs"
+    ).read_text()
+    struct = re.search(r"pub struct EngineCoreRequest \{(.*?)\n\}", source, re.S)
+    assert struct is not None
+    rust_fields = re.findall(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+):", struct.group(1), re.M
+    )
+    assert rust_fields
+    python_fields = EngineCoreRequest.__struct_fields__
+    assert python_fields[: len(rust_fields)] == tuple(rust_fields)

@@ -40,7 +40,11 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.interface import (
+    AddRequestDisposition,
+    PauseState,
+    SchedulerInterface,
+)
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -55,7 +59,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    StreamOutput,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -388,6 +397,11 @@ class Scheduler(SchedulerInterface):
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        # Whether scheduled token ids go back to the workers; see
+        # _make_cached_request_data.
+        self.send_new_token_ids = (
+            self.use_pp and not self.scheduler_config.async_scheduling
+        )
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
@@ -2022,12 +2036,10 @@ class Scheduler(SchedulerInterface):
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
-            if self.use_pp and not self.scheduler_config.async_scheduling:
-                # When using PP, the scheduler sends the sampled tokens back,
-                # because there's no direct communication between the first-
-                # stage worker and the last-stage worker. Otherwise, we don't
-                # need to send the sampled tokens back because the model runner
-                # will cache them.
+            if self.send_new_token_ids:
+                # With PP the first-stage worker has no direct path from the
+                # last stage; persistent-state models plan rows from the host
+                # token slice. Otherwise the model runner caches the tokens.
                 num_tokens = num_scheduled_tokens[req_id] - len(
                     spec_decode_tokens.get(req_id, ())
                 )
@@ -2332,6 +2344,16 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    def _add_queued_outputs(self, outputs: dict[int, list[EngineCoreOutput]]) -> None:
+        """Add outputs queued outside model execution ahead of this step's."""
+        return
+
+    def _get_stale_output_req_ids(
+        self, scheduler_output: SchedulerOutput
+    ) -> set[str] | None:
+        """Requests whose output in this step must be dropped unread."""
+        return None
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2362,6 +2384,7 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        self._add_queued_outputs(outputs)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2386,7 +2409,10 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
+        stale_req_ids = self._get_stale_output_req_ids(scheduler_output)
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+            if stale_req_ids and req_id in stale_req_ids:
+                continue
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             output_is_stale = False
@@ -2562,12 +2588,17 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             finish_reason = None
+            # The context of the input this output ran on, before stop handling
+            # can apply the next queued input.
+            stream_admission = request.stream_admission
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    if stream_admission is not None:
+                        stream_admission = stream_admission.closed()
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (
                         prefill_stats is not None
@@ -2606,6 +2637,11 @@ class Scheduler(SchedulerInterface):
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
+                        stream_output=(
+                            StreamOutput(stream_admission)
+                            if stream_admission is not None
+                            else None
+                        ),
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
@@ -2668,6 +2704,11 @@ class Scheduler(SchedulerInterface):
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
+                        stream_output=(
+                            StreamOutput(request.stream_admission.closed())
+                            if request.stream_admission is not None
+                            else None
+                        ),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
                         error=request_errors.get(request.request_id),
@@ -3094,7 +3135,10 @@ class Scheduler(SchedulerInterface):
     def has_request(self, request_id: str) -> bool:
         return request_id in self.requests
 
-    def add_request(self, request: Request) -> None:
+    def add_request(self, request: Request) -> AddRequestDisposition | None:
+        if request.stream_admission is not None and self.stream_admissions is None:
+            # EngineCore refuses these during preprocessing; fail before any change.
+            raise ValueError("Stream admission requires persistent state")
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -3128,6 +3172,7 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+        return AddRequestDisposition.ACCEPTED
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

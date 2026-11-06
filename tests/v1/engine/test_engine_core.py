@@ -791,6 +791,7 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     request = MagicMock(
         request_id="r",
         client_index=1,
+        stream_admission=None,
         abort_immediately=kind == "cleanup",
         kv_transfer_params={"do_remote_prefill": True} if kind == "pd" else None,
     )
