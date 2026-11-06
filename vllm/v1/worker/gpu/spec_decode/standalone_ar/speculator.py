@@ -286,14 +286,15 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             draft_tokens.unsqueeze(1),
         )
         self.input_buffers.input_ids[:num_reqs].copy_(draft_tokens.int())
+        # Device-side limit: graph replays see an auto-fit reduction, no host sync.
         torch.clamp(
             self.input_buffers.positions[:num_reqs] + 1,
-            max=self.max_model_len - 1,
+            max=self.max_model_len_gpu - 1,
             out=self.input_buffers.positions[:num_reqs],
         )
         torch.clamp(
             self.input_buffers.seq_lens[:num_reqs] + 1,
-            max=self.max_model_len,
+            max=self.max_model_len_gpu,
             out=self.input_buffers.seq_lens[:num_reqs],
         )
 
