@@ -1090,7 +1090,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(f!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 Tensor? num_valid_rows=None) -> ()");
+      "                 Tensor? num_valid_rows=None,"
+      "                 int row_value_bytes=0) -> ()");
 
   ops.def(
       "hisparse_invalidate_written_slots(Tensor device_global_indices_ptrs,"
@@ -1105,14 +1106,19 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! hot_cache,"
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
-      "                     Tensor miss_mask) -> ()");
+      "                     Tensor miss_mask,"
+      "                     Tensor? request_state_indices,"
+      "                     Tensor(a!)? attention_indices=None,"
+      "                     int attention_block_stride=0,"
+      "                     int row_value_bytes=0) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"
       "                        Tensor! hot_cache,"
       "                        Tensor miss_global_indices,"
       "                        Tensor miss_hot_indices,"
-      "                        Tensor miss_counts) -> ()");
+      "                        Tensor miss_counts,"
+      "                        int row_value_bytes=0) -> ()");
 
 #endif  // !USE_ROCM
 

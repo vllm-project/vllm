@@ -13,7 +13,13 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CacheConfig, CUDAGraphMode
+from vllm.config import (
+    CacheConfig,
+    CUDAGraphMode,
+    HiSparseConfig,
+    ModelConfig,
+    VllmConfig,
+)
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -110,6 +116,56 @@ def test_hisparse_group_prefetch_requires_bounded_decode_only(
     assert not hisparse_runtime_module.is_hisparse_group_prefetch_batch(None, max_rows)
 
 
+@pytest.mark.parametrize(
+    "tokens,decode_tokens,requests,query_len,expected",
+    [
+        (2, 2, 2, 1, True),
+        (0, 0, 0, 1, False),
+        (4, 4, 1, 4, False),
+        (2, 1, 2, 1, False),
+    ],
+)
+def test_hisparse_decode_batch_requires_nonempty_single_token_decodes(
+    tokens, decode_tokens, requests, query_len, expected
+):
+    metadata = SparseMLACommonMetadata(
+        num_reqs=requests,
+        max_query_len=query_len,
+        max_seq_len=128,
+        num_actual_tokens=tokens,
+        query_start_loc=torch.zeros(requests + 1, dtype=torch.int32),
+        slot_mapping=torch.arange(tokens, dtype=torch.int64),
+        block_table=torch.zeros((requests, 2), dtype=torch.int32),
+        req_id_per_token=torch.zeros(tokens, dtype=torch.int32),
+        num_decodes=requests,
+        num_decode_tokens=decode_tokens,
+        num_prefills=0,
+    )
+
+    assert hisparse_runtime_module.is_hisparse_decode_batch(metadata) is expected
+
+
+@pytest.mark.parametrize(
+    "kv_sources,index_sources,expected",
+    [
+        ([1, 3], [1, 3, 4], 4),
+        ([], [1, 3, 4], 6),
+        ([], [], 2),
+    ],
+)
+def test_hisparse_max_swap_rows_uses_busiest_kv_source_groups(
+    kv_sources, index_sources, expected
+):
+    config = VllmConfig(model_config=ModelConfig(max_model_len=128))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.scheduler_config.max_num_seqs = 3
+    config.scheduler_config.max_num_batched_tokens = 2
+    config.model_config.hf_text_config.kv_source_layer_ids = kv_sources
+    config.model_config.hf_text_config.index_source_layer_ids = index_sources
+
+    assert hisparse_runtime_module._get_max_swap_rows(config) == expected
+
+
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = CUDAHiSparseBackend()
@@ -126,6 +182,7 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker.cache_handles = []
     worker._completed_host_copy_dst_ids = []
     worker._metrics_calls = 0
     worker._metrics_event = MagicMock()
@@ -619,7 +676,9 @@ def test_hisparse_transfer_builds_page_descriptors(monkeypatch):
     worker.resident_caches = (source,)
     worker.host_caches = (destination,)
     worker.cache_handles = _as_cache_handles(
-        SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0))
+        SimpleNamespace(
+            runtime=SimpleNamespace(resident_source_index=0, storage_block_size=None)
+        )
     )
     worker._dma_free_descriptors = []
     submit_dma_descriptors = MagicMock()
@@ -649,10 +708,13 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy(monkeypatch):
     )
     monkeypatch.setattr(worker, "_enqueue_transfers", enqueue_transfers)
     transfers = [SparseKVPageTransfer(7, 2, (1,))]
+    ready_event = MagicMock()
 
-    worker._submit_transfers(transfers)
+    worker._submit_transfers(transfers, ready_event)
 
-    record_transfer_completion.assert_called_once_with(transfers)
+    record_transfer_completion.assert_called_once_with(
+        transfers, ready_event=ready_event
+    )
     enqueue_transfers.assert_not_called()
 
 
@@ -693,7 +755,11 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     worker.cache_handles = _as_cache_handles(
         *(
             SimpleNamespace(
-                runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+                runtime=SimpleNamespace(
+                    resident_source_index=i,
+                    eager_host_mirror=True,
+                    storage_block_size=None,
+                )
             )
             for i in range(2)
         )
@@ -740,7 +806,7 @@ def test_hisparse_lazy_mirror_copies_transfer_pages(monkeypatch):
     monkeypatch.setattr(worker, "_enqueue_transfers", enqueue_transfers)
     transfers = [SparseKVPageTransfer(7, 2, (1,))]
 
-    worker._submit_transfers(transfers)
+    worker._submit_transfers(transfers, MagicMock())
 
     enqueue_transfers.assert_called_once_with(transfers)
     record_transfer_completion.assert_not_called()
@@ -1099,15 +1165,18 @@ def test_hisparse_writer_records_transfer_completion_after_dma(monkeypatch):
     worker._enqueued_transfer_ids = []
     worker._pending_transfer_events = deque()
     event = MagicMock()
+    ready_event = MagicMock()
     monkeypatch.setattr(torch, "Event", lambda: event)
 
     worker._record_transfer_completion(
         [
             SparseKVPageTransfer(3, 2, (1,)),
             SparseKVPageTransfer(7, 4, (5,)),
-        ]
+        ],
+        ready_event=ready_event,
     )
 
+    worker.dma_stream.wait_event.assert_called_once_with(ready_event)
     event.record.assert_called_once_with(worker.dma_stream)
     assert worker._enqueued_transfer_ids == [3, 7]
     assert worker._pending_transfer_events == deque([(event, (3, 7))])

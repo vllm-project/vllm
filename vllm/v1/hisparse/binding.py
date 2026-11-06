@@ -67,18 +67,22 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
+    resized_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
-    return kv_cache_spec | {
-        layer_name: group.kv_cache_spec
-        for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
-    }
+    return (
+        kv_cache_spec
+        | resized_specs
+        | {
+            layer_name: group.kv_cache_spec
+            for group in groups
+            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+            for layer_name in group.layer_names
+        }
+    )
 
 
 def allocate_hisparse_kv_caches(
@@ -241,6 +245,7 @@ def bind_hisparse_kv_caches(
                 block_size=group.kv_cache_spec.block_size,
                 block_table=residency[resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
+                storage_block_size=group.kv_cache_spec.storage_block_size,
             )
             cache_handle.residency = residency
             assert cache_handle.view is not None
@@ -272,6 +277,7 @@ def bind_hisparse_kv_caches(
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
                 block_table=block_tables.input_block_tables[group_id],
+                storage_block_size=group.kv_cache_spec.storage_block_size,
             )
             resident = cache_handle.view
             hot = cache_handle.runtime.hot

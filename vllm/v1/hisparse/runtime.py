@@ -48,6 +48,7 @@ _MIN_STAGED_PREFILL_KV_ROWS = 256
 def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
     return (
         attn_metadata is not None
+        and attn_metadata.num_actual_tokens > 0
         and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
         and attn_metadata.max_query_len == 1
         and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
@@ -68,10 +69,39 @@ def is_hisparse_group_prefetch_batch(attn_metadata: Any | None, max_rows: int) -
 def _get_max_swap_rows(vllm_config: VllmConfig) -> int:
     max_query_len = max_decode_query_len(vllm_config)
     scheduler_config = vllm_config.scheduler_config
-    return min(
+    per_call_cap = min(
         scheduler_config.max_num_batched_tokens,
         scheduler_config.max_num_seqs * max_query_len,
     )
+
+    # V4.1 can reuse one compressed KV source from several independently
+    # resolved index groups. Count only the groups owned by the busiest source.
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    index_sources = getattr(hf_text_config, "index_source_layer_ids", None) or ()
+    kv_sources = getattr(hf_text_config, "kv_source_layer_ids", None) or ()
+    try:
+        index_sources = tuple(sorted({int(layer) for layer in index_sources}))
+    except (TypeError, ValueError):
+        return per_call_cap
+    if not index_sources:
+        return per_call_cap
+    try:
+        kv_sources = tuple(sorted({int(layer) for layer in kv_sources}))
+    except (TypeError, ValueError):
+        return per_call_cap * len(index_sources)
+    if not kv_sources:
+        return per_call_cap * len(index_sources)
+
+    groups_per_kv_source = {layer: 0 for layer in kv_sources}
+    for index_source in index_sources:
+        owners = [layer for layer in kv_sources if layer <= index_source]
+        if not owners:
+            # An incomplete topology is safest when every known index group is
+            # assumed to share one source.
+            return per_call_cap * len(index_sources)
+        groups_per_kv_source[owners[-1]] += 1
+    return per_call_cap * max(groups_per_kv_source.values(), default=1)
 
 
 @dataclass(frozen=True)
@@ -724,12 +754,19 @@ class HiSparseRuntime:
         index_group: HiSparseIndexGroup | None = None,
         copy_stream: torch.Stream | None = None,
         logical_topk_ready: torch.Event | None = None,
+        storage_block_size: int | None = None,
+        row_value_bytes: int | None = None,
     ) -> None:
         self.backend = get_hisparse_backend()
         self.backend.check_available()
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
         self.kv_dtype = kv_dtype
+        self.storage_block_size = storage_block_size
+        # Logical token block size resolved by the KV cache layout; the bound
+        # group block size overrides it at binding time.
+        self.logical_block_size: int | None = None
+        self.row_value_bytes = row_value_bytes
         self.device = torch.device(device)
         # Logical slots per request. Physical rows come from its ephemeral HMA
         # block table and need not be contiguous in the shared slab.
@@ -739,9 +776,14 @@ class HiSparseRuntime:
             _check_residency_shared_memory(self.device, config)
 
         row_bytes = row_width * kv_dtype.itemsize
-        if row_bytes % 16 != 0:
+        if row_value_bytes is None and row_bytes % 16 != 0:
             raise ValueError(
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
+            )
+        if row_value_bytes is not None and not 0 < row_value_bytes < row_bytes:
+            raise ValueError(
+                "HiSparse split-page value bytes must be between zero and the "
+                f"full row width, got {row_value_bytes} for a {row_bytes}B row."
             )
 
         self.is_group_leader = index_group is None
@@ -772,6 +814,7 @@ class HiSparseRuntime:
         self.cache_ops: Any = None
         self.host_pool: HiSparseHostPool | None = None
         self.request_state_indices: torch.Tensor | None = None
+        self._written_slot_invalidator: HiSparseSlotInvalidator | None = None
         self.resident_source_index = -1
         self._layer_ready_event: torch.Event | None = None
         self._swap_staged = False
@@ -799,8 +842,12 @@ class HiSparseRuntime:
         num_blocks: int,
         block_size: int,
         block_table: torch.Tensor,
+        storage_block_size: int | None = None,
     ) -> None:
         """Bind this runtime's strided view into the shared GPU HMA slab."""
+        if storage_block_size is not None:
+            self.storage_block_size = storage_block_size
+        self.logical_block_size = block_size
         self.hot = PagedCacheView.bind(
             raw_tensor,
             dtype=self.kv_dtype,
@@ -808,7 +855,7 @@ class HiSparseRuntime:
             byte_offset=byte_offset,
             block_stride=block_stride,
             num_blocks=num_blocks,
-            block_size=block_size,
+            block_size=self.storage_block_size or block_size,
         )
         self.hot_backing = raw_tensor
         self.hot_block_table = block_table
@@ -839,7 +886,25 @@ class HiSparseRuntime:
         if not (kv_cache.is_pinned() or registered_host_pool is not None):
             raise ValueError("HiSparse host-resident KV pool must be pinned memory.")
 
-        self._host_cache = kv_cache.view(-1, kv_cache.shape[-1])
+        if self.row_value_bytes is not None:
+            host_cache = kv_cache
+            if host_cache.dim() == 4:
+                if host_cache.shape[1] == 1:
+                    host_cache = host_cache.squeeze(1)
+                elif host_cache.shape[2] == 1:
+                    host_cache = host_cache.squeeze(2)
+                else:
+                    raise ValueError(
+                        "HiSparse split-page host cache must have one KV head."
+                    )
+            if host_cache.dim() != 3:
+                raise ValueError(
+                    "HiSparse split-page host cache must be a 3D paged cache, "
+                    f"got {host_cache.dim()}D."
+                )
+            self._host_cache = host_cache
+        else:
+            self._host_cache = kv_cache.view(-1, kv_cache.shape[-1])
         self.registered_host_pool = (
             registered_host_pool if registered_host_pool is not None else kv_cache
         )
@@ -870,12 +935,21 @@ class HiSparseRuntime:
             self.backend.gather_resident_rows(
                 resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
             )
+        host_cache = (
+            kv_cache
+            if self.row_value_bytes is not None
+            else kv_cache.view(-1, row_width)
+        )
         self.cache_ops.hisparse_gather_plan(
-            kv_cache.view(-1, row_width),
+            host_cache,
             staged,
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
+            None,
+            None,
+            0,
+            self.row_value_bytes or 0,
         )
         return staged
 
@@ -887,6 +961,19 @@ class HiSparseRuntime:
         group.device_global_indices.fill_(-1)
         group.lru_slots.copy_(group.lru_init.expand_as(group.lru_slots))
         group.swap_stats.zero_()
+        group.copy_stream.wait_stream(compute_stream)
+
+    def reset_hot_rows(self, state_rows: torch.Tensor) -> None:
+        """Drop hot bookkeeping for state rows that switched to a new request."""
+        if state_rows.numel() == 0:
+            return
+        group = self.index_group
+        compute_stream = torch.accelerator.current_stream()
+        compute_stream.wait_stream(group.copy_stream)
+        group.device_global_indices.index_fill_(0, state_rows, -1)
+        group.lru_slots.index_copy_(
+            0, state_rows, group.lru_init.expand(state_rows.numel(), -1)
+        )
         group.copy_stream.wait_stream(compute_stream)
 
     def invalidate_sorted_slots(
@@ -904,6 +991,23 @@ class HiSparseRuntime:
             -1,
         )
         device_global_indices.index_copy_(0, state_indices, active_indices)
+
+    def invalidate_written_slots(
+        self,
+        written_slots: torch.Tensor,
+        req_id_per_token: torch.Tensor,
+    ) -> None:
+        """Drop hot copies of slots written outside the fused insert path."""
+        request_state_indices = self.request_state_indices
+        assert request_state_indices is not None
+        invalidator = self._written_slot_invalidator
+        if (
+            invalidator is None
+            or invalidator.request_state_indices is not request_state_indices
+        ):
+            invalidator = HiSparseSlotInvalidator(request_state_indices)
+            self._written_slot_invalidator = invalidator
+        invalidator([self], written_slots, req_id_per_token)
 
     def begin_forward(self) -> None:
         self._swap_step = 0
@@ -992,6 +1096,7 @@ class HiSparseRuntime:
             if resident is not None and resident.view is not None
             else 0,
             num_valid_rows,
+            self.row_value_bytes or 0,
         )
 
     def _swap_rows(self, shared_rows: slice) -> None:
@@ -1003,6 +1108,7 @@ class HiSparseRuntime:
             shared.swap_host_physical_rows[shared_rows],
             shared.swap_device_physical_rows[shared_rows],
             shared.swap_counts[shared_rows],
+            self.row_value_bytes or 0,
         )
 
     def _resolve_and_stage_group(
@@ -1083,7 +1189,13 @@ class HiSparseRuntime:
         shared_rows = self._step_rows(num_tokens)
         group = self.index_group
         hot = self.hot
-        assert hot.block_size == block_size
+        assert hot.block_size == block_size, (
+            "HiSparse hot block mismatch:",
+            hot.block_size,
+            block_size,
+            self.storage_block_size,
+            self.row_width,
+        )
         assert hot.attention_block_stride == group.leader.hot.attention_block_stride
 
         if self.is_group_leader:
@@ -1193,6 +1305,8 @@ class HiSparseCacheHandle:
 
     def __init__(self, runtime: HiSparseRuntime) -> None:
         self.runtime = runtime
+        # Shared host pools have one publisher; private pools write per rank.
+        self.is_host_writer = True
         # Speculator layers write their rows after the target forward.
         self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
@@ -1243,8 +1357,12 @@ class HiSparseCacheHandle:
         self.prefetch_decode_group = self.decode_batch or (
             is_hisparse_group_prefetch_batch(attn_metadata, self.runtime.max_swap_rows)
         )
-        self.host_mirror_required = attn_metadata is not None and (
-            not self.decode_batch or self.runtime.eager_host_mirror
+        # Split-page caches are written straight to the host pool, so the
+        # per-layer device mirror is neither needed nor valid for them.
+        self.host_mirror_required = (
+            attn_metadata is not None
+            and self.runtime.row_value_bytes is None
+            and (not self.decode_batch or self.runtime.eager_host_mirror)
         )
 
     def write_target(
@@ -1276,7 +1394,11 @@ class HiSparseCacheHandle:
         block_size: int,
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
+        storage_block_size: int | None = None,
     ) -> None:
+        if storage_block_size is not None:
+            self.runtime.storage_block_size = storage_block_size
+        self.runtime.logical_block_size = block_size
         self.view = PagedCacheView.bind(
             raw_tensor,
             dtype=self.runtime.kv_dtype,
@@ -1284,7 +1406,7 @@ class HiSparseCacheHandle:
             byte_offset=byte_offset,
             block_stride=block_stride,
             num_blocks=num_blocks,
-            block_size=block_size,
+            block_size=self.runtime.storage_block_size or block_size,
         )
         self.block_table = block_table
         self.slot_mapping = slot_mapping
@@ -1340,6 +1462,8 @@ def create_hisparse_cache_handle(
     kv_dtype: torch.dtype,
     index_group: HiSparseMLAIndexGroup | None = None,
     device: torch.device | str | None = None,
+    storage_block_size: int | None = None,
+    row_value_bytes: int | None = None,
 ) -> HiSparseCacheHandle | None:
     config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k)
     if config is None:
@@ -1371,6 +1495,8 @@ def create_hisparse_cache_handle(
             if index_group is not None and index_group.has_indexer
             else None
         ),
+        storage_block_size=storage_block_size,
+        row_value_bytes=row_value_bytes,
     )
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group
@@ -1381,4 +1507,9 @@ def create_hisparse_cache_handle(
         config.device_buffer_size,
         max_num_reqs,
     )
-    return HiSparseCacheHandle(runtime)
+    handle = HiSparseCacheHandle(runtime)
+    shared_host_pool = getattr(
+        vllm_config, "parallel_config", None
+    ) is not None and use_shared_hisparse_host_pool(vllm_config)
+    handle.is_host_writer = not shared_host_pool or get_tp_group().rank_in_group == 0
+    return handle

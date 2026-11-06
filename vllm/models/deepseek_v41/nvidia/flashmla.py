@@ -67,6 +67,7 @@ class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4.1 (CUDA)."""
 
+    supports_hisparse = True
     backend_cls = DeepseekV4FlashMLABackend
     swa_backend_cls = DeepseekSparseSWAFlashMLABackend
 
@@ -167,6 +168,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 return
 
         swa_only = self.compress_ratio == 0
+        if self.is_kv_source and self.hisparse_cache is not None:
+            self.hisparse_cache.runtime.begin_forward()
+            self._hisparse_decode_results.clear()
         # SWA-only layers (compress_ratio == 0) don't have their own KV cache
         # allocation; consumers read the kv source's cache, which is bound on
         # the source layer.
@@ -214,17 +218,42 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         if not swa_only:
             # Local indices filled by the index-source layer's indexer.
             assert attn_metadata is not None
-            assert swa_metadata.is_valid_token is not None
             assert self.topk_indices_buffer is not None
             block_size = attn_metadata.block_size // self.compress_ratio
-            is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
-            )
+            hisparse_cache = self._hisparse_cache()
+            if hisparse_cache is not None:
+                # Layers sharing one compressed cache also share this source's
+                # handle; each index group resolves its top-k once per step.
+                assert self.compressed_cache_prefix is not None
+                source = self._static_forward_context[self.compressed_cache_prefix]
+                key = self.index_source_layer_id
+                cached = source._hisparse_decode_results.get(key)
+                if cached is None:
+                    cached = hisparse_cache.swap_in(
+                        req_id_per_token=attn_metadata.req_id_per_token[
+                            :num_decode_tokens
+                        ],
+                        block_table=attn_metadata.block_table[:num_decodes],
+                        logical_topk_indices=self.topk_indices_buffer[
+                            :num_decode_tokens
+                        ],
+                        block_size=block_size,
+                        num_valid_rows=attn_metadata.query_start_loc[-1:],
+                        return_valid_counts=True,
+                    )
+                    source._hisparse_decode_results[key] = cached
+                global_indices, topk_lens = cached
+                kv_cache = hisparse_cache.runtime.hot.attention_cache
+            else:
+                assert swa_metadata.is_valid_token is not None
+                is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
+                global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                    self.topk_indices_buffer[:num_decode_tokens],
+                    swa_metadata.token_to_req_indices,
+                    attn_metadata.block_table[:num_decodes],
+                    block_size,
+                    is_valid,
+                )
             topk_indices = global_indices.view(num_decode_tokens, 1, -1)
 
         swa_indices = swa_metadata.decode_swa_indices
@@ -325,25 +354,47 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            workspace = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
-            kv, combined_indices_out, combined_lens_out = workspace
-            if not swa_only:
-                # Gather compressed KV
-                assert attn_metadata is not None
-                block_table = attn_metadata.block_table[num_decodes:]
-                dequantize_and_gather_k_cache(
-                    kv[:chunk_size],
-                    compressed_k_cache,
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
-                    block_size=attn_metadata.block_size // self.compress_ratio,
-                    offset=0,
+            kv_spec = ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16)
+            if swa_only:
+                kv, combined_indices_out, combined_lens_out = (
+                    workspace_manager.get_simultaneous(
+                        kv_spec,
+                        ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                        ((self.max_num_batched_tokens,), torch.int32),
+                    )
                 )
+            else:
+                combined_indices_out, combined_lens_out = (
+                    workspace_manager.get_simultaneous(
+                        ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                        ((self.max_num_batched_tokens,), torch.int32),
+                    )
+                )
+                # The chunk's compressed columns stay in the workspace's tail
+                # span, which the scratch of the layers in between leaves
+                # alone. A kv source has just inserted this step's rows, so it
+                # always gathers; the consumers after it in the same forward
+                # reuse its columns while the span still holds this source and
+                # chunk, and rewrite only their SWA columns.
+                kv, intact = workspace_manager.get_retained(
+                    (
+                        self.compressed_cache_prefix,
+                        (chunk_start, chunk_end, chunk_N, chunk_M),
+                    ),
+                    *kv_spec,
+                )
+                if self.is_kv_source or not intact:
+                    assert attn_metadata is not None
+                    block_table = attn_metadata.block_table[num_decodes:]
+                    dequantize_and_gather_k_cache(
+                        kv[:chunk_size],
+                        compressed_k_cache,
+                        seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=block_table[chunk_start:chunk_end],
+                        block_size=attn_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
