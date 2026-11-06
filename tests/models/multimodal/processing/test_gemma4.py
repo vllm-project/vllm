@@ -456,6 +456,26 @@ def _gemma4_for_encoder_cudagraph(
     return model
 
 
+def test_encode_vision_without_images_or_frames():
+    # Empty inputs on the local paths (DiffusionGemma, EmbeddingGemma2) and a
+    # video with no frames encode nothing instead of calling the tower.
+    model = _gemma4_for_encoder_cudagraph()
+    model.model_dtype = torch.bfloat16
+    model._tower_lora = False
+    assert (
+        model._process_image_input_local({"pixel_values": [], "pixel_position_ids": []})
+        == []
+    )
+    videos = model._process_video_input_local(
+        {
+            "pixel_values_videos": torch.zeros(0, 2520, 768),
+            "pixel_position_ids_videos": torch.zeros(0, 2520, 2, dtype=torch.long),
+            "video_frame_counts": [0],
+        }
+    )
+    assert [video.shape for video in videos] == [(0, 8)]
+
+
 def _padded_image(
     columns: int, rows: int, max_patches: int = 2520
 ) -> tuple[torch.Tensor, torch.Tensor]:
