@@ -86,7 +86,7 @@ def test_greedy_draft_generated_sequence_is_watermarked(
     detector = detector_cls(**watermark_config)
 
     runner = vllm_runner(
-        "Qwen/Qwen3-4B-FP8",
+        "Qwen/Qwen3-4B",
         watermark_config={**watermark_config, "algorithm": algorithm},
         speculative_config={
             "method": "dspark",
