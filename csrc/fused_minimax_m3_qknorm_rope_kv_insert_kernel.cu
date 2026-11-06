@@ -212,10 +212,12 @@ __device__ __forceinline__ void storeElems(
 }
 
 // Main K/V cache store. kAuto = unquantized (cache_t == scalar_t); fp8 cache
-// dtypes use the scaled-convert path with identity scale.
+// dtypes use the scaled-convert path with the layer's dequantization scale,
+// as reshape_and_cache_flash does (1.0 when the caller passes none).
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __device__ __forceinline__ void storeCacheElems(
-    cache_t* __restrict__ dst, float const (&elems)[kElemsPerLane]) {
+    cache_t* __restrict__ dst, float const (&elems)[kElemsPerLane],
+    float const scale) {
   if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
     // kAuto means unquantized KV cache here: cache_t == scalar_t, so store the
     // model dtype directly. FP8 cache dtypes use the conversion path below.
@@ -232,12 +234,13 @@ __device__ __forceinline__ void storeCacheElems(
     }
   #pragma unroll
     for (int i = 0; i < kElemsPerLane; i++) {
-      dst[i] = fp8::scaled_convert<cache_t, rounded_t, kv_dt>(rounded[i], 1.0f);
+      dst[i] =
+          fp8::scaled_convert<cache_t, rounded_t, kv_dt>(rounded[i], scale);
     }
 #else
   #pragma unroll
     for (int i = 0; i < kElemsPerLane; i++) {
-      dst[i] = fp8::scaled_convert<cache_t, float, kv_dt>(elems[i], 1.0f);
+      dst[i] = fp8::scaled_convert<cache_t, float, kv_dt>(elems[i], scale);
     }
 #endif
   }
@@ -692,7 +695,8 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     int64_t const kv_s_dim,
     // NVFP4 index cache only: page stride in bytes.
     int64_t const idx_s_block,
-    // NVFP4 main cache only: per-layer K/V dequantization (global) scales.
+    // NVFP4 and FP8 main caches: per-layer K/V dequantization scales
+    // (nullptr for FP8 means 1.0).
     float const* __restrict__ kv_k_scale,
     float const* __restrict__ kv_v_scale) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
@@ -804,11 +808,16 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
       }
     }
 
-    // NVFP4: the per-layer global scale is not produced by the predecessor,
-    // so load it before the PDL wait.
+    // The per-layer K/V scale is not produced by the predecessor, so load it
+    // before the PDL wait. NVFP4 always has one; FP8 uses 1.0 without one.
     float nvfp4_scale = 0.0f;
+    float kv_scale = 1.0f;
     if constexpr (kNvfp4) {
       if (isK || isV) nvfp4_scale = isK ? *kv_k_scale : *kv_v_scale;
+    } else if constexpr (kv_dt != Fp8KVCacheDataType::kAuto) {
+      if ((isK || isV) && kv_k_scale != nullptr) {
+        kv_scale = isK ? *kv_k_scale : *kv_v_scale;
+      }
     }
 
     // PDL: wait for the predecessor kernel (the qkv-projection GEMM that
@@ -904,7 +913,8 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
               elems[i] = Converter::convert(Converter::convert(elems[i]));
             }
           }
-          storeCacheElems<scalar_t, cache_t, kv_dt>(kv_cache + off, elems);
+          storeCacheElems<scalar_t, cache_t, kv_dt>(kv_cache + off, elems,
+                                                    kv_scale);
         }
       }
     }
@@ -1432,7 +1442,7 @@ __device__ __forceinline__ void runWarp(
               }
             }
             storeCacheElems<scalar_t, cache_t, kv_dt>(dst + 32 * c * kv_s_dim,
-                                                      e[c]);
+                                                      e[c], kv_scale);
           }
         }
       }
@@ -1514,7 +1524,7 @@ __global__ void __launch_bounds__(kMaxWarps * 32) fusedMiniMaxM3RowGroupKernel(
     w -= roles.q_warps;
     if (w < roles.kv_warps) {
       int const h0 = roles.kv_one ? w : w * kRows;
-      float const scale = kNvfp4 ? *kv_k_scale : 1.0f;
+      float const scale = kv_k_scale != nullptr ? *kv_k_scale : 1.0f;
       int const rows = roles.kv_one ? 1 : min(kRows, nkv - h0);
       if (rows == 1) {
         if (write_qkv) {
@@ -1539,7 +1549,7 @@ __global__ void __launch_bounds__(kMaxWarps * 32) fusedMiniMaxM3RowGroupKernel(
       if constexpr (kInsertKV) {
         int const h0 = roles.kv_one ? w : w * kRows;
         int const rows = roles.kv_one ? 1 : min(kRows, nkv - h0);
-        float const scale = kNvfp4 ? *kv_v_scale : 1.0f;
+        float const scale = kv_v_scale != nullptr ? *kv_v_scale : 1.0f;
         if (rows == 1) {
           RG_RUN1(kV, kNone)
           (h0, 1, nq + nkv + h0, ring, kSideStage,
@@ -2218,7 +2228,7 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor>
         q_fp8_out,  // [N, nq*128] contiguous E4M3
     double q_fp8_scale,
-    std::optional<torch::stable::Tensor> kv_k_scale,  // [] f32, NVFP4 only
+    std::optional<torch::stable::Tensor> kv_k_scale,  // [] f32, NVFP4 or FP8
     std::optional<torch::stable::Tensor> kv_v_scale, bool write_qkv) {
   STD_TORCH_CHECK(qkv.is_cuda() && qkv.is_contiguous(),
                   "qkv must be contiguous CUDA");
@@ -2363,6 +2373,17 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
                 (*scale)->numel() >= 1,
             "nvfp4 kv_cache requires float32 CUDA kv_k_scale and kv_v_scale");
       }
+    } else if (kv_dt != vllm::Fp8KVCacheDataType::kAuto &&
+               (kv_k_scale.has_value() || kv_v_scale.has_value())) {
+      for (auto const* scale : {&kv_k_scale, &kv_v_scale}) {
+        STD_TORCH_CHECK(
+            scale->has_value() && (*scale)->is_cuda() &&
+                (*scale)->scalar_type() ==
+                    torch::headeronly::ScalarType::Float &&
+                (*scale)->numel() >= 1,
+            "fp8 kv_cache takes both kv_k_scale and kv_v_scale as float32 "
+            "CUDA tensors, or neither");
+      }
     }
     kv_s_block = kv_cache->stride(0);
     kv_s_head = kv_cache->stride(1);
@@ -2452,10 +2473,16 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
 
   STD_TORCH_CHECK(!nvfp4_kv || insert_kv,
                   "nvfp4 kv_cache_dtype requires kv_cache (insert mode)");
-  float const* kv_k_scale_ptr =
-      nvfp4_kv ? kv_k_scale->const_data_ptr<float>() : nullptr;
-  float const* kv_v_scale_ptr =
-      nvfp4_kv ? kv_v_scale->const_data_ptr<float>() : nullptr;
+  // FP8 caches use the scales when the caller passes them (both or neither).
+  bool const fp8_kv_scales = !nvfp4_kv &&
+                             kv_dt != vllm::Fp8KVCacheDataType::kAuto &&
+                             kv_k_scale.has_value();
+  float const* kv_k_scale_ptr = (nvfp4_kv || fp8_kv_scales)
+                                    ? kv_k_scale->const_data_ptr<float>()
+                                    : nullptr;
+  float const* kv_v_scale_ptr = (nvfp4_kv || fp8_kv_scales)
+                                    ? kv_v_scale->const_data_ptr<float>()
+                                    : nullptr;
 
   // The row-group kernel indexes cache slots in 32 bits.
   bool const slots_fit_int32 =
