@@ -309,10 +309,16 @@ def test_encoder_contract():
         "embed_multimodal",
         "_encoder_chunk",
     ]
+    # EmbeddingGemma2 borrows these without Gemma4's data-parallel dispatch.
+    gemma4_source = {
+        "_process_image_input": "_process_image_input_local",
+        "_process_video_input": "_process_video_input_local",
+    }
 
     for name in borrowed_methods:
         # Check method identity (L-F6 + T-F4)
-        assert getattr(EmbeddingGemma2Model, name) is getattr(G, name)
+        source = gemma4_source.get(name, name)
+        assert getattr(EmbeddingGemma2Model, name) is getattr(G, source)
 
         # AST checks: verify no zero-arg super() calls in borrowed methods
         func = getattr(EmbeddingGemma2Model, name)
