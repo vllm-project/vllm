@@ -190,6 +190,7 @@ class TestPackedBroadcastRoundtrip:
             src=0,
             post_unpack_func=post_unpack_func,
             buffer_size_bytes=buffer_size,
+            num_buffers=2,
         )
 
         # Verify all params roundtrip correctly with correct dtypes
