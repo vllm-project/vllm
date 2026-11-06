@@ -761,12 +761,7 @@ class FusedMoEQuantConfig:
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
-        schema_dtype = self.quant_schema.quant_dtype
-        if self._a1.dtype is None and schema_dtype is not None:
-            return None
-        if self._a1.dtype is not None and schema_dtype is None:
-            return self._a1.dtype
-        return schema_dtype
+        return self._a1.dtype
 
     @property
     def weight_quant_dtype(self) -> torch.dtype | str | None:

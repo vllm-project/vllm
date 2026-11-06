@@ -264,6 +264,20 @@ def test_schema_preserves_legacy_shape_absence() -> None:
     assert config.quant_schema.w1.legacy_group_shape is None
 
 
+def test_runtime_quant_dtype_preserves_fp8_activation_dtype() -> None:
+    fp8_dtype = current_platform.fp8_dtype()
+    config = FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(fp8_dtype, GroupShape(128, 128)),
+        _a2=FusedMoEQuantDesc(fp8_dtype, GroupShape(128, 128)),
+        _w1=FusedMoEQuantDesc("mxfp4", None, _scale()),
+        _w2=FusedMoEQuantDesc("mxfp4", None, _scale()),
+    )
+
+    assert config.quant_dtype == fp8_dtype
+    assert config.quant_schema.quant_dtype == "fp8"
+    assert config.use_mxfp4_w4a8 is True
+
+
 def test_schema_keeps_unquantized_alignment_for_gptq() -> None:
     config = gptq_marlin_moe_quant_config(
         _scale(), _scale(), weight_bits=4, group_size=128
