@@ -36,7 +36,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.ubatching import (
     dbo_comm_stream_priority,
-    init_dbo_tp_comms,
+    enable_dbo_tp_overlap,
     make_ubatch_contexts,
 )
 from vllm.v1.worker.utils import AttentionGroup
@@ -358,7 +358,7 @@ class UBatchRunner:
         self.capture_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
-        init_dbo_tp_comms(self.parallel_config)
+        enable_dbo_tp_overlap(self.parallel_config, self.comm_stream)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
         current_platform.prepare_ubatch_streams(
