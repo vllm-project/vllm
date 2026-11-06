@@ -7156,9 +7156,10 @@ def test_update_state_after_alloc_loads_confirmed_multi_block_tail():
     [job_id] = scheduler._current_batch_load_jobs
     load_job = scheduler._current_batch_load_jobs[job_id]
     keys = scheduler._jobs[job_id].keys
-    assert [
-        req_status.req_context.get_offload_key_position(key) for key in keys
-    ] == [48, 48]
+    assert [req_status.req_context.get_offload_key_position(key) for key in keys] == [
+        48,
+        48,
+    ]
     dst = load_job.dst_spec
     assert dst.block_ids.tolist() == [31, 32, 33, 43]
     assert dst.group_sizes == [3, 1]
