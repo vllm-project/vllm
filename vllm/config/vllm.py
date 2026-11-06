@@ -3907,6 +3907,18 @@ class VllmConfig:
                     "Quantized ReplaySSM requires Mamba2 head dimension 64 "
                     "and state size 128"
                 )
+        if self.cache_config.replayssm_state_dtype == "fp8":
+            from vllm.utils.flashinfer import (
+                _REPLAYSSM_FP8_MIN_FLASHINFER,
+                has_flashinfer_replayssm_fp8_checkpoints,
+            )
+
+            if not has_flashinfer_replayssm_fp8_checkpoints():
+                raise ValueError(
+                    "FP8 ReplaySSM checkpoints require FlashInfer "
+                    f">= {_REPLAYSSM_FP8_MIN_FLASHINFER}, which bounds FP8 "
+                    "checkpoint scales; use --replayssm-state-dtype int8"
+                )
         return self
 
     @model_validator(mode="after")

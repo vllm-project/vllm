@@ -4858,6 +4858,20 @@ def test_quantized_replayssm_rejects_conflicting_checkpoint_dtype(state_dtype):
         )
 
 
+def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales():
+    from vllm.config.mamba import MambaConfig
+    from vllm.utils.flashinfer import has_flashinfer_replayssm_fp8_checkpoints
+
+    if has_flashinfer_replayssm_fp8_checkpoints():
+        pytest.skip("Installed FlashInfer bounds FP8 checkpoint scales")
+    with pytest.raises(ValueError, match="bounds FP8 checkpoint scales"):
+        VllmConfig(
+            cache_config=CacheConfig(use_replayssm=True, replayssm_state_dtype="fp8"),
+            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+
 @pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
 def test_quantized_replayssm_preserves_explicit_checkpoint_selection(state_dtype):
     from transformers import PreTrainedConfig

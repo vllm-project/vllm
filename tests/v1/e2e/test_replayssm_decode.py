@@ -10,6 +10,7 @@ import pytest
 import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_replayssm_fp8_checkpoints
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -81,6 +82,10 @@ FLASHINFER_PROMPTS = [
 requires_flashinfer_replayssm_materialization = pytest.mark.skipif(
     not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
     reason="FlashInfer ReplaySSM materialization APIs not available",
+)
+requires_flashinfer_replayssm_fp8_checkpoints = pytest.mark.skipif(
+    not has_flashinfer_replayssm_fp8_checkpoints(),
+    reason="Installed FlashInfer does not bound FP8 checkpoint scales",
 )
 
 
@@ -410,7 +415,13 @@ def _check_replayssm_prefix_caching(
     [
         pytest.param(False, True, "auto", id="align-v1-ngram-t4"),
         pytest.param(True, False, "auto", id="align-v2-stp"),
-        pytest.param(True, False, "fp8", id="align-v2-fp8"),
+        pytest.param(
+            True,
+            False,
+            "fp8",
+            id="align-v2-fp8",
+            marks=requires_flashinfer_replayssm_fp8_checkpoints,
+        ),
         pytest.param(True, False, "int8", id="align-v2-int8"),
     ],
 )

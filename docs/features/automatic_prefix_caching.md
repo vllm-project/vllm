@@ -79,17 +79,18 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A
     --mamba-ssm-cache-dtype auto \
     --mamba-backend flashinfer \
     --use-replayssm \
-    --replayssm-state-dtype fp8 \
+    --replayssm-state-dtype int8 \
     --enable-mamba-cache-stochastic-rounding \
     --mamba-cache-philox-rounds 5 \
     --enable-prefix-caching
 ```
 
-Replace `fp8` with `int8` for INT8 checkpoints.
+Replace `int8` with `fp8` for FP8 checkpoints.
 The existing stochastic-rounding options control decode checkpoint writes.
 Prefill conversion uses nearest rounding. Quantization can change model output.
 Both Model Runners support shared quantized checkpoints and aligned prefix caching.
 The path requires Mamba2 head dimension 64, state size 128, BF16 activations, and FlashInfer 0.7.2 or newer.
+FP8 requires FlashInfer 0.7.5 or newer, which bounds FP8 checkpoint scales for tiny state rows.
 Explicit SSU algorithm selection is unsupported for quantized checkpoints.
 
 ## Example workloads
