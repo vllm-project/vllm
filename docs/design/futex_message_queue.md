@@ -101,6 +101,11 @@ Readers can drain committed messages after the writer closes; cancellation and
 peer closure wake blocked participants. Waiter registration and a final predicate
 check precede futex parking so publication and cancellation cannot miss a waiter.
 Deadlines are monotonic, and the existing timeout/warning callbacks remain in use.
+Non-blocking `readable()` checks use the same native readiness predicate without
+reserving or consuming a slot. The executor's separate active-output
+`spin_until_readable()` API still yields while checking both queue readiness and
+caller-owned pending work; this change does not eliminate that explicit polling
+path. Ordinary idle dequeues use futex parking, not that active-output loop.
 As with the existing queue lifecycle, executors must call `shutdown` when a
 participant exits. Abrupt peer death without that lifecycle notification is not
 detected by a futex alone; an unbounded acquire is not a process-liveness check.
