@@ -1413,9 +1413,6 @@ class Glm5NextForConditionalGeneration(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
 
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()
-
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
             layer.mlp
