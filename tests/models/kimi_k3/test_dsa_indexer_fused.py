@@ -682,7 +682,6 @@ def test_indexer_score_reads_its_cache_format(
         dcp_world_size=1,
         cp_kv_cache_interleave_size=1,
         topk_backend="auto",
-        dcp_local_topk=0,
     )
     context_lens = seq_lens.view(-1, 1).contiguous()
     # Varlen decode, as the metadata builder sets it up: request index per row.
