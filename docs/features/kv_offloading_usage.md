@@ -496,6 +496,29 @@ end at an attention-chunk boundary for every chunked-local cache group. Otherwis
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
 
+## Large private SimpleCPU buffers
+
+`SimpleCPUOffloadConnector` can use one mmap-backed CPU buffer per rank. Enable
+transparent hugepage advice with `THP_MEM_ALLOC_ENABLE=1`, or request reserved
+HugeTLB pages with `"cpu_hugepage_block_size": "2MB"` (or `"1GB"`) in
+`kv_connector_extra_config`. Without either option, allocation is unchanged.
+These options do not change the resolved KV capacity or the GPU KV budget.
+
+THP needs no pre-reserved pool. The buffer is populated before CUDA/HIP
+registration and inherits the worker's NUMA policy. THP remains best effort;
+check actual `AnonHugePages` coverage and physical VRAM. Allocation can take
+longer due to compaction. Explicit HugeTLB requires a provisioned pool and fails
+at startup when the pool or container limit is insufficient. Both modes exclude
+the mapping from forked children and register bounded ranges that do not split
+KV blocks. THP buffers and registration ranges are aligned to 2 MiB; HugeTLB
+registration respects its requested backing-page size. THP registrations use
+a 511 GiB cap to accommodate joint KV-block and page boundaries. Startup fails
+if no joint boundary fits that cap. Other allocation modes retain the 256 GiB
+registration cap.
+
+Neither mode is selected automatically by GPU vendor or driver version. They
+apply to the CPU backend; `cpu_hugepage_block_size` is rejected for disk offload.
+
 ## Further Reading
 
 - [vLLM blog: KV Offloading Connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) — motivation, architecture (DMA-based async transfer), and benchmarks (TTFT and throughput).

@@ -11,6 +11,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import pin_tensor as pin_tensor
 
 logger = init_logger(__name__)
 
@@ -19,18 +20,6 @@ logger = init_logger(__name__)
 # be read early, only safe for a stable source (e.g. pinned host memory).
 CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
-
-
-def pin_tensor(tensor: torch.Tensor) -> None:
-    """Pin a CPU tensor via cudaHostRegister.
-
-    This bypasses PyTorch's CUDACachingHostAllocator which rounds
-    every ``pin_memory=True`` allocation up to the next power of 2
-    (e.g. 100 GB becomes 128 GB).
-    """
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
 
 
 class _CUmemLocation(ctypes.Structure):
