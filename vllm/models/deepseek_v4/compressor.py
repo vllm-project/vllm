@@ -61,6 +61,10 @@ class CompressorBackend(AttentionBackend):
     def __init__(self):
         super().__init__()
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_cuda()
+
     @staticmethod
     def get_name() -> str:
         return "CompressorBackend"
@@ -134,6 +138,14 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
                 else None
             ),
         )
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> CompressorMetadata:
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        if self.block_size == 8:
+            metadata.c128_boundary = None
+        return metadata
 
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
