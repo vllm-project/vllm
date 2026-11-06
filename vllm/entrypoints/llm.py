@@ -866,12 +866,9 @@ class LLM(
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
-            reset_connector: Whether discarding the KV cache also resets the
-                KV connector's cache, such as blocks offloaded to CPU. Ignored
-                at level 0. Keep it ``True`` if the weights may change before
-                ``wake_up``: block hashes do not cover them. An in-process
-                engine refuses ``False`` while its scheduler has work left,
-                as connector transfers may still read the KV cache.
+            reset_connector: Also reset the KV connector's cache, such as
+                blocks offloaded to CPU. Set ``False`` only if the weights do
+                not change before ``wake_up``. Ignored at level 0.
 
         """
         self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
@@ -883,8 +880,8 @@ class LLM(
         Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
 
         Args:
-            reset_connector: Whether to also reset the KV connector's cache;
-                see [sleep][vllm.LLM.sleep].
+            reset_connector: Also reset the KV connector's cache; see
+                [sleep][vllm.LLM.sleep].
 
         """
         self.llm_engine.release_kv_cache_memory(reset_connector)

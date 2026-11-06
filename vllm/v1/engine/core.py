@@ -1037,26 +1037,21 @@ class EngineCore:
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
-        # Unlike EngineCoreProc, this engine does not step until connector
-        # transfers drain, so stores may still read the KV cache that a sleep
-        # discards. A connector reset discards them; keeping the cache cannot.
-        if (
-            clear_cache
-            and not reset_connector
-            and self.scheduler.get_kv_connector() is not None
-            and self.scheduler.has_requests()
-        ):
-            raise RuntimeError(
-                "reset_connector=False requires a drained engine, which the "
-                "in-process engine cannot wait for. Enable multiprocessing or "
-                "keep reset_connector=True."
-            )
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        if clear_cache and not reset_connector:
+            # Pending connector stores still read the KV cache that a sleep
+            # discards. Step until they finish, as EngineCoreProc does before
+            # it completes a pause.
+            while self.scheduler.has_requests() or self.batch_queue:
+                _, model_executed = self.step_fn()
+                self.post_step(model_executed)
+                if not model_executed:
+                    time.sleep(0.001)
         self._finish_pause(clear_cache, reset_connector)
 
         return None
@@ -1104,10 +1099,8 @@ class EngineCore:
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
-            reset_connector: Whether discarding the KV cache also resets the
-                KV connector's cache. Ignored at level 0. Keep it ``True`` if
-                the weights may change before the wake-up: block hashes do
-                not cover them.
+            reset_connector: Also reset the KV connector's cache; see
+                ``LLM.sleep``.
 
         """
         if self._checkpoint_state != CheckpointState.RUNNING:
@@ -1177,12 +1170,7 @@ class EngineCore:
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical memory. Requires a completed pause
         and all executor memory to be resident. Kept requests are recomputed
-        after wake-up.
-
-        Args:
-            reset_connector: Whether to also reset the KV connector's cache,
-                as for ``sleep``.
-
+        after wake-up. ``reset_connector`` is as for ``sleep``.
         """
         if not (
             self.is_scheduler_paused()
@@ -2432,9 +2420,6 @@ class EngineCoreProc(EngineCore):
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
-
-        ``reset_connector`` decides whether clearing caches also resets the
-        KV connector's cache.
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")

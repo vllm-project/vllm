@@ -145,8 +145,6 @@ llm.wake_up()
 
 Block hashes do not cover the weights. If the weights may change before the wake-up, keep the default, or give requests a `cache_salt` per weight version so that blocks computed with older weights are never matched.
 
-Keeping the cache needs the engine to finish the connector's transfers before the KV cache is discarded. An in-process engine (`VLLM_ENABLE_V1_MULTIPROCESSING=0`, or the `external_launcher` backend) cannot wait for them, so it refuses `reset_connector=False` while its scheduler still has requests to process or clean up, for example right after `generate()`. Use the default multiprocess engine to keep the cache.
-
 #### Offloading CUDA graph memory
 
 By default, CUDA graph memory stays on the GPU while asleep. With

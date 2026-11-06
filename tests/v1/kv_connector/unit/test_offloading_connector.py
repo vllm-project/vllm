@@ -546,9 +546,13 @@ def test_cpu_offloading_metrics() -> None:
         del llm
 
 
-@pytest.mark.parametrize("reset_connector", [True, False])
-def test_sleep_keeps_offloaded_blocks_unless_reset(reset_connector: bool) -> None:
-    """After a sleep that keeps the connector, the prompt loads from CPU."""
+@pytest.mark.parametrize("multiprocessing", [True, False])
+def test_sleep_keeps_offloaded_blocks_unless_reset(
+    monkeypatch: pytest.MonkeyPatch, multiprocessing: bool
+) -> None:
+    """A sleep that keeps the connector's cache serves the prompt from CPU
+    after the wake-up; a sleep that resets it does not."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", str(int(multiprocessing)))
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -560,24 +564,26 @@ def test_sleep_keeps_offloaded_blocks_unless_reset(reset_connector: bool) -> Non
     # A prefix of whole offloaded blocks, plus the token to recompute.
     prefix = [100 + i for i in range(4 * CPU_BLOCK_SIZES)]
     prompt = TokensPrompt(prompt_token_ids=prefix + [7])
-    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params = SamplingParams(temperature=0, max_tokens=1)
 
+    # Synchronous scheduling leaves the last step's stores unsubmitted when
+    # generate() returns, so the sleep must finish them itself.
     llm = LLM(
         model="facebook/opt-125m",
         max_model_len=2048,
         gpu_memory_utilization=0.2,
         enable_sleep_mode=True,
+        async_scheduling=False,
         kv_transfer_config=kv_transfer_config,
     )
     try:
-        llm.generate(prompt, sampling_params, use_tqdm=False)
-        # No wait for the stores: the sleep must drain them before it
-        # discards the GPU blocks they read.
-        llm.sleep(level=1, reset_connector=reset_connector)
-        llm.wake_up()
-
-        output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
-        assert output.num_cached_tokens == (0 if reset_connector else len(prefix))
+        expected = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        for reset_connector, num_cached in ((False, len(prefix)), (True, 0)):
+            llm.sleep(level=1, reset_connector=reset_connector)
+            llm.wake_up()
+            output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+            assert output.num_cached_tokens == num_cached
+            assert output.outputs[0].token_ids == expected.outputs[0].token_ids
     finally:
         del llm
 
