@@ -34,8 +34,9 @@ SKIP_LOAD_TENSORS: set[str] = {
 }
 
 # Tensors which are never moved to, or materialized from, the meta device.
-# `bias` is built after create_weights(), so it is never on meta to begin with.
-SKIP_TENSORS: set[str] = SKIP_LOAD_TENSORS | {"bias"}
+# A `bias` is staged like the weight: post-load processing may re-lay it out
+# (Marlin pads and permutes it), so it must be reloaded in checkpoint layout.
+SKIP_TENSORS: set[str] = SKIP_LOAD_TENSORS
 
 
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:

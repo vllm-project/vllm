@@ -20,16 +20,21 @@ Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import store_params_in_triton
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
+)
+from vllm.model_executor.layers.quantization.online.moe_base import (
+    OnlineMoEMethodBase,
 )
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_processing,
@@ -42,6 +47,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     finish_direct_reload,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
+    get_layerwise_info,
     initialize_online_processing,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -373,6 +379,93 @@ class TestUnsent:
         assert model.deq.online.quant_method.runs == 1
 
 
+class TestOnlineStaging:
+    """Staged quantization runs post-load processing on temporaries."""
+
+    def test_processing_objects_read_the_kernel_tensors(self, monkeypatch):
+        # what post-load processing builds around its tensors (a quant
+        # config's scale, a triton_kernels tensor on the weight's storage)
+        # must read the kernel tensors, as captured CUDA graphs and later
+        # kernel-format updates do, not keep the temporaries alive
+        def quantize(layer):
+            _quantize_int8(layer)
+            layer.quant_method.config_scale = layer.weight_scale
+            storage = SimpleNamespace(data=layer.weight.data.clone())
+            store_params_in_triton(layer, weight=SimpleNamespace(storage=storage))
+            layer.weight_triton = storage
+
+        monkeypatch.setitem(_PWAL, "deq.online", quantize)
+        model = _cold_start(_checkpoint())
+        _reload(model, _checkpoint(1.01))
+        layer = model.deq.online
+        scale = layer.quant_method.config_scale
+        assert scale.data_ptr() == layer.weight_scale.data_ptr()
+        assert layer.weight_triton.data.data_ptr() == layer.weight.data_ptr()
+
+    def test_relaid_out_bias_reloads_from_checkpoint_bytes(self, monkeypatch):
+        # Marlin pads and permutes an online Linear's bias: it is staged with
+        # the weight, so the loader writes the checkpoint layout, not the
+        # kernel's, and post-load processing re-lays it out
+        def quantize(layer):
+            _quantize_int8(layer)
+            bias = torch.nn.functional.pad(layer.bias, (0, 4)).flip(0)
+            replace_parameter(layer, "bias", bias)
+
+        monkeypatch.setitem(_PWAL, "deq.online", quantize)
+        model = _cold_start(_checkpoint())
+        ptrs = _ptrs(_state(model))
+        _reload(model, _checkpoint(1.01))
+        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+        assert _ptrs(_state(model)) == ptrs
+
+    def test_padded_moe_is_processed_as_its_experts_arrive(self):
+        # round-up padding is never loaded, and another rank's experts load
+        # nothing: the layer completes without them instead of buffering
+        # every expert until finish
+        class _MoE(OnlineMoEMethodBase):
+            def get_fused_moe_quant_config(self, layer):
+                return None
+
+            def process_weights_after_loading(self, layer):
+                self.processed = True
+
+        method = object.__new__(_MoE)
+        method.requantization_source = None
+        method.processed = False
+        method.moe = SimpleNamespace(
+            w13_num_shards=2,
+            hidden_dim_unpadded=4,
+            intermediate_size_per_partition_unpadded=2,
+            has_bias=False,
+        )
+
+        def load_expert(param, loaded_weight, expert_id):
+            if expert_id < 2:  # local experts 0 and 1
+                rows, cols = loaded_weight.shape
+                param.data[expert_id, :rows, :cols].copy_(loaded_weight)
+
+        layer = torch.nn.Module()
+        layer.quant_method = method
+        layer.quant_config = SimpleNamespace(online_quantization_config=None)
+        with _DEVICE:
+            method.create_weights(
+                layer,
+                num_experts=2,
+                hidden_size=8,
+                intermediate_size_per_partition=4,
+                params_dtype=torch.bfloat16,
+                weight_loader=load_expert,
+            )
+        info = get_layerwise_info(layer)
+        for expert_id in (2, 0, 3, 1):
+            for name, shape in (("w13_weight", (4, 4)), ("w2_weight", (4, 2))):
+                param = getattr(layer, name)
+                param.weight_loader(param, torch.ones(shape), expert_id=expert_id)
+            if expert_id == 2:
+                assert info.loaded_weights == []
+        assert method.processed
+
+
 class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
@@ -474,6 +567,32 @@ def test_retry_after_aborted_update_matches_cold_start():
     assert "_direct_reload_begun" not in model.__dict__
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
     assert _ptrs(_state(model)) == ptrs
+
+
+def test_aborted_update_unstages_online_modules():
+    # the worker recommits the lent KV cache: the staged checkpoint tensors
+    # must not outlive the update
+    from vllm.v1.worker.gpu_worker import Worker
+
+    model = _cold_start(_checkpoint())
+    layer = model.deq.online
+    before = _state(model)
+    begin_direct_reload(model)
+    model.load_weights([("deq.online.weight", _checkpoint(1.01)["deq.online.weight"])])
+    assert get_layerwise_info(layer).loaded_weights
+    worker = SimpleNamespace(
+        weight_transfer_engine=SimpleNamespace(
+            model=model, reset_weight_update_target=lambda: None
+        ),
+        _weight_update_kv_cache_loan=contextlib.ExitStack(),
+        _weight_update_is_draft=False,
+    )
+    Worker._end_weight_update(worker, refresh=False)
+    assert get_layerwise_info(layer).loaded_weights == []
+    names = ["deq.online.weight", "deq.online.weight_scale", "deq.online.bias"]
+    _assert_same(_state(model), before, names=names, addresses=True)
+    _reload(model, _checkpoint(1.01))  # the next full update repairs the model
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
 
 
 def test_start_and_finish_reload_run_direct_reload():

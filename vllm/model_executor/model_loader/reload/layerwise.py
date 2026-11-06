@@ -30,6 +30,7 @@ from .utils import (
     get_layer_params_buffers,
     get_layer_size,
     get_layer_tensors,
+    get_tensor_load_numel,
     has_device_tensors,
 )
 
@@ -222,9 +223,11 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
-        # Buffer loaded weights, track loading progress
-        info.loaded_weights.append((param_name, bound_args))
+        # Buffer loaded weights, track loading progress. A load that writes
+        # nothing (another rank's expert) is not replayed, so not buffered.
         num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        if num_loaded or not get_tensor_load_numel(bound_args.arguments["param"]):
+            info.loaded_weights.append((param_name, bound_args))
         info.load_numel += num_loaded
 
         logger.debug(
@@ -466,15 +469,28 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     non_persistent = info.kernel_non_persistent_buffers
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
+        _copy_into_kernel_tensor(getattr(layer, name), param)
     for name, buffer in buffers.items():
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
             continue
-        buffer.data.copy_(getattr(layer, name))
+        _copy_into_kernel_tensor(getattr(layer, name), buffer)
 
     _place_kernel_tensors(layer, info)
+
+
+def _copy_into_kernel_tensor(processed: torch.Tensor, kernel: torch.Tensor) -> None:
+    """Copy a processed tensor into its kernel tensor, then point it at the
+    kernel tensor: what post-load processing built around it (a quant config's
+    scales, a triton_kernels tensor) then reads the tensor that captured CUDA
+    graphs and later kernel-format updates use, and its storage is freed."""
+    kernel.data.copy_(processed)
+    if processed is not kernel and (processed.shape, processed.dtype) == (
+        kernel.shape,
+        kernel.dtype,
+    ):
+        processed.data = kernel.data
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -485,7 +501,8 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     parameters, buffers = info.kernel_tensors
     non_persistent = info.kernel_non_persistent_buffers
     for name, param in parameters.items():
-        # tensors kept live while staged (bias) had their loaders wrapped
+        # tensors kept live while staged (registered after the metadata was
+        # recorded) had their loaders wrapped
         if _get_weight_loader(param).__name__ == "online_process_loader":
             param.weight_loader = _get_original_loader(param)
         layer.register_parameter(name, param)

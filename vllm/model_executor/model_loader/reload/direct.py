@@ -39,6 +39,7 @@ from .layerwise import (
 logger = init_logger(__name__)
 
 __all__ = [
+    "abort_direct_reload",
     "begin_direct_reload",
     "direct_reload_active",
     "direct_reload_enabled",
@@ -234,18 +235,9 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     the model holds checkpoint-layout bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    online = [
-        m
-        for m in model.modules()
-        if getattr(getattr(m, "quant_method", None), "uses_meta_device", False)
-    ]
     # Unstage what an aborted update left staged: this only restores the
     # cold-start state, so the checks below still see the committed model.
-    # Its kernel tensors are processed: restore the guard the abort may have
-    # cleared, or finish would quantize them again if the module is unsent.
-    for module in online:
-        unstage_layer(module)
-        module._already_called_process_weights_after_loading = True
+    online = abort_direct_reload(model)
     _check_params_kept(model)
     views = _checkpoint_views(model)
 
@@ -269,6 +261,24 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
+
+
+def abort_direct_reload(model: torch.nn.Module) -> list[torch.nn.Module]:
+    """Unstage the online-quantized modules of an aborted update: they get
+    their kernel tensors back and drop the checkpoint tensors they buffered.
+    The model stays pending; only a new full update repairs it. Returns the
+    online-quantized modules."""
+    online = [
+        m
+        for m in model.modules()
+        if getattr(getattr(m, "quant_method", None), "uses_meta_device", False)
+    ]
+    for module in online:
+        unstage_layer(module)
+        # its kernel tensors are processed: restore the guard the abort may
+        # have cleared, or finish would quantize them again if it is unsent
+        module._already_called_process_weights_after_loading = True
+    return online
 
 
 @torch.no_grad()

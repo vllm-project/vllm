@@ -71,7 +71,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+from vllm.model_executor.model_loader.reload.direct import (
+    abort_direct_reload,
+    direct_reload_enabled,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -1851,6 +1854,9 @@ class Worker(WorkerBase):
     def _end_weight_update(self, refresh: bool) -> None:
         assert self.weight_transfer_engine is not None
         self._weight_update_active = False
+        if not refresh and direct_reload_enabled():
+            # free the staged checkpoint tensors before the KV cache is back
+            abort_direct_reload(self.weight_transfer_engine.model)
         self._weight_update_kv_cache_loan.close()
         self.weight_transfer_engine.reset_weight_update_target()
         if self._weight_update_is_draft and (
