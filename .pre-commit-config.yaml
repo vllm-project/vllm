@@ -54,7 +54,26 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
+      files: ^(requirements/(common|cuda|test/cuda)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
+    - id: pip-compile
+      alias: pip-compile-kv-connectors
+      name: pip-compile-kv-connectors
+      args: [
+        requirements/test/kv_connectors_cuda.in,
+        -c, requirements/cuda.txt,
+        -c, requirements/test/cuda.txt,
+        -o, requirements/test/kv_connectors_cuda.txt,
+        --generate-hashes,
+        # nixl pulls both CUDA variants; the CUDA 13 image keeps only nixl-cu13.
+        --no-emit-package, nixl-cu12,
+        # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
+        --no-emit-package, nvidia-nccl-cu13,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cu130,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
@@ -125,7 +144,7 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
+      files: ^(requirements/(common|rocm|test/rocm)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
@@ -138,7 +157,7 @@ repos:
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+      files: ^(requirements/(common|xpu|test/xpu)\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
     - id: pip-compile
       alias: pip-compile-cpu
       name: pip-compile-cpu
@@ -151,7 +170,7 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      files: ^(requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
       exclude: ^requirements/test/cuda\.txt$
     - id: pip-compile
       alias: pip-compile-docs
@@ -163,7 +182,7 @@ repos:
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/docs\.(in|txt)$
+      files: ^(requirements/docs\.(in|txt)|pyproject\.toml|\.pre-commit-config\.yaml)$
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
   hooks:
@@ -290,6 +309,13 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-kv-connector-lock
+    name: Check the CI KV connector lock matches requirements/kv_connectors.txt
+    entry: python tools/kv_connector_lock.py align
+    language: python
+    files: ^(requirements/(kv_connectors\.txt|test/kv_connectors_cuda\.(in|txt))|tools/kv_connector_lock\.py)$
+    pass_filenames: false
+    additional_dependencies: [packaging]
   - id: check-dockerignore-tracked
     name: Check .dockerignore does not exclude tracked files
     entry: python tools/pre_commit/check_dockerignore_tracked.py

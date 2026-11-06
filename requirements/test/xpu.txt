@@ -1232,9 +1232,9 @@ docstring-parser==0.18.0 \
     --hash=sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015 \
     --hash=sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b
     # via anthropic
-dpcpp-cpp-rt==2026.1.0 \
-    --hash=sha256:77f8b791cb400f0da6d59cd1e56b25b12ea643edf059d5d1f0cb25bc39489b16 \
-    --hash=sha256:9e7058dedf18c9cc8e5baff596dc6cf0c532807f3a5934b60e95be2f69ee4014
+dpcpp-cpp-rt==2026.1.2 \
+    --hash=sha256:1eeaceda2d11010a69bd891f12be08bdb4628f6ed3de9b2e53655bf6c19638d1 \
+    --hash=sha256:77396a9e5e388bc9f778ec4c1131181966ea5e31fd68ed49b2613844e869dc1c
     # via
     #   onemkl-sycl-blas
     #   onemkl-sycl-dft
@@ -1468,9 +1468,9 @@ fastavro==1.12.2 \
     --hash=sha256:f089f24225a28ddafa5cfad7c41cfa84db1a55f2d473370769a95c0e3bac60c9 \
     --hash=sha256:f604ba83498e209fff4c7ecc5063a39421dc538dace694bc592f9f338254f3dc
     # via cohere
-filelock==3.32.3 \
-    --hash=sha256:0ffa185a3540854c95caa7fa76b76cb219d907415e2c5dc9af25fd970563487f \
-    --hash=sha256:7f0ca4bcc0e181c60dbbd8aa9ab5b120ebb99e4e064e83636340056f833a1f09
+filelock==4.2.6 \
+    --hash=sha256:ee7af8ede36dcaf12e1016d9f7c3a63ecd5497d46f85dab21b8c779b8f944e97 \
+    --hash=sha256:fd7d4fca497bf3e3d0945a13261f8e684f2aef12ce7cf76aef26e13bf7388b88
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1771,10 +1771,12 @@ gpt-oss==0.0.9 \
     --hash=sha256:4bbd174a6af2060179ab292505ec8e0f2505188628a6d102bd72690d06387f9c \
     --hash=sha256:f8cce0186e31752fb94ccbd61dcca5fd39603b6d22b9779656a7b20749a6330c
     # via -r requirements/test/xpu.in
-graphql-core==3.2.11 \
-    --hash=sha256:0b3e35ff41e9adba53021ab0cef475eb18f57c7f53f0f2ca55567fbf3c537ea0 \
-    --hash=sha256:e7e156d10beb127cab5c89ff0da71416fc73d27c484a4757d3b2d35633774802
-    # via hypothesis-graphql
+graphql-core==3.2.13 \
+    --hash=sha256:b0eb04f2c31556b2310a77c8fb53c74e8b56570f8fea594d89c6ef7827dbb497 \
+    --hash=sha256:bb81dd266d4ab7b591bd976f1b23639d97776cb9ac1a896b4a93c271e11ed618
+    # via
+    #   -r requirements/test/xpu.in
+    #   hypothesis-graphql
 grpcio==1.83.0 \
     --hash=sha256:009667eaf3dcd5224c713589cdc98e7ca4ed0ff0b61132c6b276e930eb83a2df \
     --hash=sha256:10b3fa0475eb572c9a81a6fe37fa16a9c500c0c91cfc148cac15692b7e3c2867 \
@@ -2293,29 +2295,29 @@ iniconfig==2.3.0 \
     --hash=sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730 \
     --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
     # via pytest
-intel-cmplr-lib-rt==2026.1.0 \
-    --hash=sha256:04c05fc09a32b11e15f1ca6ee0910ac9811e221de33170feb58d45542a8da533 \
-    --hash=sha256:8e002aaf89741de3b424bdad51ce60ead21cc8f4dee970fccba88ee3c845692d
+intel-cmplr-lib-rt==2026.1.2 \
+    --hash=sha256:7b15df26eb09cf7b99395a14fa3158fc62f274085eaa20f4ec4f667c379b4e30 \
+    --hash=sha256:b4a975deeb97eee26c15e7038f63635c4dacc33151506f2e5c56cc5758cbe462
     # via
     #   intel-sycl-rt
     #   torch
-intel-cmplr-lib-ur==2026.1.0 \
-    --hash=sha256:538e1135ee1801fb19fa1a580838a1f666f05534d35350d82736d959373d3b15 \
-    --hash=sha256:74b64ace8277b031aa36328dc8f87f7f959a6ca4da5b68c69923d37283e01664
+intel-cmplr-lib-ur==2026.1.2 \
+    --hash=sha256:b27207f3b42d12ce88cd53ca8b3b7a7e79755aa07a84eccf1c209fcbefe468bf \
+    --hash=sha256:e2ef94d758948a5c52090f723bc113b8614a8a4187f017668d0375b72a8be653
     # via
     #   intel-openmp
     #   intel-sycl-rt
     #   torch
-intel-cmplr-lic-rt==2026.1.0 \
-    --hash=sha256:19e568a1b37e5080140c2694f990505948b7c0cf08d4090beab70702b76c6a50 \
-    --hash=sha256:ec9f7c495bda8f5d260442056808ee75cf4c1a145910ce999e0e8964d78ce1ba
+intel-cmplr-lic-rt==2026.1.2 \
+    --hash=sha256:f4d8ec7bada4e21f1c16555b6a2be7ba1d28a11463dd7bbb57055e0c41c4a2fb \
+    --hash=sha256:fb8076864a666a8e646cdeb25e724ab82a6aa928abbcf8c1096cc1bba49867ec
     # via
     #   intel-opencl-rt
     #   intel-sycl-rt
     #   torch
-intel-opencl-rt==2026.1.0 \
-    --hash=sha256:0967dc144f9cdf3aaa0fc722b92a54119cff9867f0b07e8dee8b8c0a88f05e44 \
-    --hash=sha256:b2891b6a6f347f21d2a9f0e872fb97e1aef407b4c34714516994dd884ea5e19e
+intel-opencl-rt==2026.1.2 \
+    --hash=sha256:9b4da9a4e12e56c5eda5c93c22a8eb0579f5811d27a5d8cc1171303208308320 \
+    --hash=sha256:b543a09209fc157a70eb40f72338862a35cf86ad1ef4808d4e89cf0078bf8947
     # via
     #   dpcpp-cpp-rt
     #   onemkl-sycl-blas
@@ -2324,20 +2326,20 @@ intel-opencl-rt==2026.1.0 \
     #   onemkl-sycl-rng
     #   onemkl-sycl-sparse
     #   torch
-intel-openmp==2026.1.0 \
-    --hash=sha256:8f9f86d93da9d549eec7bae26d65d6188ed748792ce655b5cdbc2e1a15cb7206 \
-    --hash=sha256:e6887f701b7d2323ed147008893b9af22e511aaa97e0fc9c37eb8be24a5366b0
+intel-openmp==2026.1.2 \
+    --hash=sha256:4612231a3605db891265c1d8cc4af49ee66009dc55f24012770a9faf3d8ac35e \
+    --hash=sha256:c5fd1bfb8306f7a21abc7494c700ca117bf4abbde841e48b263904ac50b1d694
     # via
     #   dpcpp-cpp-rt
     #   mkl
     #   torch
-intel-pti==1.0.1 \
-    --hash=sha256:4e7ad9e955d2dad8e41cd95d22e8ab1e476bae2e6e351f0e8b4653fe77ab2e0c \
-    --hash=sha256:db45adc0a555cd22864f4cfd418ef81cf07a02c78627e6a3cb6387920b352278
+intel-pti==1.1.0 \
+    --hash=sha256:34211ebb05c6e4723c20c94c46e467a60f444365b17d659e13d3e8000f39e99a \
+    --hash=sha256:62bb374068d5e43239db7a75d19e673e21be68603092de6238522cad4ea8c9ca
     # via torch
-intel-sycl-rt==2026.1.0 \
-    --hash=sha256:307d7022583d929e3091eadcea15fd3440fb68c35cd20094f2bf8597f936bfd9 \
-    --hash=sha256:c8f4ae787c334d6a48b66514b2ac29c7bb4aedde2939c8ba61e7370ca748fce6
+intel-sycl-rt==2026.1.2 \
+    --hash=sha256:7f1f3d92adeb135b6129bbe6f7d939c0416e584594d038213a74fb56237e619a \
+    --hash=sha256:9f4c9aff11177a29ff81bcecffd47e43b1edf54b766f97ed1dac13a820b649e6
     # via
     #   dpcpp-cpp-rt
     #   oneccl
@@ -3421,9 +3423,9 @@ ninja==1.13.0 \
     --hash=sha256:fb46acf6b93b8dd0322adc3a4945452a4e774b75b91293bafcc7b7f8e6517dfa \
     --hash=sha256:fb8ee8719f8af47fed145cced4a85f0755dd55d45b2bddaf7431fa89803c5f3e
     # via -r requirements/test/../common.txt
-nltk==3.10.3 \
-    --hash=sha256:bb9327a461c3811c2fa4900e03840401f2126adfb30c0072827c433bd2444ea4 \
-    --hash=sha256:ff9598a8e20518ee0d557745890cc4435b9578489e2dcbc69c4f81fa060caf7c
+nltk==3.10.4 \
+    --hash=sha256:44679f4e9220abfd496d2c8cdb22f8425ccbe557604f9aa5cacb1c44003dabc1 \
+    --hash=sha256:769ba5413f265b7d3e87cd163cc28efa01e29eeef8bb6080bc907949d9fcfb51
     # via
     #   -r requirements/test/xpu.in
     #   rouge-score
@@ -3549,13 +3551,13 @@ numpy==2.2.6 \
     #   torchvision
     #   transformers
     #   xgrammar
-oneccl==2022.1.1 \
-    --hash=sha256:e877ad3720e8d6dd45d71cf05dd9d65e66f5a38c0900089f1542569e43512e78
+oneccl==2022.1.2 \
+    --hash=sha256:c87c28fcce5435b03b8f01f3e669ab3ec59718f28f9ab537403b49efe83f4c16
     # via
     #   oneccl-devel
     #   torch
-oneccl-devel==2022.1.1 \
-    --hash=sha256:a088ba67a3610bdb621b82335953ceb4bda65b81146a306a1bb3c64e47d47735
+oneccl-devel==2022.1.2 \
+    --hash=sha256:bdf97644da971fc112b6bd53d6e22e8ff032fb8f32442bb914e98727442c229d
     # via torch
 onemkl-license==2026.1.0 \
     --hash=sha256:39fd829648af92c9e03c22ba228f07174d829aaa2fe3c5f6cd7073b8eb8a9805 \
@@ -3613,59 +3615,71 @@ opencv-python-headless==5.0.0.93 \
     #   albucore
     #   albumentations
     #   mistral-common
-opentelemetry-api==1.44.0 \
-    --hash=sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a \
-    --hash=sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef
+opentelemetry-api==1.45.2 \
+    --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34 \
+    --hash=sha256:d7b0008e21e5fd61cbe7a7f34ca3b6905a78ab677d9bc395e299359c75cda6b4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
     #   mcp
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp==1.44.0 \
-    --hash=sha256:4a498fa8d8fd8be9e8e2d175fe5524a3fe581ccffadd8509db86526a5fb97051 \
-    --hash=sha256:af1cde7c33ea8ed624bf04ac49a885730fe44c1f1ad698656e592c38f70ce106
+opentelemetry-exporter-http-transport==0.66b2 \
+    --hash=sha256:66d6ed810a515432c8891da9a834464332fd70badeca45bdeeae81b4280c903b \
+    --hash=sha256:fd5f5b490c099acda1cd7b909d5e8981436bf18cc8c6098d302d114c271720e9
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp==1.45.2 \
+    --hash=sha256:52c8b9f268289c92c08b3a97f48c63d6e5c037f25ca1f6f29ef162fb78974afc \
+    --hash=sha256:879044ba65b8b1be7a0d9d904afb76700e96d2a4d36700918d9325c9ee3b8be4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
-opentelemetry-exporter-otlp-proto-common==1.44.0 \
-    --hash=sha256:9a9fe61bba73d802904bc989f1d6b4a7b1ee40f06c40e98d6f85af65aaebb694 \
-    --hash=sha256:dc87a5a5bc58f149a56d1547e4691588fa12994cdc3bc039a694ccb3375862ac
+opentelemetry-exporter-otlp-common==0.66b2 \
+    --hash=sha256:06f5a9b88638e310efa1f1d206cdf6b75393e112aba4e174a963416192bd1028 \
+    --hash=sha256:ace86efb75489f925f1ef809856ae5f0c7db534e4afdc624530222228b1236a5
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-exporter-otlp-proto-grpc==1.44.0 \
-    --hash=sha256:40d1ae9e03fcc36de3cbac610cc99f35894938bff9cfd90fc4ec68bd85448463 \
-    --hash=sha256:6a1a645ea182a2f59440c51fa8301d309f3324a8f9d65f8395584b064b67ee4e
+opentelemetry-exporter-otlp-proto-common==1.45.2 \
+    --hash=sha256:af483b24217028892f017096731b794b196b785025d2e6808874720fd0b05a80 \
+    --hash=sha256:f1f2806f3f28ce7938033823e50934fcd91595a39de38e69a28a51e19f40fc6d
+    # via
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc==1.45.2 \
+    --hash=sha256:8a48d60835e90536846bd82de487bfbd81bccb5a1b3d0fb82edeea17db07395c \
+    --hash=sha256:9e4a6490ca7711479fec7c519425bc09808abbc9a2a1775528edecf200d19a5a
     # via opentelemetry-exporter-otlp
-opentelemetry-exporter-otlp-proto-http==1.44.0 \
-    --hash=sha256:838592fce774c1c8bb7b9a0a7facbfa82e17be5a8a4e94cef10cb84ae026bae3 \
-    --hash=sha256:c633d7270ad6b57cd4cfbe8b0007a9e2e7c0cb50bd6c50fe2a7b245f721a09d8
+opentelemetry-exporter-otlp-proto-http==1.45.2 \
+    --hash=sha256:5984a3fb46bc4628e4e2b85d4a6e72637e03962aae6cf372791137768a4ad939 \
+    --hash=sha256:6e4d025138829d0ee57946930c2ccad6491ad4d92a958e9c7eea69278fe60cfc
     # via opentelemetry-exporter-otlp
-opentelemetry-proto==1.44.0 \
-    --hash=sha256:898b155a0e1557afd867478fb6158e8122a46329ca0bb8dc53cc55e98f017f56 \
-    --hash=sha256:c547a79c2f8c0c515d31509154682e5921c7cfd5ca67b70e1f9266e2c3e103f3
+opentelemetry-proto==1.45.2 \
+    --hash=sha256:03a7ca1b43f89fd5b965d5975902bb2515c0c86e2428b456836e9a6149c6235a \
+    --hash=sha256:bd8d23cf770605b0af9b7be2071d26a464fea289d35429abfd2a66226114ad64
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-opentelemetry-sdk==1.44.0 \
-    --hash=sha256:cebe7f65dc12f26ead75c6064de12fd2a9052e5060c0272d402cfa203aae123b \
-    --hash=sha256:df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad
+opentelemetry-sdk==1.45.2 \
+    --hash=sha256:7eec4de13dd21ff3a1670dcb0e02079e692736f94d733dfdce5af461d884248d \
+    --hash=sha256:ff974ea70ee4f1d51e2ec152db37c2b626c7bf82bb3f7d86114fd8704e7199c6
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
+    #   opentelemetry-exporter-otlp-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-semantic-conventions-ai
-opentelemetry-semantic-conventions==0.65b0 \
-    --hash=sha256:1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb \
-    --hash=sha256:f9b2b81e9d5b64f11bc952075e7e9c7fb0aab075c7fd1c46d597f1b919852d60
+opentelemetry-semantic-conventions==0.66b2 \
+    --hash=sha256:4cbe61e5f9275d57ab31708446e7938ef4291ebbe6a7fca6f7a629c5acae87d8 \
+    --hash=sha256:7da5f1a5dc4383eb66711d4d3d3e71824d9403ac1559fea021cc103c1a4c4976
     # via
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions-ai
@@ -4990,9 +5004,9 @@ pyyaml==6.0.3 \
     #   timm
     #   transformers
     #   uvicorn
-pyzes==0.1.2 \
-    --hash=sha256:21667f0a23b15fcf81c1267dbc86f5a9b0d5118297cae645e4ab31c50e9e7d6b \
-    --hash=sha256:5638684399049940414071afafff91ee87f18807457b3cb0d31cd5d5a0b7db23
+pyzes==0.1.3 \
+    --hash=sha256:61e3f45d85f97e11de5a6714d29f1813fe9454cd650a10f600eb61de6dbdc518 \
+    --hash=sha256:e9c617096551beb2cec0cd8714ccc641c39ea3fe2ff41575234c218e9bd5f874
     # via torch
 pyzmq==27.1.0 \
     --hash=sha256:01c0e07d558b06a60773744ea6251f769cd79a41a97d11b8bf4ab8f034b0424d \
@@ -5328,6 +5342,7 @@ requests==2.34.2 \
     #   modelscope
     #   msal
     #   mteb
+    #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-http
     #   pooch
     #   schemathesis
@@ -6401,23 +6416,21 @@ tokenizers==0.23.3 \
     #   -r requirements/test/../common.txt
     #   cohere
     #   transformers
-torch==2.14.0+xpu \
-    --hash=sha256:05f8f130e25c24d4f7903266af165145e9234fae8ce73ec2613adfc015cba34a \
-    --hash=sha256:4e3bcdb6f50b4718b77d05f1519d0a79db41e679b9f9ce90b909860463e73864 \
-    --hash=sha256:5af65e289658f709a7aaf26ac13c3fa91437347bf391f4d9bbd5ba8c42d227ae \
-    --hash=sha256:6178b8cad88607d817513c3a0552506f855984ea6278c46b6c462070e3f834fd \
-    --hash=sha256:62d1c8f46d636c5437bd7ace001f59ff17c8176cd3427721a3082f02b38a4b31 \
-    --hash=sha256:678770efb6aaa51d5213dfd7147d81e08c8c73ce1bec95c9f2b190ff7f882675 \
-    --hash=sha256:6ac53560d8c593de63e649ce18b8b4010b5de7372f657717bdd02cd5b84c857d \
-    --hash=sha256:777bfeaac53528a08a95dc9b497015416091568e9e37b5f40e88d867f7a71249 \
-    --hash=sha256:9acd595fe85000de53edcb6e0b176bb963b0eac8cf3239caf70b720041433fcb \
-    --hash=sha256:a09e7a70eefe49b9f3d908f60a7b729673bed3f628371ccfe74955b1f7671928 \
-    --hash=sha256:a65aae36218be1f3965adeb3b7c95e8575c5a1af3058b819bdc1b6490956772e \
-    --hash=sha256:c311660dcd102debd75711b4f5f7cce5ea4ba8b30a7be5c7839ee3b471af3c2d \
-    --hash=sha256:cf5f0749fb38d6ee70c9c5ccb58727379df2b92b707fb669fceb834cd28e4cff \
-    --hash=sha256:db64da94be8370424a6d3b161545e43f6b3811f455324b2a4602712bdc5e22b1 \
-    --hash=sha256:e9e8d09da820604da85f8d24012f37266df0980546d012aa3420f5aa233d5511 \
-    --hash=sha256:f408cf4586843ccffe976112be848414b16561cda4ec31ea01926b5f8bb4aa33
+torch==2.15.0+xpu \
+    --hash=sha256:021dcbb1e2fdb0aecfe0783ce1b738bbc2a2a1b40957a2f97e3efa99d1cf0e6e \
+    --hash=sha256:1107461b7b86c8fb641792a863c7600b64866450661a334036799c4f11834521 \
+    --hash=sha256:123135368c5f4e2aaa4e87c26f67d6844b446e88a371de2fc9917486cc6ad6e9 \
+    --hash=sha256:16f89c6267e532bce5f6fc92fcbca8d3730a7271619f36063e7289e4fa688b15 \
+    --hash=sha256:18988a7744cd8126c4da7dd8bee30d6c99e6433540d66103ec158e9ee47d0ead \
+    --hash=sha256:20466bb3a6c9742d98d306c760c604834211f308e05a1fa1143318c1bcd596db \
+    --hash=sha256:402bfd4b0bdcc7ca4e56a74562aed220eea8754dba8a5b5e5b1fc6214b69706c \
+    --hash=sha256:44347b554ff6d200859d7f23656c15c48736837c542851ab5b18b2db7fef2586 \
+    --hash=sha256:7ccfe7bd112232fddafb644656e8f10045ee5bc828407678c58a73ac6b86ff58 \
+    --hash=sha256:ad293f17b1491692f215720173133bc90cfee044d47bb4abcc55caf6c039cc18 \
+    --hash=sha256:bb878319e82da2ebc7098bbbbb540f31fd2b4834cb465d2f65cb595267b61166 \
+    --hash=sha256:bce990cb4403803098011d8ce79f352181fffa283cfc4d587f98603dc41683b8 \
+    --hash=sha256:dc64841fffe57f0a3c3b658c17ddb3266ea51829dcce27d9796ed3cb2e49282e \
+    --hash=sha256:f79f5121cf3b2dd80cdc4b70149f4230bd3b9e12b3aebc658d8b90f85241b867
     # via
     #   -c requirements/xpu.txt
     #   accelerate
@@ -6431,23 +6444,9 @@ torch==2.14.0+xpu \
     #   timm
     #   torchvision
     #   xgrammar
-torchvision==0.29.0+xpu \
-    --hash=sha256:48da8d7869ce2876b56cfa22a74980f5ae90c0b15287bbdc2852c0eb59eed066 \
-    --hash=sha256:59372ed821523f9671f302ff662321735a44b98309fc52b2fa794e4813da3af1 \
-    --hash=sha256:70d689871f19d0d339f091ee2237834c91b1d7c6d3e28d861de19884c81981ec \
-    --hash=sha256:7c8bf87ef3a237abaf46616570ca592e8dc05d8d0bdd2eeb45e045d63cccc7e7 \
-    --hash=sha256:81d968169d17813c83429c688bb5460b9f8f14051444da37d9375b81d448b8ce \
-    --hash=sha256:9405dec56c911c44a9d60e0422dfe346e0503a2016adca1bbea63d865bf04d15 \
-    --hash=sha256:97d5078013ad29d78f6f0ea4624006098740a4908d3abe4ef7ed0d4975b41c03 \
-    --hash=sha256:a52c971cd23be0a54de344d193b97360fd1e3f1c3b54dd365c539a2900bf4bd4 \
-    --hash=sha256:b6899225cb7e41db094b32d7c8df8a15b39e5a753879769de9a7e262e4530b76 \
-    --hash=sha256:b797435faa3cef4bfe174799bfaf97e78898037888fee7d248d272f95eb1b879 \
-    --hash=sha256:c9704071d330108675e8e46ff95293d8c92a207388953ec43102c2591775762d \
-    --hash=sha256:cada8723f4aa66b0b26ed3b48d18825e3a77b5b2adcebeb6101cd741e3d4f3f6 \
-    --hash=sha256:cc1fe77ed7e04312f0d6e664121f6a0692431c2fb84cda96ab284b90db1a68cc \
-    --hash=sha256:d78dcacb61a9059aef50994cd7e2ef968b4172a11ad737408951f3a9260fd62c \
-    --hash=sha256:e7cd892130accf6a4569984f3821d4e03cee75e05032c4bd6214bee64226719f \
-    --hash=sha256:f90377c60883f3ccb54a568a7f9bb43bd6ecc002af4ede7dd1eb51aa0476188c
+torchvision==0.29.2+xpu \
+    --hash=sha256:b15295f0395380f1c460315e116548afb66e1ddaaa5ee2862cccbdcd119b8c7b \
+    --hash=sha256:f641acaee33eb1b369da755f93e1ee226b835ab7891552144bd077587701c8fc
     # via
     #   open-clip-torch
     #   timm
@@ -6500,28 +6499,26 @@ transformers==5.22.0 \
     #   peft
     #   sentence-transformers
     #   xgrammar
-triton==3.8.0+xpu \
-    --hash=sha256:f16b24efcc789e3987ee602b7442e11cac0b9d3bc78f96e3a2ec3cdd5a60b7bb
+triton==3.9.0+xpu \
+    --hash=sha256:52ac246a9ba8ec94efbbd632e95df9016c97e527ed5a260b37daa4285f9611f0
     # via
     #   -c requirements/xpu.txt
     #   xgrammar
-triton-xpu==3.8.0 \
-    --hash=sha256:0b13940f8506a6aed62b506371c6c83b9e21838ba3ebc64a3a6d981779602f18 \
-    --hash=sha256:138970b2e5b4723b990b8aac9d5228650f9066b1547cad1204b79fc063409797 \
-    --hash=sha256:474fe1befdfdd0733cd5415899d9e3891996860c0d86efb459bb4c7bf3d122df \
-    --hash=sha256:5d76e2d29ec4a5535664af7cd0ecf1758f19ee8b87b7424e0c41312355cfb337 \
-    --hash=sha256:75a1d076576610661f5eb5701f5e7ab82d74c5ddb75975efa78d7cf6db81d6d1 \
-    --hash=sha256:815b94eaa48c56577217023898c39f746a52ab905e2cb7f27ec862e59d727995 \
-    --hash=sha256:83d16b713b3cf9583f82a3f3491a82cb2bc9a33b515ad89e186090f8711c507a \
-    --hash=sha256:879b027304e617911a9d8728a4cc0e31512f3ccbafdcd07dba573bdd60cfb085 \
-    --hash=sha256:a630ed62bbce184eb9135a7854ac67ed057f7b9cbee974d883ad8121d6fb0b52 \
-    --hash=sha256:ae62d2425ad36aea135f9d9a9a331e3a5ada6ac2ca65f60e53fb450c5a883219 \
-    --hash=sha256:afc5bbd137abffe8810f8b8b7dc654ff37497bb28bb293d3fea6a0e4f1fbab09 \
-    --hash=sha256:b19f47726756b472ec744610e30ced1008f4911306a94b5ca5224b71a11c2149 \
-    --hash=sha256:cbcceb5cd1baf7b296428477f5ff27113c1507245f10bd8c870645ab353619dc \
-    --hash=sha256:cd15dffba8e3b434c2637794beb03323e8d4ed417eac3ded1605519a2afe7a08 \
-    --hash=sha256:d63f0326675de71a00ef3c67873e952954b2ed4f0e97dfd98aba4562edf03da2 \
-    --hash=sha256:ef124d8a4bca148a4386e054bf1185e37184bc67c8b6bd4aa7af52049500c7e2
+triton-xpu==3.9.0 \
+    --hash=sha256:0a82fb54b0e899de3908e63521bd4beb9f8237a78e541739e0aa955d7e4b9aa6 \
+    --hash=sha256:204a01753ee75353d2f8890174af7308fa8c24b2c28538026bf734b986d59a67 \
+    --hash=sha256:2ef68477f924d9debabb3b33f58f4162aafcc8ba5749abbbdb87086b27d78256 \
+    --hash=sha256:36cdcbc9e8d2273230e1ab420d068df78a7da5ad578077c4323c71ca8996703c \
+    --hash=sha256:4ab2bef657da80d4e4c3dbfa2bd0a0fe6c4d5296d099064a5e8e1ef70ba32144 \
+    --hash=sha256:56c2e96b0afe8e392e038aee3e2835106a547e5cc64cc88aa065a245d6eddb81 \
+    --hash=sha256:9111947061f26eae582becc075e7d2c6c8f7895fabe0dfd506a03a50a6af1dc7 \
+    --hash=sha256:b434bb3c5220a13f08c199c044ae7caf6d243ffef8d0c1fd5168060a57c7e5d7 \
+    --hash=sha256:c1034ce18e9f6875a1e640bd002f81a53e4f670f3bfdfb71904e0243d3b44e89 \
+    --hash=sha256:d59ebd92cdd1c16495ba654560f5203ddcfb21972bc098b36974d7fe89370041 \
+    --hash=sha256:e0c92dd1932dad479d9ceffb050b025164d73cbc5914259e94fc678ce3c45ebb \
+    --hash=sha256:e9e47ea67b8c52aeb56607c5c46e92c5754523733de991e67021e7b338b71642 \
+    --hash=sha256:ebe19bc34c347975930de62e1bff89ceab5896addd8770d43e7313e195c80f8f \
+    --hash=sha256:f32fa285d8b225d4973e2c30640ade280f148450e498458769f6b274961f1978
     # via
     #   torch
     #   triton
