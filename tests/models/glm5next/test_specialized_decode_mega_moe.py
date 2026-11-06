@@ -98,7 +98,8 @@ def test_mega_moe_matches_reference(grouped, tokens, ue8m0):
 
     g = torch.Generator(device="cuda").manual_seed(tokens)
     w = _weights(g)
-    args = (*w["trtllm"], TOP_K, LIMIT, SCALE, ue8m0)
+    w31, w31_s, w2, w2_s = w["trtllm"]
+    args = (w31, w31_s, w2, w2_s, TOP_K, LIMIT, SCALE, ue8m0)
     if grouped:
         # The shared expert runs as one more expert of every token.
         mega = GroupedExperts(*args, shared=w["shared_trtllm"])
@@ -199,8 +200,9 @@ def test_grouped_moe_error_within_stock(tokens):
     logits = torch.randn(tokens, EXPERTS, generator=g, device="cuda")
     bias = torch.randn(EXPERTS, generator=g, device="cuda") * 0.1
 
+    w31, w31_s, w2, w2_s = w["trtllm"]
     grouped = GroupedExperts(
-        *w["trtllm"], TOP_K, LIMIT, SCALE, True, shared=w["shared_trtllm"]
+        w31, w31_s, w2, w2_s, TOP_K, LIMIT, SCALE, True, shared=w["shared_trtllm"]
     )
     rows, _, weights, shared = grouped(x, logits, bias)
     ours = (rows.float().view(tokens, TOP_K, HIDDEN) * weights[..., None]).sum(1)

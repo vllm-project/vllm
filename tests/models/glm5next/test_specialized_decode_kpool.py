@@ -4,6 +4,7 @@
 stock Triton kernels they replace."""
 
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 import torch
@@ -18,7 +19,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _update_inputs(requests, tokens, seed, padded):
+class _Inputs(NamedTuple):
+    """The tensors of one batched kpool update, in the kernels' argument order."""
+
+    cache: torch.Tensor
+    tail: torch.Tensor
+    tail_slots: torch.Tensor
+    key: torch.Tensor
+    score: torch.Tensor
+    ape: torch.Tensor
+    slots: torch.Tensor
+    positions: torch.Tensor
+
+
+def _update_inputs(requests, tokens, seed, padded) -> _Inputs:
     g = torch.Generator(device="cuda").manual_seed(seed)
     blocks, page = requests + 4, 64
     cache = torch.randint(
@@ -46,16 +60,7 @@ def _update_inputs(requests, tokens, seed, padded):
     ).int()
     if padded:
         positions[0, -1], slots[0, -1], tail_slots[0, -1] = -1, -1, -1
-    return [
-        cache,
-        tail,
-        tail_slots,
-        key,
-        score,
-        ape,
-        slots,
-        positions,
-    ]
+    return _Inputs(cache, tail, tail_slots, key, score, ape, slots, positions)
 
 
 @pytest.mark.parametrize("requests,tokens", [(1, 1), (64, 1), (2, 7)])
@@ -71,7 +76,7 @@ def test_kpool_update_matches_stock(requests, tokens, padded):
 
     assert mqa_logits_use_mx_scales()
     ref = _update_inputs(requests, tokens, 100 * requests + tokens, padded)
-    out = [t.clone() for t in ref]
+    out = _Inputs(*(t.clone() for t in ref))
     before = ref[0].clone()
     stock(*ref, POOL, DIM, round_scale=True)
     kpool_update(*out, POOL)
