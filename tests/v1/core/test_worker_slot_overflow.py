@@ -64,7 +64,6 @@ class WorkerSlots:
 def _model_runner_output(req_ids: list[str], sampled: list[list[int]]):
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=sampled,
         logprobs=None,
         prompt_logprobs_dict={},

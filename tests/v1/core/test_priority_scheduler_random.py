@@ -103,7 +103,6 @@ def _mock_execute_model(
 
     return ModelRunnerOutput(
         req_ids=request_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(request_ids)},
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},

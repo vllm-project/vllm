@@ -1694,7 +1694,6 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
         first,
         ModelRunnerOutput(
             req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[32]],
         ),
     )

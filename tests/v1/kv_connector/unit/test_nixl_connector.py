@@ -1068,7 +1068,6 @@ class TestNixlHandshake:
 
         out0 = ModelRunnerOutput(
             req_ids=[req_id],
-            req_id_to_index={req_id: 0},
             sampled_token_ids=[[0]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -1080,7 +1079,6 @@ class TestNixlHandshake:
         )
         out1 = ModelRunnerOutput(
             req_ids=[req_id],
-            req_id_to_index={req_id: 0},
             sampled_token_ids=[[0]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2085,7 +2083,6 @@ def test_kv_connector_stats_aggregation():
     for i, worker_stats in enumerate([worker1_stats, worker2_stats, worker3_stats]):
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
-            req_id_to_index={f"req_{i}": 0},
             sampled_token_ids=[[123]],  # dummy token
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2277,7 +2274,6 @@ def test_multi_kv_connector_stats_aggregation():
         stats = make_multi_stats(nixl_count, foo)
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
-            req_id_to_index={f"req_{i}": 0},
             sampled_token_ids=[[123]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -2333,7 +2329,6 @@ def test_scheduler_kv_connector_stats_aggregation():
 
     model_output = ModelRunnerOutput(
         req_ids=["req_0"],
-        req_id_to_index={"req_0": 0},
         sampled_token_ids=[[123]],
         logprobs=None,
         prompt_logprobs_dict={},

@@ -353,7 +353,6 @@ def test_lookahead_mamba_partial_tail_survives_finish(
             step,
             ModelRunnerOutput(
                 req_ids=[req.request_id],
-                req_id_to_index={req.request_id: 0},
                 sampled_token_ids=[[99] if is_final else []],
             ),
         )

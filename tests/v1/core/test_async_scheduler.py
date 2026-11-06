@@ -24,7 +24,6 @@ def _make_model_runner_output(
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[i] for i in range(len(req_ids))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -346,7 +345,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[123]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -463,7 +461,6 @@ class PipelinedEngine:
                 self.emitted_position[token] = view[0] - len(tokens) + offset
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
             sampled_token_ids=sampled_token_ids,
             logprobs=None,
             prompt_logprobs_dict={},
