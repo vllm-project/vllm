@@ -1258,6 +1258,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
+            if self.speculator is not None:
+                self.speculator.on_requests_preempted(preempted_req_ids)
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
         # Sorted so every TP rank frees request slots in the same order.
         # Features like batch-sharded sampling derive rank request ownership
@@ -1301,7 +1303,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
             if self.speculator is not None:
-                self.speculator.add_request(req_index)
+                self.speculator.add_request(req_index, new_req_data)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
@@ -2501,6 +2503,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # models; the model objects can outlive this runner.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
+            speculator.shutdown()
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
             self.speculator = None

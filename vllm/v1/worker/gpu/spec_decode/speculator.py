@@ -17,6 +17,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -126,7 +127,7 @@ class BaseSpeculator(ABC):
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
 
-    def add_request(self, req_index: int) -> None:
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         """A new request was assigned request-state slot `req_index`, e.g. to
         reset per-slot state. No-op by default."""
         return
@@ -136,9 +137,18 @@ class BaseSpeculator(ABC):
         are freed so their token history is still readable. No-op by default."""
         return
 
+    def on_requests_preempted(self, preempted_req_ids: set[str]) -> None:
+        """Requests preempted, before their request-state slots are freed. They
+        are added again when they resume. No-op by default."""
+        return
+
     def reset_state(self) -> None:
         """Forget anything learned across requests, called after the warmup
         requests have finished. No-op by default."""
+        return
+
+    def shutdown(self) -> None:
+        """Called when the model runner shuts down. No-op by default."""
         return
 
 
