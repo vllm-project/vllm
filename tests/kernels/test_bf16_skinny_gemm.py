@@ -34,7 +34,7 @@ EXPECTED_SELECTIONS = {
     (2112, 7168): (set(), set(range(1, 17))),
     (2304, 1536): (set(), set(range(1, 17))),
     (4608, 1536): (set(), set(range(1, 17))),
-    (3584, 7168): ({1}, set(range(2, 9))),
+    (3584, 7168): ({1}, set()),
     (6288, 7168): (set(range(1, 5)), set()),
     (12448, 7168): (set(range(1, 4)), set()),
     (7168, 768): (set(), set(range(1, 17))),
@@ -662,8 +662,8 @@ def test_build_plan_matches_selector() -> None:
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). Mirrors
 # KIMI_K3_PROJECTIONS_SM100, measured on B200; intentionally different from
-# EXPECTED_SELECTIONS (e.g. 3584x7168 routes dsv3 at M2..8 on SM103 but only
-# wins with CuTe at M1..3 on SM100).
+# EXPECTED_SELECTIONS (e.g. 3584x7168 uses CuTe at M1 only on SM103 but wins
+# with CuTe at M1..3 on SM100).
 EXPECTED_SELECTIONS_SM100 = {
     (1536, 128): (set(), {1, 16}),
     (3072, 128): (set(), {8}),
