@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode of the MTP draft layer: the main model's stages on the
-draft's FULL-graph steps, and a vocab-parallel argmax for greedy drafts.
+draft's FULL-graph steps.
 
 The MTP layer has no mHC streams, so its boundaries are a fused all-reduce,
 residual add and RMSNorm (``AllReduceNorm``) where the main model fuses the
 all-reduce with mHC. The vocab-parallel embedding's all-reduce takes the same
 mailbox, fused with the enorm / hnorm of the eh_proj input. The draft's BF16
-projections and LM head shard run the split-K GEMM above two tokens.
+projections run the split-K GEMM above two tokens.
 """
 
 from typing import Any
@@ -33,15 +33,12 @@ from .decode import (
 
 logger = init_logger(__name__)
 
-# Draft rows whose greedy token the vocab-parallel argmax serves.
-ARGMAX_MAX_TOKENS = 64
-
 
 class SpecializedDraft(LayerStages):
     """Built on the first eager draft forward (the weights are processed by
     then). Reads the MTP layers, never modifies them."""
 
-    def __init__(self, predictor, config, greedy: bool):
+    def __init__(self, predictor, config):
         self.config = config
         self.policy = Policy(config.policy)
         self.q = config.q
@@ -96,12 +93,6 @@ class SpecializedDraft(LayerStages):
             self.ar_norm = self._build_ar_norm()
         self.embed_tokens = predictor.embed_tokens
         self.fused_embedding = self.ar_norm is not None and self._build_embedding()
-        self.head: Any = None
-        self.argmax = self._build_argmax() if greedy else None
-        if not greedy:
-            logger.info_once(
-                "Specialized draft: stock argmax (use_local_argmax_reduction off)"
-            )
 
     def _build_embedding(self) -> bool:
         """Whether the embedding's all-reduce can take the boundary mailbox."""
@@ -143,31 +134,6 @@ class SpecializedDraft(LayerStages):
             top_k=self.text_config.num_experts_per_tok,
             eps=norms.pop(),
             device=self.mtp_layers[0].eh_proj.weight.device,
-        )
-
-    def _build_argmax(self):
-        from ..draft_argmax import DraftArgmax
-
-        heads = [mtp.shared_head.head for mtp in self.mtp_layers]
-        head = heads[0]
-        weight = head.weight
-        shard = head.shard_indices
-        if weight.dtype != torch.bfloat16 or any(
-            h.weight.shape != weight.shape for h in heads
-        ):
-            logger.warning("Specialized draft: unsupported LM head, stock argmax")
-            return None
-        columns = weight.shape[0]
-        if self.policy.enabled("dsa_proj"):
-            from ..gemm import Projection
-
-            self.head = Projection(weight, self.split_k_tokens)
-        return DraftArgmax(
-            columns=columns,
-            valid=columns - shard.num_org_vocab_padding,
-            offset=shard.org_vocab_start_index,
-            capacity=ARGMAX_MAX_TOKENS,
-            device=weight.device,
         )
 
     def partial(self, tokens: int) -> bool:
@@ -264,24 +230,3 @@ class SpecializedDraft(LayerStages):
             out.index_copy_(0, rows, x)
             x = out
         return x, x
-
-    def top_tokens(self, head, logits_processor, hidden_states):
-        """Greedy draft tokens, or None for the stock vocab-parallel argmax."""
-        if self.argmax is None or not self.argmax.supports(hidden_states.shape[0]):
-            return None
-        if logits_processor.soft_cap is not None or logits_processor.scale != 1.0:
-            return None
-        tokens = hidden_states.shape[0]
-        if (
-            self.head is not None
-            and torch.cuda.is_current_stream_capturing()
-            and self.head.supports(tokens)
-            and head.weight is self.head.weight
-            and hidden_states.is_contiguous()
-        ):
-            logits = self.head(hidden_states)
-        else:
-            logits = logits_processor._apply_head(head, hidden_states, None)
-        if logits.dtype != torch.bfloat16:
-            return None
-        return self.argmax(logits.contiguous())

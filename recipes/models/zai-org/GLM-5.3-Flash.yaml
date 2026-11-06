@@ -181,8 +181,7 @@ hardware_notes:
     title: "Low-latency decode (TP4)"
     body: >-
       4×GB300 at TP4 can opt into the CuTe DSL specialized decode with
-      `--additional-config '{"decode_backend":"latency_specialized"}'`. With MTP, add
-      `"use_local_argmax_reduction":true` to `--speculative-config`. See the guide's
+      `--additional-config '{"decode_backend":"latency_specialized"}'`. See the guide's
       GB300 section for the requirements.
   ascend_950pr_8x:
     title: "vLLM Ascend A5 image required"
@@ -260,10 +259,7 @@ guide: |
   the stock path. It is opt-in and refuses at startup with the list of unmet requirements: a GB300
   (SM100 family) GPU, TP4 without pipeline, data, expert or context parallelism, Model Runner V2
   with FULL decode CUDA graphs (the default `FULL_AND_PIECEWISE`), FP8 KV cache, no LoRA or sleep
-  mode, and either no speculation or MTP with at most 7 draft tokens. With MTP, add
-  `use_local_argmax_reduction` to the speculative config: the specialized draft then picks draft
-  tokens with a vocab-parallel argmax instead of all-gathering the draft logits, which is the
-  only draft argmax it accelerates.
+  mode, and either no speculation or MTP with at most 7 draft tokens.
 
   ```bash
   vllm serve zai-org/GLM-5.3-Flash \
@@ -271,7 +267,7 @@ guide: |
     --kv-cache-dtype fp8 \
     --numa-bind \
     --additional-config '{"decode_backend":"latency_specialized"}' \
-    --speculative-config '{"method":"mtp","num_speculative_tokens":3,"use_local_argmax_reduction":true}' \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
     --tool-call-parser glm47 \
     --reasoning-parser glm47 \
     --enable-auto-tool-choice \

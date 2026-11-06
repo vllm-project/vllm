@@ -146,8 +146,6 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         # decode_backend=latency_specialized: the draft layer's specialized decode,
         # built on the first eager forward (after the weights are processed).
         self.specialized_decode_config = specialized_decode_config(vllm_config)
-        spec = vllm_config.speculative_config
-        self.greedy_draft = spec is not None and spec.use_local_argmax_reduction
         self.specialized_decode: SpecializedDraft | None = None
         self.prefill_rows: torch.Tensor | None = None
 
@@ -161,7 +159,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
 
             self.specialized_decode = SpecializedDraft(
-                self, self.specialized_decode_config, self.greedy_draft
+                self, self.specialized_decode_config
             )
         return self.specialized_decode
 
@@ -235,13 +233,6 @@ class Glm5NextMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self._mtp_layers[current_step_idx]
-        decode = self.specialized_decode
-        if decode is not None:
-            tokens = decode.top_tokens(
-                mtp_layer.shared_head.head, self.logits_processor, hidden_states
-            )
-            if tokens is not None:
-                return tokens
         # Vocab-parallel argmax for the greedy draft: per-rank head projection
         # + local argmax + a [batch, 2*tp] (value, index) reduce, instead of
         # materializing and all-gathering full [N, vocab] logits per draft

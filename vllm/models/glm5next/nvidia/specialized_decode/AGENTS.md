@@ -21,9 +21,7 @@ raises with all of them at startup:
   a relaxed check.
 - FP8 KV cache; BF16 KDA conv state and FP32 recurrent state; no
   ReplaySSM/RecoverSSM.
-- Speculative decoding: none, or MTP with at most 7 tokens. The vocab-parallel
-  draft argmax (`draft_argmax.py`) runs only when the speculative config sets
-  `use_local_argmax_reduction`; the GLM-5.3-Flash recipe documents the flag.
+- Speculative decoding: none, or MTP with at most 7 tokens.
 
 ## Structure
 
@@ -45,7 +43,7 @@ The executor reads the stock modules and never modifies them.
 | `mega_moe.py`, `grouped_moe.py`, `shared_expert.py` | Per-route expert clusters (1-4 tokens), the expert-grouped persistent kernel (8-64), shared-expert GEMVs |
 | `dense_mlp.py` | The three dense layers' MLP |
 | `gemm.py`, `linear.py` | BF16 projections on the skinny and split-K GEMMs |
-| `logits_gather.py`, `draft_argmax.py` | LM head gather and the vocab-parallel greedy draft argmax |
+| `logits_gather.py` | LM head gather |
 | `policy.py` | Which implementation each stage runs per token count |
 
 Kimi K3 (CuTe DSL primitives, split-K GEMM, `batch_table`) and DeepSeek-V4.1
