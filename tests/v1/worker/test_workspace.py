@@ -19,6 +19,11 @@ class _SpecConfig:
     def use_dspark(self) -> bool:
         return self._dspark
 
+    @property
+    def uses_separate_workspace_lane(self) -> bool:
+        # Only DSpark drafts in a separate workspace lane.
+        return self._dspark
+
 
 class _VllmConfig:
     def __init__(self, spec_config: _SpecConfig | None) -> None:
@@ -278,3 +283,77 @@ def test_reserved_slots_replay_cuda_graphs(monkeypatch):
             graph.replay()
         for value, output in enumerate(outputs, 1):
             torch.testing.assert_close(output, torch.full_like(output, value**2))
+
+
+def test_retained_span_survives_small_scratch_at_the_tail(monkeypatch) -> None:
+    """The retained span sits at the workspace end, so head-sized scratch
+    requests leave its bytes intact and the next same-key call reports so."""
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    (full,) = manager.get_simultaneous(((4096,), torch.uint8))
+
+    span, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert not intact
+    assert span.data_ptr() == full.data_ptr() + 4096 - 1024
+    span.copy_(torch.arange(256, dtype=torch.int32))
+
+    (head,) = manager.get_simultaneous(((3072,), torch.uint8))
+    head.fill_(7)
+    again, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+    assert again.data_ptr() == span.data_ptr()
+    assert torch.equal(again, torch.arange(256, dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "disturb",
+    ["scratch_overlap", "other_key", "other_size", "reallocation"],
+)
+def test_retained_span_reports_disturbance(monkeypatch, disturb: str) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    manager.get_simultaneous(((4096,), torch.uint8))
+    manager.get_retained("kv", (256,), torch.int32)
+
+    if disturb == "scratch_overlap":
+        # One byte past the head of the span is enough.
+        manager.get_simultaneous(((3073,), torch.uint8))
+    elif disturb == "other_key":
+        manager.get_retained("other", (256,), torch.int32)
+    elif disturb == "other_size":
+        manager.get_retained("kv", (128,), torch.int32)
+    else:
+        manager.get_simultaneous(((8192,), torch.uint8))
+
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert not intact
+    # The call itself re-arms the span.
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+
+
+def test_retained_span_is_per_slot(monkeypatch) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    manager.get_simultaneous(((4096,), torch.uint8))
+    manager.get_retained("kv", (256,), torch.int32)
+    with workspace.use_workspace_lane(1):
+        # Another lane's scratch and span requests do not touch lane 0.
+        manager.get_simultaneous(((4096,), torch.uint8))
+        _, intact = manager.get_retained("kv", (256,), torch.int32)
+        assert not intact
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+
+
+def test_reserve_growth_invalidates_retained_spans_in_all_slots(monkeypatch) -> None:
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=2)
+    manager.reserve(((1024,), torch.uint8))
+    for active_ubatch in range(2):
+        manager.get_retained("kv", (256,), torch.int32)
+    manager.reserve(((2048,), torch.uint8))
+    for active_ubatch in range(2):
+        _, intact = manager.get_retained("kv", (256,), torch.int32)
+        assert not intact
