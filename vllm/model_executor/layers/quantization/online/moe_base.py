@@ -28,11 +28,6 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     and quantize them after loading via the QeRL layerwise processing system.
     """
 
-    # finish clears the guard that keeps it from quantizing its converted
-    # bytes again
-    supports_direct_reload = False
-    direct_reload_unsupported_reason = "online quantization"
-
     uses_meta_device: bool = True
 
     def __init__(self, moe: FusedMoEConfig):

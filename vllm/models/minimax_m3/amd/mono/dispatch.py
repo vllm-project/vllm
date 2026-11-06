@@ -153,7 +153,6 @@ class MonoDecode:
         self._enabled = False
         # without mono decode no stale copy is read: direct reload is allowed
         self._model.__dict__.pop("supports_direct_reload", None)
-        self._model.__dict__.pop("direct_reload_unsupported_reason", None)
 
     def _ensure_runner(self) -> bool:
         """Build (or rebuild after a KV cache re-bind) the runner outside capture."""

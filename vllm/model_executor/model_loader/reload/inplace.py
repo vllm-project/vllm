@@ -71,7 +71,6 @@ def reload_weights(
     }
     counter_before_reloading = time.perf_counter()
 
-    model_loader = None
     if weights_iterator is None:
         model_loader = get_model_loader(load_config)
         if not hasattr(model_loader, "get_all_weights"):
@@ -85,7 +84,7 @@ def reload_weights(
         start_reload(model)
 
     # load weights from disk if none are provided
-    if model_loader is not None:
+    if weights_iterator is None:
         if weights_path is not None:
             # The revision and any object-storage `model_weights` source
             # belong to the model we are reloading away from, so they must
@@ -95,7 +94,6 @@ def reload_weights(
             model_config.revision = None
         weights_iterator = model_loader.get_all_weights(model_config, model)
         weights_iterator = cast(Iterable[tuple[str, torch.Tensor]], weights_iterator)
-    assert weights_iterator is not None
 
     if is_checkpoint_format:
         # load weights from checkpoint/ original model format

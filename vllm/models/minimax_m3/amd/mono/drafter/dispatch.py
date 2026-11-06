@@ -76,7 +76,6 @@ class DrafterDecode:
         self._enabled = False
         # no packed copy is read any more: direct reload is allowed
         self._model.__dict__.pop("supports_direct_reload", None)
-        self._model.__dict__.pop("direct_reload_unsupported_reason", None)
 
     def _ensure_runner(self) -> bool:
         """Build (or rebuild after a KV cache re-bind) the runner outside capture."""

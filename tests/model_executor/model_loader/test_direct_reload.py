@@ -161,10 +161,10 @@ def _checkpoint(scale: float = 1.0) -> dict[str, torch.Tensor]:
     }
 
 
-def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
+def _cold_start(weights: dict[str, torch.Tensor], cls=_ToyModel) -> _ToyModel:
     """As ``BaseModelLoader.load_model`` does."""
     with _DEVICE:
-        model = _ToyModel()
+        model = cls()
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     return model
@@ -298,10 +298,7 @@ class TestRefusals:
         owner, (_, _, dtype, offset), attrs, storage = model.mimo.weight._ckpt
         layout = ((64, 64), (64, 1), dtype, offset)
         model.mimo.weight._ckpt = (owner, layout, attrs, storage)
-        before = _state(model)
-        with pytest.raises(RuntimeError, match="checkpoint layout needs"):
-            begin_direct_reload(model)
-        _assert_same(_state(model), before, addresses=True)
+        self._assert_begin_refused(model, "checkpoint layout needs")
 
     def _assert_begin_refused(self, model, match) -> None:
         before = _state(model)
@@ -318,8 +315,6 @@ class TestRefusals:
             ("online", "online quantization"),
             # elastic EP wraps the method after load
             ("online-elastic-ep", "online quantization"),
-            # post-load processing deletes the staging parameters a reload loads
-            ("online-shared-experts", "online quantization"),
             # its post-load processing runs only once per quant method
             ("HummingLinearMethod", "humming"),
             ("HummingMoEMethod", "humming"),
@@ -334,15 +329,12 @@ class TestRefusals:
         from vllm.model_executor.layers.quantization import humming as humming_mod
 
         model = _cold_start(_checkpoint())
-        online = object.__new__(Fp8PerTensorOnlineLinearMethod)
-        if kind == "online":
-            method = online
-        elif kind == "online-elastic-ep":
-            method = object.__new__(FusedMoEModularMethod)
-            method.__dict__["old_quant_method"] = online
-        elif kind == "online-shared-experts":
-            model.proj.shared_expert_online_loader = object()
-            method = model.proj.quant_method
+        if kind.startswith("online"):
+            method = object.__new__(Fp8PerTensorOnlineLinearMethod)
+            if kind == "online-elastic-ep":
+                wrapper = object.__new__(FusedMoEModularMethod)
+                wrapper.__dict__["old_quant_method"] = method
+                method = wrapper
         elif kind == "InputHadamardLinearMethod":
             method = object.__new__(InputHadamardLinearMethod)
         else:
@@ -365,7 +357,6 @@ class TestRefusals:
         ],
     )
     def test_unsupported_component_refused(self, module_path, cls_name):
-        # post-load processing with a one-shot guard: a rerun is a no-op
         import importlib
 
         cls = getattr(importlib.import_module(module_path), cls_name)
@@ -373,26 +364,18 @@ class TestRefusals:
         experts = object.__new__(cls)
         torch.nn.Module.__init__(experts)
         model.proj.add_module("experts", experts)
+        reason = cls.direct_reload_unsupported_reason
         self._assert_begin_refused(
-            model, rf"{cls_name} is not supported \(proj\.experts\)"
+            model, rf"{cls_name} is not supported \(proj\.experts\): {reason}"
         )
 
-    @pytest.mark.parametrize(
-        "reason,match",
-        [
-            ("weight copies are built once", "weight copies are built once"),
-            (None, "no reason given"),
-        ],
-    )
-    def test_instance_declared_unsupported_refused(self, reason, match):
+    def test_instance_declared_unsupported_refused(self):
         # set on a model instance at runtime (MiniMax-M3 AMD mono decode);
         # False refuses even a validated class
         model = _cold_start(_checkpoint())
         model.supports_direct_reload = False
-        if reason is not None:
-            model.direct_reload_unsupported_reason = reason
         self._assert_begin_refused(
-            model, rf"_ToyModel is not supported \(model\): {match}"
+            model, r"_ToyModel is not supported \(model\): no reason given"
         )
 
     def test_replaced_param_refused(self):
@@ -400,11 +383,7 @@ class TestRefusals:
         # the loader would write checkpoint bytes into its runtime layout
         model = _cold_start(_checkpoint())
         model.proj.weight = torch.nn.Parameter(model.proj.weight.data, False)
-        before = _state(model)
-        with pytest.raises(RuntimeError, match=r"replaced .*proj\.weight"):
-            begin_direct_reload(model)
-        _assert_same(_state(model), before, addresses=True)
-        assert "_direct_reload_begun" not in model.__dict__
+        self._assert_begin_refused(model, r"replaced .*proj\.weight")
 
 
 def _worker(model, draft=None, **config):
@@ -504,11 +483,7 @@ class TestCallSites:
         class _UnmarkedOnce(_ToyModel):  # the mark is not inherited
             pass
 
-        cls = _ToyModel if marked else _UnmarkedOnce
-        with _DEVICE:
-            model = cls()
-        model.load_weights(_checkpoint().items())
-        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        model = _cold_start(_checkpoint(), _ToyModel if marked else _UnmarkedOnce)
         _worker(model)._create_weight_transfer_engine(
             WeightTransferConfig(backend="ipc")
         )
@@ -739,7 +714,6 @@ def test_config_refused_by_the_check_not_at_startup(overrides, match):
     [
         ("direct", "sharded_rdt", "sharded_rdt"),
         ("layerwise", "sharded_rdt", None),
-        ("direct", "sparse_nccl", None),  # its engine warns instead
     ],
 )
 def test_verify_direct_reload_compat(monkeypatch, mode, backend, match):

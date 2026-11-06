@@ -87,8 +87,7 @@ def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor
 
 
 def _config_refusal(vllm_config: VllmConfig) -> str | None:
-    """Why ``vllm_config`` cannot reload directly. Checked with the model, so
-    a server that never updates its weights starts with any of these."""
+    """Why ``vllm_config`` cannot reload directly."""
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -129,14 +128,10 @@ def _config_refusal(vllm_config: VllmConfig) -> str | None:
 def check_direct_reload_support(
     model: torch.nn.Module, vllm_config: VllmConfig | None = None
 ) -> None:
-    """Raise if ``model`` (or ``vllm_config``, by default the current one) is
-    known to reload incorrectly with direct reload; warn once per class if the
-    model is not validated (`SupportsDirectReload`).
-
-    Called when the weight-transfer engine is created and in
-    `begin_direct_reload`. A refusal is read fresh each time: runtime flags
-    may change after load (specialized decode built later, mono decode turned
-    off). Config-time refusal: sharded_rdt, in VllmConfig."""
+    """Raise if ``model`` or ``vllm_config`` (default: the current one) is
+    known to reload incorrectly; warn once per class for a model that is not
+    `SupportsDirectReload`. Runs at weight-transfer engine creation and in
+    `begin_direct_reload`, so a server that never updates is not refused."""
     from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
         FusedMoEModularMethod,
     )
@@ -158,12 +153,6 @@ def check_direct_reload_support(
                     f"direct reload: {type(obj).__name__} is not supported "
                     f"({name or 'model'}): {reason or 'no reason given'}"
                 )
-        # fused shared experts quantized online under a pre-quantized method:
-        # post-load processing deletes the staging parameters a reload loads
-        if getattr(module, "shared_expert_online_loader", None) is not None:
-            raise RuntimeError(
-                f"direct reload: online quantization is not supported ({name})"
-            )
     if not supports_direct_reload(type(model)):
         logger.warning_once(
             "direct reload: %s is not validated with direct reload (it does "

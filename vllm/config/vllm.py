@@ -1272,10 +1272,7 @@ class VllmConfig:
                     )
 
     def _verify_direct_reload_compat(self) -> None:
-        """Reject configurations that direct weight reload cannot support.
-        Other refusals are checked with the model when updates are set up
-        (`check_direct_reload_support`), so a server that never updates is
-        not refused."""
+        """Reject configurations that direct weight reload cannot support."""
         # not `direct_reload_enabled()`: importing it would load the model
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":

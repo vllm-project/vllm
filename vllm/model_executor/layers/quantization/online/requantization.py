@@ -38,6 +38,10 @@ class OnlineRequantizationMixin:
     # Only the MXFP4 online methods honor an activation override for now.
     accepts_activation_override: bool = False
 
+    # finish clears the guard that keeps it from requantizing converted bytes
+    supports_direct_reload = False
+    direct_reload_unsupported_reason: str | None = "online quantization"
+
     @classmethod
     def resolve_activation_quant_key(
         cls, activation_quant_key: QuantKey | None, explicit: bool
