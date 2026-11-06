@@ -96,6 +96,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
             get_attn_backend=lambda backend=backend: backend,
             is_draft_layer=False,
+            kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(
@@ -129,6 +130,7 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
             get_kv_cache_spec=lambda _: spec,
             get_attn_backend=lambda: backend,
             is_draft_layer=name == "draft",
+            kv_sharing_target_layer_name=None,
         )
         for name in ("target", "draft")
     }
@@ -276,7 +278,9 @@ def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
     backend = FlashInferMLASparseTRTLLMBackend
     config: Any = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         use_v2_model_runner=True,
     )
@@ -339,6 +343,7 @@ def test_dsv41_sparse_builders_keep_varlen_decode_graphs_only(
         speculative_config=SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         use_v2_model_runner=True,
     )

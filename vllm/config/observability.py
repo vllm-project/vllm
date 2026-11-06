@@ -4,14 +4,13 @@
 import math
 from functools import cached_property
 from itertools import pairwise
-from typing import Any, Literal
+from typing import Literal
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
 
 from vllm import version
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config
 
 DetailedTraceModules = Literal["model", "worker", "all"]
 
@@ -125,22 +124,14 @@ class ObservabilityConfig:
             or "all" in self.collect_detailed_traces
         )
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     @field_validator("show_hidden_metrics_for_version")
     @classmethod
