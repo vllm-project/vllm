@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -69,9 +70,15 @@ class RocmAttentionMetadata:
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
+    # Per-layer dense [num_blocks, num_kv_heads, block_size] scale tables that
+    # the AITER asm decode reads for an fp8 cache; None when it is unused.
+    k_scale: dict[str, torch.Tensor] | None = None
+    v_scale: dict[str, torch.Tensor] | None = None
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    kv_cache_spec: AttentionSpec
 
     def __init__(
         self,
@@ -90,6 +97,50 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        self.use_aiter_asm_decode = (
+            bool(rocm_aiter_ops.is_mha_enabled())
+            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+            and self.block_size == 16
+            and kv_cache_spec.head_size == 128
+        )
+        self.k_scale: dict[str, torch.Tensor] | None = None
+        self.v_scale: dict[str, torch.Tensor] | None = None
+
+    def _build_aiter_kv_scale_tables(self) -> None:
+        # Map each layer to the shared table for its per-tensor scale, shaped by
+        # this group's spec, once its KV cache is bound; until then keep HIP.
+        if self.k_scale is not None or not self.use_aiter_asm_decode:
+            return
+        from vllm.v1.attention.backends.rocm_aiter_fa import (
+            AiterFlashAttentionMetadataBuilder,
+        )
+
+        tables = AiterFlashAttentionMetadataBuilder.asm_kv_scale_tables
+        attn_layers = self.vllm_config.compilation_config.static_forward_context
+        k_scale_tables: dict[str, torch.Tensor] = {}
+        v_scale_tables: dict[str, torch.Tensor] = {}
+        for layer_name in self.layer_names:
+            layer = attn_layers[layer_name]
+            kv_cache = getattr(layer, "kv_cache", None)
+            if not isinstance(kv_cache, torch.Tensor) or kv_cache.numel() == 0:
+                return
+            num_blocks = kv_cache.shape[0]
+            k_scale_tables[layer_name] = tables.get(
+                self.device,
+                num_blocks,
+                self.kv_cache_spec.num_kv_heads,
+                self.block_size,
+                layer._k_scale_float,
+            )
+            v_scale_tables[layer_name] = tables.get(
+                self.device,
+                num_blocks,
+                self.kv_cache_spec.num_kv_heads,
+                self.block_size,
+                layer._v_scale_float,
+            )
+        self.k_scale, self.v_scale = k_scale_tables, v_scale_tables
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -120,6 +171,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        self._build_aiter_kv_scale_tables()
 
         attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -130,6 +182,8 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             causal=common_attn_metadata.causal,
+            k_scale=self.k_scale,
+            v_scale=self.v_scale,
         )
         return attn_metadata
 
@@ -312,6 +366,30 @@ class RocmAttentionImpl(AttentionImpl):
 
         self._use_interleaved_v_cache = False
 
+        # fp8 cache with 16-token blocks matches the AITER asm decode layout;
+        # its ultra-precision kernel only exists for GQA ratios up to 8.
+        self._use_aiter_asm_decode = (
+            bool(rocm_aiter_ops.is_mha_enabled())
+            and attn_type == AttentionType.DECODER
+            and kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and head_size == 128
+            and 1 <= self.num_queries_per_kv <= 8
+            and alibi_slopes is None
+            and sinks is None
+            and self.sliding_window == (-1, -1)
+        )
+        # Same cut as AITER's own asm/HIP choice; below it the HIP kernel here
+        # is as fast and more accurate on an fp8 cache.
+        self._aiter_asm_min_heads = (
+            2 * num_compute_units() if self._use_aiter_asm_decode else 0
+        )
+        if self._use_aiter_asm_decode:
+            logger.info_once(
+                "ROCM_ATTN: using AITER asm paged attention for pure-decode "
+                "batches above %d query heads with an fp8 KV cache.",
+                self._aiter_asm_min_heads,
+            )
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -361,6 +439,34 @@ class RocmAttentionImpl(AttentionImpl):
             sinks=self.sinks,
         )
         return output
+
+    def _forward_aiter_asm_decode(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: RocmAttentionMetadata,
+    ) -> None:
+        # V [blocks, kv_heads, head_size, 16] is AITER's shuffled V with one
+        # 16-token group, so unsqueeze gives its [blocks, kv_heads, 1, hs, 16].
+        assert attn_metadata.k_scale is not None
+        assert attn_metadata.v_scale is not None
+        num_seqs = attn_metadata.num_actual_tokens
+        block_table = attn_metadata.block_table[:num_seqs]
+        rocm_aiter_ops.pa_fwd_asm(
+            Q=query[:num_seqs],
+            K=key_cache,
+            V=value_cache.unsqueeze(2),
+            block_tables=block_table,
+            context_lens=attn_metadata.seq_lens[:num_seqs],
+            block_tables_stride0=block_table.stride(0),
+            K_QScale=attn_metadata.k_scale[layer.layer_name],
+            V_QScale=attn_metadata.v_scale[layer.layer_name],
+            out_=output[:num_seqs],
+            high_precision=2,
+        )
 
     def forward(
         self,
@@ -446,6 +552,23 @@ class RocmAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
+
+        if (
+            self._use_aiter_asm_decode
+            and max_seqlen_q == 1
+            and num_actual_tokens * self.num_heads > self._aiter_asm_min_heads
+            and attn_metadata.k_scale is not None
+            and attn_metadata.causal
+            and output_scale is None
+            and query.dtype == torch.bfloat16
+            and max_seqlen_k <= 128 * 1024
+            and key_cache.shape[3] == 16
+            and has_native_kv_cache_layout(key_cache, value_cache)
+        ):
+            self._forward_aiter_asm_decode(
+                layer, query, key_cache, value_cache, output, attn_metadata
+            )
+            return output
 
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(

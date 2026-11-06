@@ -4696,12 +4696,16 @@ class rocm_aiter_ops:
         K_QScale: torch.Tensor,
         V_QScale: torch.Tensor,
         out_: torch.Tensor,
+        high_precision: int = 1,
     ):
         """Paged attention forward pass using assembly kernel.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
         even when VLLM_ROCM_USE_AITER=0.
+
+        high_precision selects the kernel variant: 1 prefers the high-precision
+        kernel and falls back to others, 2 requires the ultra-precision one.
 
         Note: This performs lazy import of aiter.pa_fwd_asm
         """
@@ -4717,6 +4721,7 @@ class rocm_aiter_ops:
             K_QScale=K_QScale,
             V_QScale=V_QScale,
             out_=out_,
+            high_precision=high_precision,
         )
 
     @staticmethod
