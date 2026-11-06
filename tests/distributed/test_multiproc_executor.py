@@ -16,7 +16,6 @@ from tests.utils import multi_gpu_test
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor import multiproc_executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -98,19 +97,6 @@ def create_vllm_config(
         vllm_config.parallel_config.disable_custom_all_reduce = True
 
     return vllm_config
-
-
-def create_test_scheduler_output(num_requests: int = 1) -> SchedulerOutput:
-    """Create a minimal SchedulerOutput for testing."""
-    # This is a simplified version - in practice you'd need proper
-    # SchedulerOutput construction based on the actual vLLM v1 API
-    return SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_resumed_reqs=[],
-        scheduled_running_reqs=[],
-        num_scheduled_tokens={},
-        total_num_scheduled_tokens=0,
-    )
 
 
 def test_multiproc_executor_initialization():
