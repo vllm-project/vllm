@@ -70,6 +70,55 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
+After warmup, the daemon releases its communication resources and, on CUDA,
+cached cuBLAS workspaces before accepting engine connections. The model weights
+remain resident for CUDA IPC sharing. This reduces the daemon's GPU memory
+overhead; the amount reclaimed depends on the model and allocator state.
+
+### Seeding warmup caches between daemons (D2D)
+
+A fresh daemon replica — a new node joining a fleet, a restarted preload
+set — would normally pay the autotune pass itself. With a seed source
+configured, each daemon rank fetches its rank-matched warmup caches from the
+source replica over an authenticated TCP control plane before tuning,
+validates them, and installs them into its own on-disk cache, so its warmup
+skips the profiling sweep. Any failure (unreachable, missing, incompatible)
+falls back to local tuning.
+
+Source replica:
+
+```bash
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --seed-listen-host 0.0.0.0 --seed-listen-port 29600 \
+    --seed-token "$TOKEN"
+```
+
+Mirror replica (possibly on another node):
+
+```bash
+vllm preload --model /path/to/model --tensor-parallel-size 4 \
+    --seed-source-host <source-host> --seed-source-port 29600 \
+    --seed-token "$TOKEN"
+```
+
+Each rank binds and dials `base_port + group offset + its global rank`, so one
+`host:base_port` pair covers a whole replica, including the draft daemon group
+when speculative decoding is configured.
+
+The exchange is keyed by the on-disk cache layout: a request names the cache
+by kind, configuration hash, DP rank and world rank, and the source resolves
+it to files under its cache root. Before installing, the target rejects a
+payload whose FlashInfer environment metadata (GPU, CUDA/cuDNN stack) differs
+from its own — such a table would never load anyway, and a hard conflict is
+never overwritten, which would poison the cache file into re-tuning on every
+start. Tables are shareable across vLLM versions as long as the configuration
+hash matches.
+
+The channel is a generic seeding point: warmup caches are the first kind, and
+further daemon state (e.g. Triton warmup caches or weight manifests) plugs in
+as additional kinds — small JSON payloads travel inline, while large binary
+state rides the data plane.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
@@ -91,6 +140,12 @@ vllm preload --model /path/to/model --tensor-parallel-size 4
 Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
+
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory; fallback does not
+stop the daemon or release its cached weights in zero-copy mode.
 
 ## Multi-node and data parallelism
 
@@ -193,10 +248,33 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   passes, and a table tuned on the draft model would key on the draft's
   config, which no engine looks up), so those deployments' first engine
   tunes and fills the cache instead.
+- **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
+  seeded; single-rank daemons use FlashInfer's managed v2 store and always
+  tune in place. Seeding requires a trusted network — the TCP channel is
+  authenticated by a shared token but unencrypted.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
+  Online `fp8_per_tensor`, `fp8_per_channel`, and `fp8_per_block` dense
+  linear layers support CUDA IPC with the CUTLASS linear backend. Set
+  `--kernel-config '{"linear_backend": "cutlass"}'` on both the daemon and
+  engine; the block variant additionally requires a GPU supported by the
+  CUTLASS block-FP8 kernel. Online `mxfp8` linear layers can reuse weights
+  with an MXFP8 kernel that supports pre-processed weights, including
+  FlashInfer CUTLASS on Blackwell.
+  The engine reuses the quantized weights and scales without running online
+  quantization again. This does not enable online MoE quantization or
+  conversion from an already quantized checkpoint.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
+  ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
+  CUTLASS, the daemon fuses activation scales once; engines reuse the fused
+  scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
@@ -214,6 +292,13 @@ processes owned by the same user:
   directory is additionally rejected if it is group/world accessible.
 - On Linux the daemon verifies the connecting peer's UID via `SO_PEERCRED`.
 
+The optional daemon-to-daemon listener (`--seed-listen-*`) is a
+separate TCP channel: requests are JSON-only and size-capped, authenticate
+with the shared `--seed-token` (constant-time comparison), and
+an unauthenticated peer that stops sending is cut off by a whole-message
+deadline instead of blocking the accept loop. The channel is unencrypted —
+bind it to a trusted network.
+
 See the [security documentation](../usage/security.md) for vLLM's general
 threat model.
 
@@ -221,10 +306,18 @@ threat model.
 
 - Each GPU's socket path is guarded by an exclusive lock file, so a second
   daemon for the same GPU fails fast instead of clobbering the live socket.
-- `vllm preload` reports readiness once every rank is serving; if any rank
-  dies during startup, the remaining ranks are terminated and the command
-  exits with that rank's exit code.
+- `vllm preload` reports readiness once every rank is serving. If any rank
+  exits during startup or serving, the launcher terminates and reaps the
+  remaining ranks, stops its health endpoint, and exits with a nonzero status.
+  The failing rank's nonzero exit code is preserved. Signal failures use
+  `128 + signal number` (for example, 137 for `SIGKILL`); an unexpected clean
+  rank exit is reported as status 1. Restart the entire preload group before
+  attaching new engines.
 - `SIGINT`/`SIGTERM` to the `vllm preload` process terminates all daemon
-  ranks, which unlinks their sockets and releases the GPU memory.
+  ranks and exits with status 130/143.
+- In either shutdown path, ranks that do not stop within ten seconds are
+  killed and reaped, releasing their GPU memory. A forcibly
+  terminated rank may leave a stale socket; the next daemon replaces it
+  after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.

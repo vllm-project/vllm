@@ -9,6 +9,8 @@ sparse engine does not have to subclass the dense one.
 """
 
 import socket
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -28,6 +30,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
+from vllm.platforms import current_platform
 from vllm.utils.nccl import unpinned_nccl_env
 
 
@@ -125,8 +128,39 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
+def build_worker_init_payload(
+    init_info: "NCCLRendezvous",
+    *,
+    packed: bool = False,
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+) -> dict:
+    # Workers sit at rank_offset 1, after the single trainer sender rank 0.
+    worker_init_info = NCCLWeightTransferInitInfo(
+        master_address=init_info.master_address,
+        master_port=init_info.master_port,
+        rank_offset=1,
+        world_size=init_info.world_size,
+        packed=packed,
+        packed_buffer_size_bytes=packed_buffer_size_bytes,
+        packed_num_buffers=packed_num_buffers,
+    )
+    return worker_init_payload(worker_init_info)
+
+
+def run_trainer_rendezvous(
+    *, init_worker: Callable[[], None], init_trainer: Callable[[], None]
+) -> None:
+    # Workers and trainer must enter the rendezvous concurrently, so run the
+    # worker initialization RPC in a thread while opening the trainer endpoint.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(init_worker)
+        init_trainer()
+        future.result()
+
+
 class NCCLRendezvous(Protocol):
-    """The TCP rendezvous fields `trainer_init` needs.
+    """The TCP rendezvous fields used by trainer initialization helpers.
 
     Structural so each backend can keep its own trainer init info next to its
     engine (dense `NCCLTrainerInitInfo`, `SparseNCCLTrainerInitInfo`) without
@@ -136,6 +170,16 @@ class NCCLRendezvous(Protocol):
     master_address: str
     master_port: int
     world_size: int
+
+
+def _require_usable_communicator(comm: "PyNcclCommunicator") -> "PyNcclCommunicator":
+    """A disabled communicator makes every broadcast a no-op (stale weights)."""
+    if comm.disabled:
+        raise RuntimeError(
+            f"PyNccl communicator is disabled on {current_platform.device_type}; "
+            "NCCL weight transfer would be a no-op."
+        )
+    return comm
 
 
 def stateless_init_metadata_group(
@@ -178,7 +222,7 @@ def stateless_init_process_group(
         host=master_address, port=master_port, rank=rank, world_size=world_size
     )
     with unpinned_nccl_env():
-        return PyNcclCommunicator(pg, device=device)
+        return _require_usable_communicator(PyNcclCommunicator(pg, device=device))
 
 
 def uid_init_process_group(
@@ -195,11 +239,13 @@ def uid_init_process_group(
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
     with unpinned_nccl_env():
-        return PyNcclCommunicator.from_unique_id_bytes(
-            nccl_unique_id_bytes,
-            rank=rank,
-            world_size=world_size,
-            device=device,
+        return _require_usable_communicator(
+            PyNcclCommunicator.from_unique_id_bytes(
+                nccl_unique_id_bytes,
+                rank=rank,
+                world_size=world_size,
+                device=device,
+            )
         )
 
 
@@ -272,9 +318,8 @@ def trainer_init(
             - master_address: str
             - master_port: int
             - world_size: int
-        rank: This trainer process's rank in the group. The broadcast backends
-            have a single trainer at rank 0; multi-rank trainers (m2n) occupy
-            ranks `[0, num_trainer_ranks)` and the workers start after them.
+        rank: This trainer process's rank in the group. Trainer ranks occupy
+            `[0, num_trainer_ranks)` and the workers start after them.
 
     Returns:
         PyNcclCommunicator for weight transfer.
