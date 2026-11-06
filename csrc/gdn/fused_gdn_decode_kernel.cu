@@ -92,8 +92,6 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-// DSpark K=8 needs 9 tokens (8 drafts + 1 bonus). Shared memory is static, so
-// the 48KB per-block limit caps this (fp32 state uses ~45.6KB at 9 tokens).
 constexpr int kMaxMtpTokens = 9;
 constexpr int kDtBiasFloat32 = 0;
 constexpr int kDtBiasBFloat16 = 1;
@@ -155,30 +153,6 @@ __device__ __forceinline__ Sum2 warp_reduce_sum_pair(float x, float y) {
 // SplitV > 1 splits the V rows of one (request, value head) over a cluster of
 // SplitV CTAs along blockIdx.z, so small batches fill more SMs. The gated
 // RMSNorm over V then needs the partial sums of the other CTAs (via DSMEM).
-__device__ __forceinline__ void cluster_sync() {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  cg::this_cluster().sync();
-#else
-  __trap();
-#endif
-}
-
-template <int SplitV>
-__device__ __forceinline__ float cluster_sum(float* local, int index) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-  cg::cluster_group cluster = cg::this_cluster();
-  float total = 0.0f;
-  #pragma unroll
-  for (int rank = 0; rank < SplitV; ++rank) {
-    total += cluster.map_shared_rank(local, rank)[index];
-  }
-  return total;
-#else
-  __trap();
-  return 0.0f;
-#endif
-}
-
 template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
           int SplitV>
 __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
@@ -425,13 +399,22 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       shared_sum_square[t] = sum_square;
     }
   }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // Sum the partial sums of squares of all CTAs in the cluster via DSMEM.
   if constexpr (SplitV > 1) {
-    cluster_sync();
+    cg::cluster_group cluster = cg::this_cluster();
+    cluster.sync();
     for (int t = warp; t < num_tokens; t += kWarps) {
-      write_token(t, cluster_sum<SplitV>(shared_sum_square, t));
+      float sum_square = 0.0f;
+  #pragma unroll
+      for (int rank = 0; rank < SplitV; ++rank) {
+        sum_square += cluster.map_shared_rank(shared_sum_square, rank)[t];
+      }
+      write_token(t, sum_square);
     }
-    cluster_sync();  // keep shared_sum_square alive for remote readers
+    cluster.sync();  // keep shared_sum_square alive for remote readers
   }
+#endif
 }
 
 // Split V over a cluster while the split grid still fits in one wave (2 CTAs
