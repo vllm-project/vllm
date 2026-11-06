@@ -489,7 +489,7 @@ You can enable or disable normalize via `use_activation`.
     {"object":"error","message":"Model \"BAAI/bge-m3\" does not support matryoshka representation, changing output dimensions will lead to poor results.","type":"BadRequestError","param":null,"code":400}
     ```
 
-For supported models, `dimensions` must not exceed the model's output embedding size, which can differ from its hidden size. Models with `matryoshka_dimensions` also restrict requests to the listed values. For example, `voyageai/voyage-4-nano` supports `dimensions=2048` even though its hidden size is 1024.
+For supported models, `dimensions` must not exceed the model's output embedding size, which can differ from its hidden size. For example, `voyageai/voyage-4-nano` supports `dimensions=2048` even though its hidden size is 1024. Models with `matryoshka_dimensions` also restrict requests to the listed values.
 
 #### Manually enable Matryoshka Embeddings
 

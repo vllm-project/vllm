@@ -2171,6 +2171,7 @@ class ModelConfig:
         if override is not None:
             return override
 
+        # Check for embedding_dim set by model config (e.g., embedding gemma-2).
         emb_dim = getattr(self.hf_text_config, "embedding_dim", None)
         if emb_dim is None:
             emb_dim = getattr(self.hf_config, "embedding_dim", None)

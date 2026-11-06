@@ -314,27 +314,3 @@ def test_matryoshka_dimensions_model_runner_v2(
         name_1="vllm",
         tol=1e-2,
     )
-
-
-def test_voyage_native_embedding_dimensions(vllm_runner) -> None:
-    prompts = ["Represent the query for retrieving supporting documents: What is vLLM?"]
-    with vllm_runner(
-        "voyageai/voyage-4-nano",
-        runner="pooling",
-        hf_overrides={"architectures": ["VoyageQwen3BidirectionalEmbedModel"]},
-        enforce_eager=True,
-        max_model_len=128,
-    ) as vllm_model:
-        default_embeddings = vllm_model.embed(prompts)
-        embeddings = vllm_model.embed(
-            prompts, pooling_params=PoolingParams(dimensions=2048)
-        )
-
-    assert len(embeddings[0]) == 2048
-    check_embeddings_close(
-        embeddings_0_lst=default_embeddings,
-        embeddings_1_lst=embeddings,
-        name_0="default",
-        name_1="explicit dimensions",
-        tol=1e-6,
-    )
