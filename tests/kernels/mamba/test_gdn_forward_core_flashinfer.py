@@ -18,6 +18,7 @@ actual row the layer fails to write shows up.
 
 import dataclasses
 import functools
+import itertools
 import types
 from unittest.mock import patch
 
@@ -40,18 +41,21 @@ from tests.v1.attention.utils import (  # noqa: E402
     create_vllm_config,
 )
 from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
+from vllm.distributed.parallel_state import (  # noqa: E402
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.model_executor.layers.mamba.checkpoint import (  # noqa: E402
-    MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
 )
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
-    ChunkGatedDeltaRule,
     QwenGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
 )
+from vllm.utils.network_utils import get_open_port  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
     GDNFlashInferCheckpointPlan,
@@ -72,7 +76,17 @@ def _builder(backend: str, num_spec: int = 0):
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
-        hf_config_override={"linear_key_head_dim": K},
+    )
+    # Qwen3.5 is multimodal; the GDN dims live on the text config, and
+    # create_vllm_config's override would only touch the top-level config.
+    cfg.model_config.hf_text_config.update(
+        {
+            "linear_num_key_heads": H,
+            "linear_num_value_heads": HV,
+            "linear_key_head_dim": K,
+            "linear_value_head_dim": V,
+            "linear_conv_kernel_dim": CONV_KERNEL,
+        }
     )
     cfg.additional_config = {"gdn_prefill_backend": backend}
     if num_spec:
@@ -94,42 +108,41 @@ def _builder(backend: str, num_spec: int = 0):
     return cfg, builder
 
 
-class _LayerShim(types.SimpleNamespace):
-    """Layer state stand-in that binds the real ``QwenGatedDeltaNetAttention``
-    instance methods on access (data attributes come from the namespace), so
-    new helper methods used by ``_forward_core`` resolve to the real class
-    instead of needing to be listed here."""
+# Layers register in their VllmConfig's static_forward_context, which rejects
+# duplicate names; several runs share one config.
+_layer_idx = itertools.count(1)
 
-    def __getattr__(self, name):
-        attr = getattr(QwenGatedDeltaNetAttention, name, None)
-        if callable(attr):
-            return types.MethodType(attr, self)
-        raise AttributeError(name)
+
+@pytest.fixture(autouse=True)
+def _init_single_rank(default_vllm_config):
+    """The real layer builds TP-sharded projections; give them world size 1.
+
+    tests/conftest.py tears the groups down after every test, so re-init
+    idempotently.
+    """
+    if not torch.distributed.is_initialized():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            # One rank needs no NCCL communicator (and NCCL's device probing
+            # conflicts with cgroup-restricted GPUs).
+            backend="gloo",
+            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+        )
+    ensure_model_parallel_initialized(1, 1)
 
 
 def _layer(cfg, weights, conv_state, ssm_state, packed_decode=False):
-    layer = _LayerShim(
-        prefix=PREFIX,
-        enable_packed_recurrent_decode=packed_decode,
-        tp_size=1,
-        num_k_heads=H,
-        num_v_heads=HV,
-        head_k_dim=K,
-        head_v_dim=V,
-        key_dim=H * K,
-        value_dim=HV * V,
-        activation="silu",
-        A_log=weights["A_log"],
-        dt_bias=weights["dt_bias"],
-        # Production conv1d is ColumnParallelLinear(bias=False).
-        conv1d=types.SimpleNamespace(weight=weights["conv_weight"], bias=None),
-        kv_cache=(conv_state, ssm_state),
-        _checkpoint_buffer_spec=((64, HV, V, K), torch.float32),
-        _checkpoint_exporter=MambaPrefillCheckpointExporter(state_len=CONV_KERNEL - 1),
-    )
-    with set_current_vllm_config(cfg):
-        layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
-    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
+    prefix = f"model.layers.{next(_layer_idx)}.linear_attn"
+    with set_current_vllm_config(cfg), torch.device("cuda"):
+        layer = QwenGatedDeltaNetAttention(cfg.model_config.hf_text_config, cfg, prefix)
+    # The runner assigns the cache tensors the same way (MambaBase.kv_cache).
+    layer.kv_cache = (conv_state, ssm_state)
+    layer.enable_packed_recurrent_decode = packed_decode
+    layer.conv1d.weight.data = weights["conv_weight"].clone()
+    layer.A_log.data = weights["A_log"].clone()
+    layer.dt_bias.data = weights["dt_bias"].clone()
     return layer
 
 
@@ -147,7 +160,7 @@ def _run(cfg, meta, weights, inputs, conv_state0, ssm_state0, packed_decode=Fals
     def pad(x):
         return torch.cat([x, torch.zeros_like(x[:PAD])])
 
-    ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta})
+    ctx = types.SimpleNamespace(attn_metadata={layer.prefix: meta})
     with patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=ctx):
         layer._forward_core(
             mixed_qkv=pad(mixed_qkv), b=pad(b), a=pad(a), core_attn_out=core_attn_out
@@ -299,6 +312,11 @@ def test_flashinfer_checkpointed_prefill_pool_matches_gather(
     with set_current_vllm_config(fi_cfg):
         meta = fi_builder.build(common_prefix_len=0, common_attn_metadata=common)
     assert meta.prefill_initial_state_mode == ("all" if cached else "none")
+
+    # Checkpoint export needs the layer's align-mode machinery (exporter and
+    # workspace buffer spec).
+    fi_cfg.cache_config.mamba_cache_mode = "align"
+    fi_cfg.cache_config.mamba_block_size = BLOCK_SIZE
 
     # One checkpoint per prefill row, each in a free cache slot.
     offsets = [0] * num_decodes + [192, 128][: len(prefill_lens)]
