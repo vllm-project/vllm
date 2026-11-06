@@ -538,6 +538,7 @@ class DotsVisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        pos_ids = pos_ids.to(rotary_pos_emb_full.device)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
