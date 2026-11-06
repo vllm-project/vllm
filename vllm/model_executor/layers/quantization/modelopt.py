@@ -1081,7 +1081,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             if amax is None:
                 continue
             retire_parameter(layer, f"{prefix}_input_amax")
-            if is_weights_pre_processed() or self.per_token_activation:
+            if is_weights_pre_processed() or self.per_token_activation or self.use_a16:
                 continue
             value = amax.item()
             if not (math.isfinite(value) and value > 0):
