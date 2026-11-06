@@ -406,7 +406,7 @@ REFIT_CASES = [
             pytest.mark.xfail(
                 strict=True,
                 reason="FlashInfer keeps the bmm1/bmm2 scales of the first "
-                "forward after k/v scales change (vllm#61287 fixes eager and "
+                "forward after k/v scales change (vllm#65353 fixes eager and "
                 "piecewise decode; FULL-graph decode still captures them)",
             ),
         ),
