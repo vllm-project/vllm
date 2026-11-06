@@ -21,6 +21,8 @@ from vllm.lora.layers.custom_layer import (
     DeepseekV4CompressorKVScoreWithLoRA,
     DeepseekV4GroupedWoAWithLoRA,
     Glm5NextIndexerWkWeightsWithLoRA,
+    MLAKVBProjWithLoRA,
+    MLAKVBProjWithShardedLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "Step5FusedQKVIndexerWithLoRA",
     "Step5SparseIndexerWWithLoRA",
     "Glm5NextIndexerWkWeightsWithLoRA",
+    "MLAKVBProjWithLoRA",
+    "MLAKVBProjWithShardedLoRA",
     "VocabParallelEmbeddingWithLoRA",
     "LogitsProcessorWithLoRA",
     "ColumnParallelLinearWithLoRA",
