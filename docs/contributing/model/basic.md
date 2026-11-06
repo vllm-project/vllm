@@ -39,7 +39,7 @@ The initialization code should look like this:
     class MyDecoderLayer(nn.Module):
         def __init__(self, vllm_config: VllmConfig, prefix: str):
             super().__init__()
-            self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
+            self.self_attn = MyAttention(vllm_config, prefix=f"{prefix}.self_attn")
 
     class MyModel(nn.Module):
         def __init__(self, vllm_config: VllmConfig, prefix: str):
@@ -60,7 +60,7 @@ The initialization code should look like this:
 
 ```python
 class MyModel(nn.Module):
-        ...
+    ...
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         ... 
@@ -145,6 +145,6 @@ For implementing new custom mamba-like layers, one should inherit from `MambaBas
 It is also necessary to implement the "attention meta-data" class which handles the meta-data that is common across all layers.
 Please see [`LinearAttentionMetadata`](../../../vllm/v1/attention/backends/linear_attn.py) or [`ShortConvAttentionMetadata`](../../../vllm/v1/attention/backends/short_conv_attn.py) for examples of this.
 It is also worth noting that we should update `MambaAttentionBackendEnum` in [`registry.py`](../../../vllm/v1/attention/backends/registry.py) when adding a new mamba backend.
-Finally, if one wants to support torch compile and CUDA graphs, it necessary to wrap the call to the mamba-like layer inside a custom op and register it.
+Finally, if one wants to support torch compile and CUDA graphs, it is necessary to wrap the call to the mamba-like layer inside a custom op and register it.
 Please see the calls to `direct_register_custom_op` in [vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py](../../../vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py) or [vllm/model_executor/layers/mamba/short_conv.py](../../../vllm/model_executor/layers/mamba/short_conv.py) for examples of this.
-The new custom op should then be added to the list `_attention_ops` in [vllm/config/compilation.py](../../../vllm/config/compilation.py) to ensure that piecewise CUDA graphs works as intended.
+The new custom op should then be added to the list `_attention_ops` in [vllm/config/compilation.py](../../../vllm/config/compilation.py) to ensure that piecewise CUDA graphs work as intended.
