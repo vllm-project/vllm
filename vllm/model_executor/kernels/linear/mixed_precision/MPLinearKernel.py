@@ -56,6 +56,13 @@ class MPLinearKernel(LinearKernel[MPLinearLayerConfig]):
             )
         return True, None
 
+    @classmethod
+    def max_fast_rows(cls, c: MPLinearLayerConfig) -> int | None:
+        """The most activation rows this kernel serves on its fast decode path,
+        or None if it has no such cutoff. A caller that also holds the layer's
+        unquantized weight can run that instead above this many rows."""
+        return None
+
     def __init__(
         self,
         c: MPLinearLayerConfig,

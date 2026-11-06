@@ -86,6 +86,26 @@ def test_tracks_bf16_head_through_logits_processor(
 
 
 @requires_cuda
+def test_copy_runs_source_head_past_kernel_fast_rows(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """Past the rows its kernel serves fast, the copy computes with the source
+    head instead, so a large draft batch is never slower than without it."""
+    head = _target_head(monkeypatch)
+    draft_head = quantized_lm_head_copy(head, INT4)
+    max_rows: int | None = getattr(draft_head.quant_method, "max_rows", None)
+    if max_rows is None:
+        pytest.skip("this platform's int4 kernel has no row cutoff")
+    assert max_rows is not None
+    logits_processor = LogitsProcessor(VOCAB)
+    hidden = torch.randn(max_rows + 1, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    ref = logits_processor(head, hidden)
+    assert torch.equal(logits_processor(draft_head, hidden), ref)
+    out = logits_processor(draft_head, hidden[:max_rows])
+    assert not torch.equal(out, ref[:max_rows])
+
+
+@requires_cuda
 @pytest.mark.parametrize("quantization", ["fp8", NVFP4, INT4])
 def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization
