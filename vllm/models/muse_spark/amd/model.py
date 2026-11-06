@@ -99,18 +99,6 @@ def _supports_router_bf16x3_device() -> bool:
     return on_gfx950()
 
 
-@functools.cache
-def _unpooler_uses_default_gemm() -> bool:
-    if not current_platform.is_rocm():
-        return False
-
-    # Importing a foreign platform can reload torch extension libraries.
-    from vllm.platforms.rocm import on_gfx950
-
-    # The default ROCm GEMM dispatch is benchmarked against F.linear on gfx950 only.
-    return on_gfx950()
-
-
 def norm_residual_then_norm(
     x: MuseSpark1xResidualStream,
     pre_norm: MuseSpark1xRMSNorm,
@@ -241,7 +229,9 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.unpooler",
         )
-        if not _unpooler_uses_default_gemm():
+        # The default unquantized GEMM dispatch is benchmarked against F.linear
+        # for the unpooler shape on ROCm only.
+        if not current_platform.is_rocm():
             self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
         if self.pooler is not None:
