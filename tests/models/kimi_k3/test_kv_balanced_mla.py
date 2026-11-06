@@ -451,6 +451,7 @@ def test_specialized_mla_core_policy():
     (q > 1) and from BALANCED_Q1_BATCH rows at q = 1 where the kernel runs,
     tokenspeed otherwise (both tokenspeed's kernel, the stock backend's; there is no
     trtllm-gen core); a named balanced core falls back where it can't run."""
+    pytest.importorskip("cutlass")
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.prepared import (
         BALANCED_Q1_BATCH,
         core_for,
@@ -498,6 +499,7 @@ def test_specialized_balanced_core_matches_reference(lengths, heads, q, cp):
     """The specialized decode's balanced MLA core (``BalancedMla``: TP8 / DCP8
     capacity, PDL launch, caller-owned output) against the FP32 reference, captured
     in a CUDA graph with the plan, as the decode step runs it."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import supports
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.balanced import (
         CAPACITY,
         BalancedMla,
@@ -505,6 +507,8 @@ def test_specialized_balanced_core_matches_reference(lengths, heads, q, cp):
 
     torch.manual_seed(0)
     device = torch.device("cuda")
+    if not supports(heads, q, device):
+        pytest.skip("this GPU runs the shape on M64 tiles, without the balanced core")
     dcp = cp[0] > 1
     local = [_shard_len(n, cp) for n in lengths]
     cache, block_table = _paged(
@@ -596,13 +600,15 @@ def test_specialized_balanced_core_bitwise_matches_tokenspeed(lengths, heads, q,
     a summation order); stock's own call is the TOKENSPEED_MLA backend's."""
     from tokenspeed_mla import tokenspeed_mla_decode
 
-    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KV_TILE
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KV_TILE, supports
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.balanced import (
         BalancedMla,
     )
 
     torch.manual_seed(0)
     device = torch.device("cuda")
+    if not supports(heads, q, device):
+        pytest.skip("this GPU runs the shape on M64 tiles, without the balanced core")
     world, rank, interleave = cp
     dcp = world > 1
     local = [_shard_len(n, cp) for n in lengths]
