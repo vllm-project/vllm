@@ -2008,7 +2008,6 @@ def test_put_credits_cover_d2h_cascades_and_load_readers(success):
     assert manager.get_put_admission_budget() == 4
     assert manager.prepare_store(keys, _CTX) is not None
     assert manager.get_put_admission_budget() == 0
-    assert manager.prepare_store(to_keys([10]), _CTX) is None
     manager.complete_store(keys, _CTX, success=success)
     if success:
         manager.prepare_load(keys, _CTX)
@@ -2035,7 +2034,7 @@ def test_put_credits_cover_parked_request_cascades():
         primary_kv_view=primary.get_kv_memoryview(),
         tier_type="test",
     )
-    tier.on_new_request = lambda ctx: RequestOffloadingContext(
+    tier.on_new_request = lambda ctx: RequestOffloadingContext(  # type: ignore[method-assign]
         policy=OffloadPolicy.REQUEST_LEVEL
     )
     manager = TieringOffloadingManager(primary, [tier])
@@ -2081,3 +2080,16 @@ def test_put_advisory_budget_reuses_step_poll_before_authoritative_store():
     assert tier.polls == 1
     assert manager.prepare_store(to_keys([1, 2]), _CTX) is not None
     assert tier.polls == 2
+
+
+def test_put_credits_do_not_gate_one_shot_stores():
+    # Partial-tail and boundary stores are never re-offered, so exhausted PUT
+    # credits must not reject them while the allocator still has room.
+    primary = CPUPrimaryTierOffloadingManager(8, _mock_mmap_region(8))
+    manager = TieringOffloadingManager(primary)
+    manager.configure_put_batching(2, 2, 0)
+    manager.on_new_request(_CTX)
+    assert manager.prepare_store(to_keys([0, 1]), _CTX) is not None
+    assert manager.get_put_admission_budget() == 0
+    output = manager.prepare_store(to_keys([10]), _CTX)
+    assert output is not None and output.keys_to_store == to_keys([10])

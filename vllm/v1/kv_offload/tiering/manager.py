@@ -949,23 +949,9 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 2: Store to primary tier (new chunks only).
         # Cascading of these newly-stored chunks to ALL secondary tiers
         # happens later in complete_store(), after the GPU→Primary transfer
-        # completes.
-        if hasattr(self, "_put_max_inflight"):
-            keys = list(dict.fromkeys(keys))
-            budget = self.get_put_admission_budget()
-            state = self._req_state[req_context.req_id]
-            # Existing keys also need credits if request-level cascades will
-            # newly pin them. Already charged keys consume no extra credit.
-            needed = sum(
-                key not in self._put_staging_keys
-                and (
-                    self.primary_tier._policy.get(key) is None
-                    or bool(state.request_level_tiers)
-                )
-                for key in keys
-            )
-            if needed > budget:
-                return None
+        # completes. PUT credits are advisory: the scheduler clips batched
+        # offers to them, while one-shot stores (partial tails, boundary
+        # handoffs, finished requests) rely on the allocator alone.
         primary_result = self.primary_tier.prepare_store(keys, req_context)
 
         if primary_result is None:
