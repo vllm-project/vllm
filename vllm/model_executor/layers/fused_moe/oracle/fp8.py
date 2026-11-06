@@ -9,6 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -38,8 +39,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    move_parameter,
+    refill_derived,
+    replace_parameter,
+    set_kernel_parameter,
+)
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -211,10 +218,12 @@ def backend_to_kernel_cls(
 
     elif backend == Fp8MoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterFp8BlockExperts,
+            AiterFp8ChannelExperts,
+            AiterFp8TensorExperts,
         )
 
-        return [AiterExperts]
+        return [AiterFp8BlockExperts, AiterFp8TensorExperts, AiterFp8ChannelExperts]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
@@ -406,11 +415,7 @@ def select_fp8_moe_backend(
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(backend: Fp8MoeBackend):
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
@@ -452,7 +457,7 @@ def select_fp8_moe_backend(
     if runner_backend != "auto":
         requested_backend = map_fp8_backend(runner_backend)
         # For batched activation format, use batched variants if available.
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             if requested_backend == Fp8MoeBackend.DEEPGEMM:
                 requested_backend = Fp8MoeBackend.BATCHED_DEEPGEMM
             elif requested_backend == Fp8MoeBackend.TRITON:
@@ -483,13 +488,20 @@ def select_fp8_moe_backend(
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
         else:
             backend = (
-                Fp8MoeBackend.DEEPGEMM
-                if activation_format == mk.FusedMoEActivationFormat.Standard
-                else Fp8MoeBackend.BATCHED_DEEPGEMM
+                Fp8MoeBackend.BATCHED_DEEPGEMM
+                if activation_format.is_batched
+                else Fp8MoeBackend.DEEPGEMM
             )
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
+    elif (model_config := get_current_vllm_config().model_config) is not None and (
+        should_auto_disable_deep_gemm(
+            getattr(model_config.hf_text_config, "model_type", None)
+        )
+    ):
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -608,26 +620,24 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
         )
 
-        # Online quantization has not installed the quantized tensors yet.
-        scale_name = (
-            "weight_scale_inv"
-            if hasattr(layer, "w13_weight_scale_inv")
-            else "weight_scale"
+        scale_name = stage_moe_weights_for_humming(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
-        for prefix, weight, scale, input_scale in (
-            ("w13", w13, w13_scale, w13_input_scale),
-            ("w2", w2, w2_scale, w2_input_scale),
-        ):
-            replace_parameter(layer, f"{prefix}_weight", weight)
-            replace_parameter(layer, f"{prefix}_{scale_name}", scale)
-            if input_scale is not None:
-                replace_parameter(layer, f"{prefix}_input_scale", input_scale)
 
         convert_to_humming_moe_kernel_format(
             layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
         )
+        if scale_name == "weight_scale_inv":
+            # One param under both names: the loaded `_inv` holds the runtime scale.
+            for prefix in ("w13", "w2"):
+                scale = layer._parameters.pop(f"{prefix}_weight_scale").data
+                move_parameter(
+                    layer, f"{prefix}_{scale_name}", f"{prefix}_weight_scale"
+                )
+                set_kernel_parameter(layer, f"{prefix}_weight_scale", scale)
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -778,15 +788,15 @@ def make_fp8_moe_quant_config(
         assert a1_scale is not None and a2_scale is not None
         g1_alphas = w1_scale * a1_scale
         g2_alphas = w2_scale * a2_scale
+        a1_gscale = 1.0 / a1_scale
+        a2_gscale = 1.0 / a2_scale
         if layer is not None:
-            layer.register_parameter(
-                "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
-            )
-            layer.register_parameter(
-                "g2_alphas", torch.nn.Parameter(g2_alphas, requires_grad=False)
-            )
+            replace_parameter(layer, "g1_alphas", g1_alphas)
+            replace_parameter(layer, "g2_alphas", g2_alphas)
             g1_alphas = layer.g1_alphas
             g2_alphas = layer.g2_alphas
+            a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
+            a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -794,8 +804,8 @@ def make_fp8_moe_quant_config(
             w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            a1_gscale=(1.0 / a1_scale),
-            a2_gscale=(1.0 / a2_scale),
+            a1_gscale=a1_gscale,
+            a2_gscale=a2_gscale,
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
             gemm1_clamp_limit=swiglu_limit,
@@ -830,6 +840,11 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        # TRTLLM fp8-block consumes activation scales as [K/128, M]; emit them
+        # transposed from the quant kernel instead of copying afterwards.
+        is_scale_transposed=(
+            fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and block_shape == [128, 128]
+        ),
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
@@ -850,13 +865,21 @@ def make_fp8_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        # CUTLASS block-FP8 experts quantize inside the kernel, so all-to-all
+        # carries BF16/FP16 activations rather than FP8 values and scales.
+        input_dtype=(
+            moe_config.in_dtype
+            if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and moe_quant_config.is_block_quantized
+            else None
+        ),
     )
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(

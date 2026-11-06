@@ -14,6 +14,7 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 def _make_mock_llm() -> LLM:
     llm = object.__new__(LLM)
+    llm.chat_template = None
     llm.model_config = SimpleNamespace(
         runner_type="generate", enable_prompt_embeds=False
     )

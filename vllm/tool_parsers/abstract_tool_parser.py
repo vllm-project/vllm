@@ -60,9 +60,9 @@ class ToolParser:
     # their parsed tool-call syntax matches a builtin xgrammar format.
     structural_tag_model: str | None = None
     # Strict level applied when the operator leaves ``--tool-strict-level``
-    # at auto. Operator flags override it, and
+    # unset. Operator flags override it, and
     # ``VLLM_ENFORCE_STRICT_TOOL_CALLING=0`` still disables structural tags.
-    default_tool_strict_level: ToolStrictLevel | None = None
+    default_tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
     engine_based_streaming: bool = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

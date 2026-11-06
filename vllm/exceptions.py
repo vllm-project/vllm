@@ -62,6 +62,12 @@ class VLLMNotFoundError(VLLMClientError):
     pass
 
 
+class ChatTemplateResolutionError(VLLMClientError):
+    """Raised when chat template resolution fails."""
+
+    pass
+
+
 class LoRAAdapterNotFoundError(VLLMNotFoundError):
     """Exception raised when a LoRA adapter is not found.
 
@@ -191,4 +197,19 @@ class ProfilerAlreadyActiveError(GracefulHTTPError):
             "A profiling session is already active. Call /stop_profile before "
             "starting another session.",
             HTTPStatus.CONFLICT,
+        )
+
+
+class EngineFaultedError(GracefulHTTPError):
+    """Raised when the engine has faulted and is awaiting FT recovery.
+
+    Returns HTTP 503 (Service Unavailable) so that load balancers and
+    client SDKs retry the request on a different instance.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "The engine has faulted and cannot accept new requests. "
+            "Please try again later or on a different instance.",
+            HTTPStatus.SERVICE_UNAVAILABLE,
         )

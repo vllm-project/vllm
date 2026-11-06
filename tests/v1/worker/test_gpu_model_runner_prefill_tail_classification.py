@@ -194,7 +194,6 @@ def test_prefill_continuation_keeps_placeholder_decode_zero_draft_becomes_zero(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={"decode_with_draft": [99]},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -239,7 +238,6 @@ def test_prefill_tail_of_two_or_three_tokens_also_keeps_the_placeholder(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={"decode_with_draft": [99]},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )

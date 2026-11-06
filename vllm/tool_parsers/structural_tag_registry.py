@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import CustomTool, FunctionTool, ToolChoiceCustom
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
@@ -39,7 +39,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
-from vllm.tool_parsers.utils import get_function_tools, require_function_tools
+from vllm.tool_parsers.utils import (
+    custom_tool_parameters,
+    get_function_tools,
+    require_function_tools,
+)
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -287,6 +291,11 @@ def _dump_tool_for_xgrammar(
         if tool.strict is not None:
             function["strict"] = tool.strict
         return {"type": "function", "function": function}
+    if isinstance(tool, CustomTool):
+        function = {"name": tool.name, "parameters": custom_tool_parameters()}
+        if tool.description is not None:
+            function["description"] = tool.description
+        return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
         return dumped_tool
@@ -306,7 +315,7 @@ def _dump_tool_choice_for_xgrammar(
     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
-    if isinstance(tool_choice, ToolChoiceFunction):
+    if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
         return {
             "type": "function",
             "function": {"name": tool_choice.name},
@@ -999,6 +1008,14 @@ _GLM_4_7_VALUE_EXCLUDES = [
 ]
 
 
+# Only scalar values are pinned as bare JSON. Array and object values stay raw
+# text: a JSON grammar there admits only JSON escapes after a backslash, so text
+# the model writes with bare backslashes (a Windows path) is forced into escapes
+# the model gives near-zero probability. The parser keeps the raw text when such
+# a value is not valid JSON.
+_GLM_4_7_JSON_SCALAR_TYPES = frozenset({"integer", "number", "boolean", "null"})
+
+
 def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
     if "enum" in prop:
         values = [
@@ -1007,16 +1024,11 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
         ]
         return values[0] if len(values) == 1 else OrFormat(elements=values)
     prop_type = prop.get("type")
-    if isinstance(prop_type, list):
-        formats = [
-            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
-        ]
-        if "string" in prop_type:
-            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
-        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
-    if prop_type in (None, "string"):
+    types = prop_type if isinstance(prop_type, list) else [prop_type]
+    if not types or not all(t in _GLM_4_7_JSON_SCALAR_TYPES for t in types):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
-    return JSONSchemaFormat(json_schema={"type": prop_type})
+    formats = [JSONSchemaFormat(json_schema={"type": t}) for t in types]
+    return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
 
 
 def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -1036,7 +1048,7 @@ def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
-    """Shallow tag for a non-strict tool: keys and basic value types pinned."""
+    """Shallow tag for a non-strict tool: keys and scalar value types pinned."""
     properties = _glm_4_7_plain_properties(tool.function.parameters or {})
     if properties is None:
         return TagFormat(

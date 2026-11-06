@@ -29,6 +29,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.kpool_compress import (
@@ -206,7 +207,12 @@ def _torch_reference(
                     k_off = page_base + loc_tok * HEAD_DIM + torch.arange(HEAD_DIM)
                 s_off = page_base + k_region + loc_tok * 4
                 kv_flat[k_off] = quantized.view(torch.uint8)
-                kv_flat[s_off : s_off + 4] = scale.detach().reshape(1).view(torch.uint8)
+                scale_bytes = scale.detach().reshape(1).view(torch.uint8)
+                if mqa_logits_use_mx_scales():
+                    # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+                    ue8m0 = scale.reshape(1).view(torch.int32) >> 23
+                    scale_bytes = ue8m0.to(torch.uint8).repeat(4)
+                kv_flat[s_off : s_off + 4] = scale_bytes
 
             # stash -- gated on the TOKEN-granular tail slot, not on pos_valid.
             # pos_valid keys off the pool-granular cache_loc, which is -1 for

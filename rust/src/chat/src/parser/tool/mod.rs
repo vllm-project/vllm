@@ -5,12 +5,15 @@
 
 use std::sync::{Arc, LazyLock};
 
+use vllm_tokenizer::DynTokenizer;
+
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
     HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MiMoToolParser,
     MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Qwen3CoderToolParser, Qwen3JsonToolParser, SeedOssToolParser, Step5ToolParser, ToolParser,
+    ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -39,13 +42,20 @@ pub mod names {
     pub const MISTRAL: &str = "mistral";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
     pub const QWEN3_CODER: &str = "qwen3_coder";
+    // The `<tool_call>`-wrapped JSON format of Qwen2.5, QwQ and Qwen3.
+    pub const QWEN3_JSON: &str = "qwen3_json";
+    // An alias of `qwen3_coder` for the same XML format.
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
+    pub const STEP5: &str = "step5";
 }
 
 /// Constructor signature for one registered tool parser implementation.
-type ToolParserCreator =
-    Arc<dyn Fn(&[ChatTool]) -> vllm_parser::tool::Result<Box<dyn ToolParser>> + Send + Sync>;
+type ToolParserCreator = Arc<
+    dyn Fn(&[ChatTool], DynTokenizer) -> vllm_parser::tool::Result<Box<dyn ToolParser>>
+        + Send
+        + Sync,
+>;
 
 /// Registry and model matcher for tool parsers.
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;
@@ -82,8 +92,10 @@ impl ToolParserFactory {
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
-            .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
+            .register_parser::<Qwen3CoderToolParser>(names::QWEN3_XML)
+            .register_parser::<Qwen3JsonToolParser>(names::QWEN3_JSON)
+            .register_parser::<Step5ToolParser>(names::STEP5)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
         factory
@@ -92,9 +104,9 @@ impl ToolParserFactory {
             .register_pattern("mimo-v2", names::MIMO)
             .register_pattern("qwen3-coder", names::QWEN3_CODER)
             .register_pattern("qwen3.5", names::QWEN3_CODER)
-            .register_pattern("qwq", names::HERMES)
-            .register_pattern("qwen2.5", names::HERMES)
-            .register_pattern("qwen3", names::QWEN3_XML)
+            .register_pattern("qwq", names::QWEN3_JSON)
+            .register_pattern("qwen2.5", names::QWEN3_JSON)
+            .register_pattern("qwen3", names::QWEN3_JSON)
             .register_pattern("hermes", names::HERMES)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
             // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,
@@ -122,6 +134,8 @@ impl ToolParserFactory {
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
+            .register_pattern("step-5", names::STEP5)
+            .register_pattern("step5", names::STEP5)
             .register_pattern("seed-oss", names::SEED_OSS)
             .register_pattern("seedoss", names::SEED_OSS);
 
@@ -137,14 +151,19 @@ impl ToolParserFactory {
     }
 
     /// Construct a parser from an exact name.
-    pub fn create(&self, name: &str, tools: &[ChatTool]) -> crate::Result<Box<dyn ToolParser>> {
+    pub fn create(
+        &self,
+        name: &str,
+        tools: &[ChatTool],
+        tokenizer: DynTokenizer,
+    ) -> crate::Result<Box<dyn ToolParser>> {
         let creator = self.creator(name).ok_or_else(|| crate::Error::ParserUnavailableByName {
             kind: "tool",
             name: name.to_string(),
             available_names: self.list(),
         })?;
 
-        creator.as_ref()(tools).map_err(|error| crate::Error::ParserInitialization {
+        creator.as_ref()(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "tool",
             name: name.to_string(),
             error: error.into(),
@@ -156,6 +175,7 @@ impl ToolParserFactory {
         &self,
         model_id: &str,
         tools: &[ChatTool],
+        tokenizer: DynTokenizer,
     ) -> crate::Result<Box<dyn ToolParser>> {
         let name = self.resolve_name_for_model(model_id).ok_or_else(|| {
             crate::Error::ParserUnavailableForModel {
@@ -163,7 +183,7 @@ impl ToolParserFactory {
                 model_id: model_id.to_string(),
             }
         })?;
-        self.create(name, tools)
+        self.create(name, tools, tokenizer)
     }
 }
 

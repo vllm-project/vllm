@@ -79,7 +79,7 @@ mock_if_no_torch(
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
-    VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
+    VERSIONS = dict(line.split()[0].split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
@@ -145,6 +145,7 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
     )
 
 
+bench_forward = auto_mock("vllm.benchmarks.forward", "main")
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_startup = auto_mock("vllm.benchmarks", "startup")
@@ -182,7 +183,7 @@ DownloadKernelsSubcommand = auto_mock(
     "vllm.entrypoints.cli.download_kernels", "DownloadKernelsSubcommand"
 )
 sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
-openai_cli_args = auto_mock("vllm.entrypoints.launchers", "cli_args")
+openai_cli_args = auto_mock("vllm.entrypoints.common", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.launchers", "run_batch")
 
 if TYPE_CHECKING:
@@ -340,6 +341,7 @@ pages = {
         False,
     ),
     "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
+    "cli/bench/forward.md": (create_parser(bench_forward.add_cli_args), True),
     "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
     # URL kept as `mm_processor` for back-compat; command name is `mm-processor`
     "cli/bench/mm_processor.md": (

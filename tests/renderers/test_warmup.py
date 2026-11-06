@@ -28,9 +28,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.exceptions import ChatTemplateResolutionError
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.base import BaseRenderer
-from vllm.renderers.chat_utils import ChatTemplateResolutionError
 from vllm.renderers.params import ChatParams
 
 
@@ -361,7 +361,8 @@ class TestEngineStartWarmupHook:
                 MagicMock(),
                 MagicMock(),
                 MagicMock(),
-                renderer=self._mock_renderer(),
+                # Passing this rejected kwarg is the point of the test.
+                renderer=self._mock_renderer(),  # type: ignore[call-arg]
             )
 
     def test_inproc_client_forwards_fail_callback_but_not_renderer(self):

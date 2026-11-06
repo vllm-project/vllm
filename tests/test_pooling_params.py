@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -13,9 +15,10 @@ from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.pooling_params import LateChunkingParams, LateInteractionParams
 
 EMBEDDING_MODELS = [
-    EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
+    EmbedModelInfo("vllm-project/multilingual-e5-small", is_matryoshka=False),
     EmbedModelInfo(
         "Snowflake/snowflake-arctic-embed-m-v1.5",
         is_matryoshka=True,
@@ -213,76 +216,139 @@ def test_token_classify(pooling_type: str):
             pooling_params.verify(model_config)
 
 
-def test_matryoshka_accepts_native_embedding_width_without_network():
-    """Matryoshka dims up to embedding_size must verify (EG2-style 768).
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2", 2**63, 2**64])
+def test_late_chunk_size_rejects_invalid_values(value):
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        PoolingParams(late_chunking_params=LateChunkingParams(chunk_size=value))
 
-    Uses the same MockMatryoshkaModelConfig pattern as the existing upper-
-    bound test so CI always exercises this path without a HF checkpoint.
-    Pair with test_pooling_embedding_dim_preferred_over_hidden_size_without_network
-    for ModelConfig.embedding_size resolution.
-    """
-    model_config = MockMatryoshkaModelConfig(
-        pooler_config=PoolerConfig(seq_pooling_type="MEAN"),
-        is_matryoshka=True,
-        matryoshka_dimensions=[128, 256, 512, 768],
-        embedding_size=768,
-        served_model_name="google/embeddinggemma-2",
+
+def test_late_chunk_size_maximum_survives_wire_round_trip():
+    params = PoolingParams(late_chunking_params=LateChunkingParams(2**63 - 1))
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
+        == params
     )
 
-    for dim in (128, 256, 512, 768):
-        PoolingParams(task="embed", dimensions=dim).verify(model_config)
 
-    with pytest.raises(VLLMValidationError):
-        PoolingParams(task="embed", dimensions=769).verify(model_config)
-    with pytest.raises(VLLMValidationError):
-        PoolingParams(task="embed", dimensions=0).verify(model_config)
+def _late_interaction_pooling_params(late_params):
+    return PoolingParams(task="token_embed", late_interaction_params=late_params)
 
 
-def test_pooling_embedding_dim_preferred_over_hidden_size_without_network():
-    """Unit-level: pooling runner prefers text_config.embedding_dim.
-
-    Also locks precedence: explicit embedding_size and ST Dense modules win
-    over embedding_dim, and generate runners ignore embedding_dim.
-    """
-    from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from vllm.config.model import ModelConfig
-
-    def make_fake(
-        runner_type: str,
-        *,
-        embedding_size=None,
-        text_embedding_dim=768,
-        top_embedding_dim=None,
-    ):
-        return SimpleNamespace(
-            hf_config=SimpleNamespace(
-                embedding_size=embedding_size,
-                embedding_dim=top_embedding_dim,
-            ),
-            hf_text_config=SimpleNamespace(
-                embedding_dim=text_embedding_dim,
-                hidden_size=512,
-            ),
-            runner_type=runner_type,
-            model="fake-model",
-            revision=None,
-            get_hidden_size=lambda: 512,
+@pytest.mark.parametrize("mode", ["", "cache_query ", "score-doc", "score_docs"])
+def test_late_interaction_rejects_unknown_mode(mode):
+    late_params = LateInteractionParams(mode=mode, query_key="k", query_uses=1)
+    # Construction accepts a work-in-progress: input processing fills fields
+    # before the request is verified.
+    assert late_params.mode == mode
+    with pytest.raises(VLLMValidationError, match="cache_query.*score_doc"):
+        _late_interaction_pooling_params(late_params).verify(
+            _late_chunking_model_config()
         )
 
-    with patch("vllm.config.model.try_get_dense_modules", return_value=None):
-        assert ModelConfig.embedding_size.fget(make_fake("pooling")) == 768
-        assert ModelConfig.embedding_size.fget(make_fake("generate")) == 512
-        # Explicit Voyage-style override wins over embedding_dim.
+
+@pytest.mark.parametrize("query_uses", [None, 0, -1, True, 1.5, "2"])
+def test_late_interaction_cache_query_rejects_bad_use_count(query_uses):
+    late_params = LateInteractionParams(
+        mode="cache_query", query_key="k", query_uses=query_uses
+    )
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        _late_interaction_pooling_params(late_params).verify(
+            _late_chunking_model_config()
+        )
+
+
+def test_late_interaction_valid_shapes_survive_verify_and_wire_round_trip():
+    for params in (
+        LateInteractionParams(mode="cache_query", query_key="k", query_uses=3),
+        LateInteractionParams(mode="score_doc", query_key="k"),
+    ):
+        _late_interaction_pooling_params(params).verify(_late_chunking_model_config())
         assert (
-            ModelConfig.embedding_size.fget(make_fake("pooling", embedding_size=1024))
-            == 1024
+            msgspec.msgpack.decode(
+                msgspec.msgpack.encode(params), type=LateInteractionParams
+            )
+            == params
         )
 
-    # Sentence-Transformers Dense out_features wins over embedding_dim.
-    with patch(
-        "vllm.config.model.try_get_dense_modules",
-        return_value=[{"out_features": 3072}],
-    ):
-        assert ModelConfig.embedding_size.fget(make_fake("pooling")) == 3072
+
+def _late_chunking_model_config():
+    return SimpleNamespace(
+        architecture="NomicBertModel",
+        model_impl="auto",
+        is_matryoshka=False,
+        hf_config=SimpleNamespace(),
+        pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="ALL"),
+    )
+
+
+def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
+    model_config = _late_chunking_model_config()
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
+    )
+    params.verify(model_config)
+    assert params.skip_reading_prefix_cache is True
+    assert params.use_activation is True
+    # Chunk means must include cached prefixes even when the user opts into reads.
+    explicit_cache_flag = PoolingParams(
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=3),
+        skip_reading_prefix_cache=False,
+    )
+    explicit_cache_flag.verify(model_config)
+    assert explicit_cache_flag.skip_reading_prefix_cache is True
+    clone = params.clone()
+    assert clone.late_chunking_params is not None
+    clone.late_chunking_params.chunk_size = 7
+    assert params.late_chunking_params is not None
+    assert params.late_chunking_params.chunk_size == 3
+    # Workers receive only the fixed chunk size, never source ranges.
+    assert msgspec.msgpack.decode(
+        msgspec.msgpack.encode(params.late_chunking_params)
+    ) == [3]
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
+        == params
+    )
+    # A message written before the appended field still uses the old default.
+    wire = msgspec.msgpack.decode(msgspec.msgpack.encode(PoolingParams()))
+    assert msgspec.convert(wire[:-1], type=PoolingParams).late_chunking_params is None
+
+
+@pytest.mark.parametrize(
+    "task", ["embed", "classify", "token_classify", "plugin", None]
+)
+def test_late_chunking_rejects_other_tasks(task):
+    with pytest.raises(VLLMValidationError, match="requires token_embed"):
+        PoolingParams(
+            task=task, late_chunking_params=LateChunkingParams(chunk_size=2)
+        ).verify(_late_chunking_model_config())
+
+
+def test_late_chunking_uses_existing_dimension_validation():
+    config = MockMatryoshkaModelConfig(
+        pooler_config=PoolerConfig(tok_pooling_type="ALL", use_activation=False),
+    )
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2), dimensions=4
+    )
+    params.verify(config)
+    assert params.dimensions == 4
+    assert params.use_activation is False
+    params.dimensions = config.embedding_size + 1
+    with pytest.raises(VLLMValidationError, match="dimensions in range"):
+        params.verify(config)
+
+
+@pytest.mark.parametrize("from_config", [False, True])
+def test_late_chunking_rejects_token_filtering_after_resolving_defaults(from_config):
+    config = MockModelConfig(pooler_config=PoolerConfig(tok_pooling_type="STEP"))
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2)
+    )
+    if from_config:
+        config.pooler_config.step_tag_id = 42
+    else:
+        params.step_tag_id = 42
+    with pytest.raises(VLLMValidationError, match="all token rows"):
+        params.verify(config)

@@ -18,7 +18,7 @@ from vllm.exceptions import VLLMValidationError
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model, max_model_len", [("JackFram/llama-160m", 2048)])
+@pytest.mark.parametrize("model, max_model_len", [("vllm-project/llama-160m", 2048)])
 @pytest.mark.parametrize(
     "prompt_len, max_tokens",
     [
@@ -63,7 +63,7 @@ def test_decoder_max_context_length_validation(
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model", ["JackFram/llama-160m"])
+@pytest.mark.parametrize("model", ["vllm-project/llama-160m"])
 def test_auto_fit_max_model_len_rejects_oversized_input(
     model: str,
     vllm_runner: type[VllmRunner],
