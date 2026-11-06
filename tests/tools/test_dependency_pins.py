@@ -3,12 +3,14 @@
 
 import ast
 import hashlib
+import importlib.util
 import io
 import json
 import shlex
 import subprocess
 import sys
 import tarfile
+import types
 from pathlib import Path
 
 import pytest
@@ -181,3 +183,132 @@ def test_rocm_source_rebuild_verifies_requirement_hashes(
     else:
         assert result.returncode == 0, result.stdout + result.stderr
         assert (target / "fastsafetensors.py").read_text() == "SOURCE_REBUILT = True\n"
+
+
+def _load_hybrid_test_deps_check():
+    path = ROOT / ".buildkite/scripts/check-hybrid-test-deps.py"
+    spec = importlib.util.spec_from_file_location("check_hybrid_test_deps", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_hybrid_test_deps_pins_agree_and_build_tools_are_hashed():
+    """The CI-side check must pin the commits the image build fetches."""
+    check = _load_hybrid_test_deps_check()
+    build_script = (ROOT / "tools/build_hybrid_test_wheels.sh").read_text()
+    assert f"mamba_commit={check.EXPECTED_COMMITS['mamba_ssm']}" in build_script
+    assert (
+        f"causal_conv1d_commit={check.EXPECTED_COMMITS['causal_conv1d']}"
+        in build_script
+    )
+    lock = (ROOT / "requirements/build/hybrid-test-deps.txt").read_text()
+    requirement_blocks = [
+        block for block in re.split(r"\n(?=\S)", lock) if not block.startswith("#")
+    ]
+    assert len(requirement_blocks) == 4
+    for block in requirement_blocks:
+        assert re.match(r"\S+==\S+ \\\n", block), block
+        assert "--hash=sha256:" in block, block
+
+
+@pytest.mark.parametrize(
+    "installed_versions, commits_text, expected_problems",
+    [
+        ({"mamba_ssm": "2.3.0", "causal_conv1d": "1.6.0"}, "MATCHING", []),
+        (
+            {"mamba_ssm": None, "causal_conv1d": "1.6.0"},
+            "MATCHING",
+            ["mamba_ssm: installed None, expected 2.3.0"],
+        ),
+        (
+            {"mamba_ssm": "2.3.0", "causal_conv1d": "1.5.0"},
+            "MATCHING",
+            ["causal_conv1d: installed 1.5.0, expected 1.6.0"],
+        ),
+        (
+            {"mamba_ssm": "2.3.0", "causal_conv1d": "1.6.0"},
+            None,
+            ["/opt/hybrid-test-deps-commits.txt is missing"],
+        ),
+        (
+            {"mamba_ssm": "2.3.0", "causal_conv1d": "1.6.0"},
+            "mamba_ssm deadbeef\n"
+            "causal_conv1d da6dbaa9fd5a919967f14d3fd031da1288ad5025\n",
+            ["built from"],
+        ),
+    ],
+)
+def test_hybrid_test_deps_check_reports_mismatches(
+    installed_versions, commits_text, expected_problems
+):
+    check = _load_hybrid_test_deps_check()
+    if commits_text == "MATCHING":
+        commits_text = "".join(
+            f"{package} {commit}\n"
+            for package, commit in check.EXPECTED_COMMITS.items()
+        )
+    problems = check.find_problems(installed_versions, commits_text)
+    assert len(problems) == len(expected_problems)
+    for problem, expected in zip(problems, expected_problems):
+        assert problem.startswith(expected)
+
+
+def test_hybrid_test_deps_check_exits_with_every_problem(tmp_path, monkeypatch):
+    check = _load_hybrid_test_deps_check()
+
+    def fake_version(package):
+        if package == "mamba_ssm":
+            raise check.PackageNotFoundError(package)
+        return "1.6.0"
+
+    monkeypatch.setattr(check, "version", fake_version)
+    monkeypatch.setattr(check, "COMMITS_FILE", tmp_path / "missing.txt")
+    with pytest.raises(SystemExit) as exit_info:
+        check.main()
+    assert str(exit_info.value) == (
+        "The test image's hybrid test dependencies do not match the pins in "
+        "tools/build_hybrid_test_wheels.sh (arm64 and Rubin images skip them, and "
+        "a failed torch-nightly build warns in the image build log and leaves "
+        "them out):\n"
+        "mamba_ssm: installed None, expected 2.3.0\n"
+        f"{tmp_path / 'missing.txt'} is missing"
+    )
+
+
+def test_hybrid_test_deps_check_prints_verified_pins(tmp_path, monkeypatch, capsys):
+    check = _load_hybrid_test_deps_check()
+    commits_file = tmp_path / "commits.txt"
+    commits_file.write_text(
+        "".join(
+            f"{package} {commit}\n"
+            for package, commit in check.EXPECTED_COMMITS.items()
+        )
+    )
+    monkeypatch.setattr(check, "COMMITS_FILE", commits_file)
+    monkeypatch.setattr(check, "version", check.EXPECTED_VERSIONS.__getitem__)
+    for package, package_version in check.EXPECTED_VERSIONS.items():
+        fake_module = types.ModuleType(package)
+        fake_module.__version__ = package_version  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, package, fake_module)
+    check.main()
+    assert capsys.readouterr().out == (
+        "Verified hybrid test dependencies: "
+        "mamba_ssm==2.3.0@f1493ff6e9335160eb134eb67e59f8e4d9adefd6 "
+        "causal_conv1d==1.6.0@da6dbaa9fd5a919967f14d3fd031da1288ad5025\n"
+    )
+
+
+def test_hybrid_test_deps_check_script_runs_the_check():
+    """Running the script checks the image, whichever image this runs in."""
+    result = subprocess.run(
+        [sys.executable, ROOT / ".buildkite/scripts/check-hybrid-test-deps.py"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        assert result.stdout.startswith("Verified hybrid test dependencies:")
+    else:
+        assert result.returncode == 1
+        assert "do not match the pins" in result.stderr
