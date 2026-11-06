@@ -3705,6 +3705,97 @@ async fn non_stream_chat_returns_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn system_fingerprint_is_reported_on_the_last_message_like_python() {
+    let mut lines = Vec::new();
+    let cases = [
+        ("/v1/chat/completions", false),
+        ("/v1/completions", false),
+        // `echo` with `max_tokens=0` streams the prompt on its own branch.
+        ("/v1/completions", true),
+    ];
+    for (uri, prompt_only) in cases {
+        for (stream, include_usage) in [(false, false), (true, false), (true, true)] {
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+                b"engine-openai-fingerprint",
+                default_stream_output_specs(),
+                Arc::new(FakeChatBackend::new()),
+            )
+            .await;
+            let mut app = build_router(Arc::new(
+                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                    .with_system_fingerprint(Some("vllm-0.33.0-c84c7d4f".to_string())),
+            ));
+            let mut body = json!({"stream": stream});
+            if include_usage {
+                body["stream_options"] = json!({"include_usage": true});
+            }
+            if uri == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hello"}]);
+            } else {
+                body["prompt"] = json!("hello");
+            }
+            if prompt_only {
+                body["echo"] = json!(true);
+                body["max_tokens"] = json!(0);
+            }
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+
+            // One entry per message: whether it carries the fingerprint, and
+            // which kind of message it is.
+            let messages = if stream {
+                sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+            } else {
+                vec![serde_json::from_slice(&body).expect("decode json")]
+            };
+            let summary = messages
+                .iter()
+                .map(|message| {
+                    let kind = if message["choices"].as_array().is_some_and(Vec::is_empty) {
+                        "usage"
+                    } else if message["choices"][0]["finish_reason"].is_string() {
+                        "finish"
+                    } else {
+                        "delta"
+                    };
+                    match message.get("system_fingerprint") {
+                        Some(fingerprint) => format!("{kind}={fingerprint}"),
+                        None => kind.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(format!(
+                "{uri} prompt_only={prompt_only} stream={stream} include_usage={include_usage}: {summary}"
+            ));
+        }
+    }
+    expect_test::expect![[r#"
+        /v1/chat/completions prompt_only=false stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/chat/completions prompt_only=false stream=true include_usage=false: delta delta delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/chat/completions prompt_only=false stream=true include_usage=true: delta delta delta finish usage="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=true include_usage=false: delta delta delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=false stream=true include_usage=true: delta delta delta finish usage="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=false include_usage=false: finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=true include_usage=false: delta finish="vllm-0.33.0-c84c7d4f"
+        /v1/completions prompt_only=true stream=true include_usage=true: delta finish usage="vllm-0.33.0-c84c7d4f""#]].assert_eq(&lines.join("\n"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_return_prompt_text_reports_the_rendered_prompt() {
     for stream in [false, true] {
         let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
