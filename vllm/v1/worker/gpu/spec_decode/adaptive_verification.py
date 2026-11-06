@@ -17,7 +17,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.conf_compute_utils import register_d2h_stream
+from vllm.v1.conf_compute_utils import new_d2h_stream
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.attn_utils import (
@@ -237,8 +237,7 @@ class AdaptiveVerificationManager:
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
         device = req_states.device
-        self._copy_stream = torch.cuda.Stream(device)
-        register_d2h_stream(self._copy_stream)
+        self._copy_stream = new_d2h_stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
         # Rejection sampling verifies logits in one contiguous chunk; the

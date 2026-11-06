@@ -135,7 +135,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
         # Computed on the main stream: the copy stream only carries copies
-        # (see conf_compute_utils.register_d2h_stream).
+        # (see conf_compute_utils.new_d2h_stream).
         has_fault = get_ep_all2all_manager().query_fault() if check_ep_fault else None
 
         with stream(copy_stream, main_stream):

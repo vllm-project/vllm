@@ -12,10 +12,10 @@ so that:
   into an existing tensor lands in a staging tensor and is moved by a D2D on
   the current stream, so it is ordered exactly like the original copy. This
   applies to every caller.
-- D2H issued on a stream registered with ``register_d2h_stream()`` is issued
+- D2H issued on a stream created with ``new_d2h_stream()`` is issued
   by a worker thread once the source is ready. Event / stream / device
   synchronize additionally wait for the D2H copies submitted before the event
-  was recorded (or before the call). Registering a stream asserts that its D2H
+  was recorded (or before the call). Using such a stream asserts that its D2H
   sources aren't overwritten until the copy is synced (later compute-stream
   work is never ordered after a side stream anyway), and that their completion
   is only awaited through the patched torch.cuda / torch.Event methods. D2H on
@@ -63,7 +63,7 @@ _orig_accel_synchronize = torch.accelerator.synchronize
 _d2h_executor: ThreadPoolExecutor | None = None
 _pending_lock = threading.Lock()
 _pending: list[Future] = []
-# Raw handles of the streams registered via register_d2h_stream().
+# Raw handles of the streams created via new_d2h_stream().
 _d2h_streams: set[int] = set()
 # For each registered stream, the producer stream it last waited on.
 _producer_of: dict[int, torch.cuda.Stream] = {}
@@ -74,16 +74,45 @@ _inplace_h2d_storages: set[int] = set()
 _MAX_STAGED_BYTES = 32 << 20
 
 
-def register_d2h_stream(stream: torch.cuda.Stream) -> None:
-    """Route non_blocking D2H copies issued on ``stream`` through the worker
+_CUDA_STREAM_NON_BLOCKING = 0x01
+
+
+def _new_external_stream(device: torch.device) -> torch.cuda.Stream:
+    """A stream created outside torch's per-device pool, so ``torch.cuda.Stream()``
+    can never hand out its handle again (the pool is 32 streams, round-robin)."""
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    with torch.cuda.device(device):
+        handle = CudaRTLibrary().cudaStreamCreateWithFlags(_CUDA_STREAM_NON_BLOCKING)
+    return torch.cuda.ExternalStream(handle, device=device)
+
+
+def new_d2h_stream(device: torch.device | int | None = None) -> torch.cuda.Stream:
+    """Create a stream whose non_blocking D2H copies go through the worker
     thread once ``install()`` has run (see the module docstring).
 
-    A registered stream must only carry copies: readiness is tracked on the
-    stream it last waited on via ``wait_stream()``, so a kernel launched on
-    the registered stream itself is not ordered before the copies of its
-    output. Compute such values on the producer stream first.
+    Under CC the stream is created outside torch's stream pool: the patches key
+    on the raw handle, and a pool stream handed out later (e.g. by
+    ``graph_capture()`` or ``aux_stream()``) must never share it, or its events
+    would be redirected to the producer stream. Without CC this is a plain
+    ``torch.cuda.Stream``. The stream lives for the life of the process.
+
+    Such a stream must only carry copies: readiness is tracked on the stream
+    it last waited on via ``wait_stream()``, so a kernel launched on the copy
+    stream itself is not ordered before the copies of its output. Compute such
+    values on the producer stream first.
     """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_confidential_compute():
+        return torch.cuda.Stream(device)
+    dev = torch.device("cuda") if device is None else torch.device(device)
+    if dev.index is None:
+        dev = torch.device("cuda", torch.cuda.current_device())
+    stream = _new_external_stream(dev)
+    assert stream.cuda_stream not in _d2h_streams, "duplicate D2H stream handle"
     _d2h_streams.add(stream.cuda_stream)
+    return stream
 
 
 def register_inplace_h2d_target(tensor: torch.Tensor) -> None:
@@ -107,12 +136,12 @@ def register_inplace_h2d_target(tensor: torch.Tensor) -> None:
 
 @cache
 def _staging_stream(device_index: int) -> torch.cuda.Stream:
-    return torch.cuda.Stream(device_index)
+    return _new_external_stream(torch.device("cuda", device_index))
 
 
 @cache
 def _d2h_stream(device_index: int) -> torch.cuda.Stream:
-    return torch.cuda.Stream(device_index)
+    return _new_external_stream(torch.device("cuda", device_index))
 
 
 def _nbytes(t: torch.Tensor) -> int:
@@ -288,7 +317,14 @@ def _record_target(stream):
     """Where an event recorded on ``stream`` (None: the current stream) goes:
     the producer stream of a registered D2H stream, otherwise ``stream``."""
     s = stream if stream is not None else torch.cuda.current_stream()
-    return _producer_of.get(s.native_handle, stream)
+    target = _producer_of.get(s.native_handle, stream)
+    if target is not stream and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "Confidential Computing: an event is being recorded during CUDA graph "
+            f"capture on a D2H copy stream (handle {s.native_handle:#x}). Copy "
+            "streams must not be shared with capture streams."
+        )
+    return target
 
 
 def _stream_synchronize(self):

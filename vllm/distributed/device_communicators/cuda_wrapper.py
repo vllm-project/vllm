@@ -42,6 +42,13 @@ class CudaRTLibrary:
     exported_functions = [
         # ​cudaError_t cudaSetDevice ( int  device )
         Function("cudaSetDevice", cudaError_t, [ctypes.c_int]),
+        # cudaError_t cudaStreamCreateWithFlags ( cudaStream_t* pStream,
+        #                                         unsigned int flags )
+        Function(
+            "cudaStreamCreateWithFlags",
+            cudaError_t,
+            [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint],
+        ),
         # cudaError_t 	cudaDeviceSynchronize ( void )
         Function("cudaDeviceSynchronize", cudaError_t, []),
         # ​cudaError_t cudaDeviceReset ( void )
@@ -160,6 +167,13 @@ class CudaRTLibrary:
 
     def cudaSetDevice(self, device: int) -> None:
         self.CUDART_CHECK(self.funcs["cudaSetDevice"](device))
+
+    def cudaStreamCreateWithFlags(self, flags: int) -> int:
+        stream = ctypes.c_void_p()
+        self.CUDART_CHECK(
+            self.funcs["cudaStreamCreateWithFlags"](ctypes.byref(stream), flags)
+        )
+        return stream.value
 
     def cudaDeviceSynchronize(self) -> None:
         self.CUDART_CHECK(self.funcs["cudaDeviceSynchronize"]())
