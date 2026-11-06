@@ -5,9 +5,11 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import contextlib
 import json
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -52,6 +54,8 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
+    from torch.distributed import ProcessGroup
+
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -522,6 +526,26 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     return loaded
 
 
+@contextlib.contextmanager
+def _known_to_torch_distributed(group: "ProcessGroup | None") -> Iterator[None]:
+    """Keep a group in torch's world map for the duration of FlashInfer autotuning.
+
+    The autotuner calls ``dist.get_backend``, which raises for the stateless groups
+    of Elastic EP. Those stay out of the map elsewhere: its absence marks them.
+    """
+    from torch.distributed import ProcessGroup
+    from torch.distributed.distributed_c10d import Backend, _world
+
+    if not isinstance(group, ProcessGroup) or group in _world.pg_map:
+        yield
+        return
+    _world.pg_map[group] = (Backend(group.name()), None)
+    try:
+        yield
+    finally:
+        del _world.pg_map[group]
+
+
 def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -601,7 +625,11 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
-        with torch.inference_mode(), autotune_context:
+        with (
+            torch.inference_mode(),
+            _known_to_torch_distributed(group),
+            autotune_context,
+        ):
             hisparse_enabled = (
                 runner.vllm_config.attention_config.hisparse_config is not None
             )
