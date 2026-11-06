@@ -519,7 +519,6 @@ class MiniMaxM3MoE(nn.Module):
         self.reduce_results = reduce_results
         self.top_k = config.num_experts_per_tok
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.n_shared_experts = getattr(config, "n_shared_experts", None)
 
         # Sigmoid routing uses a per-expert score-correction bias for selection.
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
@@ -549,14 +548,13 @@ class MiniMaxM3MoE(nn.Module):
             self._init_mega_moe_experts(config, quant_config, prefix)
             return
 
-        if self.n_shared_experts:
-            self.shared_experts = MiniMaxM3MLP(
-                config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
-                quant_config=quant_config,
-                reduce_results=False,
-                prefix=f"{prefix}.shared_experts",
-            )
+        self.shared_experts = MiniMaxM3MLP(
+            config=config,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            reduce_results=False,
+            prefix=f"{prefix}.shared_experts",
+        )
 
         self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -601,18 +599,16 @@ class MiniMaxM3MoE(nn.Module):
             # Replicated, so the kernel can fuse it.
             return MiniMaxM3MLP(
                 config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
+                intermediate_size=config.intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
                 disable_tp=True,
                 prefix=f"{prefix}.shared_experts",
             )
 
-        shared_experts = None
-        if self.n_shared_experts:
-            # Only describes the weights: a fused layer allocates its own.
-            with torch.device("meta"):
-                shared_experts = replicated_shared_experts()
+        # Only describes the weights: a fused layer allocates its own.
+        with torch.device("meta"):
+            shared_experts = replicated_shared_experts()
         ep_group = get_ep_group()
         num_experts = config.num_local_experts
         if num_experts % ep_group.world_size != 0:
@@ -639,7 +635,7 @@ class MiniMaxM3MoE(nn.Module):
             shared_experts=shared_experts,
             prefix=f"{prefix}.experts",
         )
-        if shared_experts is not None and not self.experts.has_fused_shared_experts:
+        if not self.experts.has_fused_shared_experts:
             self.shared_experts = replicated_shared_experts()
 
     @staticmethod

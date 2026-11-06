@@ -121,7 +121,6 @@ def _mega_moe_block(num_experts=8, top_k=2, hidden_size=512, intermediate_size=2
         intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_experts_per_tok=top_k,
-        n_shared_experts=1,
         scoring_func="sigmoid",
         routed_scaling_factor=2.0,
         use_routing_bias=False,

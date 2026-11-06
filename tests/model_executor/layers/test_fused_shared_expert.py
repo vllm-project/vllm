@@ -173,7 +173,6 @@ def get_fse_test_model_config(
             num_experts_per_tok=1,
             mlp_layer_types=["sparse", "sparse"],
             rotary_dim=64,
-            n_shared_experts=1,
             scoring_func="sigmoid",
             use_routing_bias=True,
             quantization_config=quantization_config,

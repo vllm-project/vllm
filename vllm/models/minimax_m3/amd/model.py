@@ -455,7 +455,7 @@ class MiniMaxM3MoE(nn.Module):
             )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.n_shared_experts = getattr(config, "n_shared_experts", None)
+        self.n_shared_experts = 1
 
         # Sigmoid routing uses a per-expert score-correction bias for selection.
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
@@ -485,11 +485,9 @@ class MiniMaxM3MoE(nn.Module):
         # MoE call as the last expert slot, so we don't build a separate module.
         # On gfx950 with aiter MoE the append is fused inside aiter's grouped
         # top-k kernel; otherwise it goes through the vLLM top-k bias router.
-        self.is_fused_shared_expert_enabled = False
-        if bool(getattr(config, "n_shared_experts", None)):
-            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config, prefix, disable_under_ep=True
-            )
+        self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+            quant_config, prefix, disable_under_ep=True
+        )
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
         # expert is appended inside aiter's an active aiter MoE backend, the shared
@@ -503,10 +501,10 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         self.shared_experts: MiniMaxM3MLP | None = None
-        if self.n_shared_experts and not self.is_fused_shared_expert_enabled:
+        if not self.is_fused_shared_expert_enabled:
             self.shared_experts = MiniMaxM3MLP(
                 config=config,
-                intermediate_size=config.intermediate_size * self.n_shared_experts,
+                intermediate_size=config.intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
@@ -1917,11 +1915,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
         # expert, include the appended slot (id == num_local_experts).
-        n_shared = getattr(self.config, "n_shared_experts", 0) or 0
         # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
-        num_experts = self.config.num_local_experts + (
-            n_shared if self.fused_shared_expert_layers else 0
-        )
+        num_experts = self.config.num_local_experts
+        if self.fused_shared_expert_layers:
+            num_experts += 1
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
