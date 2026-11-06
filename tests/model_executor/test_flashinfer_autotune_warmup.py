@@ -139,7 +139,6 @@ def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_component
         {"limit_per_prompt": {"video": {"count": 1, "num_frames": 4}}},
         {"mm_encoder_tp_mode": "data"},
         {"mm_encoder_attn_backend": "TORCH_SDPA"},
-        {"enable_mm_embeds": True},
         {"video_pruning_rate": 0.5},
     ],
 )

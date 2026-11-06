@@ -36,7 +36,6 @@ def _flashinfer_mm_encoder_autotune_hash(
         {
             "encoder_config": hash_config(mm_config),
             "enable_chunked_prefill": enable_chunked_prefill,
-            "enable_mm_embeds": mm_config.enable_mm_embeds,
             "video_pruning_rate": mm_config.video_pruning_rate,
             "video_pruning_method": mm_config.video_pruning_method,
             "mm_processor_kwargs": normalize_value(mm_config.mm_processor_kwargs),
