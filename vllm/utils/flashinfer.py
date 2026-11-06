@@ -501,8 +501,9 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 @functools.cache
 def has_flashinfer_prims_ts_sparse_mla() -> bool:
     """Return ``True`` if FlashInfer ships the task-scheduled (prims_ts) sparse
-    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are probed separately by
-    ``prims_ts_sparse_mla_format_error`` once a device is available."""
+    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are
+    probed separately by ``prims_ts_sparse_mla_format_error`` once a device is
+    available."""
     if not has_flashinfer():
         return False
     try:
