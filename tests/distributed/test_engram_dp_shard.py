@@ -69,10 +69,16 @@ def _token_counts(dp_size: int) -> tuple[tuple[int, ...], ...]:
     return ((8,) * dp_size, (7, 0, 5, 1)[:dp_size], (7,) * dp_size)
 
 
-def _full_table(rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _full_table(
+    rows: int, packed_fp4: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The unsharded table, identical on every rank."""
     torch.manual_seed(0)
-    weight = (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    weight = (
+        torch.randint(0, 256, (rows, DIM // 2), dtype=torch.uint8)
+        if packed_fp4
+        else (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    )
     scale_inv = torch.randint(120, 134, (rows, DIM // BLOCK), dtype=torch.uint8)
     return weight, scale_inv
 
@@ -92,7 +98,14 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
     """Dequantized lookup against the whole table."""
     valid = ids >= 0
     safe_ids = ids.clamp_min(0).long()
-    values = torch.nn.functional.embedding(safe_ids, weight).float()
+    values = torch.nn.functional.embedding(safe_ids, weight)
+    if weight.dtype == torch.uint8:
+        nibbles = torch.stack((values & 0xF, values >> 4), dim=-1).flatten(-2).long()
+        lut = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=weight.device
+        )
+        values = torch.where(nibbles & 8 != 0, -1.0, 1.0) * lut[nibbles & 7]
+    values = values.float()
     scales = torch.nn.functional.embedding(safe_ids, scale_inv)
     scales = (scales.to(torch.int32) << 23).view(torch.float32)
     values = values.unflatten(-1, (-1, BLOCK)) * scales.unsqueeze(-1)
@@ -214,8 +227,8 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
 
         for failure in ("create", "open", "mmap", "register", "pinned", None):
             _check_shared_storage_lifetime_and_failures(failure)
-        for failure in (None, "create", "import"):
-            _check_cumem_host_table(failure)
+        for failure, packed_fp4 in product((None, "create", "import"), (False, True)):
+            _check_cumem_host_table(failure, packed_fp4)
 
         # GPU peer reads need NVLink P2P, which CI's L4s lack.
         p2p = current_platform.is_fully_connected(
@@ -225,10 +238,14 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             ]
         )
         # Reuse the processes and communication groups across storage modes.
-        for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
+        for (
+            cpu_offload,
+            dp_shared_memory,
+        ), n_heads, sequence_parallel, packed_fp4 in product(
             [(False, False), (True, False), (True, True)],
             [8, 7],
             [False, True] if tp_size > 1 else [False],
+            [False, True],
         ):
             _check_table(
                 vllm_config,
@@ -237,10 +254,20 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 n_heads,
                 sequence_parallel,
                 p2p,
+                packed_fp4,
             )
         if tp_size == 1 and p2p:
             # Without NVLink P2P, GPU tables keep the DP collectives.
-            _check_table(vllm_config, False, False, 8, False, p2p=False)
+            for packed_fp4 in (False, True):
+                _check_table(
+                    vllm_config,
+                    False,
+                    False,
+                    8,
+                    False,
+                    p2p=False,
+                    packed_fp4=packed_fp4,
+                )
         if tp_size == 1:
             _check_fp8_batch(vllm_config)
     finally:
@@ -411,7 +438,7 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert all(not path.exists() for path in paths)
 
 
-def _check_cumem_host_table(failure):
+def _check_cumem_host_table(failure, packed_fp4):
     """Chunked cuMem tables read back across ranks; a failed allocation or
     import on any rank falls back to /dev/shm on all of them."""
     from vllm.models.deepseek_v41.nvidia.ops import engram_host_table
@@ -421,7 +448,8 @@ def _check_cumem_host_table(failure):
 
     group = get_engram_dp_group()
     # Three 2 MiB chunks, the last one partial.
-    rows = 5 * (1 << 20) // DIM
+    row_bytes = DIM // 2 if packed_fp4 else DIM
+    rows = 5 * (1 << 20) // row_bytes
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
         if failure == "create" and group.rank_in_group == 0:
@@ -435,9 +463,16 @@ def _check_cumem_host_table(failure):
                     None,
                 ),
             )
-        storage = engram_ops.DPSharedEngramStorage(rows, DIM, BLOCK, group)
+        storage = engram_ops.DPSharedEngramStorage(
+            rows, DIM, BLOCK, group, packed_fp4=packed_fp4
+        )
     assert storage.huge_pages == (failure is None)
-    table = torch.arange(rows * DIM).remainder(251).to(torch.uint8).view(rows, DIM)
+    table = (
+        torch.arange(rows * row_bytes)
+        .remainder(251)
+        .to(torch.uint8)
+        .view(rows, row_bytes)
+    )
     if group.rank_in_group == 0:
         storage.weight.view(torch.uint8).copy_(table)
     group.barrier()
@@ -447,7 +482,13 @@ def _check_cumem_host_table(failure):
 
 
 def _check_table(
-    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel, p2p
+    vllm_config,
+    cpu_offload,
+    dp_shared_memory,
+    n_heads,
+    sequence_parallel,
+    p2p,
+    packed_fp4,
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -483,10 +524,19 @@ def _check_table(
             engram_compressed_vocab_size=32,
             engram_pad_token_id=0,
             engram_vocab_size=HEAD_SIZES[0],
+            quantization_config={
+                "engram_embed_quant": "mxfp4" if packed_fp4 else "fp8"
+            },
         )
         with set_current_vllm_config(vllm_config):
-            weight, scale_inv = _full_table(rows)
+            weight, scale_inv = _full_table(rows, packed_fp4)
             layout = EngramLayout(config)
+            # A host budget between MXFP4 and FP8 sizes must admit only MXFP4.
+            with m.context() as memory_patch:
+                memory_patch.setattr(
+                    engram_ops, "get_available_memory", lambda: rows * DIM
+                )
+                assert engram_ops.can_share_engram_tables(layout) == packed_fp4
             # Stub configuration inputs, not Engram's initialization or execution.
             component_config = SimpleNamespace(
                 engram_config=EngramConfig(
@@ -859,7 +909,7 @@ def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch, query_fails
     )
     if query_fails:
         monkeypatch.setattr(engram_ops, "check_shm_free_space", query)
-    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
+    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM, row_bytes=DIM)
     assert not engram_ops.can_share_engram_tables(layout)
     assert len(broadcasts) == 1 and broadcasts[0] is not None
 
