@@ -38,6 +38,9 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
+from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
+    AiterFlyDSLFP8PrefillBackend,
+)
 from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
@@ -53,7 +56,6 @@ from vllm.v1.attention.ops.rocm_aiter_mla_prefill import (
 from vllm.v1.attention.ops.triton_decode_attention import (
     decode_attention_fwd,
     decode_attention_fwd_verify,
-    select_verify_config,
     verify_num_kv_splits,
     warmup_decode_attention_fwd_verify,
 )
@@ -167,6 +169,15 @@ def _fp8_mla_prefill_supported() -> bool:
     return True
 
 
+def _asm_fp8_prefill_superseded(prefill_backend: object) -> bool:
+    """Whether the selected MLA prefill backend supersedes the ASM FP8 prefill.
+
+    ``AiterFlyDSLFP8PrefillBackend`` runs FP8 attention itself and also serves
+    context-free prefills, so the assembly prefill kernel must not claim them.
+    """
+    return isinstance(prefill_backend, AiterFlyDSLFP8PrefillBackend)
+
+
 @functools.lru_cache(maxsize=1)
 def _fused_mla_prefill_qkv_supported() -> bool:
     """Gate ``fused_mla_prefill_qkv_fp8`` to CDNA4 (gfx950).
@@ -239,7 +250,7 @@ def _aiter_fp8_mla_decode_drops_v_scale(num_heads: int, qlen: int, q_fp8: bool) 
     gfx942's (gqa 16, qseqlen 4) FP8 kernel applies kv_scale to the scores but
     not to V, so its output is short by exactly kv_scale. Measured on a tiny
     causal block with kv_scale 2 rather than assumed per arch, so a fixed
-    AITER build turns the correction off by itself.
+    AITER build turns the correction off by itself (ROCm/aiter#6732).
     """
     try:
         from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
@@ -505,18 +516,7 @@ def _triton_verify_num_kv_splits(
     """
     if envs.VLLM_BATCH_INVARIANT:
         return 1
-    # Must agree with the launch config decode_attention_fwd_verify selects.
-    cfg = select_verify_config(num_reqs, qlen, num_heads)
-    return verify_num_kv_splits(
-        max_seq_len,
-        num_reqs,
-        qlen,
-        num_heads,
-        sm_count,
-        block_h=cfg["BLOCK_H"],
-        occupancy=cfg.get("occupancy", 1.0),
-        min_work_per_split=cfg["MIN_SPLIT_LEN"],
-    )
+    return verify_num_kv_splits(max_seq_len, num_reqs, qlen, num_heads, sm_count)
 
 
 def _reserve_triton_verify_workspace(
@@ -1297,10 +1297,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn.
+        # A FlyDSL FP8 prefill backend supersedes the assembly kernel, so the
+        # PS workspace buffers below are not allocated either.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
+            and not _asm_fp8_prefill_superseded(self._prefill_backend)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1388,7 +1391,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
             self._fp8_v_scale_fix_qlens = frozenset(
                 qlen
-                for qlen in range(2, min(self._mtp_decode_qlen, 4) + 1)
+                for qlen in range(
+                    2,
+                    min(self._mtp_decode_qlen, AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN)
+                    + 1,
+                )
                 if _aiter_fp8_mla_decode_drops_v_scale(
                     heads, qlen, self._kv_cache_dtype_str == "fp8"
                 )
@@ -3145,17 +3152,21 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Dispatch prefill to the FP8 ASM kernel when available.
 
         Falls back to the parent (``flash_attn_varlen_func``) when FP8
-        MLA prefill is disabled, PS metadata is missing, or chunked
-        context requires two-pass merge.
+        MLA prefill is disabled, the selected prefill backend supersedes
+        it, PS metadata is missing, or chunked context requires two-pass
+        merge.
 
         The annotation uses the base ``MLACommonMetadata`` to honour LSP
         with ``MLACommonImpl.forward_mha``; the AITER builder always
         produces ``AiterMLAMetadata`` instances at runtime, so we narrow
         with ``isinstance`` before reading the AITER-specific FP8 fields.
         """
+        prefill_metadata = attn_metadata.prefill
         if (
             not self._fp8_prefill_enabled
             or not isinstance(attn_metadata, AiterMLAMetadata)
+            or prefill_metadata is None
+            or _asm_fp8_prefill_superseded(prefill_metadata.prefill_backend)
             or attn_metadata.fp8_prefill_qo_indptr is None
         ):
             return super().forward_mha(
@@ -3169,8 +3180,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 output_scale,
             )
 
-        assert attn_metadata.prefill is not None
-        prefill_metadata = attn_metadata.prefill
         has_context = prefill_metadata.chunked_context is not None
 
         if has_context:
@@ -3336,8 +3345,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         One Triton program covers a block of a request's (verify token, head)
         rows, so each KV tile is read once for all of them, and each row is
-        bounded by its own causal window. A graph padding request (or a
-        varlen tail past its real length) comes back as zeros.
+        bounded by its own causal window. A varlen tail past its real length
+        comes back as zeros.
         """
         assert decode.max_qo_len is not None
         num_rows, num_heads = q_mla.shape[:2]
