@@ -22,7 +22,6 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 try:
@@ -118,8 +117,6 @@ class StandaloneCompiledArtifacts:
         return list(dict.fromkeys(names))
 
     def load_all(self) -> None:
-        import concurrent.futures
-
         # check already loaded
         if len(self.loaded_submodule_store) == len(self.submodule_bytes_store):
             return
@@ -132,15 +129,10 @@ class StandaloneCompiledArtifacts:
             return AOTCompiledArtifact.deserialize(entry)
 
         entries = list(self.submodule_bytes_store.values())
-        if current_platform.is_rocm():
-            # Deserializing an artifact loads its compiled Triton kernels, which
-            # on ROCm ends up in hipModuleLoad. Loading modules concurrently
-            # deadlocks on the dynamic linker lock, since rocprofiler-sdk calls
-            # dl_iterate_phdr from inside the load, so load one at a time.
-            loaded_entries = [_load_entry(entry) for entry in entries]
-        else:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                loaded_entries = list(executor.map(_load_entry, entries))
+        # Restore in saved order to avoid overlapping updates to Inductor's
+        # shared Triton cache. Serial loading also avoids the ROCm
+        # hipModuleLoad/rocprofiler deadlock.
+        loaded_entries = [_load_entry(entry) for entry in entries]
 
         for i, k in enumerate(self.submodule_bytes_store.keys()):
             self.loaded_submodule_store[k] = loaded_entries[i]
