@@ -419,7 +419,7 @@ class CuMemAllocator:
         # sleep mode (see https://github.com/pytorch/pytorch/issues/147851).
         # If the user has enabled expandable segments, temporarily disable
         # them for the duration of the memory pool context and restore on
-        # exit. The whole config string is discardable, not just this one
+        # exit. The whole config string is rewritten, not just this one
         # field: torch resets every option that is absent from the string it
         # is handed, so a bare "expandable_segments:False" would also drop
         # max_split_size_mb, garbage_collection_threshold and
