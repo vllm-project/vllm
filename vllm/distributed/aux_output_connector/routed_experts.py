@@ -128,20 +128,15 @@ class RoutedExpertsBuffer:
         tail = self._requests.get(request_id)
         if tail is not None:
             blocks.append((tail.block_start, self._rows[tail.slot, : tail.length]))
-        parts = []
-        position = token_start
-        for block_start, rows in blocks:
-            if position < block_start:
-                break
-            part = rows[position - block_start : token_end - block_start]
-            parts.append(part)
-            position += len(part)
-        assert position == token_end, (
+        first = blocks[0][0] if blocks else token_start
+        available = sum(len(block) for _, block in blocks)
+        assert first <= token_start and token_end <= first + available, (
             "auxiliary output range is unavailable: "
             f"request={request_id}, range=[{token_start}, {token_end}), "
             f"available={[(start, start + len(block)) for start, block in blocks]}"
         )
-        return np.concatenate(parts)
+        rows = np.concatenate([block for _, block in blocks])
+        return rows[token_start - first : token_end - first]
 
     def retain_block(self, rows: np.ndarray) -> np.ndarray:
         """Retain one unkeyed block after the current capture call."""

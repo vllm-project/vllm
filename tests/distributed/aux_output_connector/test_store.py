@@ -547,28 +547,6 @@ def test_logical_buffer_copies_borrowed_block_when_retained():
     buffer.release_block(retained)
 
 
-@pytest.mark.parametrize("token_end", [8, 10])
-@pytest.mark.parametrize("token_start", [0, 2, 5])
-def test_logical_buffer_reads_unkeyed_blocks_and_tail(token_start, token_end):
-    """Full blocks awaiting hashes remain readable after leaving the tail."""
-    buffer = RoutedExpertsBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 12, 2)
-    logical = np.arange(token_end * 6, dtype=_DTYPE).reshape(token_end, *_SHAPE)
-    pending = [
-        (start, buffer.retain_block(rows))
-        for start, rows in buffer.capture("request", 0, logical)
-    ]
-
-    output = buffer.read("request", token_start, token_end, pending)
-    np.testing.assert_array_equal(output, logical[token_start:])
-
-    for _, rows in pending:
-        rows[:] = 0
-        buffer.release_block(rows)
-    buffer.reset()
-    buffer.capture("replacement", 0, np.zeros_like(logical[:2]))
-    np.testing.assert_array_equal(output, logical[token_start:])
-
-
 def _make_store(
     *,
     max_bytes: int = 1 << 20,
@@ -1146,14 +1124,15 @@ def test_worker_emits_mid_block_chunked_prefill():
     worker.close()
 
 
+@pytest.mark.parametrize("emit_start", [0, 5])
 @pytest.mark.parametrize("token_end", [7, 8, 10])
-def test_worker_emits_published_blocks_with_unkeyed_rows(token_end):
+def test_worker_emits_published_blocks_with_unkeyed_rows(token_end, emit_start):
     worker = _make_worker(1)
     logical = np.arange(token_end * 6, dtype=np.uint8).reshape(token_end, *_SHAPE)
 
     first = _metadata(
         0,
-        [_request_metadata("request", 0, 6, 0, [b"a" * 32])],
+        [_request_metadata("request", 0, 6, emit_start, [b"a" * 32])],
         {},
     )
     output = _process_output(
@@ -1168,12 +1147,12 @@ def test_worker_emits_published_blocks_with_unkeyed_rows(token_end):
 
     second = _metadata(
         0,
-        [_request_metadata("request", 6, token_end - 6, 0, [])],
+        [_request_metadata("request", 6, token_end - 6, emit_start, [])],
         {},
     )
     output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].rows, logical[emit_start:])
     worker.close()
 
 

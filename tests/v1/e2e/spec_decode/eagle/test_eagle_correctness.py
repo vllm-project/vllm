@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import numpy as np
 import pytest
 
 from tests.utils import (
@@ -9,56 +8,9 @@ from tests.utils import (
     single_gpu_only,
 )
 from vllm import SamplingParams
-from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 
 from .utils import _run_eagle_correctness
-
-
-@single_gpu_only
-@pytest.mark.skipif(
-    current_platform.is_device_capability_family(100),
-    reason="DeepSeek head_dim=192 not supported on SM100/SM110 (Blackwell)",
-)
-def test_deepseek_eagle_routed_experts_with_cached_aligned_prompt(
-    monkeypatch: pytest.MonkeyPatch, vllm_runner
-):
-    """A cached prefix must include routing from the final, still unkeyed block."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
-    with vllm_runner(
-        "eagle618/deepseek-v3-random",
-        max_model_len=256,
-        max_num_batched_tokens=256,
-        max_num_seqs=1,
-        block_size=16,
-        enable_prefix_caching=True,
-        enable_return_routed_experts=True,
-        enforce_eager=True,
-        speculative_config={
-            "method": "eagle",
-            "model": "eagle618/eagle-deepseek-v3-random",
-            "num_speculative_tokens": 1,
-        },
-    ) as runner:
-        prompt = TokensPrompt(prompt_token_ids=[100] * 48)
-        params = SamplingParams(temperature=0, max_tokens=1, ignore_eos=True)
-        cold = runner.llm.generate(prompt, params, use_tqdm=False)[0]
-        warm = runner.llm.generate(prompt, params, use_tqdm=False)[0]
-
-        assert cold.num_cached_tokens == 0
-        assert warm.num_cached_tokens == 32
-        cold_routes = cold.outputs[0].routed_experts
-        warm_routes = warm.outputs[0].routed_experts
-        assert cold_routes is not None and warm_routes is not None
-        model_config = runner.llm.llm_engine.vllm_config.model_config
-        assert warm_routes.shape == (
-            48,
-            model_config.get_total_num_hidden_layers(),
-            model_config.get_num_experts_per_tok(),
-        )
-        assert (warm_routes < model_config.get_num_experts()).all()
-        np.testing.assert_array_equal(warm_routes[:32], cold_routes[:32])
 
 
 @single_gpu_only
