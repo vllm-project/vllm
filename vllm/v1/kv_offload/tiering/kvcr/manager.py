@@ -528,10 +528,13 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 and chain.block_hashes[: len(old_hashes)] == old_hashes
             )
             tail = chain.block_hashes[len(old_hashes) :]
-            values = {int.from_bytes(h[-8:], "big") for h in tail}
+            valid_tail = all(type(h) is bytes and len(h) == 32 for h in tail)
+            values = (
+                {int.from_bytes(h[-8:], "big") for h in tail} if valid_tail else set()
+            )
             if (
                 not unchanged_prefix
-                or any(type(h) is not bytes or len(h) != 32 for h in tail)
+                or not valid_tail
                 or len(values) != len(tail)
                 or not state.router_hashes.isdisjoint(values)
             ):
@@ -546,7 +549,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 copy.deepcopy(hint),
                 chain,
                 eligible,
-                {int.from_bytes(h[-8:], "big") for h in chain.block_hashes},
+                {
+                    int.from_bytes(h[-8:], "big")
+                    for h in chain.block_hashes
+                    if type(h) is bytes and len(h) == 32
+                },
             )
         )
         return eligible

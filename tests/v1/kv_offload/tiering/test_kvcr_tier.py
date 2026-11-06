@@ -992,3 +992,30 @@ def test_strict_partition_completions_preserve_partial_success(monkeypatch, succ
     assert list(tier.get_finished_jobs()) == [
         JobResult(7, all(successes), None if all(successes) else expected)
     ]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("malformed", [None, 7, "bad", b"short"])
+def test_strict_malformed_snapshot_stays_local(monkeypatch, cached, malformed):
+    from dataclasses import replace
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+        RequestHashChain,
+    )
+
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1")
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, opportunistic_query=False)
+    ctx = _hint_context()
+    _set_chain(ctx)
+    if cached:
+        tier.on_new_request(ctx)
+    chain = ctx.get_state(RequestHashChain)
+    ctx.set_state(replace(chain, block_hashes=(*chain.block_hashes, malformed)))
+    kvcr.query_status = QueryStatus.HIT
+    key = make_offload_key((1).to_bytes(32, "big"), 0)
+    assert tier.lookup(key, ctx) is LookupResult.HIT
+    assert kvcr.query_calls[-1][1] is None
+    tier.submit_load(_job(7, ctx, key))
+    assert kvcr.deliver_calls[-1][2] is None
+    assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
