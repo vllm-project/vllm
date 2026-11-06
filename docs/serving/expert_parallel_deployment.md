@@ -418,3 +418,9 @@ removed rank hosted the DP store, also provide a reachable surviving
 Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`
 endpoint is no longer registered.
+
+With EPLB enabled, an error in the async EPLB worker on any rank is also a
+fault: the engines report `unhealthy` and wait for `retry` or `scale_down`,
+which restart expert rebalancing. If no instruction arrives within
+`engine_recovery_timeout_sec` (set with `--fault-tolerance-config`, default
+120 seconds), the engine raises the original error and exits.

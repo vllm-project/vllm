@@ -9,7 +9,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.utils import ensure_current_vllm_config
 from vllm.config import ParallelConfig
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.distributed.eplb import async_worker
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
@@ -193,6 +199,22 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         torch.cuda.set_sync_debug_mode(prev_mode)
 
 
+@pytest.fixture
+def eplb_dist_init(tmp_path):
+    """Like ``dist_init``, but with the platform's device backend (XCCL on XPU)."""
+    with ensure_current_vllm_config():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{tmp_path / 'dist_init'}",
+            local_rank=0,
+            backend=current_platform.dist_backend,
+        )
+        initialize_model_parallel(1, 1)
+        yield
+    cleanup_dist_env_and_memory()
+
+
 def _start_ft_async_eplb_with_failing_worker(
     monkeypatch, reset_during_transfer: bool = False
 ):
@@ -200,8 +222,6 @@ def _start_ft_async_eplb_with_failing_worker(
     every layer transfer. On one rank the EP group stands in for the EPLB group.
     With ``reset_during_transfer``, an FT reset lands before each failure.
     """
-    if current_platform.is_xpu():
-        pytest.skip("dist_init initializes NCCL, not XCCL")
     num_layers, num_experts, interval = 2, 4, 2
     device = torch.device(current_platform.device_type)
     monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
@@ -261,7 +281,7 @@ def _step_until_raise(state: EplbState, max_steps: int = 1000) -> Exception | No
     return None
 
 
-def test_async_worker_failure_raises_under_fault_tolerance(dist_init, monkeypatch):
+def test_async_worker_failure_raises_under_fault_tolerance(eplb_dist_init, monkeypatch):
     """Under fault tolerance the async worker survives an exception, but the
     failure must still reach step() so that FT can recover. Otherwise EPLB
     stalls silently with every rank waiting for the failed layer.
@@ -275,7 +295,7 @@ def test_async_worker_failure_raises_under_fault_tolerance(dist_init, monkeypatc
     assert state.async_worker.is_alive()
 
 
-def test_fault_tolerance_reset_rearms_async_eplb(dist_init, monkeypatch):
+def test_fault_tolerance_reset_rearms_async_eplb(eplb_dist_init, monkeypatch):
     """After an FT reset, the surviving worker runs the next rearrangement."""
     state, model_state, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
     assert _step_until_raise(state) is not None
@@ -291,7 +311,9 @@ def test_fault_tolerance_reset_rearms_async_eplb(dist_init, monkeypatch):
     assert exc.__cause__ is failures[1]
 
 
-def test_fault_tolerance_drops_failure_from_abandoned_cycle(dist_init, monkeypatch):
+def test_fault_tolerance_drops_failure_from_abandoned_cycle(
+    eplb_dist_init, monkeypatch
+):
     """A failure from a cycle that an FT reset abandoned is stale, so it must
     not fail the rearrangement that runs after recovery.
     """
