@@ -382,7 +382,6 @@ class Platform:
         """Override core Triton kernels with platform implementations.
 
         Platforms whose Triton kernels need replacement implementations
-        (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
         override this method and call
         :func:`vllm.triton_utils.dispatcher.register_kernels`
         with their overrides. It runs during model runner init, before any
