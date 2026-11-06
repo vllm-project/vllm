@@ -109,7 +109,6 @@ from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
     MiniMaxM3IndexerRocmNvfp4Impl,
     init_rocm_nvfp4_indexer_decode_cp,
 )
-from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
@@ -127,6 +126,7 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (
     MiniMaxM3SparseAiterPAPrefillMetadata,
 )
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import (
+    DecodeConfig,
     specialized_decode_config,
 )
 from vllm.models.minimax_m3.common.encoder_cudagraph import (
@@ -162,6 +162,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
+    from .mono.dispatch import MonoDecode
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
@@ -1607,7 +1608,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode_config: DecodeConfig | None = None
         self.specialized_decode: SpecializedDecode | None = None
 
         self.vocab_size = config.vocab_size
@@ -1747,13 +1748,39 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        # VLLM_ROCM_MINIMAX_M3_MONO=1: supported decode steps run one FlyDSL
-        # launch per layer (mono kernels)
-        self._mono = None
-        if mono_envs.MONO_ENABLE:
-            from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
+        self._mono: MonoDecode | None = None
+        if vllm_config.kernel_config.monokernel:
+            self._init_monokernel(vllm_config)
 
-            self._mono = MonoDecode(self, vllm_config)
+    def _init_monokernel(self, vllm_config: VllmConfig) -> None:
+        """Use the whole-layer mono decode if the deployment fits it, else the
+        FFN-only specialized decode."""
+        why: str | None
+        try:
+            from vllm.models.minimax_m3.amd.mono.dispatch import (
+                MonoDecode,
+                config_refusal,
+            )
+        except ImportError as err:
+            why = f"needs FlyDSL and AITER ({err})"
+        else:
+            why = config_refusal(vllm_config, self)
+            if why is None:
+                logger.info("MiniMax-M3 --monokernel: whole-layer mono decode")
+                self._mono = MonoDecode(self, vllm_config)
+                return
+        try:
+            self.specialized_decode_config = specialized_decode_config(vllm_config)
+        except ValueError as err:
+            raise ValueError(
+                f"--monokernel: MiniMax-M3 whole-layer mono decode unsupported: "
+                f"{why}; {err}"
+            ) from None
+        logger.info(
+            "MiniMax-M3 --monokernel: FFN-only specialized decode (whole-layer "
+            "mono decode unsupported: %s)",
+            why,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

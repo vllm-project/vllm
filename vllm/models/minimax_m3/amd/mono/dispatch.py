@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which MiniMax-M3 forwards take the mono path (``VLLM_ROCM_MINIMAX_M3_MONO=1``).
+"""Which MiniMax-M3 forwards take the mono path (``--monokernel``).
 
-The deployment is checked once (``_config_refusal``); a step is routed to the
+The deployment is checked once (``config_refusal``); a step is routed to the
 kernels only when it is a pure decode of 1..MAX_TOKENS tokens whose tables the
 kernels can read (``_step_refusal``). Every per-step condition is decided from
 TP-replicated state: the kernels all-reduce in-kernel, so ranks that disagreed
@@ -21,7 +21,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.amd.mono.check import forward_checked
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.models.minimax_m3.amd.mono.config import (
     MAX_CONTEXT,
     MAX_TOKENS,
@@ -29,7 +31,6 @@ from vllm.models.minimax_m3.amd.mono.config import (
     TP,
     MonoUnsupported,
 )
-from vllm.models.minimax_m3.amd.mono.envs import envs
 from vllm.models.minimax_m3.amd.mono.runner import MonoDecodeRunner, dense_prefix
 
 logger = init_logger(__name__)
@@ -54,7 +55,23 @@ def _separate_shared_ok(layers) -> bool:
     )
 
 
-def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
+def _mxfp8_attention_ok(layers) -> bool:
+    """The sparse layers' qkv and o projections are MXFP8. The dtype is set
+    when the layer is built, so this works before the weights load."""
+    try:
+        n_dense = dense_prefix(layers)
+    except MonoUnsupported:
+        return False
+    return all(
+        getattr(linear, "weight", None) is not None
+        and linear.weight.dtype == MXFP8_VALUE_DTYPE
+        and getattr(linear, "weight_scale", None) is not None
+        for lyr in layers[n_dense:]
+        for linear in (lyr.self_attn.qkv_proj, lyr.self_attn.o_proj)
+    )
+
+
+def config_refusal(vllm_config: VllmConfig, model) -> str | None:
     """Why this deployment cannot use the kernels at all, or None."""
     pc = vllm_config.parallel_config
     cc = vllm_config.cache_config
@@ -77,6 +94,7 @@ def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
             "shared expert neither fused nor a separate MLP",
         ),
         (_dense_prefix_ok(model.layers), "layer mix"),
+        (_mxfp8_attention_ok(model.layers), "attention projections not MXFP8"),
     )
     for ok, why in checks:
         if not ok:
@@ -120,20 +138,14 @@ def _step_refusal(
 
 
 class MonoDecode:
-    """Routes supported decode steps of one ``MiniMaxM3Model`` to the kernels."""
+    """Routes supported decode steps of one ``MiniMaxM3Model`` to the kernels.
+    Built only for a deployment ``config_refusal`` accepts."""
 
     def __init__(self, model, vllm_config: VllmConfig) -> None:
         self._model = model
         self._config = vllm_config.model_config.hf_text_config
         self._runner: MonoDecodeRunner | None = None
-        self._enabled = False
         self._slots_verified = False
-        if not envs.MONO_ENABLE:
-            return
-        why = _config_refusal(vllm_config, model)
-        if why is not None:
-            logger.info("MiniMax-M3 mono decode off: %s", why)
-            return
         attn0 = model.layers[dense_prefix(model.layers)].self_attn
         self._layer_name = attn0.layer_name
         self._index_prefix = attn0.indexer.index_cache.prefix
@@ -211,6 +223,4 @@ class MonoDecode:
         inputs_embeds: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self._runner is not None
-        if envs.MONO_CHECK:
-            return forward_checked(self._runner, input_ids, positions, inputs_embeds)
         return self._runner.forward(input_ids, positions, inputs_embeds)

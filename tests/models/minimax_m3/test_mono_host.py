@@ -13,9 +13,11 @@ import torch
 
 pytest.importorskip("flydsl")
 
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa: E402
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.models.minimax_m3.amd.mono import config as mono_config  # noqa: E402
 from vllm.models.minimax_m3.amd.mono import dispatch as mono_dispatch  # noqa: E402
-from vllm.models.minimax_m3.amd.mono import envs as mono_envs  # noqa: E402
 from vllm.models.minimax_m3.amd.mono.config import (  # noqa: E402
     MAX_CONTEXT,
     MAX_TOKENS,
@@ -24,8 +26,8 @@ from vllm.models.minimax_m3.amd.mono.config import (  # noqa: E402
     MonoUnsupported,
 )
 from vllm.models.minimax_m3.amd.mono.dispatch import (  # noqa: E402
-    _config_refusal,
     _step_refusal,
+    config_refusal,
 )
 from vllm.models.minimax_m3.amd.mono.runner import (  # noqa: E402
     dense_prefix,
@@ -33,11 +35,19 @@ from vllm.models.minimax_m3.amd.mono.runner import (  # noqa: E402
 )
 
 
-def _layer(moe: bool, sparse: bool):
+def _linear(dtype: torch.dtype):
+    return SimpleNamespace(
+        weight=torch.empty(0, dtype=dtype), weight_scale=torch.empty(0)
+    )
+
+
+def _layer(moe: bool, sparse: bool, attn_dtype: torch.dtype = MXFP8_VALUE_DTYPE):
     attn = (
         SimpleNamespace(
             layer_name="attn",
             indexer=SimpleNamespace(index_cache=SimpleNamespace(prefix="idx")),
+            qkv_proj=_linear(attn_dtype),
+            o_proj=_linear(attn_dtype),
         )
         if sparse
         else SimpleNamespace()
@@ -123,8 +133,13 @@ def _vllm_config(**overrides):
     return cfg
 
 
-def _model(fse: bool = True, shared_mlp: bool = True, aux=()):
-    moe = _layer(True, True)
+def _model(
+    fse: bool = True,
+    shared_mlp: bool = True,
+    aux=(),
+    attn_dtype: torch.dtype = MXFP8_VALUE_DTYPE,
+):
+    moe = _layer(True, True, attn_dtype)
     moe.block_sparse_moe = SimpleNamespace(
         is_fused_shared_expert_enabled=fse,
         shared_experts=object() if shared_mlp else None,
@@ -139,7 +154,7 @@ def _model(fse: bool = True, shared_mlp: bool = True, aux=()):
 @pytest.mark.parametrize("fse", [True, False])
 @pytest.mark.parametrize("aux", [(), (2, 30, 57)])
 def test_config_refusal_accepts_the_supported_deployment(fse, aux):
-    assert _config_refusal(_vllm_config(), _model(fse=fse, aux=aux)) is None
+    assert config_refusal(_vllm_config(), _model(fse=fse, aux=aux)) is None
 
 
 @pytest.mark.parametrize(
@@ -154,10 +169,11 @@ def test_config_refusal_accepts_the_supported_deployment(fse, aux):
             "max_model_len",
         ),
         (_vllm_config(), _model(fse=False, shared_mlp=False), "neither fused nor"),
+        (_vllm_config(), _model(attn_dtype=torch.bfloat16), "not MXFP8"),
     ],
 )
 def test_config_refusal_names_the_unmet_condition(cfg, model, why):
-    reason = _config_refusal(cfg, model)
+    reason = config_refusal(cfg, model)
     assert reason is not None and why in reason
 
 
@@ -202,9 +218,9 @@ def test_step_refusal_rejects_what_the_kernels_cannot_serve():
     assert "contiguous" in _step_reason(fwd, 4, pos)
 
 
-# ---- MonoDecode host contract: enable, runner life cycle, slot check, routing ----
+# ---- MonoDecode host contract: runner life cycle, slot check, routing ----
 # Everything the kernels are not: these pin the dispatcher's behaviour so a refactor
-# of the host side (or of the switch) must keep passing them.
+# of the host side must keep passing them.
 
 
 class _FakeRunner:
@@ -232,10 +248,8 @@ class _FakeRunner:
 
 @pytest.fixture
 def mono(monkeypatch):
-    """An enabled dispatcher on a supported deployment, outside graph capture,
-    with the runner build stubbed."""
-    monkeypatch.setattr(mono_dispatch.envs, "MONO_ENABLE", True)
-    monkeypatch.setattr(mono_dispatch.envs, "MONO_CHECK", False)
+    """A dispatcher on a supported deployment, outside graph capture, with the
+    runner build stubbed."""
     monkeypatch.setattr(mono_dispatch, "MonoDecodeRunner", _FakeRunner)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     _FakeRunner.built = 0
@@ -249,28 +263,7 @@ def _fwd_shared(n: int, shared: bool = True):
     return fwd
 
 
-def test_env_flag_parsing(monkeypatch):
-    for raw, want in (("1", True), ("true", True), ("True", True), ("0", False)):
-        monkeypatch.setenv("VLLM_ROCM_MINIMAX_M3_MONO_TESTFLAG", raw)
-        assert mono_envs._flag("VLLM_ROCM_MINIMAX_M3_MONO_TESTFLAG") is want
-    monkeypatch.delenv("VLLM_ROCM_MINIMAX_M3_MONO_TESTFLAG")
-    assert mono_envs._flag("VLLM_ROCM_MINIMAX_M3_MONO_TESTFLAG") is False
-
-
-def test_disabled_without_the_switch(monkeypatch):
-    monkeypatch.setattr(mono_dispatch.envs, "MONO_ENABLE", False)
-    mono = mono_dispatch.MonoDecode(_model(), _vllm_config())
-    assert not mono._enabled
-    assert not mono.supports(None, torch.zeros(1, dtype=torch.int64), None, None)
-
-
-def test_unsupported_deployment_falls_back(monkeypatch):
-    monkeypatch.setattr(mono_dispatch.envs, "MONO_ENABLE", True)
-    bad = _vllm_config(**{"parallel_config.tensor_parallel_size": 8})
-    assert not mono_dispatch.MonoDecode(_model(), bad)._enabled
-
-
-def test_enabled_dispatcher_reads_the_first_sparse_layer(mono):
+def test_dispatcher_reads_the_first_sparse_layer(mono):
     assert mono._enabled
     assert mono._layer_name == "attn" and mono._index_prefix == "idx"
     assert mono._runner is None  # built lazily, on the first eligible step
@@ -345,12 +338,7 @@ def test_refused_step_does_not_build_the_runner(mono, monkeypatch):
     assert not mono.supports(None, pos, None, None) and _FakeRunner.built == 0
 
 
-def test_forward_runs_the_runner_or_the_self_check(mono, monkeypatch):
+def test_forward_runs_the_runner(mono):
     mono._ensure_runner()
     pos = torch.zeros(2, dtype=torch.int64)
     assert mono.forward(None, pos, None) == "mono-out" and mono._runner.calls == [2]
-    monkeypatch.setattr(mono_dispatch.envs, "MONO_CHECK", True)
-    monkeypatch.setattr(
-        mono_dispatch, "forward_checked", lambda runner, *a: ("checked", runner)
-    )
-    assert mono.forward(None, pos, None) == ("checked", mono._runner)
