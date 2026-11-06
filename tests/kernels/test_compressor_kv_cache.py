@@ -589,7 +589,7 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
 )
 @pytest.mark.parametrize("record", ["fp8", "fp8_one_pass", "mxfp8"])
 # A regression faults the GPU and aborts the process; keep that to this test.
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_v41_gather_rows_past_int32_elements(record, monkeypatch):
     """A request whose rows start past 2^31 elements of ``out`` gets them.
 
