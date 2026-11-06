@@ -218,6 +218,17 @@ Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the sa
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
+For the KVCR tier (`"type": "kvcr"`), set `"opportunistic_query": false` in
+its `secondary_tiers` entry to enable strict hint-driven remote reuse. The
+omitted/default value is `true`, preserving legacy opportunistic lookup.
+Strict mode requires integer KV-event hashes
+(`VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=1`) and supported `kv.fetch` hints: source
+and coarse prefix anchors are validated against the scheduler's trusted hash
+chain and group chunk boundaries before authorizing finer group-qualified keys.
+Rejected or uncovered remote keys can still reuse local Guard data; their loads
+remain local-only if that data is evicted before dispatch. Stable validated
+closures are reused across lookups and valid append-only extensions.
+
 The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store. Both tiers use the coarse-grained wire medium value `STORAGE`; the medium does not distinguish filesystem from object-store storage. To recover location semantics, set the optional `locality` field (`LOCAL` / `REMOTE`) on the tier entry — that field, not the medium, tells consumers whether the tier's blocks are local to the publishing vLLM instance. Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
