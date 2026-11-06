@@ -6,6 +6,7 @@
 The executor (``runtime/decode.py``) runs the decoder layers of FULL CUDA
 graph captures of pure decode steps of 1-32 rows (up to four requests with
 the seven-token DSpark draft, whose verify steps are 8 rows a request), with
+the low-batch sparse attention core after the KV insert (``attention/``) and
 the low-batch FFN half of the MoE layers (``moe/``); every other forward
 runs the stock layers.
 """
@@ -120,8 +121,9 @@ def specialized_decode_config(vllm_config: VllmConfig) -> bool:
             f"decode_backend=latency_specialized needs {'; '.join(missing)}."
         )
     logger.info_once(
-        "MiniMax-M3 specialized decode on: MoE layers that leave their finalize "
-        "to the next layer run the low-batch FFN in FULL-graph decode steps of "
-        "1-32 rows."
+        "MiniMax-M3 specialized decode on: in FULL-graph decode steps of 1-32 "
+        "rows, the sparse attention layers run the low-batch indexer, sparse "
+        "attention and o_proj, and MoE layers that leave their finalize to the "
+        "next layer run the low-batch FFN."
     )
     return True

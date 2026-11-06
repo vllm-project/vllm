@@ -12,7 +12,7 @@ The MiniMax-M3-preview config selects a single set of branches:
       "index" attention branch.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 import torch
@@ -146,6 +146,9 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
+        LowBatchAttention,
+    )
     from vllm.models.minimax_m3.nvidia.specialized_decode.moe import LowBatchFfn
     from vllm.models.minimax_m3.nvidia.specialized_decode.runtime.decode import (
         SpecializedDecode,
@@ -1078,6 +1081,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
+        # Under decode_backend=latency_specialized the decode executor sets the
+        # flag, and process_weights_after_loading builds the low-batch path.
+        self.use_low_batch_attention = False
+        self.low_batch_attention: LowBatchAttention | None = None
 
         self.use_qkv_fused_epilogue = _supports_qkv_fused_epilogue(self)
         if self.use_qkv_fused_epilogue:
@@ -1101,6 +1108,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
+
+    def process_weights_after_loading(self) -> None:
+        if self.use_low_batch_attention:
+            from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
+                build_low_batch_attention,
+            )
+
+            self.low_batch_attention = build_low_batch_attention(self)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
@@ -1177,7 +1192,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor | QuantizedActivation,
+        low_batch: Callable[..., torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        """``low_batch``, when given, takes over after the KV insert: it gets
+        q, index_q and the KV and index caches and returns o_proj's output."""
         cos_sin_cache = self.rotary_emb.cos_sin_cache
         rotary_dim = self.rotary_emb.rotary_dim
         eps = self.q_norm.variance_epsilon
@@ -1264,6 +1282,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 write_qkv=not q_is_fp8,
             )
 
+        if low_batch is not None:
+            return low_batch(
+                q, index_q, self.kv_cache, self.indexer.index_cache.kv_cache
+            )
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)
         attn_output = self._run_attention(q, index_q, output)
         if self.use_sequence_parallel:
