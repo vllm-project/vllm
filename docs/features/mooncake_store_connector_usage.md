@@ -323,30 +323,17 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ### Lookup timeout and circuit breaker
 
-Prefix lookups wait at most **5 seconds**, including time queued on the lookup
-executor. Set `VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS` to change this limit.
-This applies to blocking lookups, async lookups, and arrival-time prefetches.
-
-A timeout or lookup error returns a cache miss so the request can compute locally.
-After **3 consecutive failures**, the circuit breaker skips further lookups for
-**30 seconds**. Configure the failure threshold with
-`VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD` and cooldown with
-`VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS`. After the cooldown,
-the serial lookup executor tries again: success resets the failure count, failure
-restarts the cooldown. A successful lookup also resets the count before the
-threshold is reached. Timeouts and cooldowns must be positive numbers of seconds;
-the failure threshold must be a positive integer.
-
-When the breaker opens, a warning logs the consecutive failure count and cooldown.
-
-```bash
-export VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS=5
-export VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD=3
-export VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS=30
-```
+Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
+`lookup_timeout_s` (see below), including time queued on the lookup executor.
+A timeout or lookup error returns a cache miss so the request computes locally.
+Only lookups that reached the store count as failures; lookups that expire
+while queued behind others do not. After 3 consecutive failures, lookups are
+skipped for 30 seconds. After the cooldown, a single probe lookup either closes
+the breaker or reopens it.
 
 This bounds the scheduler's wait for prefix lookup. It does not cancel a master
-RPC already running inside the worker or apply to KV loads, saves, or store reset.
+RPC already running inside the worker or apply to KV loads and saves. Store
+reset waits at most 60 seconds.
 
 ### kv_connector_extra_config
 
@@ -354,6 +341,7 @@ RPC already running inside the worker or apply to KV loads, saves, or store rese
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread without waiting for its result. With a positive `lookup_prefetch_limit`, lookup starts as soon as the request is added to the scheduler, so it overlaps the time the request waits in the queue. GPU KV allocation and loading still happen through the scheduler. Default: `false`.
 - `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
 - `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed. Pending lookups use the separate lookup timeout above. Default: `2.0` seconds.
+- `lookup_timeout_s` (float): Maximum wait for a prefix lookup, including executor queue time. Default: `1.0` seconds.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);

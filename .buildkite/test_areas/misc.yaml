@@ -352,19 +352,6 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":computer: (CPU) Mooncake Store Lookup"
-  key: mooncake-store-lookup-cpu
-  depends_on:
-    - image-build-cpu
-  source_file_dependencies:
-    - vllm/envs.py
-    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py
-    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/circuit_breaker.py
-    - tests/v1/kv_connector/unit/test_mooncake_store_lookup.py
-  device: cpu-small
-  commands:
-    - pytest -v -s v1/kv_connector/unit/test_mooncake_store_lookup.py
-
 - label: ":computer: (CPU) V1 Others"
   key: v1-others-cpu
   depends_on:
@@ -399,10 +386,7 @@ steps:
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
-    - >-
-      pytest -v -s -m 'cpu_test'
-      v1/kv_connector/unit
-      --ignore=v1/kv_connector/unit/test_mooncake_store_lookup.py
+    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
