@@ -183,7 +183,20 @@ class DSparkSpeculator(DFlashSpeculator):
         idx_map: torch.Tensor,
         sample_pos: torch.Tensor,
         step: int,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Sample draft ids from `logits + bias`.
+
+        The Gumbel kernel adds `bias` itself unless a step below needs the sum.
+        """
+        if bias is not None and (
+            self.draft_logits is None
+            or self._d2t_scatter_index is not None
+            or self.draft_watermarker is not None
+            or self.acceptance_estimator is not None
+            or bias.dtype != logits.dtype
+        ):
+            logits, bias = logits + bias, None
         self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
             draft_ids = greedy_argmax(logits)
@@ -224,6 +237,7 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
             logits_cache_row_mapping=self.draft_logits.row_mapping,
+            bias=bias,
         )
 
     def _markov_step(
@@ -302,12 +316,13 @@ class DSparkSpeculator(DFlashSpeculator):
             markov_embed, state = self._markov_step(prev, hidden_by_step[:, i], state)
             if self.use_confidence_head:
                 markov_embeds.append(markov_embed)
-            bias = self.model.markov_bias(markov_embed)
-            logits_i = base_logits[:, i] + bias
+            logits_i = base_logits[:, i]
+            bias: torch.Tensor | None = self.model.markov_bias(markov_embed)
             if hasattr(self.model, "apply_output_logit_transform"):
-                logits_i = self.model.apply_output_logit_transform(logits_i)
+                logits_i = self.model.apply_output_logit_transform(logits_i + bias)
+                bias = None
             draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
+                logits_i, idx_map[:, i], sample_pos[:, i], i, bias
             )
             out_tokens[:, i] = draft_sampled_i
             prev = draft_sampled_i
