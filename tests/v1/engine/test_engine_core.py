@@ -37,10 +37,12 @@ from vllm.v1.engine.core import (
     EngineCoreProc,
     EngineShutdownState,
 )
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -821,6 +823,122 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     core.add_request.reset_mock()
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
     core.add_request.assert_called_once_with(request, 0)
+
+
+@pytest.mark.parametrize(
+    "steps,fails_on",
+    [
+        pytest.param([("sleep", 2), ("wake", None)], 1, id="level2-tagless"),
+        pytest.param(
+            [("sleep", 2), ("wake", ["weights", "kv_cache"])], 1, id="level2-all-tags"
+        ),
+        pytest.param(
+            [("sleep", 2), ("wake", ["kv_cache"]), ("wake", ["weights"])],
+            2,
+            id="level2-weights-last",
+        ),
+        pytest.param(
+            [("sleep", 2), ("wake", ["weights"]), ("wake", ["kv_cache"])],
+            None,
+            id="level2-staged",
+        ),
+        pytest.param([("sleep", 1), ("wake", None)], None, id="level1"),
+        pytest.param(
+            [("sleep", 1), ("sleep", 2), ("wake", None)], None, id="level2-on-level1"
+        ),
+        pytest.param(
+            [
+                ("sleep", 2),
+                ("wake", ["weights"]),
+                ("wake", ["kv_cache"]),
+                ("sleep", 1),
+                ("wake", None),
+            ],
+            None,
+            id="level1-after-staged-level2",
+        ),
+    ],
+)
+def test_wake_up_fails_requests_on_discarded_weights(steps, fails_on):
+    """A wake_up that both remaps the weights discarded by level-2 sleep and
+    resumes scheduling fails the queued requests with a retryable error, since
+    they would run on the discarded weights. Wakes that leave a point to restore
+    the weights first, and level-1 sleep, keep them."""
+    core = _pausable_engine_core_proc()
+    executor = object.__new__(UniProcExecutor)
+    executor.sleeping_tags = set()
+    executor.discarded_tags = set()
+    executor.collective_rpc = MagicMock()
+    core.model_executor = executor
+    core._checkpoint_state = CheckpointState.RUNNING
+    core.pause_scheduler = MagicMock(return_value=None)
+    core._set_kv_connector_handshake_metadata = MagicMock()
+    order: list[str] = []
+    core.resume_scheduler = MagicMock(side_effect=lambda: order.append("resume"))
+    queued = [MagicMock(request_id=r, client_index=c) for r, c in [("a", 0), ("b", 1)]]
+
+    def finish_requests(*args):
+        order.append("fail")
+        return queued
+
+    core.scheduler.finish_requests.side_effect = finish_requests
+    core._send_finish_outputs_to_client = MagicMock()
+
+    for i, (op, arg) in enumerate(steps):
+        if op == "sleep":
+            core.sleep(level=arg)
+            continue
+        assert core.wake_up(arg) == (not executor.sleeping_tags)
+        if i != fails_on:
+            core.scheduler.finish_requests.assert_not_called()
+            continue
+        core.scheduler.finish_requests.assert_called_once_with(
+            None, RequestStatus.FINISHED_ERROR
+        )
+        sent = core._send_finish_outputs_to_client.call_args_list
+        assert [c.args[:3] for c in sent] == [
+            (["a"], 0, FinishReason.ERROR),
+            (["b"], 1, FinishReason.ERROR),
+        ]
+        error = sent[0].args[3]
+        assert error.code == "weights_not_restored" and error.retryable
+        # Failed before scheduling resumes, so none of them runs.
+        assert order == ["fail", "resume"]
+    if fails_on is None:
+        core._send_finish_outputs_to_client.assert_not_called()
+
+
+def test_wake_up_returns_failed_requests_in_process():
+    """With multiprocessing disabled, the requests a level-2 wake fails reach
+    the caller through the next get_output, so they do not stay unfinished."""
+    core = object.__new__(EngineCore)
+    executor = object.__new__(UniProcExecutor)
+    executor.sleeping_tags = set()
+    executor.discarded_tags = set()
+    executor.collective_rpc = MagicMock()
+    core.model_executor = executor
+    core.scheduler = MagicMock()
+    core.scheduler.finish_requests.return_value = [
+        MagicMock(request_id="a", client_index=0)
+    ]
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._pending_error_outputs = []
+    core.pause_scheduler = MagicMock(return_value=None)
+    core._set_kv_connector_handshake_metadata = MagicMock()
+    core.resume_scheduler = MagicMock()
+    core.step_fn = MagicMock(return_value=({}, False))
+    core.post_step = MagicMock()
+    client = object.__new__(InprocClient)
+    client.engine_core = core
+
+    core.sleep(level=2)
+    assert core.wake_up()
+
+    [output] = client.get_output().outputs
+    assert output.request_id == "a"
+    assert output.finish_reason == FinishReason.ERROR
+    assert output.error.code == "weights_not_restored" and output.error.retryable
+    assert client.get_output().outputs == []
 
 
 @pytest.mark.parametrize(

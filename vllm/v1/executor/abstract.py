@@ -119,6 +119,10 @@ class Executor(ABC):
         self.observability_config = vllm_config.observability_config
         self._init_executor()
         self.sleeping_tags: set[str] = set()
+        # Sleeping tags whose contents were discarded rather than backed up, as
+        # level-2 sleep does to the model parameters in "weights" (see
+        # Worker.sleep).
+        self.discarded_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
 
@@ -431,6 +435,8 @@ class Executor(ABC):
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
         self.sleeping_tags |= SLEEP_TAGS
+        if level >= 2:
+            self.discarded_tags.add("weights")
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
@@ -457,8 +463,10 @@ class Executor(ABC):
         if tags:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
+                self.discarded_tags.discard(tag)
         else:
             self.sleeping_tags.clear()
+            self.discarded_tags.clear()
 
     def discard(self, tags: tuple[str, ...]) -> None:
         tags_to_discard = set(tags) - self.sleeping_tags
