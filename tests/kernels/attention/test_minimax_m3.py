@@ -1594,6 +1594,9 @@ def test_decode_index_topk_correctness(
     max_decode_query_len: int,
     num_padded_reqs: int,
 ):
+    # A local generator, so the inputs don't depend on the RNG state that
+    # earlier tests in the shard leave behind.
+    gen = torch.Generator(device="cuda").manual_seed(0)
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -1615,14 +1618,28 @@ def test_decode_index_topk_correctness(
     num_pages = active_batch * max_blocks
 
     active_block_table = torch.randperm(
-        num_pages, device="cuda", dtype=torch.int32
+        num_pages, device="cuda", dtype=torch.int32, generator=gen
     ).reshape(active_batch, max_blocks)
     block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
     block_table[:active_batch] = active_block_table
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    # bf16-representable values make the kernel's TF32 dot exact, so near-tied
+    # blocks rank the same as in the FP32 reference.
+    idx_q = (
+        torch.randn(
+            batch * decode_query_len,
+            num_idx_heads,
+            head_dim,
+            device="cuda",
+            generator=gen,
+        )
+        .bfloat16()
+        .float()
     )
-    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
+    index_kv_cache = (
+        torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda", generator=gen)
+        .bfloat16()
+        .float()
+    )
 
     actual = minimax_m3_index_decode(
         idx_q,
@@ -2355,6 +2372,44 @@ def test_main_cache_layout_contract():
         order = layout.layer_view_order
         # Valid permutation: no duplicates, covers every axis.
         assert set(order) == set(range(len(order)))
+
+
+def test_sparse_metadata_build_does_not_sync():
+    """Building the prefill metadata reads only host-side lengths: it must not
+    wait for queued GPU work (it runs while the previous step executes)."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.models.minimax_m3.common.sparse_attention import (
+        MiniMaxM3SparseMetadataBuilder,
+    )
+
+    device = torch.device(current_platform.device_type)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+    )
+    builder = MiniMaxM3SparseMetadataBuilder(spec, ["layer.0"], vllm_config, device)
+    batch = BatchSpec(seq_lens=[300, 2000, 129, 4096], query_lens=[1, 1, 129, 700])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        md = builder.build(0, common)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    assert md.num_decodes == 2 and md.num_prefills == 2
+    assert md.prefill is not None
+    assert md.prefill.cu_seqlens_k.tolist() == [0, 129, 129 + 4096]
+    assert md.prefill.total_kv_blocks == 2 + 32
 
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.LBHNC])
