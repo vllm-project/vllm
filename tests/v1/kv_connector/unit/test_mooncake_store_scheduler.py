@@ -153,7 +153,7 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
         num_computed_tokens=0,
         prompt_token_ids=list(range(32)),
         num_prompt_tokens=32,
-        prefill_token_ids=None,
+        prefill_token_ids=list(range(32)),
         block_ids=([0, 1],),
         block_hashes=[f"h{i}".encode() for i in range(32 // hash_block_size)],
     )

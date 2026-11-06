@@ -47,11 +47,10 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: LoRARequest | None
+    # All the tokens to prefill: the prompt, plus any generated tokens on resume.
+    prefill_token_ids: list[int]
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
-
-    # Only used for v2 model runner.
-    prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
 
@@ -60,7 +59,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-        prefill_token_ids: list[int] | None = None,
+        prefill_token_ids: list[int],
         uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
@@ -121,14 +120,11 @@ class NewRequestData:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None
         )
-        prefill_token_ids_len = (
-            len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
-        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
-            f"prefill_token_ids_len={prefill_token_ids_len},"
+            f"prefill_token_ids_len={len(self.prefill_token_ids)},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"

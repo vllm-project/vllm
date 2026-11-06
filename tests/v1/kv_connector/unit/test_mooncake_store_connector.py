@@ -1446,7 +1446,9 @@ def test_finish_during_prefill_saves_only_completed_kv(
     )
     connector.update_state_after_alloc(request, KVCacheBlocks((owned,)), 0)
     out = SchedulerOutput.make_empty()
-    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+    ]
     out.num_scheduled_tokens = {request.request_id: 20}
     out.total_num_scheduled_tokens = 20
     out.kv_connector_block_state = KVConnectorBlockState(
@@ -1556,7 +1558,9 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
         0,
     )
     out = SchedulerOutput.make_empty()
-    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+    ]
     out.num_scheduled_tokens = {request.request_id: 32}
     out.total_num_scheduled_tokens = 32
     out.kv_connector_block_state = KVConnectorBlockState(
