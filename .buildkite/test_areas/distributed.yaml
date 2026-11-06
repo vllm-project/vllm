@@ -21,6 +21,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_pipeline_partition.py
   mirror:
     amd:
       automatic_shard: true
@@ -692,7 +693,12 @@ steps:
       - vllm/distributed/
       - vllm/_aiter_ops.py
       - vllm/_custom_ops.py
-      - csrc/rocm/skinny_gemms.cu
+      - csrc/rocm/skinny_gemms.cuh
+      - csrc/rocm/skinny_gemms_int4.cu
+      - csrc/rocm/skinny_gemms_llmm1.cu
+      - csrc/rocm/skinny_gemms_wvsplitk.cu
+      - csrc/rocm/skinny_gemms_wvsplitkq.cu
+      - csrc/rocm/skinny_gemms_wvsplitkrc.cu
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
