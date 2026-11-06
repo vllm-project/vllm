@@ -512,10 +512,11 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
     [(None, False, False), (True, False, True), (None, True, True)],
 )
 def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
-    monkeypatch, requested, imex_channel, enabled
+    monkeypatch, caplog_vllm, requested, imex_channel, enabled
 ):
     """Without a channel NIXL within a host would fall back to TCP. An explicit
-    request, for transfers across hosts, is honored."""
+    request, for transfers across hosts, is honored. Turning the cache off by
+    default says how to get it back."""
     from vllm.config.vllm import VllmConfig
 
     config = _nixl_config_for_extensible_kv_cache(
@@ -523,6 +524,7 @@ def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
     )
     VllmConfig._resolve_extensible_kv_cache(config)
     assert config.cache_config.enable_extensible_kv_cache is enabled
+    assert ("--enable-extensible-kv-cache" in caplog_vllm.text) is (not enabled)
 
 
 @pytest.mark.parametrize("multi", [False, True])

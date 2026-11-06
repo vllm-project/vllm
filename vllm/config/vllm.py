@@ -3255,6 +3255,12 @@ class VllmConfig:
             cache_config.enable_extensible_kv_cache = (
                 unsupported is None and not nixl_would_use_tcp
             )
+            if unsupported is None and nixl_would_use_tcp:
+                logger.info(
+                    "Extensible KV cache off: without an IMEX channel, NIXL within "
+                    "a host would lose NVLink and fall back to RDMA or TCP. If "
+                    "transfers only cross hosts, pass --enable-extensible-kv-cache."
+                )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
         elif requested and nixl_would_use_tcp:

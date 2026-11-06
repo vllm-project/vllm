@@ -14,7 +14,13 @@ from contextlib import suppress
 from functools import cache
 from typing import Any
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SUCCESS = 0
+_ERROR_NOT_PERMITTED = 800
+_ERROR_NOT_SUPPORTED = 801
 _MEM_ALLOCATION_TYPE_PINNED = 1
 _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
@@ -313,6 +319,27 @@ class CudaVmmDriver(VmmDriver):
         if fabric:
             prop.requestedHandleTypes = _MEM_HANDLE_TYPE_FABRIC
         return prop
+
+    def create(self, size: int, device_index: int) -> int:
+        prop = self._make_alloc_prop(device_index)
+        handle = MemHandle()
+        result = self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
+        # Device support and an open channel do not guarantee a FABRIC allocation.
+        if prop.requestedHandleTypes and result in (
+            _ERROR_NOT_PERMITTED,
+            _ERROR_NOT_SUPPORTED,
+        ):
+            logger.warning(
+                "Device %d cannot allocate with a FABRIC handle (%s); allocating "
+                "without one. With the extensible KV cache, NIXL then loses NVLink "
+                "and falls back to RDMA or TCP.",
+                device_index,
+                self.error_string(result),
+            )
+            self._fabric_capable[device_index] = False
+            return super().create(size, device_index)
+        self._check(result)
+        return handle.value
 
     def error_string(self, code: int) -> str:
         msg = ctypes.c_char_p()
