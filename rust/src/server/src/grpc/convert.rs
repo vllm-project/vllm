@@ -48,6 +48,119 @@ fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
 // Request conversion
 // ========================================================================================
 
+/// Decode per-request multimodal overrides from protobuf Struct fields.
+///
+/// Keep the maps separate from sampling parameters: they belong to
+/// media loading and multimodal preprocessing.
+pub(super) fn multimodal_kwargs_from_proto(
+    request: &pb::GenerateRequest,
+) -> (
+    Option<serde_json::Map<String, serde_json::Value>>,
+    Option<serde_json::Map<String, serde_json::Value>>,
+) {
+    fn to_map(value: &prost_types::Struct) -> serde_json::Map<String, serde_json::Value> {
+        match proto_struct_to_json(value) {
+            serde_json::Value::Object(fields) => fields,
+            _ => unreachable!("protobuf Struct must decode to a JSON object"),
+        }
+    }
+
+    (
+        request.mm_processor_kwargs.as_ref().map(to_map),
+        request.media_io_kwargs.as_ref().map(to_map),
+    )
+}
+
+/// Decode only request-scoped image overrides with a bounded resource cost.
+/// Other processor options need an explicit implementation instead of being ignored.
+pub(super) fn mm_processor_overrides_from_proto(
+    request: &pb::GenerateRequest,
+) -> Result<Option<vllm_chat::multimodal::MmProcessorOverrides>, Status> {
+    let (kwargs, _) = multimodal_kwargs_from_proto(request);
+    let Some(mut kwargs) = kwargs else {
+        return Ok(None);
+    };
+    if kwargs.is_empty() {
+        return Ok(None);
+    }
+    fn positive_integer(value: serde_json::Value, name: &str) -> Result<usize, Status> {
+        value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "mm_processor_kwargs.{name} must be a positive integer"
+                ))
+            })
+    }
+    let max_pixels = kwargs
+        .remove("max_pixels")
+        .map(|value| positive_integer(value, "max_pixels"))
+        .transpose()?;
+    let num_crops = kwargs
+        .remove("num_crops")
+        .map(|value| positive_integer(value, "num_crops"))
+        .transpose()?;
+    if let Some(key) = kwargs.keys().next() {
+        return Err(Status::invalid_argument(format!(
+            "unsupported mm_processor_kwargs key: {key}"
+        )));
+    }
+    Ok(Some(vllm_chat::multimodal::MmProcessorOverrides {
+        max_pixels,
+        num_crops,
+    }))
+}
+
+/// Read the currently supported media-I/O request override.
+///
+/// Reject unknown keys instead of silently ignoring a caller's settings.
+/// More modalities can be added as their request-scoped loader APIs become available.
+pub(super) fn video_fps_from_proto(request: &pb::GenerateRequest) -> Result<Option<f64>, Status> {
+    let (_, media_kwargs) = multimodal_kwargs_from_proto(request);
+    let Some(mut kwargs) = media_kwargs else {
+        return Ok(None);
+    };
+    let Some(video) = kwargs.remove("video") else {
+        if kwargs.is_empty() {
+            return Ok(None);
+        }
+        return Err(Status::invalid_argument("unsupported media_io_kwargs key"));
+    };
+    if !kwargs.is_empty() {
+        return Err(Status::invalid_argument("unsupported media_io_kwargs key"));
+    }
+    let serde_json::Value::Object(mut video) = video else {
+        return Err(Status::invalid_argument(
+            "media_io_kwargs.video must be an object",
+        ));
+    };
+    let Some(fps) = video.remove("fps") else {
+        if video.is_empty() {
+            return Ok(None);
+        }
+        return Err(Status::invalid_argument(
+            "unsupported media_io_kwargs.video key",
+        ));
+    };
+    if !video.is_empty() {
+        return Err(Status::invalid_argument(
+            "unsupported media_io_kwargs.video key",
+        ));
+    }
+    let fps = fps
+        .as_f64()
+        .ok_or_else(|| Status::invalid_argument("media_io_kwargs.video.fps must be a number"))?;
+    // Keep request-provided sampling bounded before any media is downloaded.
+    if !fps.is_finite() || !(0.0 < fps && fps <= 30.0) {
+        return Err(Status::invalid_argument(
+            "media_io_kwargs.video.fps must be in (0, 30]",
+        ));
+    }
+    Ok(Some(fps))
+}
+
 /// Convert a gRPC `GenerateRequest` into the internal `TextRequest`.
 ///
 /// `req.model` must be accepted by `served_model_names`; otherwise the request
@@ -594,6 +707,184 @@ mod tests {
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn grpc_processor_overrides_are_strictly_parsed() {
+        fn request(value: serde_json::Value) -> pb::GenerateRequest {
+            pb::GenerateRequest {
+                mm_processor_kwargs: json_to_proto_struct(&value),
+                ..base_request()
+            }
+        }
+        let parsed = super::mm_processor_overrides_from_proto(&request(
+            serde_json::json!({"max_pixels": 512, "num_crops": 2}),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.max_pixels, Some(512));
+        assert_eq!(parsed.num_crops, Some(2));
+        assert!(super::mm_processor_overrides_from_proto(&base_request()).unwrap().is_none());
+        for bad in [
+            serde_json::json!({"max_pixels": -1}),
+            serde_json::json!({"num_crops": 0}),
+            serde_json::json!({"num_crops": "2"}),
+            serde_json::json!({"max_pixels": 1.5}),
+            serde_json::json!({"unknown": 2}),
+            serde_json::json!({"image": {"max_pixels": 512}}),
+        ] {
+            assert_eq!(
+                super::mm_processor_overrides_from_proto(&request(bad)).unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+            );
+        }
+    }
+
+    #[test]
+    fn grpc_video_fps_override_is_validated() {
+        fn request_with_media_kwargs(value: serde_json::Value) -> pb::GenerateRequest {
+            pb::GenerateRequest {
+                media_io_kwargs: json_to_proto_struct(&value),
+                ..base_request()
+            }
+        }
+
+        let request = request_with_media_kwargs(serde_json::json!({"video": {"fps": 2.5}}));
+        assert_eq!(super::video_fps_from_proto(&request).unwrap(), Some(2.5));
+        assert_eq!(super::video_fps_from_proto(&base_request()).unwrap(), None);
+        assert_eq!(
+            super::video_fps_from_proto(&request_with_media_kwargs(serde_json::json!({}))).unwrap(),
+            None
+        );
+        for kwargs in [
+            serde_json::json!({"video": {"fps": 0}}),
+            serde_json::json!({"video": {"fps": 31}}),
+            serde_json::json!({"video": {"fps": "fast"}}),
+            serde_json::json!({"video": {"fps": 2, "other": true}}),
+            serde_json::json!({"image": {"image_mode": "RGB"}}),
+        ] {
+            let request = request_with_media_kwargs(kwargs);
+            assert_eq!(
+                super::video_fps_from_proto(&request).unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+            );
+        }
+    }
+
+    #[test]
+    fn grpc_multimodal_kwargs_convert_to_json_maps() {
+        use prost_types::{Struct, Value, value::Kind};
+
+        let mut request = base_request();
+
+        request.mm_processor_kwargs = Some(Struct {
+            fields: [(
+                "num_crops".to_string(),
+                Value {
+                    kind: Some(Kind::NumberValue(4.0)),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+
+        request.media_io_kwargs = Some(Struct {
+            fields: [(
+                "video".to_string(),
+                Value {
+                    kind: Some(Kind::StructValue(Struct {
+                        fields: [(
+                            "fps".to_string(),
+                            Value {
+                                kind: Some(Kind::NumberValue(2.0)),
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    })),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+
+        let (processor_kwargs, media_kwargs) = super::multimodal_kwargs_from_proto(&request);
+
+        assert_eq!(
+            processor_kwargs
+                .as_ref()
+                .and_then(|m| m.get("num_crops"))
+                .and_then(serde_json::Value::as_f64),
+            Some(4.0),
+        );
+
+        assert_eq!(
+            media_kwargs
+                .as_ref()
+                .and_then(|m| m.get("video"))
+                .and_then(|v| v.get("fps"))
+                .and_then(serde_json::Value::as_f64),
+            Some(2.0),
+        );
+
+        let (missing_processor, missing_media) =
+            super::multimodal_kwargs_from_proto(&base_request());
+
+        assert!(missing_processor.is_none());
+        assert!(missing_media.is_none());
+    }
+
+    #[test]
+    fn grpc_multimodal_kwargs_survive_protobuf_roundtrip() {
+        use prost_types::{Struct, Value, value::Kind};
+
+        let mm_kwargs = Struct {
+            fields: [(
+                "num_crops".to_string(),
+                Value {
+                    kind: Some(Kind::NumberValue(4.0)),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let media_kwargs = Struct {
+            fields: [(
+                "video".to_string(),
+                Value {
+                    kind: Some(Kind::StructValue(Struct {
+                        fields: [(
+                            "num_frames".to_string(),
+                            Value {
+                                kind: Some(Kind::NumberValue(8.0)),
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    })),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let request = pb::GenerateRequest {
+            mm_processor_kwargs: Some(mm_kwargs),
+            media_io_kwargs: Some(media_kwargs),
+            ..base_request()
+        };
+
+        let encoded = request.encode_to_vec();
+        let decoded =
+            pb::GenerateRequest::decode(encoded.as_slice()).expect("decode multimodal request");
+
+        assert_eq!(decoded.mm_processor_kwargs, request.mm_processor_kwargs);
+        assert_eq!(decoded.media_io_kwargs, request.media_io_kwargs);
+
+        let default_request = base_request();
+        assert!(default_request.mm_processor_kwargs.is_none());
+        assert!(default_request.media_io_kwargs.is_none());
     }
 
     #[test]

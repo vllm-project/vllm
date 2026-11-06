@@ -26,6 +26,7 @@ use llm_multimodal::{
     VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -71,6 +72,47 @@ pub struct MultimodalModelInfo {
 ///
 /// Modalities absent from the map are unlimited.
 pub type MmLimitPerPrompt = HashMap<MmModality, MmLimitSpec>;
+
+/// A deliberately limited set of request-scoped image processor options.
+/// Values may only reduce the resource budget declared by the model config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MmProcessorOverrides {
+    pub max_pixels: Option<usize>,
+    pub num_crops: Option<usize>,
+}
+
+/// Scope both multimodal-data and encoder-output cache keys to settings.
+/// The default path preserves the original IDs. UUIDs must be scoped too,
+/// since the engine's encoder cache uses `identifier`, not `mm_hash`.
+fn scoped_media_cache_key(base: &str, kind: &[u8], settings: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vllm-rust-multimodal-cache-v1\0");
+    hasher.update((base.len() as u64).to_be_bytes());
+    hasher.update(base.as_bytes());
+    hasher.update((kind.len() as u64).to_be_bytes());
+    hasher.update(kind);
+    hasher.update(settings);
+    format!("mm-override-v1:{:x}", hasher.finalize())
+}
+
+fn image_cache_key(base: &str, overrides: Option<&MmProcessorOverrides>) -> String {
+    match overrides {
+        None => base.to_owned(),
+        Some(overrides) => {
+            // Fixed-order struct of optional integer parameters.
+            let settings = serde_json::to_vec(overrides)
+                .expect("serializing image processor overrides cannot fail");
+            scoped_media_cache_key(base, b"image-processor", &settings)
+        }
+    }
+}
+
+fn video_cache_key(base: &str, fps: Option<f64>) -> String {
+    match fps {
+        None => base.to_owned(),
+        Some(fps) => scoped_media_cache_key(base, b"video-fps", &fps.to_bits().to_be_bytes()),
+    }
+}
 
 pub use vllm_engine_core_client::protocol::multimodal::MmModality;
 
@@ -346,6 +388,41 @@ fn load_preprocessor_config(
     let config = PreProcessorConfig::from_json(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
     Ok(Some(config))
+}
+
+/// Apply only bounded, explicit resource-lowering overrides.
+/// Requiring a checkpoint-defined ceiling prevents clients from selecting an
+/// unbounded budget when a model exposes no corresponding option.
+fn apply_image_overrides(
+    config: &mut PreProcessorConfig,
+    overrides: &MmProcessorOverrides,
+) -> Result<()> {
+    if let Some(max_pixels) = overrides.max_pixels {
+        let ceiling = config.max_pixels.ok_or_else(|| {
+            multimodal!("mm_processor_kwargs.max_pixels is not configured for this model")
+        })?;
+        if max_pixels == 0
+            || max_pixels > ceiling
+            || config.min_pixels.is_some_and(|min| max_pixels < min)
+        {
+            bail_multimodal!(
+                "mm_processor_kwargs.max_pixels must be between the model minimum and its configured maximum"
+            );
+        }
+        config.max_pixels = Some(max_pixels);
+    }
+    if let Some(num_crops) = overrides.num_crops {
+        let ceiling = config.num_crops.ok_or_else(|| {
+            multimodal!("mm_processor_kwargs.num_crops is not configured for this model")
+        })?;
+        if num_crops == 0 || num_crops > ceiling {
+            bail_multimodal!(
+                "mm_processor_kwargs.num_crops must be in the model's configured range"
+            );
+        }
+        config.num_crops = Some(num_crops);
+    }
+    Ok(())
 }
 
 /// Request-scoped fetched media, split per modality with tracker UUID
@@ -843,6 +920,30 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// Derive an image processor for one call, retaining the model-owned
+    /// processor unchanged. Never permit a request to raise configured limits.
+    fn image_support_with_overrides(
+        &self,
+        overrides: &MmProcessorOverrides,
+    ) -> Result<VisionModalitySupport> {
+        let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
+            modality: Modality::Image.to_string(),
+        })?;
+        let mut config = support.config.clone();
+        apply_image_overrides(&mut config, overrides)?;
+        let processor = self
+            .context
+            .resolve_vision_processor(support.spec.raw, &config, Modality::Image)?
+            .ok_or_else(|| Error::UnsupportedModality {
+                modality: Modality::Image.to_string(),
+            })?;
+        Ok(VisionModalitySupport {
+            processor,
+            config,
+            ..support.clone()
+        })
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
@@ -861,11 +962,61 @@ impl MultimodalModelInfo {
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
+        self.prepare_multimodal_with_video_fps(
+            media_parts,
+            prompt_token_ids,
+            model_dtype,
+            max_model_len,
+            None,
+        )
+        .await
+    }
+
+    /// Apply a request-scoped default video FPS without mutating shared model state.
+    pub(crate) async fn prepare_multimodal_with_video_fps(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+        video_fps: Option<f64>,
+    ) -> Result<MmFeatures> {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
-            .await
+        self.prepare_multimodal_with_options(
+            media_parts,
+            prompt_token_ids,
+            model_dtype,
+            max_model_len,
+            video_fps,
+            None,
+        )
+        .await
+    }
+
+    /// As above, but with optional image-preprocessor overrides for this request.
+    pub(crate) async fn prepare_multimodal_with_options(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+        video_fps: Option<f64>,
+        mm_overrides: Option<MmProcessorOverrides>,
+    ) -> Result<MmFeatures> {
+        if media_parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.prepare_multimodal_timed(
+            media_parts,
+            prompt_token_ids,
+            model_dtype,
+            max_model_len,
+            video_fps,
+            mm_overrides,
+        )
+        .await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -882,11 +1033,16 @@ impl MultimodalModelInfo {
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
+        video_fps: Option<f64>,
+        mm_overrides: Option<MmProcessorOverrides>,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
-        let fetched = self.fetch_media(media_parts).await?;
+        let fetched = self.fetch_media(media_parts, video_fps).await?;
+        if mm_overrides.is_some() && fetched.images.is_empty() {
+            bail_multimodal!("mm_processor_kwargs requires raw image media");
+        }
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
@@ -896,13 +1052,21 @@ impl MultimodalModelInfo {
                     fetched.image_uuids,
                     model_dtype,
                     vision_context,
+                    mm_overrides.as_ref(),
                 )
                 .await?,
             );
         }
         if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_videos_with_fps(
+                    fetched.videos,
+                    fetched.video_uuids,
+                    model_dtype,
+                    video_fps,
+                )
+                .await?,
+            );
         }
         if !fetched.audios.is_empty() {
             prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
@@ -965,6 +1129,15 @@ impl MultimodalModelInfo {
         ))
     }
 
+    /// Use a caller-supplied sampling rate only for this request.
+    fn video_sampling_policy_for_request(
+        &self,
+        request_fps: Option<f64>,
+    ) -> (FrameSampling, Option<f64>) {
+        let (sampling, checkpoint_fps) = self.video_sampling_policy().unwrap_or_default();
+        (sampling, request_fps.or(checkpoint_fps))
+    }
+
     /// Fetch all connector-backed media parts and split them per modality,
     /// preserving their request-order UUID metadata.
     #[tracing::instrument(
@@ -973,13 +1146,15 @@ impl MultimodalModelInfo {
         skip_all,
         fields(stage = "media_fetch")
     )]
-    async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
-        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
-        if let Some((sampling, default_fps)) = self.video_sampling_policy() {
-            tracker = tracker
-                .with_video_frame_sampling(sampling)
-                .with_default_video_sample_fps(default_fps);
-        }
+    async fn fetch_media(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+        video_fps: Option<f64>,
+    ) -> Result<FetchedMedia> {
+        let (sampling, default_fps) = self.video_sampling_policy_for_request(video_fps);
+        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector))
+            .with_video_frame_sampling(sampling)
+            .with_default_video_sample_fps(default_fps);
         for part in media_parts {
             tracker.push_part(part)?;
         }
@@ -1214,6 +1389,134 @@ mod tests {
         )
         .unwrap()
         .expect("GLM-5.3-Flash multimodal support")
+    }
+
+    #[test]
+    fn request_scoped_cache_keys_distinguish_image_and_video_options() {
+        let a = MmProcessorOverrides {
+            max_pixels: Some(3136),
+            num_crops: None,
+        };
+        let b = MmProcessorOverrides {
+            max_pixels: Some(6272),
+            num_crops: None,
+        };
+        let c = MmProcessorOverrides {
+            max_pixels: Some(3136),
+            num_crops: Some(2),
+        };
+        assert_eq!(image_cache_key("image-hash", None), "image-hash");
+        assert_eq!(video_cache_key("video-hash", None), "video-hash");
+        let key = image_cache_key("image-hash", Some(&a));
+        assert_eq!(key, image_cache_key("image-hash", Some(&a)));
+        assert_ne!(key, "image-hash");
+        assert_ne!(key, image_cache_key("image-hash", Some(&b)));
+        assert_ne!(key, image_cache_key("image-hash", Some(&c)));
+        assert_ne!(key, image_cache_key("other-image", Some(&a)));
+        // Caller UUIDs must be scoped to avoid encoder-output reuse.
+        assert_ne!(
+            image_cache_key("uuid", Some(&a)),
+            image_cache_key("uuid", Some(&b))
+        );
+        assert_ne!(
+            video_cache_key("uuid", Some(2.0)),
+            video_cache_key("uuid", Some(4.0))
+        );
+        assert_ne!(
+            video_cache_key("video-hash", Some(2.0)),
+            video_cache_key("video-hash", Some(4.0))
+        );
+        assert_ne!(video_cache_key("video-hash", Some(2.0)), "video-hash");
+        assert_ne!(
+            video_cache_key("video-hash", Some(2.0)),
+            image_cache_key("video-hash", Some(&a))
+        );
+    }
+
+    #[test]
+    fn image_override_builds_a_request_local_processor() {
+        let mut info = qwen3_vl_info();
+        let base = info.image.as_mut().expect("Qwen3-VL image processor");
+        base.config.max_pixels = Some(1_048_576);
+        base.config.min_pixels = Some(256);
+        let shared_processor = Arc::clone(&base.processor);
+
+        let request_support = info
+            .image_support_with_overrides(&MmProcessorOverrides {
+                max_pixels: Some(524_288),
+                num_crops: None,
+            })
+            .expect("request-scoped image processor");
+        assert_eq!(request_support.config.max_pixels, Some(524_288));
+        assert_eq!(
+            info.image.as_ref().unwrap().config.max_pixels,
+            Some(1_048_576)
+        );
+        assert!(Arc::ptr_eq(
+            &info.image.as_ref().unwrap().processor,
+            &shared_processor
+        ));
+        assert!(!Arc::ptr_eq(&request_support.processor, &shared_processor));
+    }
+
+    #[test]
+    fn image_overrides_lower_configured_limits_without_mutation() {
+        let original = PreProcessorConfig {
+            max_pixels: Some(1_048_576),
+            min_pixels: Some(256),
+            num_crops: Some(8),
+            ..Default::default()
+        };
+        let mut modified = original.clone();
+        apply_image_overrides(
+            &mut modified,
+            &MmProcessorOverrides {
+                max_pixels: Some(262_144),
+                num_crops: Some(4),
+            },
+        )
+        .unwrap();
+        assert_eq!(modified.max_pixels, Some(262_144));
+        assert_eq!(modified.num_crops, Some(4));
+        assert_eq!(original.max_pixels, Some(1_048_576));
+        assert_eq!(original.num_crops, Some(8));
+        for overrides in [
+            MmProcessorOverrides {
+                max_pixels: Some(2_000_000),
+                num_crops: None,
+            },
+            MmProcessorOverrides {
+                max_pixels: Some(100),
+                num_crops: None,
+            },
+            MmProcessorOverrides {
+                max_pixels: None,
+                num_crops: Some(9),
+            },
+        ] {
+            let mut candidate = original.clone();
+            assert!(apply_image_overrides(&mut candidate, &overrides).is_err());
+        }
+        let mut missing_ceiling = PreProcessorConfig::default();
+        assert!(
+            apply_image_overrides(
+                &mut missing_ceiling,
+                &MmProcessorOverrides {
+                    max_pixels: Some(512),
+                    num_crops: None
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn request_video_fps_overrides_checkpoint_default_without_mutation() {
+        let info = glm53_flash_info(glm53_flash_video_config());
+        let (sampling, fps) = info.video_sampling_policy_for_request(Some(3.0));
+        assert!(matches!(sampling, FrameSampling::RateWalk { .. }));
+        assert_eq!(fps, Some(3.0));
+        assert_eq!(info.video_sampling_policy_for_request(None).1, Some(1.0));
     }
 
     #[test]

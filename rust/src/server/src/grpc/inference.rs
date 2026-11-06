@@ -28,6 +28,8 @@ const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
 /// gRPC inference service backed by the shared application state.
 pub struct InferenceServiceImpl {
     state: Arc<AppState>,
+    // Only a trusted operator may enable per-request preprocessing overrides.
+    trust_request_mm_kwargs: bool,
 }
 
 struct PreparedGrpcRequest {
@@ -95,9 +97,26 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
     }
 }
 
+fn has_nonempty_mm_kwargs(request: &pb::GenerateRequest) -> bool {
+    request
+        .mm_processor_kwargs
+        .as_ref()
+        .is_some_and(|kwargs| !kwargs.fields.is_empty())
+        || request.media_io_kwargs.as_ref().is_some_and(|kwargs| !kwargs.fields.is_empty())
+}
+
 impl InferenceServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            trust_request_mm_kwargs: false,
+        }
+    }
+
+    /// Trust request-level multimodal kwargs only when opted in by the server operator.
+    pub fn with_trust_request_mm_kwargs(mut self, trust: bool) -> Self {
+        self.trust_request_mm_kwargs = trust;
+        self
     }
 
     async fn prepare_request(
@@ -132,7 +151,21 @@ impl InferenceServiceImpl {
         info!(parent: &request_span, "gRPC inference request received");
 
         let result = async {
+            // Reject before loading raw media. Empty Structs remain equivalent
+            // to an omitted field and do not require trust.
+            if !self.trust_request_mm_kwargs && has_nonempty_mm_kwargs(&proto_request) {
+                return Err(Status::invalid_argument(
+                    "per-request multimodal kwargs are disabled; enable --trust-request-mm-kwargs only for trusted clients",
+                ));
+            }
+            let video_fps = convert::video_fps_from_proto(&proto_request)?;
+            let mm_overrides = convert::mm_processor_overrides_from_proto(&proto_request)?;
             let media = std::mem::take(&mut proto_request.media);
+            if (video_fps.is_some() || mm_overrides.is_some()) && media.is_empty() {
+                return Err(Status::invalid_argument(
+                    "multimodal kwargs require raw media",
+                ));
+            }
             let mut text_request =
                 convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
             text_request.arrival_time = Some(arrival_time);
@@ -151,22 +184,34 @@ impl InferenceServiceImpl {
             }
 
             let media = super::media::from_proto(media)?;
+            if (video_fps.is_some() || mm_overrides.is_some())
+                && matches!(
+                    &media,
+                    vllm_chat::multimodal::MultimodalInput::Preprocessed(_)
+                )
+            {
+                return Err(Status::invalid_argument(
+                    "multimodal kwargs require raw media, not preprocessed features",
+                ));
+            }
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
                         "multimodal gRPC requests must provide token_ids input",
                     ));
                 };
-                let mm_features =
-                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
-                        |error| {
-                            if error.is_request_validation_error() {
-                                Status::invalid_argument(error.to_report_string())
-                            } else {
-                                Status::internal(error.to_report_string())
-                            }
-                        },
-                    )?;
+                let mm_features = self
+                    .state
+                    .chat
+                    .prepare_media_with_options(media, &mut token_ids, video_fps, mm_overrides)
+                    .await
+                    .map_err(|error| {
+                        if error.is_request_validation_error() {
+                            Status::invalid_argument(error.to_report_string())
+                        } else {
+                            Status::internal(error.to_report_string())
+                        }
+                    })?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }

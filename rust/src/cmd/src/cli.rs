@@ -375,6 +375,17 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub trust_request_chat_template: bool,
 
+    /// Allow trusted clients to pass request-specific multimodal preprocessing options.
+    /// Disabled by default to avoid resource-exhaustion requests.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub trust_request_mm_kwargs: bool,
+
+    /// Explicitly disable per-request multimodal kwargs (CLI only).
+    #[arg(long = "no-trust-request-mm-kwargs", action = ArgAction::SetTrue, conflicts_with = "trust_request_mm_kwargs")]
+    #[serde(skip)]
+    pub no_trust_request_mm_kwargs: bool,
+
     /// If specified, exclude tool definitions in prompts when
     /// tool_choice='none'.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
@@ -1010,6 +1021,8 @@ impl SharedRuntimeArgs {
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
+            trust_request_mm_kwargs: self.trust_request_mm_kwargs
+                && !self.no_trust_request_mm_kwargs,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
