@@ -183,8 +183,10 @@ def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
 
 
 requires_matmul_overrides = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(80),
-    reason="Triton matmul overrides are only installed on SM8x",
+    not (
+        current_platform.is_rocm() or current_platform.is_device_capability_family(80)
+    ),
+    reason="Triton matmul overrides are only installed on ROCm and SM8x",
 )
 
 
