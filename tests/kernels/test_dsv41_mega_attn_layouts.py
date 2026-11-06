@@ -35,6 +35,20 @@ def _load(checkpoint: torch.Tensor, perm: torch.Tensor, dim: int) -> torch.Tenso
     return param.data
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_permute_on_load_keeps_perm_off_the_weights_pool():
+    """Level-2 sleep zeroes the weights pool; later reloads still read ``perm``."""
+    checkpoint = torch.arange(8.0, device="cuda").view(4, 2)
+    perm = torch.tensor([2, 0, 3, 1], device="cuda")
+    expected = checkpoint[perm]
+    param = torch.nn.Parameter(torch.empty_like(checkpoint), requires_grad=False)
+    param.weight_loader = default_weight_loader
+    permute_on_load(param, perm, 0)
+    perm.zero_()
+    param.weight_loader(param, checkpoint)
+    torch.testing.assert_close(param.data, expected)
+
+
 def test_permuted_wq_b_gemm_matches_permuted_activation():
     """Permuting wq_b's rows makes the Q GEMM emit the fused layout directly."""
     torch.manual_seed(0)
