@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.config import ParallelConfig
+from vllm.distributed.eplb import async_worker
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.parallel_state import get_ep_group
+from vllm.platforms import current_platform
+from vllm.v1.worker.sentinel.eplb_redistribute import reset_eplb_async_state
 
 
 def _make_model_state(
@@ -182,3 +190,94 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)
+
+
+def _start_ft_async_eplb_with_failing_worker(monkeypatch):
+    """Start single-rank async EPLB under fault tolerance whose worker fails
+    every layer transfer. On one rank the EP group stands in for the EPLB group.
+    """
+    num_layers, num_experts, interval = 2, 4, 2
+    device = torch.device(current_platform.device_type)
+    monkeypatch.setattr(async_worker, "get_eplb_group", get_ep_group)
+    monkeypatch.setattr(
+        async_worker,
+        "run_rebalance_experts",
+        lambda model_state, eplb_state, phy2log_cpu, stream: phy2log_cpu.clone(),
+    )
+    failures: list[Exception] = []
+
+    def failing_transfer_layer(**kwargs):
+        failures.append(RuntimeError(f"injected transfer failure {len(failures)}"))
+        raise failures[-1]
+
+    monkeypatch.setattr(async_worker, "transfer_layer", failing_transfer_layer)
+
+    phy2log = torch.arange(num_experts, device=device).repeat(num_layers, 1)
+    model_state = _make_model_state(
+        phy2log=phy2log,
+        log2phy=phy2log.unsqueeze(-1),
+        logcnt=torch.ones(num_layers, num_experts, dtype=torch.long, device=device),
+    )
+    model_state.model.num_moe_layers = num_layers
+    model_state.model.num_logical_experts = num_experts
+    model_state.rebalanced = False
+    model_state.pending_result = None
+    model_state.expert_load_pass = torch.zeros(
+        num_layers, num_experts, dtype=torch.int32, device=device
+    )
+    model_state.expert_load_window = torch.zeros(
+        interval, num_layers, num_experts, dtype=torch.int32, device=device
+    )
+
+    parallel_config = ParallelConfig()
+    parallel_config.enable_fault_tolerance = True
+    state = EplbState(parallel_config, device)
+    if state.device_index is None:
+        pytest.skip("async EPLB needs a CUDA or XPU device")
+    state.is_async = True
+    state.expert_load_window_size = interval
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+    state.start_async_loop()
+    return state, model_state, failures
+
+
+def _step_until_raise(state: EplbState, max_steps: int = 1000) -> Exception | None:
+    for _ in range(max_steps):
+        try:
+            state.step()
+        except RuntimeError as exc:
+            return exc
+        time.sleep(0.01)
+    return None
+
+
+def test_async_worker_failure_raises_under_fault_tolerance(dist_init, monkeypatch):
+    """Under fault tolerance the async worker survives an exception, but the
+    failure must still reach step() so that FT can recover. Otherwise EPLB
+    stalls silently with every rank waiting for the failed layer.
+    """
+    state, _, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
+
+    exc = _step_until_raise(state)
+
+    assert exc is not None, "a worker failure under FT never reached step()"
+    assert exc.__cause__ is failures[0]
+    assert state.async_worker.is_alive()
+
+
+def test_fault_tolerance_reset_rearms_async_eplb(dist_init, monkeypatch):
+    """After an FT reset, the surviving worker runs the next rearrangement."""
+    state, model_state, failures = _start_ft_async_eplb_with_failing_worker(monkeypatch)
+    assert _step_until_raise(state) is not None
+
+    reset_eplb_async_state(SimpleNamespace(eplb_state=state))
+    assert state.async_worker_error is None
+    assert not model_state.rebalanced
+
+    state.expert_rearrangement_step = state.expert_rearrangement_step_interval - 1
+    exc = _step_until_raise(state)
+
+    assert exc is not None
+    assert exc.__cause__ is failures[1]

@@ -304,7 +304,8 @@ class EplbState:
         """
         self.async_worker_error: Exception | None = None
         """
-        Exception that stopped the async worker thread, if any.
+        Exception raised by the async worker, if any. Under fault tolerance
+        the thread keeps running and FT recovery clears it.
         """
         self.device_index: int | None = None
         """

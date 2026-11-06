@@ -84,10 +84,12 @@ def transfer_run_periodically(
         try:
             state.rearrange_event.wait(stream=stream)
             _transfer_cycle(state, stream, is_profile)
-        except Exception:
+        except Exception as exc:
             if not state.parallel_config.enable_fault_tolerance:
                 raise
-            # FT keeps the thread alive so EPLB can resume after a retry.
+            # Report the failure so step() raises on every rank and FT takes
+            # over; keep the thread alive so EPLB can resume after a retry.
+            state.async_worker_error = exc
             logger.exception(
                 "async loop error (Rank %d); continuing under fault tolerance",
                 rank,
