@@ -65,6 +65,8 @@ class HybridAttention(Attention):
     input projection and core of ``Attention`` (its wide-step path), then the
     stock o_proj partial and one TP all-reduce."""
 
+    output: DecodeProjection  # type: ignore[assignment]
+
     def __init__(self, decoder, runtime):  # noqa: D107 (no super().__init__)
         attention, tp = decoder.self_attn, runtime.tp
         self.kind = kind = attention_kind(attention)

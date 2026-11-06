@@ -282,8 +282,8 @@ def _compile_front(batch, heads, pitch, wq, index_kv, device, normalized, kind, 
     eps = cutlass.Float32(1e-6)
     tail = (norm, norm, index_kv, slots, q_out, w_out, eps, eps)
     if kind == "cluster" and not normalized:
-        front = IndexFront(batch, key, key + DIM, mx=mx)
-        args = (projected, fake((1536,), (1,)), wq, *tail)
+        front: IndexFront | IndexFrontMma = IndexFront(batch, key, key + DIM, mx=mx)
+        args: tuple = (projected, fake((1536,), (1,)), wq, *tail)
     else:
         front = IndexFrontMma(
             batch,

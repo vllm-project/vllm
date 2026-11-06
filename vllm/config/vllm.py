@@ -114,6 +114,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
+        "KimiK3MTPModel",
         "KimiK31ForConditionalGeneration",
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",

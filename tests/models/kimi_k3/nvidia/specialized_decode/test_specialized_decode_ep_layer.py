@@ -83,7 +83,7 @@ def test_ep_moe_layer_matches_stock_sequence(tokens, impl):
 
         SEEN.clear()
         out = layer(x)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         ((got_w, got_ids),) = SEEN
         # Same experts per token (as sets: ties may order differently) and weights.
         order, ref_order = got_ids.sort(dim=1), ref_ids.sort(dim=1)
@@ -105,5 +105,5 @@ def test_ep_moe_layer_matches_stock_sequence(tokens, impl):
         with torch.cuda.graph(graph):
             graph_out = layer(x)
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(graph_out, out, atol=0, rtol=0)

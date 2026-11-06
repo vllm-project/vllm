@@ -328,6 +328,7 @@ class FusedMarkov:
             )
             self.stream = torch.cuda.Stream(device=self.device)
         main = torch.cuda.current_stream(self.device)
+        assert self.stream is not None
         self.stream.wait_stream(main)
         noise = self.noise[: num_reqs * n_spec * self.vocab].view(
             num_reqs, n_spec, self.vocab

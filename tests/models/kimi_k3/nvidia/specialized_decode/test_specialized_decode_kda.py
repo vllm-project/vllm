@@ -101,8 +101,9 @@ def _split(attention, projected):
     return mixed, g1, g2, beta
 
 
-def _qkv(mixed):
-    return (x.reshape(1, mixed.shape[0], HEADS, D) for x in mixed.split(DIM, dim=-1))
+def _qkv(mixed) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    q, k, v = (x.reshape(1, mixed.shape[0], HEADS, D) for x in mixed.split(DIM, dim=-1))
+    return q, k, v
 
 
 def _gated_norm(attention, core, g2):

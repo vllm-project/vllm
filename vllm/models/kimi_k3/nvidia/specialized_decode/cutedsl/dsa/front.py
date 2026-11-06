@@ -184,7 +184,7 @@ class IndexFront:
                     row = 16 * m + group + 8 * h
                     col = 16 * warp + 8 * n + 2 * quarter
                     pair = acc[m * 2 + n, 2 * h], acc[m * 2 + n, 2 * h + 1]
-                    words = tuple(float_bits(v) for v in pair)
+                    words = tuple(float_bits(v) for v in pair)  # type: ignore[assignment]
                     store_shared_words(at(stage, row, col), words)
         cute.arch.fence_proxy("async.shared", space="cta")
         cute.arch.sync_threads()

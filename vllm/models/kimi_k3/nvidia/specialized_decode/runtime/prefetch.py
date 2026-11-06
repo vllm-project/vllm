@@ -168,7 +168,7 @@ class PrefetchController:
             if not layer.is_moe_layer:
                 continue
             index, moe, attention = layer.layer_idx, layer.mlp, layer.self_attn
-            up = ()
+            up: tuple = ()
             # The front GEMM reads [router shard; down shard] from the packed copy.
             ranges = urgent((packed[index],), grid=8)
             self._add("oproj_down", index, range(3, 9), ranges)
@@ -176,9 +176,9 @@ class PrefetchController:
                 shared = moe.shared_experts
                 shared = shared.gate_up_proj.weight, shared.down_proj.weight
                 # The MoE tail's K-split up projection reads this rank's rows.
-                up = moe.routed_expert_up_proj.weight
-                rows = up.shape[0] // tp
-                up = (up[runtime.rank * rows : (runtime.rank + 1) * rows],)
+                up_weight = moe.routed_expert_up_proj.weight
+                rows = up_weight.shape[0] // tp
+                up = (up_weight[runtime.rank * rows : (runtime.rank + 1) * rows],)
                 # This layer's o-projection first: it runs right after the core.
                 weights = (attention.o_proj.weight, packed[index], *shared, *up)
                 ranges = urgent(weights, grid=32)

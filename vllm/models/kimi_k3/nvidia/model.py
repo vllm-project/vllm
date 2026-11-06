@@ -1321,7 +1321,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 hidden_states = sp_all_gather(hidden_states)
                 hidden_states = hidden_states[:full_num_tokens]
 
-        # NOTE: the final norm is applied in compute_logits instead of here.
+        # NOTE: the final norm is applied in compute_logits instead of here, so
+        # the MTP draft model receives the pre-norm hidden states.
         aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
@@ -1413,6 +1414,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if experts_unpacked and name.endswith(".weight_packed"):
                 name = name.replace(".weight_packed", ".weight")
 
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
@@ -1629,7 +1633,8 @@ class KimiLinearForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        # The model's final norm is applied here, not at the end of forward.
+        # The model's final norm is applied here (not at the end of forward) so
+        # that the pre-norm hidden states can be fed to the MTP draft model.
         if self.needs_norm_in_logits:
             hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
@@ -1648,6 +1653,23 @@ class KimiLinearForCausalLM(
                     module.pack_projections()
         if self.specialized_decode is not None:
             self.specialized_decode.process_weights_after_loading()
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: KimiLinearConfig, weight_name: str
+) -> int | None:
+    if hasattr(config, "num_nextn_predict_layers") and (
+        config.num_nextn_predict_layers > 0
+    ):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            # Match regardless of the surrounding prefix. The name may arrive as
+            # ``model.layers.{i}.``, a bare ``layers.{i}.`` (after AutoWeightsLoader
+            # has stripped the ``model.`` prefix in the main model), or with the
+            # multimodal ``language_model.model.layers.{i}.`` prefix.
+            if f"layers.{layer_idx + i}." in weight_name:
+                return layer_idx + i
+    return None
 
 
 @MULTIMODAL_REGISTRY.register_processor(

@@ -204,7 +204,7 @@ def test_fused_markov_cuda_graph():
     spec.temperature.mul_(0.7)
     hh.copy_((torch.randn(hh.shape, generator=g, device="cuda") * 0.5).bfloat16())
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     got = spec.draft_tokens.clone()
     got_cache = spec.draft_logits.values.clone()
     spec.draft_logits.values.fill_(0)
@@ -238,7 +238,7 @@ def test_fused_markov_precomputed_noise_bit_equal(R, k, monkeypatch):
         spec.draft_logits.values.fill_(0)
         spec.seeds.add_(1)
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         outs.append((eager, (spec.draft_tokens.clone(), spec.draft_logits.values)))
     markov._FUSED.clear()
     for (a_tok, a_cache), (b_tok, b_cache) in zip(outs[0], outs[1]):

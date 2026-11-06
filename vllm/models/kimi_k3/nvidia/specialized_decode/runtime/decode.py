@@ -104,6 +104,10 @@ class SpecializedDecode:
     mailboxes and the decode buffers. Reads the backbone, never modifies it (but
     for the deferred RecoverSSM's per-instance KDA verify, ``recoverssm.state``)."""
 
+    attention: dict[int, Any]
+    feed_forward: dict[int, Any]
+    wide_moe: dict[int, Any]
+
     def __init__(self, backbone, config):
         # The deferred RecoverSSM's KDA layers, before any provider reads them.
         install_recoverssm_layers(
@@ -259,10 +263,10 @@ class SpecializedDecode:
         twoshot = TwoShot(*owner)
         front_box = OprojMailbox(*owner, (1, 64, 3584 + 2 * 896))
         small_batch = small_batch_chain.SmallBatchBox(*owner)
-        self.attention: dict[int, Attention] = {}
-        self.feed_forward: dict[int, Any] = {}
+        self.attention = {}
+        self.feed_forward = {}
         # Wide steps' MoE layers (moe.wide), sharing one scratch.
-        self.wide_moe: dict[int, WideMoE] = {}
+        self.wide_moe = {}
         wide = wide_batches(self.wide)
         wide_state = WideScratch(tp, device, wide) if wide else None
         for layer in layers:
@@ -295,8 +299,14 @@ class SpecializedDecode:
             )
             self.feed_forward[index] = moe
             if wide_state is not None:
-                args = (module, experts, wide_state, beta, linear_beta)
-                self.wide_moe[index] = WideMoE(*args, packed=packed[index])
+                self.wide_moe[index] = WideMoE(
+                    module,
+                    experts,
+                    wide_state,
+                    beta,
+                    linear_beta,
+                    packed=packed[index],
+                )
 
     def bind_model_state(self, state):
         """Install the runner-state side of the deferred RecoverSSM on the model
@@ -456,8 +466,10 @@ class SpecializedDecode:
             # moe.wide for the rows it prepared (65-WIDE_ROWS); dense MLP and any
             # other wide rows (a step cap below 64): stock.
             moe = self.wide_moe.get(layer.layer_idx)
-            wide_moe = moe is not None and moe.serves(b)
-            hidden = moe.run(hidden) if wide_moe else layer.mlp(hidden)
+            if moe is not None and moe.serves(b):
+                hidden = moe.run(hidden)
+            else:
+                hidden = layer.mlp(hidden)
             if layer.layer_idx + 1 in self.aux_layers:
                 aux.append(
                     backbone._capture_aux_hidden_stream(

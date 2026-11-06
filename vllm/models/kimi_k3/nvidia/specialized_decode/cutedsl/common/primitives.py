@@ -171,7 +171,13 @@ def ds_tile_scale(amax: Float32):
     """The fp8_ds_mla tile scale exp2f(ceilf(log2f(max(amax / 448, 1e-4)))) as the
     stock writer concat_and_cache_ds_mla computes it: an IEEE divide, libdevice's
     log2f (inlined below) and an exact ex2 of the integer."""
-    poly = ("0fBE2C7F30", "0f3E2FCF2A", "0fBE374E43", "0f3E520BF4", "0fBE763C8B")
+    poly: tuple[str, ...] = (
+        "0fBE2C7F30",
+        "0f3E2FCF2A",
+        "0fBE374E43",
+        "0f3E520BF4",
+        "0fBE763C8B",
+    )
     poly += ("0f3E93BF99", "0fBEB8AA49", "0f3EF6384A", "0fBF38AA3B")
     code = "{ .reg .f32 x,m,e,t,p; .reg .b32 b,k; "
     code += "div.rn.f32 x,$1,0f43E00000; max.f32 x,x,0f38D1B717; "

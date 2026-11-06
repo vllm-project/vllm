@@ -159,7 +159,7 @@ def test_flydsl_cache_past_4gib(flydsl_ops) -> None:
     ops, launches = flydsl_ops
     span = 5 * 2**30
     num_slots = span // ROW_BYTES
-    free, _ = torch.cuda.mem_get_info()
+    free, _ = torch.accelerator.get_memory_info()
     if free < span + 2**30:
         pytest.skip("needs 6 GiB of free device memory")
     gen = torch.Generator().manual_seed(3)

@@ -1571,7 +1571,7 @@ class ExpertsKernel(ExpertsGeometry):
         slot, phase, uses = self.walk_fc1(bars, (a0, asf0, x0, xsf0), tmem, ranges)
         current, ordinal, hbuffer = (Int32(-1), Int32(-1), Int32(0))
         ctx = (full, empty, accfull, accempty, hfull, hempty, accmeta)
-        ctx += (a0, asf0, h0, hsf0, tmem)
+        ctx += (a0, asf0, h0, hsf0, tmem)  # type: ignore[assignment]
         if cutlass.const_expr(self.dynamic):
             # The producer's claims: each pair's first slot carries (1, unit,
             # tile, 0), the end marker kind 2.

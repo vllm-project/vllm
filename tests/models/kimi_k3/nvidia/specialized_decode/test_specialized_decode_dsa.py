@@ -9,6 +9,7 @@ import math
 import os
 from functools import partial
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -1579,7 +1580,7 @@ def test_flashinfer_kernels_share_precision(
         exp = torch.floor(torch.log2(ulp.abs()))
         return (out - t).abs() / torch.exp2(exp)
 
-    stats = {}
+    stats: dict[str, dict[str, Any]] = {}
     for kernel, out in outs.items():
         err = out - exact
         rel = float(err.norm() / exact.norm())
@@ -2016,7 +2017,7 @@ def run_layer_step(
                 )
                 return decode(*args, **kwargs)
 
-            prepared.fi.prims_ts = on_stream
+            prepared.fi.prims_ts = on_stream  # type: ignore[method-assign]
         if prepared.fused is not None:
             prepared.fused.write_ids(topk_buffer)  # the fused indexer's top-k
         out = torch.empty(batch, HEADS * 128, device=dev, dtype=bf)
@@ -2094,6 +2095,7 @@ def run_layer_step(
             ]
             merged = merge.dcp_rows[:batch], merge.dcp_valid[:batch]
             owned = (merged, *filtered)
+            assert merge.fused is not None
             if merge.fused.packs(batch):
                 counts = merge.fused.valid[:batch]  # the fused select ran
                 assert bool((counts >= 0).all() & (counts <= merge.local_topk).all())
@@ -2105,13 +2107,19 @@ def run_layer_step(
         width = stock_width = None
         if prepared.fused is not None or merge.fused is not None:
             stage = prepared.query_stage
-            args = index_table, contexts, q
             q_fp8, head_w = stage.q_fp8[:batch], stage.head_w[:batch]
             width = exact_topk_widths(
-                ours_index, *args, q_fp8, head_w, topk_buffer[:batch], world
+                ours_index,
+                index_table,
+                contexts,
+                q,
+                q_fp8,
+                head_w,
+                topk_buffer[:batch],
+                world,
             )
             stock_width = exact_topk_widths(
-                stock_index, *args, q_fp8, head_w, stock_topk, world
+                stock_index, index_table, contexts, q, q_fp8, head_w, stock_topk, world
             )
     return SimpleNamespace(
         width=width,
@@ -2293,8 +2301,9 @@ def check_layer_step(step, q, reference=True):
         stock_ref = layer_reference(
             *args, step.stock_caches[0], step.mla_table, step.stock_topk, q, step.kv
         )
-        error = lambda x, ref: float((x.float() - ref).norm() / ref.norm())  # noqa: E731
-        ours_error, stock_error = error(out, ours_ref), error(stock, stock_ref)
+        rel_error = lambda x, ref: float((x.float() - ref).norm() / ref.norm())  # noqa: E731
+        ours_error = rel_error(out, ours_ref)
+        stock_error = rel_error(stock, stock_ref)
         print(f"relative error vs FP32: ours {ours_error:.4f} stock {stock_error:.4f}")
         assert ours_error <= 1.1 * stock_error + 1e-3, (ours_error, stock_error)
 
@@ -2517,10 +2526,10 @@ def check_prepare_allocates_nothing(core, world=1):
         indexer._SCRATCH.clear()
         indexer.select_outputs.cache_clear()
         attn_fi.PLANS.plans.clear()
-        before = torch.cuda.memory_allocated(dev)
+        before = torch.accelerator.memory_allocated(dev)
         pitches = dict.fromkeys(batches, pitch)
         prepared = PreparedDsa(attn, pitches, scratch_rows, **policy)
-        assert torch.cuda.memory_allocated(dev) > before
+        assert torch.accelerator.memory_allocated(dev) > before
         row = {"fp8": FP8_ROW, "nvfp4_ds_mla": NVFP4_ROW}[cache_dtype]
         gen = torch.Generator(device=dev).manual_seed(0)
         # The profiling run's small KV cache, then the real (larger) one (both
@@ -2533,13 +2542,13 @@ def check_prepare_allocates_nothing(core, world=1):
             caches.append((mla, index))
             layer.kv_cache, dsa_indexer.k_cache.kv_cache = mla, index
             gc.collect()  # earlier tests' garbage is not freed by prepare_cache
-            bound = torch.cuda.memory_allocated(dev)
+            bound = torch.accelerator.memory_allocated(dev)
             prepared.prepare_cache(mla)
             torch.accelerator.synchronize()
             gc.collect()
             fused = prepared.fused if world == 1 else prepared.indexer_stage.fused
             assert fused is not None
-            grown = torch.cuda.memory_allocated(dev) - bound
+            grown = torch.accelerator.memory_allocated(dev) - bound
             assert grown == 0, f"prepare_cache allocated {grown} bytes"
 
 
@@ -2999,10 +3008,13 @@ def check_dcp_value(policy, layout, batch, q, lse_base_e):
             full[:, :, mine].float() if x is rows else full[:, :, mine]
         )
     gate = projected[:, 2112 : 2112 + heads * 128].float().view(batch, heads, 128)
+    gathered_rows, gathered_lse, gathered_live = gathered_inputs
     padding = (totals == 0).repeat_interleave(q)
 
     def reference(fmt):
-        ref = dcp_value_reference(*gathered_inputs, w_uv, gate, fmt)
+        ref = dcp_value_reference(
+            gathered_rows, gathered_lse, gathered_live, w_uv, gate, fmt
+        )
         return ref.masked_fill(padding.view(-1, 1), 0).bfloat16().float()
 
     def check():
@@ -3502,7 +3514,8 @@ def test_fused_indexer_reservation_bounds(monkeypatch):
         assert indexer.static_unsupported(layer, rows, q) is not None, (rows, q)
     for topk in (1000, 8192):
         layer.topk_tokens = topk
-        assert "top-k" in indexer.static_unsupported(layer, 64, 1)
+        reason = indexer.static_unsupported(layer, 64, 1)
+        assert reason is not None and "top-k" in reason
     layer.topk_tokens = 2048
 
     import vllm.config
@@ -3990,7 +4003,7 @@ def test_prepared_dsa_compiles_once_per_kernel(
             MambaHybridModelState, "initialize_kv_cache", lambda *a: None
         )
         bound: list = []
-        prepare_layout = lambda caches: (bound.append("prepared"), prepare(16))
+        prepare_layout = lambda caches: (bound.append("prepared"), prepare(16))  # type: ignore[func-returns-value]
         cache_config = SimpleNamespace(num_gpu_blocks=None)
         decode = SpecializedDecode.__new__(SpecializedDecode)
         decode.cache_config, decode.kv_prepared = cache_config, True
