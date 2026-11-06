@@ -46,6 +46,9 @@ class ThinkingBudgetState:
             if reasoning_config is None
             else reasoning_config.natural_reasoning_end_token_ids or []
         )
+        turn_end_ids = (
+            [] if reasoning_config is None else reasoning_config.turn_end_token_ids
+        )
         self.enabled = bool(start_ids and end_ids and natural_end_ids)
         if not self.enabled:
             return
@@ -77,6 +80,13 @@ class ThinkingBudgetState:
         )
         self.reasoning_end_token_ids = torch.tensor(
             end_ids, dtype=torch.int32, device=self.device
+        )
+        # -1 is never a token ID, so models without EOS IDs keep the old scan.
+        # The cold scan's bounds check excludes masked lanes, which load -1 too.
+        self.turn_end_token_ids = torch.tensor(
+            turn_end_ids or [-1],
+            dtype=torch.int32,
+            device=self.device,
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
@@ -122,6 +132,7 @@ class ThinkingBudgetState:
             self.thinking_token_budget.gpu,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
+            self.req_states.prompt_len.gpu,
             ctx.input_ids,
             ctx.expanded_local_pos,
             self.cached_last_start,
@@ -130,6 +141,7 @@ class ThinkingBudgetState:
             self.reasoning_start_token_ids,
             self.natural_reasoning_end_token_ids,
             self.reasoning_end_token_ids,
+            self.turn_end_token_ids,
         )
 
 
@@ -159,13 +171,16 @@ def _update_committed_marker_cache_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
+    prompt_len_ptr,
     cached_last_start_ptr,
     cached_last_end_ptr,
     cached_scan_pos_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
+    turn_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
+    TURN_END_LEN: tl.constexpr,
     MAX_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -175,6 +190,7 @@ def _update_committed_marker_cache_kernel(
         return
 
     total_len = tl.load(total_len_ptr + req_state_idx)
+    prompt_len = tl.load(prompt_len_ptr + req_state_idx)
     scan_pos = tl.load(cached_scan_pos_ptr + req_state_idx)
     last_start = tl.load(cached_last_start_ptr + req_state_idx)
     last_end = tl.load(cached_last_end_ptr + req_state_idx)
@@ -214,6 +230,24 @@ def _update_committed_marker_cache_kernel(
                     other=-1,
                 )
                 end_match = end_match & (actual == expected)
+
+            # An end of turn in the prompt closes reasoning that an earlier
+            # message opened by quoting the start marker. Only the cold scan
+            # sees prompt positions, and generated ones (e.g. with ignore_eos)
+            # don't count.
+            tokens = tl.load(
+                all_token_ids_ptr + req_state_idx * all_token_ids_stride + offs,
+                mask=offs < total_len,
+                other=-1,
+            )
+            is_turn_end = offs < 0
+            for j in tl.static_range(0, TURN_END_LEN):
+                is_turn_end = is_turn_end | (
+                    tokens == tl.load(turn_end_token_ids_ptr + j)
+                )
+            end_match = end_match | (
+                (offs < block_hi) & (offs < prompt_len) & is_turn_end
+            )
 
             last_start = tl.max(tl.where(start_match, offs, -1), axis=0)
             last_end = tl.max(tl.where(end_match, offs, -1), axis=0)
@@ -372,6 +406,7 @@ def apply_thinking_budget(
     thinking_token_budget: torch.Tensor,
     all_token_ids: torch.Tensor,
     total_len: torch.Tensor,
+    prompt_len: torch.Tensor,
     input_ids: torch.Tensor,
     expanded_local_pos: torch.Tensor,
     cached_last_start: torch.Tensor,
@@ -380,6 +415,7 @@ def apply_thinking_budget(
     reasoning_start_token_ids: torch.Tensor,
     natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
+    turn_end_token_ids: torch.Tensor,
 ) -> None:
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
@@ -392,13 +428,16 @@ def apply_thinking_budget(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        prompt_len,
         cached_last_start,
         cached_last_end,
         cached_scan_pos,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
+        turn_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
+        TURN_END_LEN=turn_end_token_ids.shape[0],
         MAX_LEN=max(start_len, natural_end_len),
         BLOCK=_COLD_SCAN_BLOCK,
     )
