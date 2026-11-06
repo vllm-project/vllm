@@ -99,6 +99,7 @@ class PPHandler:
         # Aux hidden states taken by earlier stages, and by this non-last stage.
         self.upstream_aux_keys: tuple[str, ...] = ()
         self.local_aux_keys: tuple[str, ...] = ()
+        self.num_aux_hidden_states = 0
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
@@ -115,6 +116,7 @@ class PPHandler:
         self.upstream_aux_keys, self.local_aux_keys = (
             decoder.aux_hidden_state_slot_keys()
         )
+        self.num_aux_hidden_states = len(decoder.aux_hidden_state_layers)
 
     def relay_aux_hidden_states(
         self,
@@ -153,11 +155,18 @@ class PPHandler:
             hidden_states, aux_hidden_states = model_output
         else:
             hidden_states, aux_hidden_states = model_output, []
-        if not self.upstream_aux_keys:
-            return hidden_states, aux_hidden_states
-        assert intermediate_tensors is not None
-        upstream = [intermediate_tensors[key] for key in self.upstream_aux_keys]
-        return hidden_states, upstream + aux_hidden_states
+        if self.upstream_aux_keys:
+            assert intermediate_tensors is not None
+            aux_hidden_states = [
+                intermediate_tensors[key] for key in self.upstream_aux_keys
+            ] + aux_hidden_states
+        if len(aux_hidden_states) != self.num_aux_hidden_states:
+            raise RuntimeError(
+                f"The last PP stage has {len(aux_hidden_states)} aux hidden states "
+                f"for {self.num_aux_hidden_states} requested layers; the model's "
+                "forward must take them at global layer indices."
+            )
+        return hidden_states, aux_hidden_states
 
     def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor | None] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,

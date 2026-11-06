@@ -140,6 +140,24 @@ def test_pp3_relay_delivers_every_tap_once_in_layer_order(monkeypatch, taps):
     assert [t.item() for t in full] == list(taps)
 
 
+def test_last_stage_missing_its_own_taps_fails(monkeypatch):
+    """A forward that numbers layers from 0 on every stage takes none of its
+    taps past the first stage; the drafter must not get a short list."""
+    group = SimpleNamespace(world_size=2, is_first_rank=False, is_last_rank=True)
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    decoder = _ToyDecoder(3, 6)
+    decoder._set_aux_hidden_state_layers((0, 3, 6))
+    handler = PPHandler.__new__(PPHandler)
+    handler.configure_aux_hidden_state_relay(SimpleNamespace(model=decoder))
+    received = IntermediateTensors(
+        {key: torch.zeros(1) for key in handler.upstream_aux_keys}
+    )
+
+    with pytest.raises(RuntimeError, match="2 aux hidden states for 3"):
+        handler.add_upstream_aux_hidden_states(received, torch.zeros(1))
+
+
 def test_mimo_does_not_inherit_aux_hidden_state_pp_support():
     inner = MiMoModel.__new__(MiMoModel)
     target = SimpleNamespace(model=inner)

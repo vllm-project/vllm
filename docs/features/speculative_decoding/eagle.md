@@ -56,14 +56,29 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-## Eagle3 with Pipeline Parallelism
+## Pipeline Parallelism
 
-EAGLE3, DFlash and DSpark drafters read hidden states from several layers of the target model. With pipeline parallelism, each stage passes the hidden states it takes on to the next stage, and the drafter runs on the last stage. The target model has to support this; supported targets include Llama, Qwen2, Qwen3, Qwen3-VL, gpt-oss and MiniMax-M3, plus DeepSeek-V4 and Kimi-K3 on NVIDIA GPUs. Other targets are rejected at startup with `<model> does not support eagle3 with pipeline parallelism`.
+EAGLE3, DFlash, and DSpark support pipeline parallelism on Model Runner V2
+with compatible target models. Auxiliary hidden states are collected from
+the target model and forwarded across pipeline stages to the final stage,
+where the draft model runs.
+
+Supported targets include Llama, Qwen2, dense Qwen3, Qwen3-VL (dense and
+MoE), gpt-oss, Gemma 4, and MiniMax-M3. DeepSeek-V4 and Kimi-K3 are also
+supported on NVIDIA GPUs. Other targets are rejected at startup with
+`<architecture> does not support <method> with pipeline parallelism`.
+
+For example, to run gpt-oss with an EAGLE3 draft model across two pipeline
+stages:
 
 ```bash
 vllm serve openai/gpt-oss-20b \
     --pipeline-parallel-size 2 \
-    --speculative-config '{"method": "eagle3", "model": "RedHatAI/gpt-oss-20b-speculator.eagle3", "num_speculative_tokens": 3}'
+    --speculative-config '{
+        "method": "eagle3",
+        "model": "RedHatAI/gpt-oss-20b-speculator.eagle3",
+        "num_speculative_tokens": 3
+    }'
 ```
 
 ## Pre-Trained Eagle Draft Models
