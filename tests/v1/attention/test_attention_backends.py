@@ -438,6 +438,7 @@ def _test_backend_correctness(
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
     kv_cache_dtype: str = "auto",
+    global_kv_cache_dtype: str | None = None,
     use_sinks: bool = False,
     layout: KVCacheLayout | None = None,
     use_cuda_graph: bool = False,
@@ -507,6 +508,9 @@ def _test_backend_correctness(
     device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
+    if global_kv_cache_dtype is not None:
+        # A kv_cache_dtype_skip_layers layer: its cache dtype is not the global one.
+        vllm_config.cache_config.cache_dtype = global_kv_cache_dtype
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -883,6 +887,71 @@ def test_causal_backend_correctness(
             tensor_parallel_size=tensor_parallel_size,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+
+# 12 query / 2 KV heads, head size 128: FA3 splits a 600-token prefill's keys
+# for a BF16 cache but not for FP8 (on H20, H100 and H200).
+SKIP_LAYER_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+
+
+def test_flash_attn_skip_layer_under_fp8_kv_cache(default_vllm_config):
+    """A kv_cache_dtype_skip_layers layer keeps a BF16 cache under a global FP8
+    one; FA3's scheduler metadata for it must match its BF16 forward."""
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+    if not current_platform.is_cuda() or get_flash_attn_version() != 3:
+        pytest.skip("Only FA3 builds scheduler metadata ahead of time.")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        BatchSpec(seq_lens=[600], query_lens=[600]),
+        SKIP_LAYER_MODEL,
+        [AttentionBackendEnum.FLASH_ATTN],
+        causal_mask_mod,
+        global_kv_cache_dtype="fp8",
+    )
+
+
+def test_flash_attn_skip_layer_under_fp8_kv_cache_e2e(vllm_runner):
+    """End to end: layer 0 kept BF16 under an FP8 KV cache matches a BF16 KV
+    cache on a prompt of about 600 tokens."""
+    from tests.models.utils import check_logprobs_close
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+    if not current_platform.is_cuda() or get_flash_attn_version() != 3:
+        pytest.skip("Only FA3 builds scheduler metadata ahead of time.")
+
+    prompts = ["Paris is the capital of France. " * 85]  # 596 tokens
+    kwargs = {
+        "max_model_len": 1024,
+        "enforce_eager": True,
+        "attention_config": {"backend": "FLASH_ATTN"},
+    }
+    with vllm_runner(SKIP_LAYER_MODEL, **kwargs) as llm:
+        bf16_outputs = llm.generate_greedy_logprobs(prompts, 4, 8)
+    with vllm_runner(
+        SKIP_LAYER_MODEL,
+        kv_cache_dtype="fp8",
+        kv_cache_dtype_skip_layers=["0"],
+        **kwargs,
+    ) as llm:
+        fp8_outputs = llm.generate_greedy_logprobs(prompts, 4, 8)
+
+    check_logprobs_close(
+        outputs_0_lst=bf16_outputs,
+        outputs_1_lst=fp8_outputs,
+        name_0="bf16_kv_cache",
+        name_1="fp8_kv_cache_layer_0_bf16",
+    )
 
 
 @pytest.mark.skipif(
