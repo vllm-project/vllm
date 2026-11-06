@@ -37,12 +37,15 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
+    _select_fused_quant_cfg,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    allreduce_gemma_rms_norm_mxfp8,
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -114,6 +117,7 @@ from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
+    swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
@@ -277,6 +281,11 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         return gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
 
 
+# Rows per program of the fused swiglu + MXFP8 quant: at decode-sized M (8-192)
+# 16 is ~0.1 us faster than the MoE path's 64. Tuned on gfx950 (MI355X) only.
+_SWIGLU_QUANT_BLOCK_M = 16
+
+
 class MiniMaxM3MLP(nn.Module):
     """Dense SwiGLU-OAI MLP (used by the leading dense layers)."""
 
@@ -312,15 +321,70 @@ class MiniMaxM3MLP(nn.Module):
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_beta = 1.0
         self.swiglu_limit = config.swiglu_limit
+        # Set by the decoder layer: whether down_proj takes MXFP8 input, so the
+        # swiglu kernel can quantize its output (no bf16 round trip, one launch
+        # fewer than swiglu + the linear's own quant).
+        self.fuse_act_quant_mxfp8 = False
+        # (source tensor, its MXFP8 quantization) handed over by the decoder
+        # layer's post-attention norm; consumed by the next forward.
+        self._prequant: tuple[torch.Tensor, QuantizedActivation] | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
-        x = swiglu_oai_split(
-            gate_up,
-            alpha=self.swiglu_alpha,
-            beta=self.swiglu_beta,
-            limit=self.swiglu_limit,
+    def set_prequant(self, src: torch.Tensor, qa: QuantizedActivation) -> None:
+        """Hand over ``src`` already quantized, for the next forward only.
+
+        The MoE runner calls the shared expert with the layer's own input
+        tensor, so ``src`` is checked against it and ignored if it differs.
+        """
+        self._prequant = (src, qa)
+
+    def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
+        """Whether down_proj's kernel quantizes its input inside the GEMM at
+        this token count; that is already a single launch, so keep it."""
+        n, k = self.down_proj.weight.shape
+        return (
+            0 < num_tokens <= _FUSED_QUANT_MAX_M
+            and _select_fused_quant_cfg(num_tokens, n, k) is not None
         )
+
+    def forward(self, x: torch.Tensor | QuantizedActivation) -> torch.Tensor:
+        pre, self._prequant = self._prequant, None
+        if (
+            pre is not None
+            and isinstance(x, torch.Tensor)
+            and pre[0].data_ptr() == x.data_ptr()
+            and pre[0].shape == x.shape
+        ):
+            x = pre[1]
+        gate_up, _ = self.gate_up_proj(x)
+        if self.fuse_act_quant_mxfp8 and not self._down_proj_quantizes_in_gemm(
+            gate_up.shape[0]
+        ):
+            # Not bit-identical to the unfused chain, by design: this quantizes
+            # the fp32 swiglu result directly and skips the bf16 rounding the
+            # unfused path applies before the quant (about 2% of the E4M3
+            # bytes differ; the result is at least as close to the fp32
+            # activation).
+            act_q, act_scale = swiglu_oai_quantize_mxfp8(
+                gate_up,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+                block_m=_SWIGLU_QUANT_BLOCK_M,
+            )
+            x = QuantizedActivation(
+                act_q,
+                act_scale,
+                gate_up.dtype,
+                torch.Size((gate_up.shape[0], act_q.shape[1])),
+                kMxfp8Dynamic,
+            )
+        else:
+            x = swiglu_oai_split(
+                gate_up,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+            )
         x, _ = self.down_proj(x)
         return x
 
@@ -489,9 +553,18 @@ class MiniMaxM3MoE(nn.Module):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight.to(torch.float32))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        shared_prequant: QuantizedActivation | None = None,
+    ) -> torch.Tensor:
+        """``shared_prequant``: ``hidden_states`` already MXFP8-quantized, for
+        the shared expert's gate_up_proj (the routed path needs the bf16 rows)."""
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if shared_prequant is not None:
+            assert self.shared_experts is not None
+            self.shared_experts.set_prequant(hidden_states, shared_prequant)
 
         # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
         router_logits, _ = self.gate(hidden_states)
@@ -1534,6 +1607,21 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.fuse_input_norm_mxfp8 = _can_fuse_input_norm_mxfp8(self.self_attn.qkv_proj)
         if self.fuse_input_norm_mxfp8:
             logger.info_once("Fusing input_layernorm with qkv_proj's MXFP8 input quant")
+        # The FFN's first projection: the dense MLP's, or the MoE shared
+        # expert's (the routed experts take bf16).
+        ffn_mlp = (
+            self.block_sparse_moe.shared_experts if self.is_moe_layer else self.mlp
+        )
+        self.fuse_post_norm_mxfp8 = ffn_mlp is not None and _can_fuse_input_norm_mxfp8(
+            ffn_mlp.gate_up_proj
+        )
+        if ffn_mlp is not None:
+            ffn_mlp.fuse_act_quant_mxfp8 = _can_fuse_input_norm_mxfp8(ffn_mlp.down_proj)
+        if self.fuse_post_norm_mxfp8:
+            logger.info_once(
+                "Fusing post_attention_layernorm with the FFN gate_up_proj's "
+                "MXFP8 input quant"
+            )
 
     def forward(
         self,
@@ -1563,10 +1651,29 @@ class MiniMaxM3DecoderLayer(nn.Module):
             hidden_states=attn_input,
         )
 
+        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
+        if self.fuse_post_norm_mxfp8:
+            # None when a fused all-reduce + norm kernel applies (no quant
+            # epilogue there): that path keeps the linear's own quant.
+            fused = allreduce_gemma_rms_norm_mxfp8(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm,
+                # MoE: the router and routed experts need the bf16 normed rows.
+                return_normed=self.is_moe_layer,
+            )
+            if fused is not None:
+                x_q, x_scale, normed, residual = fused
+                qa = QuantizedActivation(
+                    x_q, x_scale, hidden_states.dtype, x_q.shape, kMxfp8Dynamic
+                )
+                if self.is_moe_layer:
+                    assert normed is not None
+                    return ffn(normed, shared_prequant=qa), residual
+                return ffn(qa), residual
         hidden_states, residual = fused_allreduce_gemma_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
-        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
 
