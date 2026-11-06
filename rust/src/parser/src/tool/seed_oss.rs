@@ -64,6 +64,10 @@ impl ToolParser for SeedOssToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    fn reports_tool_call_end(&self) -> bool {
+        self.inner.reports_tool_call_end()
+    }
+
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
@@ -226,7 +230,10 @@ mod tests {
         );
 
         assert!(output.normal_text().is_empty());
-        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.clone().coalesce().calls()[0].arguments,
+            r#"{"location":"SF""#
+        );
 
         output.append(parser.parse_chunk("_call>").unwrap());
         output.append(parser.finish().unwrap());

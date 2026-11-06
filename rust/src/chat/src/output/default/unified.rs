@@ -74,7 +74,7 @@ impl UnifiedParserState {
 
                 let mut events = Vec::new();
                 self.process_parser_output(output, &mut events)?;
-                self.open_call_index = None;
+                self.abort_open_call(&mut events);
 
                 let recovered = self.parser.reset();
                 if recovered.is_empty() && events.is_empty() {
@@ -97,11 +97,10 @@ impl UnifiedParserState {
 
         match self.parser.finish() {
             Ok(output) => self.process_parser_output(output, &mut events)?,
-            // The output stopped inside a tool call (`max_tokens`, a stop
-            // string): drop the unfinished markup like Python's parser engine
-            // instead of returning it as text. Earlier events stand.
+            // Drop unfinished markup. Earlier deltas remain in the stream,
+            // but an explicitly unfinished call is absent from the final message.
             Err(error) if error.is_incomplete_tool_call() => {
-                self.open_call_index = None;
+                self.abort_open_call(&mut events);
                 let _ = self.parser.reset();
             }
             Err(error) => {
@@ -110,13 +109,19 @@ impl UnifiedParserState {
                     "unified parser finish failed; closing open parser state"
                 );
                 self.parser_failed = true;
-                self.open_call_index = None;
+                self.abort_open_call(&mut events);
                 let recovered = self.parser.reset();
                 push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
             }
         }
 
         Ok(events)
+    }
+
+    fn abort_open_call(&mut self, events: &mut Vec<AssistantEvent>) {
+        if self.open_call_index.take().is_some() && self.parser.reports_tool_call_end() {
+            events.push(AssistantEvent::ToolCallAbort);
+        }
     }
 
     /// Apply one parsed unified output to the current stream state.
@@ -141,6 +146,20 @@ impl UnifiedParserState {
                 }
                 UnifiedParserEvent::ToolCall(item) => {
                     self.process_tool_item(item, events)?;
+                }
+                UnifiedParserEvent::ToolCallEnd {
+                    tool_index,
+                    arguments,
+                } => {
+                    if self.open_call_index != Some(tool_index) {
+                        return Err(Error::ToolCallStreamInvariant {
+                            message: format!(
+                                "received end for tool index {tool_index} without its start"
+                            ),
+                        });
+                    }
+                    self.open_call_index = None;
+                    events.push(AssistantEvent::ToolCallEnd { arguments });
                 }
             }
         }

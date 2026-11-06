@@ -32,6 +32,10 @@ impl ToolParser for MiMoToolParser {
         Some(xgrammar_structural_tag::Model::Mimo.builder())
     }
 
+    fn reports_tool_call_end(&self) -> bool {
+        self.inner.reports_tool_call_end()
+    }
+
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }

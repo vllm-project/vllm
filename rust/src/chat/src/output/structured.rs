@@ -148,6 +148,28 @@ impl StructuredEventState {
         Ok(events)
     }
 
+    fn finish_tool_call(&mut self, arguments: String) -> Vec<ChatEvent> {
+        if let Some(call) = self.open_tool_call.as_mut() {
+            call.arguments = arguments;
+        }
+        let mut events = Vec::new();
+        self.close_open_tool_call(&mut events);
+        events
+    }
+
+    fn abort_tool_call(&mut self) -> Option<ChatEvent> {
+        self.suppressing_tool_call = false;
+        let call = self.open_tool_call.take()?;
+        Some(ChatEvent::ToolCallAbort {
+            index: call.index,
+            call: AssistantToolCall {
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+            },
+        })
+    }
+
     /// Close any open block and emit the terminal `Done` event.
     fn finish(
         &mut self,
@@ -319,6 +341,16 @@ pub(crate) async fn structured_chat_event_stream(
                     y.yield_ok(next).await;
                 }
             }
+            AssistantEvent::ToolCallEnd { arguments } => {
+                for next in state.finish_tool_call(arguments) {
+                    y.yield_ok(next).await;
+                }
+            }
+            AssistantEvent::ToolCallAbort => {
+                if let Some(next) = state.abort_tool_call() {
+                    y.yield_ok(next).await;
+                }
+            }
             AssistantEvent::Done {
                 usage,
                 timestamps,
@@ -349,11 +381,43 @@ pub(crate) async fn structured_chat_event_stream(
 mod tests {
     use futures::{StreamExt as _, stream};
 
-    use super::structured_chat_event_stream;
+    use super::{StructuredEventState, structured_chat_event_stream};
     use crate::FinishReason;
     use crate::error::Error;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatTokenUsage};
     use crate::output::AssistantEvent;
+
+    #[test]
+    fn completed_arguments_replace_streamed_duplicates() {
+        let mut state = StructuredEventState::new(None);
+        state.start_tool_call("call_1".into(), "weather".into()).unwrap();
+        state.push_tool_call_arguments(r#"{"city":"SF","city":"NYC"}"#.into()).unwrap();
+        let events = state.finish_tool_call(r#"{"city":"NYC"}"#.into());
+        let ChatEvent::ToolCallEnd { call, .. } = &events[0] else {
+            panic!("expected completed call");
+        };
+        assert_eq!(call.arguments, r#"{"city":"NYC"}"#);
+        assert_eq!(state.message.tool_calls().next().unwrap(), call);
+    }
+
+    #[test]
+    fn aborted_call_preserves_previous_completed_call() {
+        let mut state = StructuredEventState::new(None);
+        state.start_tool_call("call_1".into(), "first".into()).unwrap();
+        state.finish_tool_call("{}".into());
+        state.start_tool_call("call_2".into(), "second".into()).unwrap();
+        state.push_tool_call_arguments(r#"{"city":"Par"#.into()).unwrap();
+        let ChatEvent::ToolCallAbort { index, call } = state.abort_tool_call().unwrap() else {
+            panic!("expected aborted call");
+        };
+        assert_eq!(index, 1);
+        assert_eq!(call.id, "call_2");
+        assert_eq!(
+            state.message.tool_calls().map(|call| call.id.as_str()).collect::<Vec<_>>(),
+            vec!["call_1"]
+        );
+        assert!(state.open_tool_call.is_none());
+    }
 
     #[tokio::test]
     async fn structured_stream_closes_tool_call_on_done() {

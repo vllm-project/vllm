@@ -569,7 +569,7 @@ async fn chat_completion_chunk_stream(
                     yield_chunk!(tool_call_arguments_chunk(&envelope, tool_index, delta));
                 }
             }
-            Ok(ChatEvent::ToolCallEnd { .. }) => {
+            Ok(ChatEvent::ToolCallEnd { .. } | ChatEvent::ToolCallAbort { .. }) => {
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
