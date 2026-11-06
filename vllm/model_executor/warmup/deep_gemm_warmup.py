@@ -49,7 +49,10 @@ def _generate_optimal_warmup_m_values(
     max_tokens: int, n: int, device: torch.device
 ) -> list[int]:
     """Generate M values that cover all possible DeepGEMM kernel configurations.
-    Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
+
+    The block sizes must mirror the layout candidates of the vendored DeepGEMM
+    heuristic (csrc/jit_kernels/heuristics/sm100.hpp); a stale set here lets
+    serving-time M values select kernel configs the warmup never compiled.
 
     Args:
         max_tokens: Maximum number of tokens to warmup for
@@ -58,7 +61,7 @@ def _generate_optimal_warmup_m_values(
 
     """
     # DeepGEMM's possible block sizes
-    block_ms = [64, 128, 256]
+    block_ms = list(range(16, 257, 16))
     block_ns = list(range(16, min(257, n + 1), 16))
     num_sms = num_compute_units(device.index)
 
