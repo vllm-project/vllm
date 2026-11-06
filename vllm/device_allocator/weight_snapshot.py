@@ -434,6 +434,57 @@ def _plausible_dummy_weights():
     return lambda: setattr(dummy_loader, "initialize_single_dummy_weight", orig)
 
 
+def _profile_build():
+    """Time the dummy build phases and cProfile process_weights_after_loading."""
+    import cProfile
+    import io
+    import pstats
+
+    from vllm.model_executor.model_loader import base_loader, dummy_loader
+
+    undo = []
+
+    def timed(mod, name, label, profile=False):
+        orig = getattr(mod, name)
+
+        def wrapper(*args, **kwargs):
+            torch.accelerator.synchronize()
+            prof = cProfile.Profile() if profile else None
+            t0 = time.perf_counter()
+            out = prof.runcall(orig, *args, **kwargs) if prof else orig(*args, **kwargs)
+            torch.accelerator.synchronize()
+            logger.info(
+                "Snapshot build: %s took %.2f s", label, time.perf_counter() - t0
+            )
+            if prof:
+                buf = io.StringIO()
+                pstats.Stats(prof, stream=buf).sort_stats("cumulative").print_stats(25)
+                logger.info("Snapshot build profile:\n%s", buf.getvalue())
+            return out
+
+        setattr(mod, name, wrapper)
+        undo.append(lambda: setattr(mod, name, orig))
+
+    timed(dummy_loader.DummyModelLoader, "load_weights", "dummy fill")
+    timed(base_loader, "process_weights_after_loading", "process_weights", True)
+    return lambda: [u() for u in undo]
+
+
+def _fast_profile_run(runner, tokens: int):
+    """With an explicit KV size, profile_run only warms up: use fewer tokens."""
+    orig = runner.profile_run
+
+    def profile_run(*args, **kwargs):
+        saved = runner.max_num_tokens
+        runner.max_num_tokens = min(saved, tokens)
+        try:
+            return orig(*args, **kwargs)
+        finally:
+            runner.max_num_tokens = saved
+
+    runner.profile_run = profile_run
+
+
 def install(worker_cls) -> None:
     """Wrap worker_cls.load_model for vLLM builds without the built-in hook."""
     import inspect
@@ -454,12 +505,19 @@ def install(worker_cls) -> None:
         # Lets model-specific checkpoint validation skip the dummy load.
         os.environ["VLLM_WEIGHT_SNAPSHOT_RESTORING"] = "1" if restore else ""
         undo = _plausible_dummy_weights() if restore else None
+        prof = os.environ.get("VLLM_WEIGHT_SNAPSHOT_PROFILE") and restore
+        undo_prof = _profile_build() if prof else None
         try:
             out = orig(self, *args, **kwargs)
         finally:
             os.environ.pop("VLLM_WEIGHT_SNAPSHOT_RESTORING", None)
             if undo is not None:
                 undo()
+            if undo_prof is not None:
+                undo_prof()
+        fast = int(os.environ.get("VLLM_WEIGHT_SNAPSHOT_FAST_PROFILE", "0"))
+        if restore and fast and self.cache_config.kv_cache_memory_bytes:
+            _fast_profile_run(self.model_runner, fast)
         roots = _roots(self.model_runner)
         (restore_fn if restore else save)(roots, path)
         return out
