@@ -516,6 +516,29 @@ def test_trust_request_mm_kwargs_cli():
     assert args.trust_request_mm_kwargs
 
 
+@pytest.mark.parametrize("mode", ["default", "fuse_sp"])
+@pytest.mark.parametrize("json_config", [False, True])
+def test_shardq_mode_cli(mode, json_config):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    options = (
+        ["--attention-config", json.dumps({"sparse_mla_shard_q_mode": mode})]
+        if json_config
+        else ["--attention-config.sparse_mla_shard_q_mode", mode]
+    )
+    config = EngineArgs.from_cli_args(parser.parse_args(options)).attention_config
+    assert config.sparse_mla_shard_q_mode == mode
+
+
+def test_shardq_mode_default_and_validation():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    config = EngineArgs.from_cli_args(parser.parse_args([])).attention_config
+    assert config.sparse_mla_shard_q_mode == "default"
+    with pytest.raises(ValueError, match="sparse_mla_shard_q_mode"):
+        EngineArgs.from_cli_args(
+            parser.parse_args(["--attention-config.sparse_mla_shard_q_mode", "invalid"])
+        )
+
+
 def test_attention_config():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

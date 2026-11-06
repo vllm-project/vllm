@@ -220,6 +220,7 @@ class DeepseekV32Attention(MLAAttention):
         self.num_local_heads = num_local_heads
         self.use_sp_shardq = (
             self.use_shardq
+            and vllm_config.attention_config.sparse_mla_shard_q_mode == "fuse_sp"
             and current_platform.is_cuda()
             and vllm_config.parallel_config.use_sequence_parallel_moe
             and vllm_config.parallel_config.pipeline_parallel_size == 1

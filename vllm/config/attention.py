@@ -155,15 +155,20 @@ class AttentionConfig:
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
     KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
-    sharded by head. On the NVIDIA DeepSeek-V3.2 / GLM-5.3 path with
-    `use_sequence_parallel_moe` and no pipeline parallelism, eligible steps
-    instead keep the contiguous SP input shards through the projections:
+    sharded by head in the default mode."""
+
+    sparse_mla_shard_q_mode: Literal["default", "fuse_sp"] = "default"
+    """ShardQ projection and communication mode. "default" uses head-sharded
+    projections followed by query and output all-to-all exchanges. "fuse_sp"
+    keeps contiguous SP input shards through the projections on the NVIDIA
+    DeepSeek-V3.2 / GLM DSA path with `use_sequence_parallel_moe` and PP=1:
     Q weights are replicated, compact KV and indexer K inputs are gathered
-    for the replicated caches, and only the attention output is exchanged.
+    for complete caches, and only the attention output is exchanged.
     Mixed steps then shard decode rows by token too. This trades additional
     Q/UK weight memory and less balanced causal indexer work for eliminating
-    the hidden-state all-gather and query all-to-all. Other steps retain the
-    head-sharded attention path."""
+    the hidden-state all-gather and query all-to-all. Requires
+    `sparse_mla_shard_q=True`; unsupported configurations and ineligible
+    steps retain the default path."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
