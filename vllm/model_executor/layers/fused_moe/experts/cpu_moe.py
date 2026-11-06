@@ -870,10 +870,40 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             moe_config,
             quant_config,
         )
+        # Determine weight quantization type from quant_config
+        # INT4: block quantized (group quantization) with int4 weights
+        # INT8 weight-only: per-channel symmetric quantization with int8
+        # weights, no activation quantization
+        self._is_int8_weight_only = (
+            quant_config.weight_quant_dtype == torch.int8
+            and quant_config.per_out_ch_quant
+            and not quant_config.is_block_quantized
+        )
+        self._is_int4 = quant_config.weight_quant_dtype == torch.int4 or (
+            quant_config.weight_quant_dtype == torch.uint8
+            and quant_config.is_block_quantized
+        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
+
+    @property
+    def w1_scale(self) -> torch.Tensor | None:
+        # Return blocked scale if set (for INT4), otherwise fall back to quant_config
+        return getattr(self, "_w1_scale", None) or self.quant_config.w1_scale
+
+    @property
+    def w2_scale(self) -> torch.Tensor | None:
+        return getattr(self, "_w2_scale", None) or self.quant_config.w2_scale
+
+    @property
+    def w1_zp(self) -> torch.Tensor | None:
+        return getattr(self, "_w1_zp", None) or self.quant_config.w1_zp
+
+    @property
+    def w2_zp(self) -> torch.Tensor | None:
+        return getattr(self, "_w2_zp", None) or self.quant_config.w2_zp
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -908,6 +938,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
     ) -> bool:
         SUPPORTED_W_A = [
             (kInt4Static, None),
+            (kInt8StaticChannelSym, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -932,6 +963,46 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 
     def supports_expert_map(self) -> bool:
         return False
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Prepack weights for CPU kernel.
+
+        For INT4: uses convert_weight_packed_scale_zp (AMX tile layout)
+        For INT8 weight-only: uses convert_weight_packed (VNNI layout)
+        """
+        if self._is_int8_weight_only:
+            # INT8 weight-only: VNNI prepack (like CPUExpertsInt8)
+            w13 = torch.ops._C.convert_weight_packed(layer.w13_weight)
+            w2 = torch.ops._C.convert_weight_packed(layer.w2_weight)
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+        else:
+            # INT4: AMX tile layout with scale and zero point
+            # convert_weight_packed_scale_zp takes (packed_weight, zeros,
+            # scale, quant_algo) and returns (blocked_weight,
+            # blocked_zeros, blocked_scale)
+            w13_packed = layer.w13_weight
+            w2_packed = layer.w2_weight
+            w13_scale = self.quant_config.w1_scale
+            w2_scale = self.quant_config.w2_scale
+            w13_zeros = self.quant_config.w1_zp
+            w2_zeros = self.quant_config.w2_zp
+            quant_algo = (
+                CPUQuantAlgo.GPTQ
+            )  # default, same as prepare_int4_moe_layer_for_cpu
+
+            blocked_w13, blocked_z13, blocked_s13 = convert_weight_packed_scale_zp(
+                w13_packed, w13_zeros, w13_scale, quant_algo
+            )
+            blocked_w2, blocked_z2, blocked_s2 = convert_weight_packed_scale_zp(
+                w2_packed, w2_zeros, w2_scale, quant_algo
+            )
+            replace_parameter(layer, "w13_weight", blocked_w13)
+            replace_parameter(layer, "w2_weight", blocked_w2)
+            self._w1_scale = blocked_s13
+            self._w2_scale = blocked_s2
+            self._w1_zp = blocked_z13
+            self._w2_zp = blocked_z2
 
     def moe_problem_size(
         self,
@@ -991,31 +1062,58 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
     ) -> None:
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "CPUExpertsInt4 (W4A16) does not support "
+                "CPUExpertsInt4 (W4A16/W8A16) does not support "
                 "apply_router_weight_on_input=True. "
             )
 
-        fused_experts_cpu(
-            output,
-            hidden_states,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            CPUQuantMethod.INT4_W4A8,
-            self.w1_scale,
-            self.w2_scale,
-            self.w1_zp,
-            self.w2_zp,
-            None,  # block_size
-            None,  # w1_bias
-            None,  # w2_bias
-            None,  # alpha
-            None,  # limit
-            True,  # is_vnni
-            None,  # a1_scale
-            _CPU_ACT_METHODS[activation],
-        )
+        if self._is_int8_weight_only:
+            # INT8 weight-only (W8A16): INT8 VNNI packed weights,
+            # unquantized BF16/FP16 activations
+            fused_experts_cpu(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                CPUQuantMethod.INT8_W8A16,
+                self.w1_scale,
+                self.w2_scale,
+                None,  # w1_zero (not used for INT8 per-channel)
+                None,  # w2_zero (not used for INT8 per-channel)
+                None,  # block_size (per-channel, no block)
+                None,  # w1_bias
+                None,  # w2_bias
+                None,  # alpha
+                None,  # limit
+                True,  # is_vnni
+                None,  # a1_scale (activations are unquantized)
+                _CPU_ACT_METHODS[activation],
+            )
+        else:
+            # INT4 weight-only (W4A16): INT4 packed weights with
+            # scale/zp, unquantized BF16/FP16 activations
+            fused_experts_cpu(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                CPUQuantMethod.INT4_W4A8,
+                self.w1_scale,
+                self.w2_scale,
+                self.w1_zp,
+                self.w2_zp,
+                None,  # block_size
+                None,  # w1_bias
+                None,  # w2_bias
+                None,  # alpha
+                None,  # limit
+                True,  # is_vnni
+                None,  # a1_scale
+                _CPU_ACT_METHODS[activation],
+            )
 
 
 class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):

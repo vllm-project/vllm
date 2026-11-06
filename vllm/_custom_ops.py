@@ -3852,10 +3852,11 @@ class CPUActMethod(IntEnum):
 class CPUQuantMethod(IntEnum):
     UNQUANT = 0
     INT8_W8A8 = 1
-    FP8_W8A16 = 2
-    INT4_W4A8 = 3
-    MXFP4 = 4
-    FP8_W8A8 = 5
+    INT8_W8A16 = 2
+    FP8_W8A16 = 3
+    INT4_W4A8 = 4
+    MXFP4 = 5
+    FP8_W8A8 = 6
 
 
 if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
