@@ -5,6 +5,8 @@
 
 use std::io::Cursor;
 
+use llm_multimodal::tracker::{MAX_SAMPLE_FPS, MIN_SAMPLE_FPS};
+use prost_types::value::Kind;
 use serde::Deserialize as _;
 use thiserror_ext::AsReport as _;
 use tonic::Status;
@@ -26,12 +28,21 @@ const MAX_MSGPACK_DEPTH: usize = 32;
 ///
 /// Require a single input kind and bound the total kwargs size before decoding.
 /// Shared media preparation validates features, model support, item limits, and prompt bounds.
-pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, Status> {
+pub(super) fn from_proto(
+    media: Vec<pb::MediaItem>,
+    media_io_kwargs: Option<&prost_types::Struct>,
+) -> Result<MultimodalInput, Status> {
+    let video_fps = video_fps(media_io_kwargs)?;
     if !media
         .iter()
         .any(|item| matches!(item.source, Some(pb::media_item::Source::Features(_))))
     {
-        return raw_parts_from_proto(media).map(MultimodalInput::Raw);
+        return raw_parts_from_proto(media, video_fps).map(MultimodalInput::Raw);
+    }
+    if video_fps.is_some() {
+        return Err(Status::invalid_argument(
+            "media_io_kwargs cannot change preprocessed media features",
+        ));
     }
     let mut encoded_bytes = 0usize;
     for item in &media {
@@ -113,11 +124,41 @@ fn decode_inline_mm_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, Status> {
     Ok(kwargs)
 }
 
+fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64>, Status> {
+    let mut fps = None;
+    for (modality, options) in media_io_kwargs.into_iter().flat_map(|kwargs| &kwargs.fields) {
+        let (true, Some(Kind::StructValue(options))) = (modality == "video", &options.kind) else {
+            return Err(invalid_media_io_kwarg(modality));
+        };
+        for (key, value) in &options.fields {
+            match &value.kind {
+                Some(Kind::NumberValue(value))
+                    if key == "fps" && (MIN_SAMPLE_FPS..=MAX_SAMPLE_FPS).contains(value) =>
+                {
+                    fps = Some(*value);
+                }
+                _ => return Err(invalid_media_io_kwarg(&format!("{modality}.{key}"))),
+            }
+        }
+    }
+    Ok(fps)
+}
+
+fn invalid_media_io_kwarg(name: &str) -> Status {
+    Status::invalid_argument(format!(
+        "invalid media_io_kwargs.{name}: only video.fps, a number between {MIN_SAMPLE_FPS} and \
+         {MAX_SAMPLE_FPS}, is supported"
+    ))
+}
+
 fn mixed_media_error() -> Status {
     Status::invalid_argument("raw media and preprocessed media features cannot be mixed")
 }
 
-fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPart>, Status> {
+fn raw_parts_from_proto(
+    media: Vec<pb::MediaItem>,
+    video_fps: Option<f64>,
+) -> Result<Vec<MediaContentPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
     for (index, item) in media.into_iter().enumerate() {
         let modality = item.modality();
@@ -165,9 +206,14 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPar
             ) => MediaContentPart::VideoUrl {
                 url,
                 uuid,
-                fps: None,
+                fps: video_fps,
                 max_long_side_pixel: None,
             },
+            (pb::Modality::Video, pb::media_item::Source::RawBytes(_)) if video_fps.is_some() => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}]: media_io_kwargs.video.fps requires a url or data_uri source"
+                )));
+            }
             (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::VideoData {
                     data,
@@ -216,6 +262,7 @@ fn validate_media_uri(
 mod tests {
     use std::collections::BTreeMap;
 
+    use super::super::convert::json_to_proto_struct;
     use super::*;
     use vllm_engine_core_client::protocol::multimodal::{
         MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, SliceSpec,
@@ -252,10 +299,81 @@ mod tests {
         };
         for media in [vec![raw.clone(), preprocessed()], vec![preprocessed(), raw]] {
             assert_eq!(
-                from_proto(media).unwrap_err().code(),
+                from_proto(media, None).unwrap_err().code(),
                 tonic::Code::InvalidArgument
             );
         }
+    }
+
+    fn video(source: pb::media_item::Source) -> pb::MediaItem {
+        pb::MediaItem {
+            modality: pb::Modality::Video as i32,
+            source: Some(source),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn media_io_kwargs_video_fps_sets_the_video_url_sampling_rate() {
+        let url = video(pb::media_item::Source::Url(
+            "https://example.com/clip.mp4".to_owned(),
+        ));
+        let kwargs = json_to_proto_struct(&serde_json::json!({"video": {"fps": 1}}));
+        let MultimodalInput::Raw(parts) = from_proto(vec![url], kwargs.as_ref()).unwrap() else {
+            unreachable!()
+        };
+        expect_test::expect![[r#"
+            [
+                VideoUrl {
+                    url: "https://example.com/clip.mp4",
+                    uuid: None,
+                    fps: Some(
+                        1.0,
+                    ),
+                    max_long_side_pixel: None,
+                },
+            ]
+        "#]]
+        .assert_debug_eq(&parts);
+    }
+
+    #[test]
+    fn media_io_kwargs_that_cannot_apply_are_rejected() {
+        let url = video(pb::media_item::Source::Url(
+            "https://example.com/clip.mp4".to_owned(),
+        ));
+        let cases = [
+            (url.clone(), serde_json::json!({"video": {"num_frames": 8}})),
+            (url.clone(), serde_json::json!({"image": {}})),
+            (url.clone(), serde_json::json!({"video": {"fps": 30}})),
+            (url.clone(), serde_json::json!({"video": {"fps": null}})),
+            (url, serde_json::json!({"video": [1]})),
+            (
+                video(pb::media_item::Source::RawBytes(vec![1])),
+                serde_json::json!({"video": {"fps": 1}}),
+            ),
+            (preprocessed(), serde_json::json!({"video": {"fps": 1}})),
+        ];
+        let messages = cases
+            .into_iter()
+            .map(|(item, kwargs)| {
+                let kwargs = json_to_proto_struct(&kwargs);
+                let error = from_proto(vec![item], kwargs.as_ref()).unwrap_err();
+                assert_eq!(error.code(), tonic::Code::InvalidArgument);
+                error.message().to_owned()
+            })
+            .collect::<Vec<_>>();
+        expect_test::expect![[r#"
+            [
+                "invalid media_io_kwargs.video.num_frames: only video.fps, a number between 0.2 and 5, is supported",
+                "invalid media_io_kwargs.image: only video.fps, a number between 0.2 and 5, is supported",
+                "invalid media_io_kwargs.video.fps: only video.fps, a number between 0.2 and 5, is supported",
+                "invalid media_io_kwargs.video.fps: only video.fps, a number between 0.2 and 5, is supported",
+                "invalid media_io_kwargs.video: only video.fps, a number between 0.2 and 5, is supported",
+                "media[0]: media_io_kwargs.video.fps requires a url or data_uri source",
+                "media_io_kwargs cannot change preprocessed media features",
+            ]
+        "#]].assert_debug_eq(&messages);
     }
 
     #[test]
@@ -273,7 +391,7 @@ mod tests {
         };
         feature.is_embed = vec![true, false];
         for media in [missing_modality, missing_kwargs, invalid_mask] {
-            let error = from_proto(vec![media]).unwrap_err();
+            let error = from_proto(vec![media], None).unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().starts_with("media[0]:"));
         }
@@ -286,7 +404,7 @@ mod tests {
             unreachable!()
         };
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
-        let error = from_proto(vec![item.clone(), item]).unwrap_err();
+        let error = from_proto(vec![item.clone(), item], None).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
 

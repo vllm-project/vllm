@@ -64,6 +64,10 @@ message GenerateRequest {
   // output after reasoning. Prefer a constraint that covers the full output
   // from the first generated token.
   EngineReasoningGate engine_reasoning_gate = 18;
+
+  // Media loading options keyed by modality, as in the HTTP `media_io_kwargs`
+  // request field. Only `video.fps` (frames sampled per second) is supported.
+  google.protobuf.Struct media_io_kwargs = 19;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
