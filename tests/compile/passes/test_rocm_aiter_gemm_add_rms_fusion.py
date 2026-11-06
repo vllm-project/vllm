@@ -56,7 +56,7 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("num_layers", [3])
 @pytest.mark.parametrize("gemma_norm", [False, True])
-@pytest.mark.parametrize("fused_op_available", [True, False])
+@pytest.mark.parametrize("disabled_by", [None, "op", "arch"])
 @pytest.mark.parametrize("num_tokens", [16])
 # AITER's gfx950 Triton config for N=256, K=7168 splits K at M <= 16.
 @pytest.mark.parametrize("hidden_size, k", [(256, 7168)])
@@ -68,7 +68,7 @@ def test_fuse_gemm_add_rms(
     dtype: torch.dtype,
     num_layers: int,
     gemma_norm: bool,
-    fused_op_available: bool,
+    disabled_by: str | None,
     num_tokens: int,
     hidden_size: int,
     k: int,
@@ -89,7 +89,7 @@ def test_fuse_gemm_add_rms(
     )
 
     if (
-        fused_op_available
+        disabled_by is None
         and not rocm_aiter_ops.is_fused_reduce_add_rmsnorm_supported()
     ):
         pytest.skip("Needs AITER's fused_reduce_add_rmsnorm (ROCm/aiter#6678)")
@@ -106,9 +106,14 @@ def test_fuse_gemm_add_rms(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
         rocm_aiter_ops.refresh_env_variables()
-        if not fused_op_available:
+        if disabled_by == "op":
             m.setattr(
                 rocm_aiter_ops, "is_fused_reduce_add_rmsnorm_supported", lambda: False
+            )
+        elif disabled_by == "arch":
+            m.setattr(
+                "vllm.compilation.passes.fusion.rocm_aiter_fusion.on_gfx950",
+                lambda: False,
             )
         # Route the GEMM through the AITER Triton kernel whatever the tuned CSV says.
         m.setattr(
@@ -116,7 +121,7 @@ def test_fuse_gemm_add_rms(
             lambda *args: "triton",
         )
         input_ranks: list[int] = []
-        if fused_op_available:
+        if disabled_by is None:
             from aiter.ops.triton.normalization import fused_reduce_add_rmsnorm as mod
 
             fused_reduce_add_rmsnorm = mod.fused_reduce_add_rmsnorm
@@ -148,8 +153,8 @@ def test_fuse_gemm_add_rms(
         # atol: one bf16 ulp at |residual| 4-8; only unfused rounds before the add.
         torch.testing.assert_close(outputs_unfused, outputs_fused, atol=6e-2, rtol=2e-2)
 
-        if not fused_op_available:
-            # Without the AITER op the pass registers nothing; the graph stays unfused.
+        if disabled_by is not None:
+            # Without the AITER op or off gfx950 the pass registers nothing.
             assert fusion_pass.matched_count == 0 and not input_ranks
             assert all(backend.op_count(op) > 0 for op in model.ops_in_model_before())
             assert backend.op_count(model.ops_in_model_after()[0]) == 0

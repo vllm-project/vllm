@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
@@ -1440,6 +1441,11 @@ class RocmAiterGemmAddRMSNormFusionPass(VllmFusionPatternMatcherPass):
             config.compilation_config.pass_config.gemm_add_rms_fusion_max_token_num
         )
 
+        if not on_gfx950():
+            logger.warning_once(
+                "GEMM + add RMSNorm fusion disabled: it is only supported on gfx950."
+            )
+            return
         if not rocm_aiter_ops.is_fused_reduce_add_rmsnorm_supported():
             logger.warning_once(
                 "GEMM + add RMSNorm fusion disabled: the installed AITER has no "
