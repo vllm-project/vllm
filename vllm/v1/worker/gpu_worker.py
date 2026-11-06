@@ -253,10 +253,7 @@ class Worker(WorkerBase):
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
-        # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
-        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -345,17 +342,6 @@ class Worker(WorkerBase):
                 parameter.untyped_storage().data_ptr()
                 for parameter in self._get_sleep_parameters(model).values()
             }
-            # XPU still discards the whole weights pool.
-            if current_platform.is_xpu():
-                self._sleep_saved_buffers = {
-                    name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-                }
-                draft = self.get_draft_model()
-                if draft is not None:
-                    self._sleep_saved_draft_buffers = {
-                        name: buffer.cpu().clone()
-                        for name, buffer in draft.named_buffers()
-                    }
 
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()
@@ -397,25 +383,9 @@ class Worker(WorkerBase):
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
 
-        # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
         if wake_weights and self._sleep_saved_parameters:
             self._restore_sleep_parameters(self.model_runner.model)
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
-
-        if wake_weights and len(self._sleep_saved_draft_buffers):
-            draft = self.get_draft_model()
-            if draft is not None:
-                for name, buffer in draft.named_buffers():
-                    if name in self._sleep_saved_draft_buffers:
-                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
-            self._sleep_saved_draft_buffers = {}
-
         self.synchronize_device()
 
     def discard(self, tags: tuple[str, ...]) -> None:

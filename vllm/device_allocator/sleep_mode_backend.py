@@ -25,7 +25,6 @@ from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Literal
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
@@ -130,17 +129,10 @@ class CuMemBackend(SleepModeBackend):
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
-        allocator = get_mem_allocator_instance()
-        if level == 2 and current_platform.is_xpu():
-            allocator.sleep(offload_tags=("runtime", "cudagraph"))
-        elif level == 2:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            CuMemAllocator.get_instance().sleep(
-                ("weights", "runtime", "cudagraph"), discardable
-            )
-        else:
-            allocator.sleep(offload_tags=("weights", "runtime", "cudagraph"))
+        # Level 1 passes nothing discardable, so every weights allocation is kept.
+        get_mem_allocator_instance().sleep(
+            ("weights", "runtime", "cudagraph"), discardable
+        )
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance

@@ -17,7 +17,12 @@ from typing import Any
 
 import torch
 
-from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
+from vllm.device_allocator import (
+    DEFERRABLE_TAGS,
+    AllocationData,
+    HandleType,
+    only_holding,
+)
 from vllm.device_allocator.alloc_conf import (
     EXPANDABLE_SEGMENTS,
     conf_flag_enabled,
@@ -253,18 +258,6 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def _only_holding(self, tensors: Collection[int]) -> set[int]:
-        """Weights allocations whose live tensors all start at these addresses."""
-        return {
-            allocation["address"]
-            for pool, _ in self.allocator_and_pools.get("weights", [])
-            for allocation in pool.snapshot()
-            if all(
-                block["state"] == "inactive" or block["address"] in tensors
-                for block in allocation["blocks"]
-            )
-        }
-
     def sleep(
         self,
         offload_tags: tuple[str, ...] | str | None = None,
@@ -293,7 +286,11 @@ class CuMemAllocator:
         total_bytes = 0
         backup_bytes = 0
         has_policy_conflict = False
-        discarded = self._only_holding(discardable) if discardable else set()
+        discarded = (
+            only_holding(self.allocator_and_pools.get("weights", []), discardable)
+            if discardable
+            else set()
+        )
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:

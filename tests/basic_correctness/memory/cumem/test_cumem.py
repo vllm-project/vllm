@@ -537,7 +537,6 @@ def test_runtime_state_survives_sleep(level):
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_keeps_what_the_update_does_not_rewrite():
     """Only allocations holding nothing but discardable tensors are discarded."""
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
