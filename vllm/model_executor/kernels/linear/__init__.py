@@ -889,7 +889,7 @@ def init_int8_linear_kernel(
     )
 
 
-_HUMMING_INT4_G128_CAPABILITIES = frozenset({120})
+_HUMMING_INT4_G128_CAPABILITY_FAMILY = 12
 
 
 def _prefer_humming_for_int4_g128(
@@ -898,10 +898,11 @@ def _prefer_humming_for_int4_g128(
     compute_capability: int | None,
 ) -> list[type[MPLinearKernel]]:
     """Move Humming directly ahead of Marlin for int4 symmetric group-128
-    weights with bf16 activations on _HUMMING_INT4_G128_CAPABILITIES. Other
-    formats and devices are unmeasured and keep Marlin."""
+    weights with bf16 activations on SM12x. Other formats and devices are
+    unmeasured and keep Marlin."""
     if not (
-        compute_capability in _HUMMING_INT4_G128_CAPABILITIES
+        compute_capability is not None
+        and compute_capability // 10 == _HUMMING_INT4_G128_CAPABILITY_FAMILY
         and config.weight_type == scalar_types.uint4b8
         and config.group_size == 128
         and not config.zero_points

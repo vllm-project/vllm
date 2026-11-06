@@ -40,9 +40,9 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
-On SM120 GPUs such as the RTX PRO 6000, automatic selection uses Humming
-instead of Marlin for int4 symmetric group-128 weights with bf16 activations.
-Pass `--linear-backend marlin` to keep Marlin.
+On SM12x GPUs such as the RTX PRO 6000 and DGX Spark, automatic selection uses
+Humming instead of Marlin for int4 symmetric group-128 weights with bf16
+activations. Pass `--linear-backend marlin` to keep Marlin.
 
 ## Hadamard Input Transforms (QuIP)
 
