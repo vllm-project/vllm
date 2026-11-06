@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950, on_gfx1250
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -845,16 +845,20 @@ def test_activation_method_enum_values():
 # MXFP4 kernel tests ------------------------------------------------------
 
 
-def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
-    """AITER MXFP4 MoE support should stay gfx950-only."""
+def test_aiter_mxfp4_quant_scheme_support_matches_arch():
+    """AITER MXFP4 MoE runs W4A16 only on gfx950, and W4A4 also on gfx1250."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterMxfp4Experts,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Dynamic,
         kMxfp4Static,
     )
 
     assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
+    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, kMxfp4Dynamic) is (
+        on_gfx950() or on_gfx1250()
+    )
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
