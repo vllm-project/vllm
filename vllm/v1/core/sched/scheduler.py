@@ -254,9 +254,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
-        # First token loaded synchronously by the connector, per request, until
-        # the output of the step that loaded it is processed.
-        self._sync_kv_load_starts: dict[str, int] = {}
+        # Blocks each KV cache group loads synchronously for a request, until
+        # the output of the step that loaded them is processed.
+        self._sync_kv_load_blocks: dict[str, tuple[list[int], ...]] = {}
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -1552,8 +1552,10 @@ class Scheduler(SchedulerInterface):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                    self._sync_kv_load_starts[request.request_id] = (
-                        num_new_local_computed_tokens
+                    self._sync_kv_load_blocks[request.request_id] = (
+                        self.kv_cache_manager.get_block_ids_from_token(
+                            request.request_id, num_new_local_computed_tokens
+                        )
                     )
                 if self.log_stats:
                     request.record_event(
@@ -2298,9 +2300,9 @@ class Scheduler(SchedulerInterface):
                     kv_connector_output.failed_sync_recving
                 )
             )
-        if self.connector is not None and self._sync_kv_load_starts:
+        if self.connector is not None and self._sync_kv_load_blocks:
             for req_id in num_scheduled_tokens:
-                self._sync_kv_load_starts.pop(req_id, None)
+                self._sync_kv_load_blocks.pop(req_id, None)
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
@@ -3706,44 +3708,48 @@ class Scheduler(SchedulerInterface):
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_failed_sync_recving(self, failed_req_ids: set[str]) -> set[str]:
-        """Recover running requests whose synchronous KV load failed.
+        """Recover requests whose synchronous KV load failed.
 
         The step's forward already ran on incomplete KV, so every block the
-        request wrote from the start of the load is bad, in every KV cache
-        group. Those blocks are evicted from the prefix cache, and requests
-        that already share them are handled the same way. Under the recompute
-        policy the requests are preempted and recomputed from scratch, as
-        recurrent state cannot resume from a partial prefix; otherwise they
-        fail.
+        load wrote is bad, in every KV cache group. Those blocks are evicted
+        from the prefix cache, whatever the request's state now, and requests
+        that already share them are handled too. Under the recompute policy
+        the requests are preempted and recomputed from scratch, as recurrent
+        state cannot resume from a partial prefix; otherwise they fail.
 
         Returns:
             IDs of affected requests whose output this step must be skipped.
 
         """
-        failed = [
-            request
-            for req_id in failed_req_ids
-            if (request := self.requests.get(req_id)) is not None
-            and request.status == RequestStatus.RUNNING
-            and req_id in self._sync_kv_load_starts
-        ]
-        if not failed:
-            return set()
-
         bad_block_ids: list[set[int]] = [
             set() for _ in self.kv_cache_config.kv_cache_groups
         ]
-        for request in failed:
-            block_ids = self.kv_cache_manager.get_block_ids_from_token(
-                request.request_id, self._sync_kv_load_starts[request.request_id]
-            )
+        failed: dict[str, Request] = {}
+        for req_id in failed_req_ids:
+            block_ids = self._sync_kv_load_blocks.get(req_id)
+            if block_ids is None:
+                logger.warning(
+                    "Ignoring a synchronous KV load failure for request %s, "
+                    "which did not load synchronously in this step.",
+                    req_id,
+                )
+                continue
             for group_bad, ids in zip(bad_block_ids, block_ids):
                 group_bad.update(ids)
+            request = self.requests.get(req_id)
+            if request is not None and not request.is_finished():
+                failed[req_id] = request
 
-        affected = {request.request_id for request in failed}
+        affected = {
+            req_id
+            for req_id, request in failed.items()
+            if request.status == RequestStatus.RUNNING
+        }
+        # Preempted by an earlier schedule() before this output arrived.
+        preempted_early = set(failed) - affected
         async_affected: set[str] = set()
         for request in self.requests.values():
-            if request.request_id in affected or request.status not in (
+            if request.request_id in failed or request.status not in (
                 RequestStatus.RUNNING,
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
             ):
@@ -3764,14 +3770,19 @@ class Scheduler(SchedulerInterface):
         failed_async = self._handle_failed_recving(async_affected)
 
         if not self.recompute_kv_load_failures:
-            logger.error(
-                "Failing %d request(s) due to synchronous KV load failure "
-                "(failure_policy=fail). Request IDs: %s",
-                len(affected | failed_async),
-                affected | failed_async,
-            )
-            return affected | failed_async
+            to_fail = affected | preempted_early | failed_async
+            if to_fail:
+                logger.error(
+                    "Failing %d request(s) due to synchronous KV load failure "
+                    "(failure_policy=fail). Request IDs: %s",
+                    len(to_fail),
+                    to_fail,
+                )
+            return to_fail
 
+        for req_id in preempted_early:
+            # Its in-flight output came from the bad forward.
+            failed[req_id].drop_stale_output = True
         timestamp = time.monotonic()
         preempted = [r for r in self.running if r.request_id in affected]
         self.running = remove_all(self.running, set(preempted))
@@ -3779,12 +3790,13 @@ class Scheduler(SchedulerInterface):
         for request in reversed(preempted):
             self._preempt_request(request, timestamp, drop_stale_output=True)
             self.prev_step_scheduled_req_ids.discard(request.request_id)
-        logger.warning(
-            "Recovered from synchronous KV load failure: %d request(s) "
-            "preempted for recompute, %d waiting request(s) rescheduled.",
-            len(preempted),
-            len(async_affected),
-        )
+        if preempted or preempted_early or async_affected:
+            logger.warning(
+                "Recovered from synchronous KV load failure: %d request(s) "
+                "preempted for recompute, %d waiting request(s) rescheduled.",
+                len(preempted) + len(preempted_early),
+                len(async_affected),
+            )
         return affected
 
     def _handle_invalid_blocks(
@@ -3804,7 +3816,8 @@ class Scheduler(SchedulerInterface):
                 "(invalid_block_ids) which is not supported for models "
                 "with multiple KV cache groups. "
                 "Connectors must report failed requests via "
-                "KVConnectorTransferResults.failed_recving instead."
+                "KVConnectorTransferResults.failed_recving (asynchronous "
+                "loads) or failed_sync_recving (synchronous loads) instead."
             )
 
         should_fail = not self.recompute_kv_load_failures

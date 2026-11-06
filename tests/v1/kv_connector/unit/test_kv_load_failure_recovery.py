@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
@@ -506,3 +510,53 @@ def test_failed_sync_recving_ignores_requests_without_a_sync_load():
 
     assert failed.status == RequestStatus.RUNNING
     assert other.status == RequestStatus.RUNNING
+
+
+@pytest.mark.parametrize("policy", ["recompute", "fail"])
+def test_sync_load_failure_of_a_request_preempted_before_its_output(policy: str):
+    """Under async scheduling the next schedule() can preempt a request before
+    the output reporting its failed load arrives. Its blocks must still leave
+    the prefix cache, and its in-flight output must not be delivered."""
+    failed, other = create_request(num_tokens=64), create_request(num_tokens=64)
+    scheduler = _multi_group_sync_load_scheduler(policy, failed, other)
+
+    scheduler_output = scheduler.schedule()
+    loaded = scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    scheduler.running.remove(failed)
+    scheduler._preempt_request(failed, time.monotonic())
+    assert _cached(scheduler, loaded)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [failed, other], failed_sync_recving={failed.request_id}
+        ),
+    )
+
+    assert not _cached(scheduler, loaded)
+    assert other.status == RequestStatus.RUNNING
+    if policy == "recompute":
+        assert failed.status == RequestStatus.PREEMPTED
+        assert failed.num_output_tokens == 0
+    else:
+        assert failed.status == RequestStatus.FINISHED_ERROR
+
+
+def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints():
+    """A recurrent-state block before the load start is a prefix-cache
+    checkpoint the load did not write, so it is not reported as bad."""
+    kv_cache_config = make_kv_cache_config(
+        block_size=16, mamba_enabled=True, mamba_cache_mode="align"
+    )
+
+    def block(block_id: int) -> KVCacheBlock:
+        return KVCacheBlock(block_id)
+
+    manager = SimpleNamespace(
+        kv_cache_config=kv_cache_config,
+        get_blocks=lambda _: SimpleNamespace(
+            blocks=([block(1), block(2), block(3)], [block(7), block(8), block(9)])
+        ),
+    )
+
+    assert KVCacheManager.get_block_ids_from_token(manager, "req", 32) == ([3], [9])

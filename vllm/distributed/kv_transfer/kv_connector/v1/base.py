@@ -96,8 +96,11 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
-    # Requests whose synchronous load (load_kv_async=False) failed this step:
-    # the forward pass ran on incomplete KV.
+    # Requests whose synchronous load (load_kv_async=False) failed: the
+    # forward pass ran on incomplete KV. Report a request in the same step
+    # that loaded it; any worker may report it. The scheduler evicts every
+    # block the load wrote, in every KV cache group, and recomputes the
+    # request from scratch or fails it, per kv_load_failure_policy.
     failed_sync_recving: set[str] = field(default_factory=set)
 
 
