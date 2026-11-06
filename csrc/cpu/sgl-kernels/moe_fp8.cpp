@@ -38,7 +38,8 @@ void fused_experts_fp_kernel_impl(
     float alpha,
     float limit,
     CPUActMethod act_func,
-    bool with_bias) {
+    bool with_bias,
+    bool skip_weighted) {
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
 
@@ -213,10 +214,10 @@ void fused_experts_fp_kernel_impl(
           /*   do_unpack    */ do_unpack);
 
       // 2.b copy from C to ic2 in original order
-      //   and also mul topk_weights in float32
+      //   and also mul topk_weights in float32 (unless skip_weighted is true)
       for (int64_t m = 0; m < m_size; ++m) {
         int32_t index = A_ids[m];
-        float weight = topk_weights[index];
+        float weight = skip_weighted ? 1.0f : topk_weights[index];
         copy_mul_stub(ic2 + index * K + nb * BLOCK_N, C + m * BLOCK_N, weight, n_size);
       }
     });
@@ -265,7 +266,8 @@ void fused_experts_fp_kernel_impl(
       float alpha,                                                           \
       float limit,                                                           \
       CPUActMethod act_func,                                                 \
-      bool with_bias)
+      bool with_bias,                                                        \
+      bool skip_weighted)
 
 INSTANTIATE_MOE_FP_TEMPLATE(at::BFloat16, at::Float8_e4m3fn, float, false);
 INSTANTIATE_MOE_FP_TEMPLATE(at::Half, at::Float8_e4m3fn, float, false);

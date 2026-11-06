@@ -3896,6 +3896,7 @@ def fused_experts_cpu(
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
     act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
+    skip_weighted: bool = False,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3917,6 +3918,7 @@ def fused_experts_cpu(
         limit,
         is_vnni,
         act_method,
+        skip_weighted,
     )
 
 
