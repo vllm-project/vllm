@@ -18,8 +18,8 @@ python3 -m pytest -s -x "${IMPORT_CANARY}"
 # TP shapes and modes on the dense default model (Qwen3-0.6B). TP1/TP1 gets
 # one dedicated GPU per side. The hetero-TP configs (P TP1/D TP2 and
 # P TP2/D TP1) share one GPU between the prefiller and one decoder rank
-# (0.35 each), as does push-mode PP prefill (P TP1xPP2, D TP2, sharing both
-# GPUs). DP-attention decode runs the nightly sweep's MoE model
+# (0.35 each), as does PP prefill in pull and push modes (P TP1xPP2, D TP2,
+# sharing both GPUs). DP-attention decode runs the nightly sweep's MoE model
 # (deepseek-vl2-tiny, ~6.5 GB bf16): P TP1 and one D DP2 rank share GPU0, so
 # it needs 0.4 per engine to keep room for KV and CUDA contexts.
 dense_configs=(
@@ -27,6 +27,7 @@ dense_configs=(
   "GPU_MEMORY_UTILIZATION=0.35 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
   "GPU_MEMORY_UTILIZATION=0.35 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1"
   "DP_EP=1 GPU_MEMORY_UTILIZATION=0.4 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
+  "GPU_MEMORY_UTILIZATION=0.35 PREFILLER_PP_SIZE=2 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
   "KV_CONNECTOR=NixlPushConnector GPU_MEMORY_UTILIZATION=0.35 PREFILLER_PP_SIZE=2 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
 )
 
