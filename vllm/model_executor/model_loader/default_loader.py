@@ -54,22 +54,6 @@ logger = init_logger(__name__)
 _CONFIG_BUILT_PARAMS = ("input_scale_ub",)
 
 
-def _check_draft_layers_loaded(
-    model: nn.Module, model_config: ModelConfig, loaded_weights: set[str]
-) -> None:
-    """A checkpoint quantized without its MTP layers must not start a random draft."""
-    if (
-        model_config.runner_type == "draft"
-        and any(".layers." in name for name, _ in model.named_parameters())
-        and not any(".layers." in name for name in loaded_weights)
-    ):
-        raise ValueError(
-            f"{type(model).__name__} found no layer weights in the checkpoint. It "
-            "may have been quantized without the MTP layers. Use a checkpoint that "
-            "includes them, or disable speculative decoding."
-        )
-
-
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
 
@@ -562,8 +546,6 @@ class DefaultModelLoader(BaseModelLoader):
         )
         if hasattr(model, "finish_checkpoint_load"):
             model.finish_checkpoint_load(loaded_weights)
-        if loaded_weights is not None:
-            _check_draft_layers_loaded(model, model_config, loaded_weights)
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.
         default_enable_weights_track = (
