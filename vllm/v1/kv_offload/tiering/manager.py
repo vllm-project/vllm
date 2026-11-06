@@ -1461,6 +1461,21 @@ class TieringOffloadingManager(OffloadingManager):
         self._put_get_reserve = get_reserve_chunks
         self._put_staging_keys: set[OffloadKey] = set()
 
+    def keys_needing_put_credit(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> set[OffloadKey]:
+        """Keys a store would newly charge: absent from the primary tier, or
+        resident but about to be pinned by a request-level cascade."""
+        state = self._req_state.get(req_context.req_id)
+        request_level = state is not None and bool(state.request_level_tiers)
+        policy = self.primary_tier._policy
+        return {
+            key
+            for key in keys
+            if key not in self._put_staging_keys
+            and (request_level or policy.get(key) is None)
+        }
+
     def get_put_admission_budget(self) -> int:
         """Conservative credit bound; the atomic allocator remains authoritative.
 

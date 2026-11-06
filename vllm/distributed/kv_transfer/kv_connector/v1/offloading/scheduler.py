@@ -2001,6 +2001,7 @@ class OffloadingConnectorScheduler:
         ranges: list[tuple[int, int]],
         key_ends: list[tuple[int, OffloadKey, int, int]],
         budget: int | None,
+        needs_credit: set[OffloadKey],
     ) -> tuple[list[tuple[int, int]], dict[OffloadKey, tuple[int, int]]]:
         """Select whole aligned multi-group units, never a flattened prefix.
 
@@ -2010,20 +2011,24 @@ class OffloadingConnectorScheduler:
         keys fit real credits (which are bounded by the PUT staging limit).
         ``budget=None`` admits every unit: a finished request's blocks are
         freed after this step, so its tail is offered once, in full.
+        Only ``needs_credit`` keys count against the budget and batch size:
+        resident keys (e.g. shared prefixes) allocate nothing.
         """
         alignment = self._put_alignment
         units: dict[int, set[OffloadKey]] = {}
         for end, key, _, _ in key_ends:
             units.setdefault(cdiv(end, alignment) * alignment, set()).add(key)
         chosen: set[OffloadKey] = set()
+        charged: set[OffloadKey] = set()
         frontier = 0
         for end, keys in sorted(units.items()):
-            size = len(chosen | keys)
+            size = len(charged | (keys & needs_credit))
             if budget is not None and (
-                size > budget or (chosen and size > self._put_batch_chunks)
+                size > budget or (charged and size > self._put_batch_chunks)
             ):
                 break
             chosen.update(keys)
+            charged.update(keys & needs_credit)
             frontier = end
         if chosen and len(chosen) == len({key for _, key, _, _ in key_ends}):
             # All eligible keys fit: resolve legitimately skipped trailing
@@ -2063,6 +2068,10 @@ class OffloadingConnectorScheduler:
             if self._put_retry_after in req_ids:
                 start = req_ids.index(self._put_retry_after) + 1
                 req_ids = req_ids[start:] + req_ids[:start]
+            # Finished requests get one store pass before their blocks are
+            # freed, so they claim primary capacity ahead of running ones.
+            finished = scheduler_output.finished_req_ids or set()
+            req_ids.sort(key=lambda r: r not in finished)
             # Computed once per step and refreshed only after a store is
             # prepared: gated or blocked requests leave it unchanged.
             assert self._put_manager is not None
@@ -2092,8 +2101,6 @@ class OffloadingConnectorScheduler:
                     # Last chance: blocks are freed after this step, so the
                     # allocator, not the advisory credit, bounds this store.
                     budget = None
-                elif budget == 0:
-                    continue
 
             if req.status is RequestStatus.FINISHED_ABORTED:
                 num_tokens_after_batch = req.num_computed_tokens
@@ -2272,8 +2279,14 @@ class OffloadingConnectorScheduler:
                         )
 
             if self._put_batch_chunks and new_offload_keys:
+                assert self._put_manager is not None
                 group_store_ranges, store_sources = self._clip_put_frontier(
-                    group_store_ranges, key_ends, budget
+                    group_store_ranges,
+                    key_ends,
+                    budget,
+                    self._put_manager.keys_needing_put_credit(
+                        new_offload_keys, req_status.req_context
+                    ),
                 )
                 new_offload_keys = list(store_sources)
                 if not new_offload_keys:

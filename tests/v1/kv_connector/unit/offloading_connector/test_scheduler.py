@@ -7290,3 +7290,30 @@ def test_put_admission_state_is_read_once_per_step_plus_per_store(monkeypatch):
     # re-reading the manager's admission state.
     assert len(jobs) == 2
     assert len(calls) == 3
+
+
+def test_put_resident_prefix_does_not_consume_batch_or_credit():
+    scheduler = _make_put_scheduler(batch=1, capacity=2, pool=8)
+    _, state = _put_request(scheduler)
+    # Another request already stored this request's first six chunks.
+    shared = state.group_states[0].offload_keys[:6]
+    primary = scheduler.manager.primary_tier
+    ctx = ReqContext("other")
+    assert primary.prepare_store(shared, ctx) is not None
+    primary.complete_store(shared, ctx)
+    [job] = scheduler._build_store_jobs(_put_output(put=128)).values()
+    assert job.src_spec.block_ids.tolist() == [7]
+    assert state.group_states[0].next_stored_chunk_idx == 7
+
+
+def test_put_finished_requests_claim_capacity_before_running_ones():
+    scheduler = _make_put_scheduler(batch=8, capacity=8)
+    _put_request(scheduler, "a")
+    finished, _ = _put_request(scheduler, "f")
+    finished.num_computed_tokens = 128
+    finished.status = RequestStatus.FINISHED_STOPPED
+    output = _put_output(a=128)
+    output.finished_req_ids = {"f"}
+    # The pool fits one request; the finished one has no later chance.
+    [job_id] = scheduler._build_store_jobs(output)
+    assert scheduler._jobs[job_id].req_id == "f"
