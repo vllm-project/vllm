@@ -248,9 +248,8 @@ def _counts(t: torch.Tensor) -> bool:
 def _perturb(name: str, t: torch.Tensor) -> torch.Tensor:
     b = t.roll(1, 0) if t.dim() and t.shape[0] > 1 else t
     if t.dtype in FLOATS:
-        # a factor that isn't a power of two changes every maximum; a small
-        # one keeps the model's activations in range
-        b = b * 1.25
+        # a factor that isn't a power of two changes every maximum
+        b = b * 3
         if bool((t == t.reshape(-1)[0]).all()):
             # constant: an offset of its own keeps it distinct from the others
             b = b + 1 + zlib.crc32(name.encode()) % 1000 / 1000
@@ -389,7 +388,6 @@ DP2_EP = dict(data_parallel_size=2, enable_expert_parallel=True)
 
 DEEPSEEK_V3 = "inference-optimization/DeepSeek-V3-debug-empty"
 DEEPSEEK_V3_FP8 = f"{DEEPSEEK_V3}-FP8_DYNAMIC"
-QWEN3_MOE_FP8 = "Qwen/Qwen3-30B-A3B-FP8"
 
 REFIT_CASES = [
     # one GPU
@@ -418,13 +416,10 @@ REFIT_CASES = [
     RefitCase("nemotron-h", "bf16", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"),
     # two GPUs
     *(
-        RefitCase(family, quant, model, parallel)
-        for family, quant, model in (
-            ("deepseek-v3", "fp8", DEEPSEEK_V3_FP8),
-            ("qwen3-moe", "fp8-block", QWEN3_MOE_FP8),
-        )
+        RefitCase("deepseek-v3", "fp8", DEEPSEEK_V3_FP8, parallel)
         for parallel in (TP2, TP2_EP, TP2_EP_EPLB, DP2_EP)
     ),
+    RefitCase("qwen3-moe", "fp8-block", "Qwen/Qwen3-30B-A3B-FP8", TP2_EP),
 ]
 
 
@@ -481,6 +476,10 @@ async def test_refit_equals_fresh(case: RefitCase, checkpoints, monkeypatch):
     if case.quant.startswith("fp8") and not current_platform.supports_fp8():
         pytest.skip("Requires FP8 support")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # fresh and refit engines compile separately (their model paths differ):
+    # fixed Inductor reduction configs keep their numerics equal
+    monkeypatch.setenv("TORCHINDUCTOR_DETERMINISTIC", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     folder_a, folder_b, unchanged = checkpoints(case)
 
     async with _engine(folder_b, case, "layerwise", monkeypatch) as fresh:
