@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.reload import (
     finish_reload,
     load_planned,
     plan_loads,
+    record_metadata_for_reloading,
     start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -131,3 +132,31 @@ def test_planned_update_rederives_input_scales(dist_init, monkeypatch) -> None:
             assert torch.equal(
                 tensor.view(torch.uint8), expected[name].view(torch.uint8)
             ), name
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="NVFP4 MoE needs SM100"
+)
+def test_layerwise_reload_keeps_routed_experts(dist_init, monkeypatch) -> None:
+    """Layerwise reload doesn't see the routed-expert loads (they write
+    ``.data``); the amax load must not make it reprocess the layer from
+    uninitialized weights."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    weights = _checkpoint(seed=0)
+    model = _Model()
+    with torch.device("cuda"):
+        record_metadata_for_reloading(model)  # as model init does
+    model.load_weights(weights.items())
+    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cuda"))
+    before = _state(model)
+
+    start_reload(model)
+    model.load_weights(weights.items())
+    finish_reload(model, _MODEL_CONFIG, torch.device("cuda"))
+
+    after = _state(model)
+    assert after.keys() == before.keys()
+    for name, tensor in after.items():
+        assert torch.equal(tensor.view(torch.uint8), before[name].view(torch.uint8)), (
+            name
+        )

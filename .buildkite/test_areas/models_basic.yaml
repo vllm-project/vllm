@@ -200,6 +200,8 @@ steps:
   - vllm/cute_utils/
   - cmake/external_projects/tml_fa4.cmake
   - tests/models/inkling/
+  # test_moe_reload.py covers ModelOpt NVFP4 MoE's input_amax handling
+  - vllm/model_executor/layers/quantization/modelopt.py
   commands:
     # FA4 kernel tests require SM100; the suite skips them elsewhere.
     - pytest -v -s models/inkling
