@@ -121,8 +121,7 @@ def _cap_num_warmup_reqs(
         spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
     )
     return min(
-        num_reqs,
-        model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots),
+        num_reqs, model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots)
     )
 
 
@@ -146,6 +145,7 @@ def run_mixed_prefill_decode_warmup(
     # the scheduler's correction-slot reservation.
     spec_config = model_runner.speculative_config
     if spec_config is not None:
+        # Keep room for the draft slots of both requests.
         num_tokens = min(
             num_tokens,
             model_runner.max_num_tokens
