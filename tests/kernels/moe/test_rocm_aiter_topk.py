@@ -377,24 +377,25 @@ def aiter_shared_expert_fusion(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize(
-    ("num_experts", "topk", "num_shared", "renormalize", "shared_expert_weight"),
+    ("num_experts", "topk", "num_shared", "renormalize", "has_gate"),
     [
-        pytest.param(128, 4, 1, True, 1.0, id="mistral_large_4"),
-        pytest.param(64, 6, 2, False, 0.5, id="deepseek_v2_lite_scaled"),
+        pytest.param(128, 4, 1, True, False, id="mistral_large_4"),
+        pytest.param(64, 6, 2, False, False, id="deepseek_v2_lite"),
+        pytest.param(512, 10, 1, True, True, id="qwen3_next_gated"),
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
-def test_rocm_aiter_shared_routed_router_without_shared_expert_gate(
+def test_rocm_aiter_shared_routed_router(
     aiter_shared_expert_fusion,
     num_experts: int,
     topk: int,
     num_shared: int,
     renormalize: bool,
-    shared_expert_weight: float,
+    has_gate: bool,
     dtype: torch.dtype,
 ):
-    """Fused shared experts without a gate: every routed expert stays
-    selectable, and the shared slots keep their ids and constant weight."""
+    """Every routed expert stays selectable, and the shared slots keep their
+    ids with weight sigmoid(gate logit) when gated, 1.0 otherwise."""
     rocm_aiter_moe.init_aiter_topK_meta_data(
         n_routed_experts=num_experts,
         n_shared_experts=num_shared,
@@ -408,66 +409,32 @@ def test_rocm_aiter_shared_routed_router_without_shared_expert_gate(
         global_num_experts=num_experts,
         renormalize=renormalize,
         num_fused_shared_experts=num_shared,
-        shared_expert_weight=shared_expert_weight,
+        has_shared_expert_gate=has_gate,
     )
     assert isinstance(router, AiterSharedRoutedFusedMoERouter)
 
     set_random_seed(0)
     num_tokens = 33
-    logits = (torch.randn((num_tokens, num_experts), device="cuda") * 3).to(dtype)
-    # The last routed experts must stay selectable.
+    num_cols = num_experts + (num_shared if has_gate else 0)
+    logits = (torch.randn((num_tokens, num_cols), device="cuda") * 3).to(dtype)
     last_experts = range(num_experts - num_shared, num_experts)
-    logits[0, -num_shared:] = 20.0
+    logits[0, last_experts.start : last_experts.stop] = 20.0
     hidden_states = torch.empty((num_tokens, 16), dtype=dtype, device="cuda")
     weights, ids = router.select_experts(hidden_states, logits)
 
     assert set(last_experts) <= set(ids[0, :topk].tolist())
-    _assert_softmax_topk(weights[:, :topk], ids[:, :topk], logits, renormalize)
+    _assert_softmax_topk(
+        weights[:, :topk], ids[:, :topk], logits[:, :num_experts], renormalize
+    )
     shared_ids = torch.arange(
         num_experts, num_experts + num_shared, device="cuda", dtype=torch.int32
     )
     assert torch.equal(ids[:, topk:], shared_ids.expand(num_tokens, -1))
-    assert (weights[:, topk:] == shared_expert_weight).all()
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
-def test_rocm_aiter_shared_routed_router_with_shared_expert_gate(
-    aiter_shared_expert_fusion, dtype: torch.dtype
-):
-    """Qwen3-Next: the shared-expert gate logits follow the routed logits, and
-    the shared slot weight is their sigmoid."""
-    num_experts, topk, num_shared = 512, 10, 1
-    rocm_aiter_moe.init_aiter_topK_meta_data(
-        n_routed_experts=num_experts,
-        n_shared_experts=num_shared,
-        top_k=topk,
-        tp_rank=0,
-        tp_size=1,
-        max_num_tokens=64,
-    )
-    router = create_fused_moe_router(
-        top_k=topk,
-        global_num_experts=num_experts,
-        renormalize=True,
-        num_fused_shared_experts=num_shared,
-        has_shared_expert_gate=True,
-    )
-    assert isinstance(router, AiterSharedRoutedFusedMoERouter)
-
-    set_random_seed(0)
-    num_tokens = 33
-    logits = torch.randn((num_tokens, num_experts + num_shared), device="cuda") * 3
-    logits = logits.to(dtype)
-    hidden_states = torch.empty((num_tokens, 16), dtype=dtype, device="cuda")
-    weights, ids = router.select_experts(hidden_states, logits)
-
-    _assert_softmax_topk(
-        weights[:, :topk], ids[:, :topk], logits[:, :num_experts], renormalize=True
-    )
-    assert (ids[:, topk:] == num_experts).all()
-    torch.testing.assert_close(
-        weights[:, topk:], torch.sigmoid(logits[:, num_experts:].float())
-    )
+    if has_gate:
+        expected_shared = torch.sigmoid(logits[:, num_experts:].float())
+    else:
+        expected_shared = torch.ones_like(weights[:, topk:])
+    torch.testing.assert_close(weights[:, topk:], expected_shared)
 
 
 def test_rocm_aiter_topk_gating_torch_compile_compatibility():

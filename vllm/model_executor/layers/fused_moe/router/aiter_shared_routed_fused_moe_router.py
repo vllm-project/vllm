@@ -26,9 +26,9 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
     the pre-allocated AITER buffer via a fallback path.
 
     Without a shared-expert gate (e.g. DeepSeek-V2 style), router_logits only
-    hold the routed experts and every token uses the shared experts with the
-    constant shared_expert_weight. The routed top-k is written directly into
-    the pre-allocated AITER buffer, whose shared-expert slots are pre-filled.
+    hold the routed experts and every token uses the shared experts with
+    weight 1.0. The routed top-k is written directly into the pre-allocated
+    AITER buffer, whose shared-expert slots are pre-filled.
 
     Only instantiated when rocm_aiter fused-MoE is active and
     num_fused_shared_experts > 0.
@@ -43,7 +43,6 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         scoring_func: str = "softmax",
         renormalize: bool = True,
         has_shared_expert_gate: bool = False,
-        shared_expert_weight: float = 1.0,
     ):
         super().__init__(
             top_k=top_k,
@@ -54,7 +53,6 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self.scoring_func = scoring_func
         self.num_fused_shared_experts = num_fused_shared_experts
         self.has_shared_expert_gate = has_shared_expert_gate
-        self.shared_expert_weight = shared_expert_weight
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -120,11 +118,6 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
                 router_logits,
                 self.renormalize,
             )
-            # init_aiter_topK_meta_data pre-fills the shared slots with 1.0.
-            if self.shared_expert_weight != 1.0:
-                total_topk_weights[:, topk : topk + num_fse].fill_(
-                    self.shared_expert_weight
-                )
             return total_topk_weights, total_topk_ids
 
         if rocm_aiter_ops.fuse_sigmoid_in_kernel(aiter_topK_meta_data):
