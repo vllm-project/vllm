@@ -252,6 +252,17 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 }
 
 
+def _lm_head_method(quantization: str) -> type[OnlineLinearBase]:
+    if quantization == "int4_per_group_32_asym":
+        # online.int4 imports this module.
+        from vllm.model_executor.layers.quantization.online.int4 import (
+            Int4PerGroup32AsymLMHeadMethod,
+        )
+
+        return Int4PerGroup32AsymLMHeadMethod
+    return _LM_HEAD_METHODS[quantization]
+
+
 def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
     if (
         not isinstance(
@@ -276,7 +287,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=_LM_HEAD_METHODS[quantization](),
+            quant_method=_lm_head_method(quantization)(),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
@@ -295,13 +306,15 @@ _SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDiction
 
 
 def quantized_lm_head_copy(
-    lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
+    lm_head: ParallelLMHead,
+    quantization: Literal["fp8", "nvfp4", "int4_per_group_32_asym"],
 ) -> ParallelLMHead:
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
     "fp8" uses per-row weight and per-token activation scales on the platform's
     FP8 linear kernel; "nvfp4" is weight-only on the
-    platform's W4A16 kernel. `lm_head` is left
+    platform's W4A16 kernel; "int4_per_group_32_asym" is weight-only on the
+    platform's mixed-precision linear kernel. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """
