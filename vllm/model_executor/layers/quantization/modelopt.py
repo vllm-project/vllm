@@ -2213,6 +2213,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             candidates.append(
                 "language_model.model." + prefix[len("model.language_model.") :]
             )
+        elif prefix.startswith("model.layers."):
+            # A text-only module (e.g. a multimodal checkpoint's MTP layer,
+            # built as a text draft) listed with the language model's layers,
+            # as stored or after the target model's hf_to_vllm_mapper.
+            rest = prefix[len("model.") :]
+            candidates.append("language_model.model." + rest)
+            candidates.append("model.language_model." + rest)
 
         return tuple(dict.fromkeys(candidates))
 
