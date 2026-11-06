@@ -435,7 +435,8 @@ def _verify_reference(q, cache, block_table, seq_lens, real_seq_lens, qlen, scal
 )
 @pytest.mark.parametrize("num_heads", [8, 16, 128])
 @pytest.mark.parametrize("qlen", [5, 8])
-# 3 requests stay on the small-tile config; 24 reach the 64-row tiles.
+# 3 requests at 8 or 16 heads stay on the small-tile config; the rest reach
+# the 64-row tiles.
 @pytest.mark.parametrize("batch", [3, 24])
 @pytest.mark.parametrize("page_size", [1, 16])
 @pytest.mark.parametrize("kv_dtype", ["bf16", "fp8"])
@@ -528,18 +529,21 @@ def test_decode_attention_fwd_verify(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only the ROCm AITER MLA backend uses it"
 )
-def test_decode_attention_fwd_verify_int64_page_offset():
+# 16 heads take the small-tile config, 128 the 64-row QSPLIT one.
+@pytest.mark.parametrize("num_heads", [16, 128])
+def test_decode_attention_fwd_verify_int64_page_offset(num_heads):
     """Page offsets must not overflow int32 once the cache holds more than
     2**31 elements (fp8 past 2 GiB)."""
     from vllm.v1.attention.ops.triton_decode_attention import (
         decode_attention_fwd_verify,
     )
 
-    dim, kv_lora_rank, page_size, qlen, num_heads = 576, 512, 16, 8, 16
+    dim, kv_lora_rank, page_size, qlen = 576, 512, 16, 8
     pages_per_req = cdiv(200, page_size)
     # Every page the table points at starts past element 2**31.
     first_high = 2**31 // (page_size * dim) + 1
     num_pages = first_high + 2 * pages_per_req
+    torch.accelerator.empty_cache()
     if torch.accelerator.get_memory_info()[0] < num_pages * page_size * dim + 2**30:
         pytest.skip("needs about 3 GiB of free device memory")
     set_random_seed(0)

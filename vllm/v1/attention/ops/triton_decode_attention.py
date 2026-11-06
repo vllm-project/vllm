@@ -1251,16 +1251,15 @@ def _fwd_verify_kernel_stage2(
     )
 
 
-VERIFY_DEFAULT_CONFIG: dict[str, Any] = dict(
-    BLOCK_H=32,
-    BLOCK_N=16,
+_VERIFY_BASE_CONFIG: dict[str, Any] = dict(
+    BLOCK_N=32,
     num_warps=4,
     num_stages=1,
     waves_per_eu=1,
     matrix_instr_nonkdim=16,
     kpack=2,
     SPLIT_ALIGN=16,
-    MIN_SPLIT_LEN=256,
+    MIN_SPLIT_LEN=128,
     QSPLIT=False,
     S2_BLOCK_S=16,
     s2_num_warps=4,
@@ -1277,24 +1276,24 @@ def verify_num_kv_splits(
     qlen: int,
     num_heads: int,
     sm_count: int,
-    block_h: int = VERIFY_DEFAULT_CONFIG["BLOCK_H"],
-    occupancy: float = 1.0,
-    min_work_per_split: int = 64,
     max_splits: int = 8,
 ) -> int:
     """Static upper bound on KV splits (safe to bake into a cudagraph).
 
     The kernel splits each request's own length into
     max(cdiv(L, splits), MIN_SPLIT_LEN) chunks, so this only caps the split
-    count. ``occupancy`` is the number of resident stage-1 programs per CU.
-    If one split of every request fits in a single dispatch round, use as many
-    splits as fit in that round; otherwise pick n <= max_splits minimising
-    rounds(n) / n (the idle tail of the last round), preferring fewer splits
-    within 5% of the best.
+    count. The config's ``occupancy`` is the number of resident stage-1
+    programs per CU. If one split of every request fits in a single dispatch
+    round, use as many splits as fit in that round; otherwise pick
+    n <= max_splits minimising rounds(n) / n (the idle tail of the last round),
+    preferring fewer splits within 5% of the best.
     """
-    programs_per_split = max(1, batch) * verify_row_blocks(qlen, num_heads, block_h)
-    ideal = triton.cdiv(max(1, max_seq_len), max(1, min_work_per_split))
-    slots = max(1, int(occupancy * sm_count))
+    cfg = select_verify_config(batch, qlen, num_heads)
+    programs_per_split = max(1, batch) * verify_row_blocks(
+        qlen, num_heads, cfg["BLOCK_H"]
+    )
+    ideal = triton.cdiv(max(1, max_seq_len), cfg["MIN_SPLIT_LEN"])
+    slots = max(1, int(cfg["occupancy"] * sm_count))
     if programs_per_split <= slots:
         n = slots // programs_per_split
     else:
@@ -1450,20 +1449,11 @@ def decode_attention_fwd_verify(
     )
 
 
-_VERIFY_SMALL_CONFIG: dict[str, Any] = dict(
-    BLOCK_H=32, BLOCK_N=32, num_warps=4, kpack=1, MIN_SPLIT_LEN=128, occupancy=2.0
-)
+_VERIFY_SMALL_CONFIG: dict[str, Any] = dict(BLOCK_H=32, kpack=1, occupancy=2.0)
 # 64-row tiles, Q and the QK operand split in two 256-wide halves (QSPLIT,
 # which also enables the K/V prefetch), 32 keys per step on 4 warps. 8 warps
 # cap VGPRs at 256 and spill or idle MFMA rows here.
-_VERIFY_LARGE_CONFIG: dict[str, Any] = dict(
-    BLOCK_H=64,
-    BLOCK_N=32,
-    num_warps=4,
-    QSPLIT=True,
-    MIN_SPLIT_LEN=128,
-    occupancy=1.0,
-)
+_VERIFY_LARGE_CONFIG: dict[str, Any] = dict(BLOCK_H=64, QSPLIT=True, occupancy=1.0)
 
 
 _VERIFY_SMALL_MAX_ROWS = 640
@@ -1476,7 +1466,7 @@ def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any
     GPU. Otherwise 64-row tiles (Q split in two 256-wide halves, next K/V
     tile prefetched) halve the KV re-reads per request.
     """
-    cfg = dict(VERIFY_DEFAULT_CONFIG)
+    cfg = dict(_VERIFY_BASE_CONFIG)
     if batch * qlen * num_heads <= _VERIFY_SMALL_MAX_ROWS:
         cfg.update(_VERIFY_SMALL_CONFIG)
     else:
