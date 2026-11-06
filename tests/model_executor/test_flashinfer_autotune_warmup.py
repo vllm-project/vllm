@@ -18,6 +18,7 @@ import torch
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
 from vllm.config import MultiModalConfig
+from vllm.config.utils import hash_config, hash_factors
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     _flashinfer_mm_encoder_autotune_hash,
     get_flashinfer_mm_encoder_autotune_config,
@@ -129,12 +130,12 @@ def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_component
     """Processor cache capacity must not change either part of the cache key."""
     config = encoder_autotune_config
     mm_config = config.model_config.get_multimodal_config()
-    config_hash = config.compute_hash(include_version=False)
+    config_hash = hash_factors(config.compile_factors(include_version=False))
     encoder_hash = _flashinfer_mm_encoder_autotune_hash(mm_config)
 
     assert mm_config.mm_processor_cache_gb > 0
     mm_config.mm_processor_cache_gb = 0
-    assert config.compute_hash(include_version=False) == config_hash
+    assert hash_factors(config.compile_factors(include_version=False)) == config_hash
     assert _flashinfer_mm_encoder_autotune_hash(mm_config) == encoder_hash
 
 
@@ -842,14 +843,11 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     mutated.kv_cache_layout = "LBHNC"
 
     # Negative control: the write-backs are hashed factors.
-    assert mutated.compute_hash() != fresh.compute_hash()
+    assert hash_config(mutated) != hash_config(fresh)
     normalized = _normalize_cache_config_for_hash(mutated)
-    assert normalized.compute_hash() == fresh.compute_hash()
+    assert hash_config(normalized) == hash_config(fresh)
     # Factory state is returned untouched.
     assert _normalize_cache_config_for_hash(fresh) is fresh
     # block_size stays significant (the daemon keys on the resolved value).
-    resolved = CacheConfig(block_size=64)
-    assert (
-        _normalize_cache_config_for_hash(resolved).compute_hash()
-        != fresh.compute_hash()
-    )
+    resolved = CacheConfig(block_size=32)
+    assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)

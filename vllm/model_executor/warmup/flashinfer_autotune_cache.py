@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer autotune cache helpers."""
 
-import hashlib
 import os
 import tempfile
 from contextlib import suppress
@@ -12,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, MultiModalConfig, VllmConfig, replace
+from vllm.config.utils import hash_config, hash_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ def _flashinfer_mm_encoder_autotune_hash(
 
     return MultiModalHasher.hash_kwargs(
         "sha256",
-        encoder_config=mm_config.compute_hash(),
+        encoder_config=hash_config(mm_config),
         enable_chunked_prefill=enable_chunked_prefill,
         mm_processor_kwargs=sort_dicts(mm_config.mm_processor_kwargs or {}),
         limit_per_prompt=sort_dicts(
@@ -82,14 +82,16 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
-    config_hash = vllm_config.compute_hash(include_version=False)
+    factors = vllm_config.compile_factors(include_version=False)
     mm_config = get_flashinfer_mm_encoder_autotune_config(vllm_config)
     if mm_config is not None:
-        config_hash += _flashinfer_mm_encoder_autotune_hash(
-            mm_config,
-            enable_chunked_prefill=vllm_config.scheduler_config.enable_chunked_prefill,
+        factors["flashinfer_mm_encoder_autotune"] = (
+            _flashinfer_mm_encoder_autotune_hash(
+                mm_config,
+                enable_chunked_prefill=vllm_config.scheduler_config.enable_chunked_prefill,
+            )
         )
-    return hashlib.sha256(config_hash.encode()).hexdigest()
+    return hash_factors(factors)
 
 
 def flashinfer_autotune_root() -> Path:
