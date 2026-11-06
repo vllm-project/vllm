@@ -9,6 +9,7 @@ Test organization:
     - TestGetInputModality     — modality routing from mm_kwargs keys
     - TestSupportsBatch        — precomputed embeddings skip the graph
     - TestDefaultBudgetTable   — subdivided default budgets, user overrides
+    - TestGridThwEncoderCudaGraphMixin — shared grid_thw select/capture logic
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
@@ -24,6 +25,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.model_executor.models.encoder_cudagraph_utils import (
+    GridThwEncoderCudaGraphMixin,
+)
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
@@ -1171,6 +1175,97 @@ class TestSupportsBatch:
         )
         mm_kwargs = {key: torch.zeros(1) for key in keys}
         assert mgr.supports_batch(modality, mm_kwargs) is expected
+
+
+# ---------------------------------------------------------------------------
+# No-GPU tests — GridThwEncoderCudaGraphMixin
+# ---------------------------------------------------------------------------
+
+
+class _StubGridThwVisual:
+    spatial_merge_size = 2
+    patch_embed = SimpleNamespace(
+        proj=SimpleNamespace(in_channels=3), patch_size=2, temporal_patch_size=1
+    )
+    input_norm = SimpleNamespace(input_dtype=None)
+
+    def __init__(self):
+        self.metadata_calls: list[tuple[list[list[int]], dict[str, Any]]] = []
+
+    def prepare_encoder_metadata(self, grid_thw, **kwargs):
+        self.metadata_calls.append((grid_thw, kwargs))
+        return {"cu_seqlens": torch.zeros(len(grid_thw) + 1, dtype=torch.int32)}
+
+
+class _GridThwHost(GridThwEncoderCudaGraphMixin):
+    def __init__(self):
+        self.visual = _StubGridThwVisual()
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=["pixel_values", "cu_seqlens"],
+            out_hidden_size=12,
+            max_frames_per_video=self.get_max_frames_per_video(),
+        )
+
+    def get_max_frames_per_video(self) -> int:
+        return 3
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "max_model_len"), [(8192, 4096), (2048, 32768)]
+)
+def test_default_budget_range(max_num_batched_tokens, max_model_len):
+    """Models without their own override budget from 64 up to the smaller of
+    max_num_batched_tokens and max_model_len."""
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+    )
+    budget_range = SupportsEncoderCudaGraph.get_encoder_cudagraph_budget_range(
+        cast(Any, None), cast(Any, vllm_config)
+    )
+    assert budget_range == (64, min(max_num_batched_tokens, max_model_len))
+
+
+class TestGridThwEncoderCudaGraphMixin:
+    """Shared grid_thw logic used by Qwen-VL-style models."""
+
+    def test_select_slices_items_by_patch_count(self):
+        host = _GridThwHost()
+        grid = [[2, 2, 4], [1, 2, 2], [1, 4, 2]]
+        pixel_values = torch.arange(28).unsqueeze(1)
+        mm_kwargs = {"pixel_values_videos": pixel_values, "video_grid_thw": grid}
+
+        specs = host.get_encoder_cudagraph_item_specs(mm_kwargs)
+        assert [s.output_tokens for s in specs] == [4, 1, 2]
+
+        selected = host.select_encoder_cudagraph_items(mm_kwargs, [2, 0])
+        assert selected["video_grid_thw"] == [[1, 4, 2], [2, 2, 4]]
+        expected = torch.cat([pixel_values[20:], pixel_values[:16]])
+        assert torch.equal(selected["pixel_values_videos"], expected)
+
+        empty = host.select_encoder_cudagraph_items(mm_kwargs, [])
+        assert empty["video_grid_thw"] == []
+        assert empty["pixel_values_videos"].shape == (0, 1)
+
+    def test_capture_buffers_cover_budget_with_video_layout(self):
+        host = _GridThwHost()
+        values = host.prepare_encoder_cudagraph_capture_inputs(
+            token_budget=10,
+            max_batch_size=2,
+            max_frames_per_batch=6,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        ).values
+
+        ((grid, kwargs),) = host.visual.metadata_calls
+        # ceil(10 / 2) = 5 tokens per item, spread over 3 frames of 2 tokens.
+        assert grid == [[3, 2, 4], [3, 2, 4]]
+        assert kwargs["max_seqlen_override"] == 40
+        assert values["pixel_values"].shape == (48, 12)
+        assert list(values) == ["cu_seqlens", "pixel_values"]
 
 
 # ---------------------------------------------------------------------------
