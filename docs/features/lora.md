@@ -231,6 +231,98 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 }'
 ```
 
+### Registering an Adapter from Tensors
+
+An adapter can also be registered without a checkpoint on disk. Inside the worker, typically from a worker extension (the `worker_extension_cls` engine argument), build the `LoRAModel` with `LoRAModel.from_lora_tensors`, the step the path loader runs after reading the files, and add it to the manager:
+
+```python
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
+
+
+class LoRARegistrar:  # in an importable module, passed as worker_extension_cls
+    def register_lora(self, lora_id: int, adapter_config: dict) -> None:
+        tensors = ...  # PEFT-named lora_A/lora_B tensors, produced in the worker
+        manager = self.model_runner.get_model().lora_manager
+        peft_helper = PEFTHelper.from_dict(adapter_config)
+        peft_helper.validate_legal(manager.lora_config)
+        mapper = getattr(manager.model, "hf_to_vllm_mapper", None)
+        lora = LoRAModel.from_lora_tensors(
+            lora_id,
+            tensors,
+            peft_helper,
+            device="cpu",
+            dtype=manager.lora_config.lora_dtype,
+            model_vocab_size=manager.vocab_size,
+            weights_mapper=mapper.get_rename_mapper() if mapper else None,
+            skip_prefixes=getattr(manager.model, "lora_skip_prefixes", None),
+        )
+        manager.add_adapter(lora)
+        manager.pin_adapter(lora_id)
+```
+
+Requests then reference the adapter as `LoRARequest(name, lora_id, lora_path)` with any non-empty placeholder path: an adapter already registered under that ID is used as is, and the path is only read if the adapter has to be loaded again. Pin it, as above, so it is never evicted, and do not set `load_inplace` on its requests.
+
+### Updating LoRA Weights from Tensors
+
+The LoRA manager of each worker can also replace an adapter's weights from tensors, without writing a checkpoint, or expose the GPU slot that holds them. These calls run inside the worker, typically from a worker extension (the `worker_extension_cls` engine argument) that obtains the tensors itself, e.g. generates them from a seed or receives them through a weight-transfer channel; `collective_rpc` then only carries small arguments:
+
+```python
+import torch
+
+
+class LoRAWriter:  # in an importable module, passed as worker_extension_cls
+    def set_down_proj(self, lora_id: int, layer: int, seed: int) -> None:
+        g = torch.Generator().manual_seed(seed)
+        lora_a = torch.randn(8, 3072, generator=g)  # (rank, in_features)
+        lora_b = torch.zeros(1024, 8)  # (out_features, rank), scaling folded in
+        self.model_runner.lora_manager.update_adapter_weights(
+            lora_id, {f"model.layers.{layer}.mlp.down_proj": (lora_a, lora_b)}
+        )
+
+
+llm = LLM(model, enable_lora=True, worker_extension_cls="my_module.LoRAWriter")
+llm.collective_rpc("set_down_proj", args=(lora_id, 0, 1234))
+```
+
+- `update_adapter_weights(lora_id, weights)` takes a mapping from module name to `(lora_a, lora_b)`, with one entry per slice for packed modules such as `qkv_proj` (`None` keeps a slice). Modules held by another pipeline-parallel rank are skipped, so every worker can receive the same mapping. The cached copy of the adapter is updated too, so the weights survive GPU-slot eviction for as long as the adapter stays registered; an adapter removed from the CPU cache is reloaded from its `lora_path`. Passing `update_cpu_cache=False` writes only the GPU slot, avoiding a device-to-host copy for frequent updates, and requires the adapter to be pinned (`pin_lora`).
+- `get_adapter_slot(lora_id)` returns the slot index, and `get_adapter_slot_weights(lora_id)` returns per-module views of the slot's A and B buffers (local to the rank, padded to `max_lora_rank`) for reading or in-place updates under `torch.inference_mode()`. These are views, not checkpoint-format weights: on TP workers, do not pass them as full unsharded inputs to `update_adapter_weights`.
+
+Both APIs support dense and MoE LoRA layers. MoE updates use stacked A `(experts, rank, in_features)` and B `(experts, out_features, rank)` factors, with scaling folded into B:
+
+| MoE layer | Slice order |
+| --- | --- |
+| Gated, per-expert format | `w1`, `w2`, `w3` |
+| Non-gated | `w1`, `w2` |
+| 3D fused format | `w13`, `w2` |
+
+`update_adapter_weights` preserves the loaded rank and expects full TP dimensions. For EP, it accepts global-expert tensors and selects this worker's contiguous expert range, or accepts already local-expert tensors. Shared factors keep an expert axis of size one. Slot views expose the actual local buffers, including TP sharding and rank padding. Metadata errors are rejected before any writes; sources aliasing a destination are cloned before the slot is reset.
+
+### Frequent GPU-Resident Updates (ZO / ES)
+
+Zeroth-order optimization and evolution strategies can write new perturbations before every probe forward. Repeated checkpoint loading, CPU-cache updates, and clearing a slot before replacing all of its factors add work to every probe. Pin an active adapter and obtain its views once, then generate directions directly into those views or copy prepared GPU factors into them. This avoids checkpoint I/O, device-to-host copies, intermediate adapter allocation, repeated slot lookup, and reset-then-copy work. The buffers and their addresses stay the same, including when CUDA graphs read them.
+
+For example, the following worker-extension methods prepare a rank-local write plan and overwrite B directly. The adapter must already be loaded and active; its A buffers must contain the intended factors.
+
+```python
+class ProbeWriter:
+    def prepare_probe(self, lora_id: int, module_names: list[str]) -> None:
+        manager = self.model_runner.lora_manager
+        manager.pin_adapter(lora_id)
+        weights = manager.get_adapter_slot_weights(lora_id, module_names)
+        self.probe_b = [b for _, bs in weights.values() for b in bs]
+
+    def zero_probe_b(self) -> None:
+        with torch.inference_mode():
+            torch._foreach_zero_(self.probe_b)
+```
+
+Direct writes affect only the GPU copy. Keep the adapter pinned while retaining views; removal, or eviction after unpinning, allows another adapter to reuse the slot. Overwrite the whole intended region, including unused padded rank entries, so previous perturbations cannot leak into a probe. The adapter's CPU copy stays unchanged; use `update_adapter_weights` when weights must survive eviction. Cache persistence can synchronize CPU/GPU transfers. `update_cpu_cache=False` is a validated GPU-only replacement API, while retained views let a caller generate factors in place without a replacement/reset cycle. Use GPU-resident inputs to avoid host transfers on these paths.
+
+Perform writes between forwards on the worker stream. A worker extension must join any separate producer stream before writing and must not modify buffers while a forward is using them. These methods do not quiesce in-flight requests or implement a concurrent weight-transfer protocol.
+
+Prefix-cache entries computed with an adapter's previous weights are not invalidated by these calls. Call `llm.reset_prefix_cache()` after an update if requests for that adapter may share cached prefixes.
+
 ## New format for `--lora-modules`
 
 In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:
