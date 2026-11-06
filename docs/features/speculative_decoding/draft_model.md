@@ -104,6 +104,10 @@ for output in outputs:
       print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+## Draft Models with Pipeline Parallelism
+
+With pipeline parallelism (`pipeline_parallel_size > 1`), the draft model runs as a whole model on the last pipeline stage. This requires a draft model with the `LlamaForCausalLM`, `Qwen2ForCausalLM` or `Qwen3ForCausalLM` architecture; other draft architectures fail at startup with `NotImplementedError`. A custom `VLLM_PP_LAYER_PARTITION` applies only to the target model.
+
 !!! warning
     Note: Please use `--speculative-config` to set all configurations related
     to speculative decoding. The previous method of specifying the model
