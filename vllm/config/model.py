@@ -808,9 +808,6 @@ class ModelConfig:
                         setattr(self.pooler_config, k, v)
                         pooler_config_sources[k] = "sentence_transformers"
 
-            # Sentence Transformers v6 saves the CrossEncoder activation outside
-            # config.json; put it where the classifier activation lookup reads it,
-            # unless hf_overrides sets the activation explicitly.
             if (
                 act_fn := get_sentence_transformers_activation_fn(
                     self.model, self.revision
