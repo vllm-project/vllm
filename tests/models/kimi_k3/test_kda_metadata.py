@@ -3,6 +3,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
+from typing import TypeVar
 from unittest.mock import Mock, patch
 
 import pytest
@@ -26,7 +27,6 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -57,6 +57,8 @@ PRUNED_METADATA_FIELDS = {
     "flashinfer_prefill_query_start_loc",
     "flashinfer_prefill_seq_order",
 }
+
+_BuilderT = TypeVar("_BuilderT", bound=GDNAttentionMetadataBuilder)
 
 
 def _assert_matches_shared_gdn(
@@ -92,7 +94,7 @@ def _assert_matches_shared_gdn(
 
 
 def _make_builder(
-    builder_cls: type[AttentionMetadataBuilder],
+    builder_cls: type[_BuilderT],
     num_speculative_tokens: int,
     full_cuda_graph: bool,
     device: torch.device = DEVICE,
@@ -105,7 +107,8 @@ def _make_builder(
     disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
-) -> AttentionMetadataBuilder:
+    num_hash_lookahead_tokens: int = 0,
+) -> _BuilderT:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -132,6 +135,7 @@ def _make_builder(
     vllm_config.cache_config.cache_hit_alignment_tokens = (
         cache_hit_alignment_tokens or hash_block_size
     )
+    vllm_config.num_hash_lookahead_tokens = num_hash_lookahead_tokens
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,
@@ -213,6 +217,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         speculative_config=SimpleNamespace(
             num_speculative_tokens=2,
             parallel_drafting=False,
+            enable_adaptive_verification=False,
             use_eagle_block_drop=Mock(return_value=False),
         ),
         compilation_config=SimpleNamespace(
@@ -223,6 +228,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         additional_config={},
         num_speculative_tokens=2,
+        num_hash_lookahead_tokens=0,
         use_v2_model_runner=True,
     )
     builder = KimiK3KDAMetadataBuilder(
@@ -363,22 +369,31 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
+    (
+        "seq_len",
+        "disable_eagle_block_drop",
+        "num_hash_lookahead_tokens",
+        "prefix_match_unit",
+        "expected_offset",
+    ),
     [
-        (100, False, 16, 80),
-        (100, True, 16, 96),
-        (100, False, 8, None),
-        (96, False, 16, 80),
-        (96, True, 16, 80),
+        (100, False, 0, 16, 80),
+        (100, True, 0, 16, 96),
+        (100, False, 1, 16, 96),
+        (100, False, 0, 8, None),
+        (96, False, 0, 16, 80),
+        (96, True, 0, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     seq_len: int,
     disable_eagle_block_drop: bool,
+    num_hash_lookahead_tokens: int,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
+    """Lookahead hashes need no back-off from the replay boundary."""
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
@@ -398,6 +413,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         prefix_match_unit=prefix_match_unit,
         use_eagle=True,
         disable_eagle_block_drop=disable_eagle_block_drop,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -643,6 +659,8 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         )
     context = builder.recoverssm_context
     assert context is not None
+    commit = context.commit
+    assert isinstance(commit, Mock)
     actual = builder.build(
         0,
         common_attn_metadata,
@@ -680,7 +698,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
             is common_attn_metadata.compute_num_computed_tokens()
         )
         assert postprocess.block_size == BLOCK_SIZE
-    args = context.commit.call_args.args
+    args = commit.call_args.args
     assert args[0] is num_accepted_tokens
     torch.testing.assert_close(args[1], commit_metadata.state_indices[:, 0])
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
@@ -791,7 +809,7 @@ def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
     ],
 )
 def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
-    builder_cls: type[AttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
+    builder_cls: type[GDNAttentionMetadataBuilder], monkeypatch: pytest.MonkeyPatch
 ):
     """`build_for_cudagraph_capture` is not capture-only: a DP rank with nothing
     scheduled re-stages its FULL-graph metadata through it on every dummy step,
