@@ -37,13 +37,11 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.circuit_breaker import (  # noqa: E501
-    CircuitBreaker,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -2739,6 +2737,11 @@ class LookupKeyServer:
 # ============================================================
 
 
+# Consecutive failed lookups that open the breaker, and how long it stays open.
+LOOKUP_BREAKER_FAILURE_THRESHOLD = 3
+LOOKUP_BREAKER_COOLDOWN_S = 30.0
+
+
 @dataclasses.dataclass
 class LookupState:
     future: Future[MooncakeLookupResult]
@@ -2776,11 +2779,11 @@ class LookupKeyClient:
     """
 
     def __init__(self, vllm_config: VllmConfig):
-        self._lookup_timeout_s = envs.VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS
-        cooldown_s = envs.VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS
-        threshold = envs.VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD
-        assert self._lookup_timeout_s > 0, "Mooncake lookup timeout must be positive"
-        self.circuit_breaker = CircuitBreaker(cooldown_s, threshold)
+        self.circuit_breaker = CircuitBreaker(
+            "Mooncake lookup",
+            LOOKUP_BREAKER_COOLDOWN_S,
+            LOOKUP_BREAKER_FAILURE_THRESHOLD,
+        )
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -2807,6 +2810,8 @@ class LookupKeyClient:
             threading.BoundedSemaphore(prefetch_limit) if prefetch_limit > 0 else None
         )
         self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
+        self._lookup_timeout_s = extra_config.get("lookup_timeout_s", 5.0)
+        assert self._lookup_timeout_s > 0, "lookup_timeout_s must be positive"
 
     def _wait_for_socket(self, event: int, deadline: float) -> None:
         remaining_ms = int((deadline - time.monotonic()) * 1000)

@@ -11,10 +11,8 @@ import pytest
 import zmq
 
 from vllm.config import DeviceConfig, KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.circuit_breaker import (  # noqa: E501
-    CircuitBreaker,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     MooncakeLookupResult,
 )
@@ -29,13 +27,9 @@ pytestmark = pytest.mark.cpu_test
 def lookup_service(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> Iterator[tuple[worker.LookupKeyClient, zmq.Socket]]:
-    monkeypatch.setenv("VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS", "0.15")
-    monkeypatch.setenv(
-        "VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "0.2"
-    )
-    monkeypatch.setenv(
-        "VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
-        str(getattr(request, "param", 1)),
+    monkeypatch.setattr(worker, "LOOKUP_BREAKER_COOLDOWN_S", 0.2)
+    monkeypatch.setattr(
+        worker, "LOOKUP_BREAKER_FAILURE_THRESHOLD", getattr(request, "param", 1)
     )
     # Keep Unix socket paths below the platform limit.
     with tempfile.TemporaryDirectory(prefix="mc-", dir="/tmp") as rpc_dir:
@@ -45,7 +39,10 @@ def lookup_service(
             kv_transfer_config=KVTransferConfig(
                 kv_connector="MooncakeStoreConnector",
                 kv_role="kv_both",
-                kv_connector_extra_config={"lookup_prefetch_limit": 1},
+                kv_connector_extra_config={
+                    "lookup_prefetch_limit": 1,
+                    "lookup_timeout_s": 0.15,
+                },
             ),
         )
         context = zmq.Context()
@@ -143,7 +140,7 @@ def test_circuit_breaker_reopens_after_failed_retry(
 ) -> None:
     clock = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
-    breaker = CircuitBreaker(30, failure_threshold=3)
+    breaker = CircuitBreaker("Test", 30, failure_threshold=3)
     assert not breaker.is_open
     for _ in range(2):
         breaker.record_failure()
@@ -154,7 +151,7 @@ def test_circuit_breaker_reopens_after_failed_retry(
         assert not breaker.is_open
     breaker.record_failure()
     assert breaker.is_open
-    assert "3 consecutive failures; skipping lookups for 30 seconds" in caplog.text
+    assert "3 consecutive failures; skipping requests for 30 seconds" in caplog.text
     clock[0] = 130
     assert not breaker.is_open
     breaker.record_failure()

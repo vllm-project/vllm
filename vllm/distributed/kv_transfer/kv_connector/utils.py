@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache helper for store."""
 
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import chain
@@ -680,3 +681,37 @@ class TransferTopology:
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )
+
+
+class CircuitBreaker:
+    """Opens for ``cooldown_s`` after ``failure_threshold`` consecutive
+    failures; callers skip requests while it is open. After the cooldown, a
+    single failure reopens it and a success resets the failure count."""
+
+    def __init__(self, name: str, cooldown_s: float, failure_threshold: int):
+        assert cooldown_s > 0 and failure_threshold > 0
+        self.name = name
+        self.cooldown_s = cooldown_s
+        self.failure_threshold = failure_threshold
+        self._failures = 0
+        self._open_until = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        return time.monotonic() < self._open_until
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.failure_threshold:
+            self._open_until = time.monotonic() + self.cooldown_s
+            logger.warning(
+                "%s circuit breaker opened after %d consecutive failures; "
+                "skipping requests for %s seconds",
+                self.name,
+                self._failures,
+                self.cooldown_s,
+            )
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._open_until = 0.0
