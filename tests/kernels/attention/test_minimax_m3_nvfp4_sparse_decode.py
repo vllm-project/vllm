@@ -480,7 +480,7 @@ def _record_kernels(monkeypatch, host):
     real = host._get_kernel
 
     def record(*args):
-        chosen.append(args)
+        chosen.append(args[:3])  # not the kernel variant (fp8_out)
         return real(*args)
 
     monkeypatch.setattr(host, "_get_kernel", record)
