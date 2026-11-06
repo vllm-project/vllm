@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -12,11 +14,11 @@ use super::types::ChatCompletionRequest;
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
 use crate::lora::LoraModelResolution;
-use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
 };
+use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -30,6 +32,8 @@ pub(super) struct PreparedRequest {
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
+    /// Number of choices to generate.
+    pub n: NonZeroU32,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
     /// Lowered chat request for `vllm-chat`.
@@ -74,6 +78,7 @@ pub(super) fn prepare_chat_request(
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    let n = resolve_n(request.n)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,
@@ -143,10 +148,22 @@ pub(super) fn prepare_chat_request(
         request.vllm_xargs.as_ref(),
     );
 
+    // OpenAI treats `tools: []` like an omitted field: with no tool declared
+    // anywhere, `auto` and `required` have nothing to call and fall back to
+    // `none`. A named choice still fails tool resolution, as no tool matches it.
+    let tool_choice = match request.tool_choice {
+        Some(ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::Required))
+            if request.tools.as_ref().is_some_and(Vec::is_empty)
+                && messages.iter().all(|message| message.declared_tools().is_none()) =>
+        {
+            Some(ToolChoice::Value(ToolChoiceValue::None))
+        }
+        tool_choice => tool_choice,
+    };
     let tool_context = ResolvedToolContext::new(
         &messages,
         convert_tools(request.tools)?,
-        request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
+        tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
@@ -218,6 +235,7 @@ pub(super) fn prepare_chat_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
+        n,
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
@@ -271,7 +289,9 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -339,6 +359,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
+                ContentPart::Refusal { .. } => bail_invalid_request!(
+                    "Only assistant messages can have a 'refusal' content type."
+                ),
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
                     detail: image_url.detail,
@@ -373,7 +396,9 @@ fn convert_assistant_text_blocks(
         MessageContent::Parts(parts) => parts
             .into_iter()
             .map(|part| match part {
-                ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Ok(AssistantContentBlock::Text { text })
+                }
                 _ => bail_invalid_request!(
                     "Only text content parts are supported for assistant messages."
                 ),
@@ -1374,6 +1399,60 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_replays_assistant_refusal_parts_as_text() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "refusal", "refusal": "I can't help with that."},
+                ]},
+            ],
+            "echo": true,
+        }))
+        .expect("refusal parts parse in assistant messages");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages[1],
+            VllmChatMessage::assistant_blocks(vec![AssistantContentBlock::Text {
+                text: "I can't help with that.".to_string(),
+            }])
+        );
+        assert_eq!(
+            prepared.options.echo.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_refusal_parts_outside_assistant_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": [
+                {"type": "refusal", "refusal": "no"},
+            ]}],
+        }))
+        .expect("refusal parts parse in any message");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only assistant messages can have a 'refusal' content type."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_assistant_reasoning_history() {
         let message = ChatCompletionMessage {
             role: AssistantRole,
@@ -1600,6 +1679,117 @@ mod tests {
             &ChatToolChoice::Required
         );
         assert!(!prepared.options.is_named_tool_choice);
+    }
+
+    /// Like OpenAI, `tools: []` is an omitted field: no tool reaches the
+    /// renderer, and `auto` and `required` fall back to `none`.
+    #[test]
+    fn prepare_chat_request_treats_empty_tools_as_omitted() {
+        let cases = [
+            None,
+            Some(ToolChoiceValue::None),
+            Some(ToolChoiceValue::Auto),
+            Some(ToolChoiceValue::Required),
+        ];
+        for tool_choice in cases {
+            let request = ChatCompletionRequest {
+                tools: Some(Vec::new()),
+                tool_choice: tool_choice.map(ToolChoice::Value),
+                ..base_request()
+            };
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
+
+            assert!(prepared.chat_request.initial_tools().is_empty());
+            assert_eq!(
+                prepared.chat_request.tool_choice(),
+                &ChatToolChoice::None,
+                "{tool_choice:?}"
+            );
+        }
+    }
+
+    /// Tools declared in a developer message stay available under `tools: []`,
+    /// as they would with `tools` omitted.
+    #[test]
+    fn prepare_chat_request_keeps_developer_tools_with_empty_tools() {
+        for tool_choice in [ToolChoiceValue::Auto, ToolChoiceValue::Required] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    ChatMessage::Developer {
+                        content: MessageContent::Text("Use tools.".to_string()),
+                        tools: Some(vec![Tool {
+                            tool_type: "function".to_string(),
+                            function: Function {
+                                name: "lookup".to_string(),
+                                description: None,
+                                parameters: json!({"type": "object"}),
+                                strict: None,
+                                defer_loading: None,
+                            },
+                            defer_loading: None,
+                        }]),
+                        name: None,
+                    },
+                    ChatMessage::User {
+                        content: MessageContent::Text("hello".to_string()),
+                        name: None,
+                    },
+                ],
+                tools: Some(Vec::new()),
+                tool_choice: Some(ToolChoice::Value(tool_choice)),
+                ..base_request()
+            };
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
+
+            let expected = match tool_choice {
+                ToolChoiceValue::Auto => ChatToolChoice::Auto,
+                _ => ChatToolChoice::Required,
+            };
+            assert_eq!(prepared.chat_request.tool_choice(), &expected);
+        }
+    }
+
+    /// A named tool choice keeps the empty list, so it reports the missing
+    /// function instead of falling back to `none`.
+    #[test]
+    fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
+        let request = ChatCompletionRequest {
+            tools: Some(Vec::new()),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "f".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("no tool matches the named choice");
+
+        expect![[r#"
+            InvalidRequest {
+                message: "tool_choice function `f` was not found in the available tools",
+                param: None,
+            }
+        "#]]
+        .assert_debug_eq(&error);
     }
 
     #[test]

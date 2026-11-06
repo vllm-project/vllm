@@ -44,7 +44,7 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         bail_invalid_request!(param = "prompt", "prompt template is not supported");
     }
 
-    if let Some(metadata) = &request.metadata
+    if let Some(metadata) = &request.echo.metadata
         && (metadata.len() > 16
             || metadata
                 .iter()
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn max_tool_calls_is_accepted_without_builtin_tools() {
         let mut request = base_request();
-        request.max_tool_calls = Some(1);
+        request.echo.max_tool_calls = Some(1);
         assert!(validate_request_compat(&request).is_ok());
     }
 
