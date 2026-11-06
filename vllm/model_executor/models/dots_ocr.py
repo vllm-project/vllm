@@ -57,7 +57,6 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
@@ -511,7 +510,7 @@ class DotsVisionTransformer(nn.Module):
     def get_pos_ids_by_grid(self, grid_thw: list[list[int]]) -> list[torch.Tensor]:
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h, device=self.device).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -521,7 +520,7 @@ class DotsVisionTransformer(nn.Module):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = torch.arange(w, device=self.device).unsqueeze(0).expand(h, -1)
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -557,9 +556,8 @@ class DotsVisionTransformer(nn.Module):
     ) -> torch.Tensor:
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        # Convert grid_thw to tensor (always expecting list format now).
-        # Staged through pinned memory so the H2D copy stays asynchronous.
-        grid_thw_tensor = async_tensor_h2d(
+        # Convert grid_thw to tensor (always expecting list format now)
+        grid_thw_tensor = torch.tensor(
             grid_thw, device=hidden_states.device, dtype=torch.long
         )
         hidden_states = hidden_states.to(self.dtype)
