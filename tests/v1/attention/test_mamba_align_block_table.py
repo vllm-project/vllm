@@ -17,8 +17,16 @@ it), so a column stride of 1 must not be assumed.
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
+
+DEVICE_TYPE = current_platform.device_type
+
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs a GPU",
+)
 
 WIDTH = 64
 
@@ -61,12 +69,12 @@ def _make(nreq, block_size, nspec, device, noncontig=False):
     return bt, sl
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 @pytest.mark.parametrize("nreq", [1, 2, 8, 64])
 @pytest.mark.parametrize("block_size", [16, 64, 256])
 @pytest.mark.parametrize("nspec", [0, 1, 2, 3, 4, 7])
 def test_matches_reference(nreq, block_size, nspec):
-    bt, sl = _make(nreq, block_size, nspec, "cuda")
+    bt, sl = _make(nreq, block_size, nspec, DEVICE_TYPE)
     got = mamba_get_block_table_tensor(bt, sl, _spec(block_size, nspec), "align")
     want = _reference(bt, sl, block_size, nspec)
     assert got.shape == want.shape
@@ -74,38 +82,38 @@ def test_matches_reference(nreq, block_size, nspec):
     torch.testing.assert_close(got, want, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 @pytest.mark.parametrize("nspec", [0, 3, 7])
 def test_non_contiguous_block_table(nspec):
     """A column stride != 1 must be honoured, not assumed away."""
-    bt, sl = _make(8, 64, nspec, "cuda", noncontig=True)
+    bt, sl = _make(8, 64, nspec, DEVICE_TYPE, noncontig=True)
     got = mamba_get_block_table_tensor(bt, sl, _spec(64, nspec), "align")
     want = _reference(bt, sl, 64, nspec)
     torch.testing.assert_close(got, want, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 def test_zero_seq_len_clamps_to_first_row():
     """CUDA-graph padding rows carry seq_len 0; the old code clamped to row 0."""
-    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device="cuda")
-    sl = torch.zeros(4, dtype=torch.int32, device="cuda")
+    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device=DEVICE_TYPE)
+    sl = torch.zeros(4, dtype=torch.int32, device=DEVICE_TYPE)
     got = mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "align")
     torch.testing.assert_close(got, _reference(bt, sl, 64, 3), atol=0, rtol=0)
     # start clamps to 0, so this is just the first 1 + nspec columns.
     torch.testing.assert_close(got, bt[:, :4], atol=0, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 def test_zero_requests_returns_empty():
     """An empty batch must not launch a (0,) grid."""
-    bt = torch.zeros((0, WIDTH), dtype=torch.int32, device="cuda")
-    sl = torch.zeros(0, dtype=torch.int32, device="cuda")
+    bt = torch.zeros((0, WIDTH), dtype=torch.int32, device=DEVICE_TYPE)
+    sl = torch.zeros(0, dtype=torch.int32, device=DEVICE_TYPE)
     got = mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "align")
     assert got.shape == (0, 4)
     assert got.dtype == bt.dtype
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@requires_accelerator
 def test_none_mode_returns_the_input_unchanged():
     """`MambaCacheMode` is Literal["align", "none"]; only "none" passes through.
 
@@ -114,13 +122,13 @@ def test_none_mode_returns_the_input_unchanged():
     align branch and returns a NEW tensor, so asserting identity for it failed
     -- correctly. The passthrough contract applies to "none" alone.
     """
-    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device="cuda")
-    sl = torch.randint(0, 1000, (4,), dtype=torch.int32, device="cuda")
+    bt = torch.randint(0, 5000, (4, WIDTH), dtype=torch.int32, device=DEVICE_TYPE)
+    sl = torch.randint(0, 1000, (4,), dtype=torch.int32, device=DEVICE_TYPE)
     assert mamba_get_block_table_tensor(bt, sl, _spec(64, 3), "none") is bt
 
 
 # ---------------------------------------------------------------------------
-# CPU tensors. Every test above runs on "cuda", which is exactly how the
+# CPU tensors. Every test above runs on the accelerator, which is exactly how the
 # regression reached review: `mamba_get_block_table_tensor` is a SHARED
 # utility and its callers legitimately pass CPU tensors -- the GDN and
 # linear-attention metadata builders are unit-tested with
