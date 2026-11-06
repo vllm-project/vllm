@@ -1,8 +1,0 @@
-# Isolated reference for the public NCP remote-code generation API.
-# The vLLM test environment keeps requirements/test/cuda.txt.
-transformers==5.16.1
-huggingface-hub==1.33.0
-torch==2.14.0
-torchvision==0.29.0
-einops
-sentencepiece
