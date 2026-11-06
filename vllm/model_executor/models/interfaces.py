@@ -1704,9 +1704,15 @@ class EagleModelMixin:
             tuple(f"{key}{i}" for i in range(base, end)),
         )
 
+    def collect_remote_aux_hidden_states(
+        self, intermediate_tensors: "IntermediateTensors | None"
+    ) -> list[torch.Tensor]:
+        """Deprecated, kept for out-of-tree models: returns []. The model runner
+        now adds the earlier PP stages' aux hidden states on the last stage."""
+        return []
 
-def get_eagle_decoder(model: object) -> EagleModelMixin | None:
-    """The decoder of `model` that takes the aux hidden states, if any."""
+
+def _get_decoder_holder(model: object) -> object:
     parent_ref = model
     if hasattr(model, "get_language_model"):
         parent_ref = model.get_language_model()
@@ -1714,7 +1720,12 @@ def get_eagle_decoder(model: object) -> EagleModelMixin | None:
         parent_ref = model.language_model
     # A multimodal model that builds its decoder inside `_mark_language_model`
     # has get_language_model() return the decoder itself, with no `.model`.
-    holder = getattr(parent_ref, "model", parent_ref)
+    return getattr(parent_ref, "model", parent_ref)
+
+
+def get_eagle_decoder(model: object) -> EagleModelMixin | None:
+    """The decoder of `model` that takes the aux hidden states, if any."""
+    holder = _get_decoder_holder(model)
     return holder if isinstance(holder, EagleModelMixin) else None
 
 
@@ -1787,13 +1798,7 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             Tuple of layer indices for auxiliary hidden state outputs.
 
         """
-        parent_ref = self
-        if hasattr(self, "get_language_model"):
-            parent_ref = self.get_language_model()
-        elif hasattr(self, "language_model"):
-            parent_ref = self.language_model
-        # Same unwrap-only-if-needed rule as set_aux_hidden_state_layers.
-        holder = getattr(parent_ref, "model", parent_ref)
+        holder = _get_decoder_holder(self)
         assert hasattr(holder, "layers"), (
             "Model instance must have 'layers' attribute to get number of layers"
         )

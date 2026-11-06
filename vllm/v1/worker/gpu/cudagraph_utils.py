@@ -707,6 +707,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                 if isinstance(model_output, tuple):
                     hidden_states, aux_hidden_states = model_output
                 else:
+                    assert not (
+                        self.use_aux_hidden_state_outputs and self.is_first_pp_rank
+                    ), "The model returned no aux hidden states."
                     hidden_states = model_output
                     aux_hidden_states = []
                 if self.hidden_states is None:
