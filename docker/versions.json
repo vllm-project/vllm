@@ -14,7 +14,7 @@
       "default": "false"
     },
     "NCCL_VERSION": {
-      "default": "2.30.7"
+      "default": "2.31.2"
     },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
@@ -59,7 +59,7 @@
       "default": "cuda"
     },
     "DEEPEP_COMMIT_HASH": {
-      "default": "d4f41e4e93"
+      "default": "a56d6156febcd9976e55adc85b5155bfac9f28f8"
     },
     "GIT_REPO_CHECK": {
       "default": "0"
@@ -69,9 +69,6 @@
     },
     "RUN_WHEEL_CHECK": {
       "default": "true"
-    },
-    "FLASHINFER_VERSION": {
-      "default": "0.7.0.post1"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
@@ -83,7 +80,10 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.7"
+      "default": ">=0.17.1"
+    },
+    "GGUF_VERSION": {
+      "default": ">=0.19.0"
     }
   }
 }

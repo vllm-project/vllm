@@ -12,9 +12,11 @@ import torch
 import torch.nn as nn
 from torch.distributed import P2POp
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -376,7 +378,7 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         eplb_state.drain_async()
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_model_state = eplb_state.model_states[hash_config_cached(model_config)]
         physical_to_logical = eplb_model_state.physical_to_logical_map_buffer
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
@@ -454,12 +456,43 @@ class ElasticEPScalingExecutor:
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
-            if speculator is not None:
-                reset_compile_wrapper(speculator.model)
+            if draft_model := getattr(speculator, "model", None):
+                reset_compile_wrapper(draft_model)
 
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+        self._switch_to_fresh_graph_pool()
+
+    def _switch_to_fresh_graph_pool(self) -> None:
+        # Libraries may keep capture-time tensors alive after their graphs are
+        # released (e.g. FlyDSL retains the last launch's DLPack arguments), so
+        # the old pool cannot be erased. Re-capturing into that pool trips the
+        # allocator's "use_count > 0" assert; capture into a fresh one instead.
+        platform_cls = type(current_platform)
+        if platform_cls._global_graph_pool is None:
+            return
+        new_pool = current_platform.graph_pool_handle()
+        platform_cls._global_graph_pool = new_pool
+
+        model_runner = self.worker.model_runner
+        manager = getattr(model_runner, "cudagraph_manager", None)
+        speculator = getattr(model_runner, "speculator", None)
+        managers = [manager] + [
+            attr
+            for attr in (vars(speculator).values() if speculator else ())
+            if isinstance(attr, CudaGraphManager)
+        ]
+        for m in managers:
+            if m is not None and m.pool is not None:
+                m.pool = new_pool
+
+        wrappers: list[CUDAGraphWrapper | BreakableCUDAGraphWrapper] = [
+            *CUDAGraphWrapper._all_instances,
+            *BreakableCUDAGraphWrapper._all_instances,
+        ]
+        for wrapper in wrappers:
+            wrapper.graph_pool = new_pool
 
     def switch_and_remove(self) -> None:
         # Removing ranks skipped preparation, so wait for prior cleanup here.
@@ -524,7 +557,7 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_model_state = eplb_state.model_states[hash_config_cached(model_config)]
 
         num_physical_experts = num_local_experts * new_ep_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
