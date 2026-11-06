@@ -452,6 +452,7 @@ steps:
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
   - tests/models/test_cohere2_moe_parallel_block.py
+  - tests/models/test_embedding_gemma2_config.py
   device: cpu-small
   commands:
     - >-
@@ -475,6 +476,7 @@ steps:
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
+      models/test_embedding_gemma2_config.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
