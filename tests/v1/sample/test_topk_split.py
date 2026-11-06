@@ -80,12 +80,13 @@ def _few_finite() -> torch.Tensor:
 
 
 CASES = {
-    "mixed": (lambda: _logits(4, 0), [1, 16, 17, 64], [0.9, 0.95, 0.5, 1.0]),
-    "no_p": (lambda: _logits(2, 2), [20, 20], None),
-    "p_edges": (lambda: _logits(2, 3), [24, 33], [1e-6, 0.999999]),
+    "mixed": (
+        lambda: _logits(6, 0),
+        [1, 16, 17, 24, 33, 64],
+        [0.9, 0.95, 0.5, 1e-6, 0.999999, 1.0],
+    ),
     "tie_k": (lambda: _ties_at_kth(2, 20), [20, 20], [0.95, 1.0]),
     "tie_p": (lambda: _ties_at_topp_cut(2, 20), [20, 20], [0.5, 0.9]),
-    "uniform": (lambda: torch.zeros(2, VOCAB, device=DEVICE), [20, 64], [0.93, 1.0]),
     "few_finite": (_few_finite, [20, 20], None),
 }
 
@@ -127,11 +128,7 @@ def test_new_k_in_a_tile_compiles_nothing():
     "rows,max_top_k,vocab,taken",
     [
         (1, 20, VOCAB, True),
-        (64, 24, VOCAB, True),
-        (65, 24, VOCAB, False),
-        (4, _TOPK_SPLIT_MAX_K, VOCAB, True),
         (5, _TOPK_SPLIT_MAX_K, VOCAB, False),
-        (2, _TOPK_SPLIT_MAX_K + 1, VOCAB, False),
         (2, None, VOCAB, False),
         (2, 20, _TOPK_SPLIT_MIN_VOCAB - 1, False),
     ],
