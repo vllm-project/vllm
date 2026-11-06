@@ -48,6 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     remap_moe_expert_weights,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.utils import mark_experts_loaded
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -337,6 +338,7 @@ class GptOssRoutedExperts(RoutedExperts):
             return False if return_success else None
 
         expert_data = param.data[expert_id]
+        mark_experts_loaded(param, (expert_id,), None)  # as the fused load
         weight_dtype = getattr(self.quant_method, "weight_dtype", "")
         quant_method_name = self.quant_method.__class__.__name__
 

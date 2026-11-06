@@ -9,10 +9,14 @@ which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
-Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+Delivery contract: an update loads every parameter cold start loaded (as
+``model.load_weights`` reports it), except those marked ``optional_in_update``
+(a frozen table the trainer never sends, whose module has no PWAL). ``finish``
+checks it before rerunning PWAL, which would otherwise reprocess the kept
+runtime bytes of a parameter the update left out.
 """
 
+import weakref
 from collections.abc import Iterator
 
 import torch
@@ -32,7 +36,9 @@ __all__ = [
     "begin_direct_reload",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "mark_loaded",
     "record_checkpoint_layout",
+    "track_loaded_params",
 ]
 
 
@@ -77,6 +83,113 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
             yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
+def track_loaded_params(model: torch.nn.Module) -> None:
+    """Collect what the next load loads: the parameter names ``load_weights``
+    returns (``None``: unreported, unchecked), stacked shards and MoE experts."""
+    from vllm.model_executor.layers.linear import StackedColumnParallelLinear
+
+    load_weights = getattr(model, "load_weights", None)
+    if load_weights is None:  # a bare module: nothing to check
+        return
+    if not getattr(load_weights, "_tracks_loads", False):
+        func, ref = getattr(load_weights, "__func__", load_weights), weakref.ref(model)
+        bound = func is not load_weights
+
+        def tracked(*args, **kwargs):
+            m = ref()
+            assert m is not None
+            loaded = func(m, *args, **kwargs) if bound else func(*args, **kwargs)
+            names = m.__dict__.get("_loaded_params")
+            if names is not None:
+                if loaded is None:
+                    m._loaded_params = None
+                else:
+                    names.update(loaded)
+            return loaded
+
+        tracked._tracks_loads = True  # type: ignore[attr-defined]
+        model.load_weights = tracked
+    model._loaded_params = set()
+    for module in model.modules():
+        if isinstance(module, StackedColumnParallelLinear):
+            module.loaded_shard_ids = {}
+        for p in module.parameters(recurse=False):
+            p.__dict__.pop("_loaded_experts", None)
+
+
+def mark_loaded(model: torch.nn.Module, name: str) -> None:
+    """Report parameter ``name`` loaded without ``load_weights`` (written in
+    place by a weight transfer engine)."""
+    names = model.__dict__.get("_loaded_params")
+    if names is not None:
+        names.add(name)
+
+
+def _record_required(model: torch.nn.Module, loaded: set[str]) -> None:
+    """What every later update must load again: these parameters and the MoE
+    experts this load wrote."""
+    model._required_params = loaded
+    for p in model.parameters():
+        if "_loaded_experts" in p.__dict__:
+            p._ckpt_experts = frozenset(p._loaded_experts)
+
+
+def _dummy_required(model: torch.nn.Module) -> list[str]:
+    """After a cold start that loaded nothing: the model's checkpoint
+    parameters except those a checkpoint may lack."""
+    from vllm.model_executor.model_loader.default_loader import checkpoint_may_lack
+
+    return [
+        f"{module_name}.{name}" if module_name else name
+        for module_name, module in model.named_modules()
+        for name, p in module.named_parameters(recurse=False)
+        if _owned(model, p) and not checkpoint_may_lack(module, name, p)
+    ]
+
+
+def _check_update_complete(model: torch.nn.Module) -> None:
+    """Raise unless the update loaded every parameter, stacked shard and MoE
+    expert cold start loaded (after a dummy start: the checkpoint has)."""
+    from vllm.model_executor.layers.linear import StackedColumnParallelLinear
+
+    loaded = model.__dict__.pop("_loaded_params", None)
+    if loaded is None:
+        return
+    dummy = model.__dict__.get("_required_params") is None
+    required = _dummy_required(model) if dummy else model._required_params
+    # by parameter: a tied one counts under either name
+    params = dict(model.named_parameters(remove_duplicate=False))
+    delivered = {params.get(n, n) for n in loaded}
+    missing = [n for n in required if params.get(n, n) not in delivered]
+    for module_name, module in model.named_modules():
+        if isinstance(module, StackedColumnParallelLinear):
+            missing += [f"{module_name}.{s}" for s in module.pop_missing_shards()]
+        for name, p in module.named_parameters(module_name, recurse=False):
+            lost = p.__dict__.get("_ckpt_experts", frozenset()) - p.__dict__.get(
+                "_loaded_experts", set()
+            )
+            if lost:
+                missing.append(f"{name} experts {sorted(lost, key=str)[:4]}")
+    missing = sorted(
+        n for n in missing if not getattr(params.get(n), "optional_in_update", False)
+    )
+    if missing:
+        baseline = (
+            "the checkpoint has (first update after a dummy start; exempt: "
+            "`checkpoint_may_lack`)"
+            if dummy
+            else "cold start loaded"
+        )
+        raise RuntimeError(
+            f"direct reload: the update did not load {len(missing)} parameters "
+            f"or parts that {baseline} (e.g. {missing[:8]}); start a new full "
+            "update. Only a parameter marked `optional_in_update` (no post-load "
+            "processing) may be left out"
+        )
+    if dummy:
+        _record_required(model, loaded)
+
+
 def _check_supported_modules(model: torch.nn.Module) -> None:
     # config-level refusals: VllmConfig._verify_direct_reload_compat
     from vllm.model_executor.layers.quantization.humming import (
@@ -114,6 +227,9 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
     _check_supported_modules(model)
+    # what cold start loaded, every update must load again (empty: dummy)
+    if loaded := model.__dict__.pop("_loaded_params", None):
+        _record_required(model, loaded)
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
@@ -201,6 +317,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
+    track_loaded_params(model)
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
     for _, t in _loadable_tensors(model):
@@ -227,6 +344,7 @@ def finish_direct_reload(
         raise RuntimeError(
             "direct reload: finish without a begin; start a new full update"
         )
+    _check_update_complete(model)
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
 

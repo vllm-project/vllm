@@ -54,6 +54,27 @@ logger = init_logger(__name__)
 _CONFIG_BUILT_PARAMS = ("input_scale_ub",)
 
 
+def checkpoint_may_lack(
+    module: nn.Module, param_name: str, param: torch.Tensor
+) -> bool:
+    """Whether a quantized checkpoint may lack parameter ``param_name`` of
+    ``module``, which every other parameter has to come from:
+    - online quantization (uses_meta_device) quantizes the weights while
+      loading, so its parameters do not map to checkpoint tensors;
+    - KV-cache quantization parameters (BaseKVCacheMethod) fall back to
+      defaults when a checkpoint has none;
+    - empty placeholders hold no data, e.g. the qzeros moe_wna16 registers
+      for symmetric GPTQ;
+    - _CONFIG_BUILT_PARAMS come from the quantization config."""
+    quant_method = getattr(module, "quant_method", None)
+    return (
+        getattr(quant_method, "uses_meta_device", False)
+        or isinstance(quant_method, BaseKVCacheMethod)
+        or param.numel() == 0
+        or param_name.rsplit(".", 1)[-1] in _CONFIG_BUILT_PARAMS
+    )
+
+
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
 
@@ -576,25 +597,10 @@ class DefaultModelLoader(BaseModelLoader):
                 # which can be missing in checkpoints
                 if has_online_quant or has_postprocess_quant:
                     for param_name, param in module.named_parameters():
-                        # On a quantized model, every parameter has to come from
-                        # the checkpoint except those a checkpoint cannot carry:
-                        # - online quantization (uses_meta_device) quantizes the
-                        #   weights while loading, so its parameters do not map
-                        #   to checkpoint tensors;
-                        # - KV-cache quantization parameters (BaseKVCacheMethod)
-                        #   fall back to defaults when a checkpoint has none;
-                        # - empty placeholders hold no data, e.g. the qzeros
-                        #   moe_wna16 registers for symmetric GPTQ;
-                        # - _CONFIG_BUILT_PARAMS come from the quantization config.
                         # Unquantized models, where this check runs by default,
                         # keep the module-wide exemption.
-                        if (
-                            quantized
-                            and not has_online_quant
-                            and not isinstance(quant_method, BaseKVCacheMethod)
-                            and param.numel() > 0
-                            and param_name.rsplit(".", 1)[-1]
-                            not in _CONFIG_BUILT_PARAMS
+                        if quantized and not checkpoint_may_lack(
+                            module, param_name, param
                         ):
                             continue
                         full_name = f"{name}.{param_name}" if name else param_name

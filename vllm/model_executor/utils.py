@@ -11,6 +11,7 @@ from typing import Any, overload
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -34,6 +35,14 @@ def weights_already_processed():
 
 def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
+
+
+def mark_experts_loaded(param: torch.Tensor, expert_ids, shard_id) -> None:
+    """MoE weight loaders: record the local experts and the shard written into
+    ``param``; a direct reload checks every update writes them all again."""
+    if envs.VLLM_RELOAD_MODE == "direct":
+        experts = param.__dict__.setdefault("_loaded_experts", set())
+        experts.update((e, shard_id) for e in expert_ids)
 
 
 def set_weight_attrs(

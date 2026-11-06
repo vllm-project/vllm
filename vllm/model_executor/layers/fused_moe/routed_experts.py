@@ -30,7 +30,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
-from vllm.model_executor.utils import copy_weight_, kernel_parameters
+from vllm.model_executor.utils import (
+    copy_weight_,
+    kernel_parameters,
+    mark_experts_loaded,
+)
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -702,6 +706,7 @@ class RoutedExperts(PluggableLayer):
                 dim1 = loaded_weight.shape[1]
                 dim2 = loaded_weight.shape[2]
                 copy_weight_(param.data[:, :dim1, :dim2], loaded_weight)
+            mark_experts_loaded(param, range(self.local_num_experts), None)
             return True if return_success else None
 
         from vllm.model_executor.layers.quantization.online.moe_base import (
@@ -803,6 +808,11 @@ class RoutedExperts(PluggableLayer):
             shard_dim += 1
 
         expert_data = param.data if full_load else param.data[expert_id]
+        if full_load:
+            experts: Iterable[int] = range(self.local_num_experts)
+        else:  # global input scales are indexed by the global id
+            experts = (global_expert_id if use_global_sf else expert_id,)
+        mark_experts_loaded(param, experts, shard_id)
 
         if "bias" in weight_name:
             self._loaded_expert_biases.add(weight_name.rsplit(".", 1)[-1])
