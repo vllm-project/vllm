@@ -301,7 +301,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
             if mm_data is None
             else mm_data
         )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
         dummy_images = (
             [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
         )
