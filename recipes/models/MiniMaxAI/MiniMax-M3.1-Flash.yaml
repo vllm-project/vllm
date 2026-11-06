@@ -1417,19 +1417,15 @@ presets:
       # the DSpark drafter kernels (seven-token drafts; c64's three-token draft keeps
       # the stock draft layers)
       VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
-      # parallel top-16 block selection for the NVFP4 indexer; the FP8 indexer of the
-      # mono points bypasses it
+      # the FP8 indexer of the mono points bypasses it
       VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
       VLLM_USE_RUST_FRONTEND: "1"
-      # the draft LM head's skinny GEMM takes about 5x longer at exactly 5 requests than at 4
+      # the draft LM head's skinny GEMM is 5x slower at exactly 5 requests
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
     json_args:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
-    # The breakable-graph points pass --compilation-config as a plain argument:
-    # json_args cannot add a flag the mono_decode feature owns. The capture list is a
-    # deprecated alias that, on the V2 model runner, sets both the prefill token sizes
-    # and the decode request sizes: every multiple of 8 up to 256, then 384-8192 (a
-    # coarse list makes decode about 10% slower).
+    # json_args cannot add --compilation-config (mono_decode owns it). The capture list is
+    # the V2 runner's deprecated alias for the prefill and decode graph sizes.
     points:
       c1:
         label: "1 (mono)"
