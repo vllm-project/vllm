@@ -1828,6 +1828,14 @@ class RowParallelLinear(LinearBase):
         shift = envs.VLLM_TP_FP16_PARTIAL_SUMS_SHIFT if self._fp16_partials else 0
         self.partial_sum_scale = 2.0**-shift
         self._partial_sum_unscale = 2.0**shift
+        if self._fp16_partials is not None:
+            # An FP32 factor makes the unscale and the BF16 cast one kernel,
+            # computed in FP32 (an FP16 product could overflow).
+            self.register_buffer(
+                "_partial_sum_unscale_fp32",
+                torch.tensor([self._partial_sum_unscale], dtype=torch.float32),
+                persistent=False,
+            )
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
@@ -1883,9 +1891,11 @@ class RowParallelLinear(LinearBase):
             output = tensor_model_parallel_all_reduce(output_parallel)
             if self._fp16_partials is not None:
                 # one BF16 rounding after the sum, as on a single GPU
-                output = output.to(self.params_dtype)
-                if self._partial_sum_unscale != 1.0:
-                    output = output * self._partial_sum_unscale
+                output = torch.mul(
+                    output,
+                    self._partial_sum_unscale_fp32,
+                    out=torch.empty_like(output, dtype=self.params_dtype),
+                )
         else:
             output = output_parallel
 
