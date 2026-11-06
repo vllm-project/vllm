@@ -197,13 +197,16 @@ steps:
   - vllm/config/kernel.py
   - vllm/model_executor/warmup/
   - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/model_executor/kernels/linear/mxfp8/
+  - vllm/model_executor/layers/quantization/online/
   - vllm/multimodal/encoder_budget.py
   - vllm/model_executor/models/pixtral.py
+  - vllm/model_executor/models/qwen2_5_vl.py
   - vllm/utils/flashinfer.py
   - vllm/v1/worker/gpu/
   - tests/models/multimodal/test_nemotron_embed.py
   commands:
-    - pytest -v -s models/multimodal/test_nemotron_embed.py::test_flashinfer_autotune_vision_gemms
+    - pytest -v -s models/multimodal/test_nemotron_embed.py
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
