@@ -182,7 +182,7 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 64
     DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
