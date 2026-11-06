@@ -19,13 +19,15 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
-def server():
-    with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
+def server(request):
+    args = getattr(request, "param", [])
+    with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -522,6 +524,7 @@ def _make_completion_generate_response(
     request_id: str,
     kv_transfer_params: dict | None = None,
     logprobs: dict | None = None,
+    prompt_logprobs: list | None = None,
 ) -> dict:
     return {
         "request_id": request_id,
@@ -533,7 +536,7 @@ def _make_completion_generate_response(
                 "logprobs": logprobs,
             }
         ],
-        "prompt_logprobs": None,
+        "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
     }
 
@@ -735,6 +738,81 @@ async def test_derender_completion_logprobs(client):
     assert isinstance(logprobs["token_logprobs"][0], float)
     assert len(logprobs["text_offset"]) == 1
     assert logprobs["text_offset"][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_prompt_logprobs_passthrough(client):
+    """Each GenerateResponse's prompt_logprobs reaches that prompt's choices.
+
+    Regression test: /v1/completions/derender used to drop the prompt
+    logprobs the engine had already computed and returned, while the direct
+    /v1/completions endpoint attaches them to every choice of the prompt.
+    """
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+    tok = get_tokenizer(MODEL_NAME)
+    # A --tokens-only generate server has no tokenizer: decoded_token is null.
+    plp1 = [None, {str(gr1["token_ids"][0]): {"logprob": -0.5, "rank": 1}}]
+    plp2 = [None, {str(gr2["token_ids"][0]): {"logprob": -0.25, "rank": 2}}]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    gr1["token_ids"][:3], gr1["request_id"], prompt_logprobs=plp1
+                ),
+                _make_completion_generate_response(
+                    gr2["token_ids"][:3], gr2["request_id"], prompt_logprobs=plp2
+                ),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    choices = response.json()["choices"]
+    assert len(choices) == 2
+    for choice, gr, plp in zip(choices, (gr1, gr2), (plp1, plp2)):
+        tid = gr["token_ids"][0]
+        (text,) = convert_ids_list_to_tokens(tok, [tid])
+        entry = choice["prompt_logprobs"][1][str(tid)]
+        assert plp[1] is not None
+        assert choice["prompt_logprobs"][0] is None
+        assert entry["decoded_token"] == text
+        assert entry["logprob"] == plp[1][str(tid)]["logprob"]
+        assert entry["rank"] == plp[1][str(tid)]["rank"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_prompt_logprobs_decoded_token(client):
+    """Null decoded_token is filled (unknown ids as ""); given ones and empty
+    entries are kept."""
+    gen_req = await _render_chat(client)
+    ids = gen_req["token_ids"][:3]
+    tok = get_tokenizer(MODEL_NAME)
+    plp = [
+        None,
+        {str(ids[0]): {"logprob": -0.5, "rank": 1}},
+        {str(ids[1]): {"logprob": -0.1, "rank": 1, "decoded_token": "kept"}},
+        {},
+        {str(len(tok) + 1000): {"logprob": -1.0, "rank": 1}},
+    ]
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(ids, prompt_logprobs=plp),
+        },
+    )
+    assert response.status_code == 200
+    out = response.json()["prompt_logprobs"]
+    assert (
+        out[1][str(ids[0])]["decoded_token"]
+        == (convert_ids_list_to_tokens(tok, [ids[0]])[0])
+    )
+    assert out[2][str(ids[1])]["decoded_token"] == "kept"
+    assert out[3] == {}
+    assert out[4][str(len(tok) + 1000)]["decoded_token"] == ""
 
 
 @pytest.mark.asyncio
@@ -1024,10 +1102,11 @@ async def _e2e_render_chat(
     client: httpx.AsyncClient,
     model: str,
     messages: list[dict],
+    **extra,
 ) -> dict:
     resp = await client.post(
         "/v1/chat/completions/render",
-        json={"model": model, "messages": messages},
+        json={"model": model, "messages": messages, **extra},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -1308,6 +1387,62 @@ async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
     )
     assert resp.status_code == 400
     assert "chat_request" in resp.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# E2E: Qwen3 reasoning parser, which reads the prompt
+# ---------------------------------------------------------------------------
+
+QWEN3_MODEL = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def qwen3_server():
+    args = ["--reasoning-parser", "qwen3"]
+    with RemoteLaunchRenderServer(QWEN3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def qwen3_client(qwen3_server):
+    async with httpx.AsyncClient(
+        base_url=qwen3_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
+    """The parser reads the caller's prompt_token_ids, so output after a
+    prompt that already closes reasoning is content. Generate omits
+    prompt_token_ids unless return_token_ids is set."""
+    messages = [
+        {"role": "user", "content": "What is 6*7?"},
+        {"role": "assistant", "content": "<think>\nEasy.\n</think>\n\nThe answer"},
+    ]
+    continuation = {"add_generation_prompt": False, "continue_final_message": True}
+    gen_req = await _e2e_render_chat(
+        qwen3_client, QWEN3_MODEL, messages, **continuation
+    )
+    output_ids = _encode(get_tokenizer(QWEN3_MODEL), " is 42.")
+
+    resp = await qwen3_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": QWEN3_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_token_ids": gen_req["token_ids"],
+            "chat_request": {
+                "model": QWEN3_MODEL,
+                "messages": messages,
+                **continuation,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert message["content"] == " is 42."
+    assert message["reasoning"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1618,7 +1753,7 @@ def _derender_hermes_chat(
         )
     )
 
-    (choice,) = derenderer._derender_chat(response, request)
+    (choice,), _ = derenderer._derender_chat(response, request)
     return choice
 
 
@@ -1777,7 +1912,7 @@ def test_derender_batch_trims_stop_like_engine(
             messages=[{"role": "user", "content": "Count"}],
             **request_kwargs,
         )
-        (choice,) = derenderer._derender_chat(response, request)
+        (choice,), _ = derenderer._derender_chat(response, request)
         output_text = choice.message.content
     else:
         request = CompletionRequest(model=MODEL_NAME, prompt="Count", **request_kwargs)
@@ -1836,3 +1971,54 @@ async def test_derender_completion_preserves_requested_token_ids(
         )
     assert choices[0].token_ids == (token_ids if return_token_ids else None)
     assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "server_flag"),
+    [([], False), (["--return-tokens-as-token-ids"], True)],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("endpoint", ["chat", "completion"])
+@pytest.mark.parametrize("override", [None, False, True])
+async def test_derender_logprob_override(
+    client, tokenizer, server_flag, endpoint, override
+):
+    """An explicit false must override a true render-server default."""
+    token_id = tokenizer.convert_tokens_to_ids("▁true")
+    logprobs = _make_generate_logprobs(token_id)
+    logprobs["content"][0]["top_logprobs"][0]["token_id"] = token_id
+    generated = _make_generate_response(
+        [token_id], finish_reason="length", logprobs=logprobs
+    )
+    original = (
+        {"messages": [], "logprobs": True, "top_logprobs": 1}
+        if endpoint == "chat"
+        else {"prompt": "Hi", "logprobs": 1}
+    )
+    if override is not None:
+        original["return_tokens_as_token_ids"] = override
+    payload = (
+        {"chat_request": original, "generate_response": generated}
+        if endpoint == "chat"
+        else {"completion_request": original, "generate_responses": [generated]}
+    )
+    response = await client.post(
+        f"/v1/{'chat/completions' if endpoint == 'chat' else 'completions'}/derender",
+        json=payload,
+    )
+    response.raise_for_status()
+    placeholders = server_flag if override is None else override
+    expected = f"token_id:{token_id}" if placeholders else " true"
+    choice = response.json()["choices"][0]
+    if endpoint == "chat":
+        entry = choice["logprobs"]["content"][0]
+        assert (entry["token"], entry["bytes"]) == (
+            expected,
+            None if placeholders else list(b" true"),
+        )
+        assert entry["top_logprobs"][0]["token"] == expected
+    else:
+        assert choice["logprobs"]["tokens"] == [expected]
+        assert choice["logprobs"]["top_logprobs"] == [{expected: -2.0}]

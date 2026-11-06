@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) CUDA Platform"
   key: platform-tests
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
@@ -19,6 +20,7 @@ steps:
     - pytest -v -s cuda/test_cuda_compatibility_path.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) CUDA Platform"
       dind: false
       device: mi355_dpx
@@ -54,6 +56,7 @@ steps:
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI250) CUDAGraph"
       dind: false
       device: mi250_1
