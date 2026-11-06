@@ -482,7 +482,7 @@ def _run_flashinfer_autotune_mm_encoder(
             tp_size,
         )
         if num_items == 0:
-            logger.warning(
+            logger.warning_once(
                 "Skipping FlashInfer autotuning for the %s encoder: the "
                 "profiling budget of %d items is smaller than TP size %d "
                 "and cannot give every rank nonempty work in data mode.",

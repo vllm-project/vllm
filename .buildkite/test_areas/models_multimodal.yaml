@@ -196,6 +196,7 @@ steps:
     VLLM_WORKER_MULTIPROC_METHOD: spawn
   source_file_dependencies:
   - vllm/config/kernel.py
+  - vllm/config/multimodal.py
   - vllm/model_executor/warmup/
   - vllm/model_executor/kernels/linear/nvfp4/
   - vllm/model_executor/kernels/linear/mxfp8/
@@ -203,7 +204,9 @@ steps:
   - vllm/multimodal/encoder_budget.py
   - vllm/model_executor/models/pixtral.py
   - vllm/model_executor/models/qwen2_5_vl.py
+  - vllm/model_executor/models/vision.py
   - vllm/utils/flashinfer.py
+  - vllm/v1/core/encoder_cache_manager.py
   - vllm/v1/worker/gpu/
   - tests/model_executor/test_flashinfer_encoder_autotune.py
   commands:

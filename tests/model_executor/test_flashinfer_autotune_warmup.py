@@ -139,6 +139,8 @@ def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_component
         {"limit_per_prompt": {"video": {"count": 1, "num_frames": 4}}},
         {"mm_encoder_tp_mode": "data"},
         {"mm_encoder_attn_backend": "TORCH_SDPA"},
+        {"enable_mm_embeds": True},
+        {"video_pruning_rate": 0.5},
     ],
 )
 def test_encoder_autotune_identity_covers_profiling_inputs(overrides):
@@ -146,6 +148,16 @@ def test_encoder_autotune_identity_covers_profiling_inputs(overrides):
         MultiModalConfig(**overrides), enable_chunked_prefill=True
     ) != _flashinfer_mm_encoder_autotune_hash(
         MultiModalConfig(), enable_chunked_prefill=True
+    )
+
+
+def test_encoder_autotune_identity_tracks_video_pruning_method():
+    assert _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(video_pruning_rate=0.5, video_pruning_method="evs"),
+        enable_chunked_prefill=True,
+    ) != _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(video_pruning_rate=0.5, video_pruning_method="vidcom2"),
+        enable_chunked_prefill=True,
     )
 
 
@@ -168,7 +180,6 @@ def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
 def _make_runner(modules, *, max_tokens: int = 8192):
     """Create a runner carrying only the state used by FlashInfer warmup."""
     return SimpleNamespace(
-        supports_mm_inputs=False,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
             model_config=None,

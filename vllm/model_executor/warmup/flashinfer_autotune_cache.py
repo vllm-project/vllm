@@ -5,7 +5,6 @@
 import os
 import tempfile
 from contextlib import suppress
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,20 +32,15 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
 def _flashinfer_mm_encoder_autotune_hash(
     mm_config: MultiModalConfig, *, enable_chunked_prefill: bool
 ) -> str:
-    if mm_config.skip_mm_profiling:
-        return ""
-
     return hash_factors(
         {
             "encoder_config": hash_config(mm_config),
             "enable_chunked_prefill": enable_chunked_prefill,
-            "mm_processor_kwargs": normalize_value(mm_config.mm_processor_kwargs or {}),
-            "limit_per_prompt": normalize_value(
-                {
-                    modality: asdict(opts)
-                    for modality, opts in mm_config.limit_per_prompt.items()
-                }
-            ),
+            "enable_mm_embeds": mm_config.enable_mm_embeds,
+            "video_pruning_rate": mm_config.video_pruning_rate,
+            "video_pruning_method": mm_config.video_pruning_method,
+            "mm_processor_kwargs": normalize_value(mm_config.mm_processor_kwargs),
+            "limit_per_prompt": normalize_value(mm_config.limit_per_prompt),
         }
     )
 
