@@ -131,6 +131,7 @@ def test_rocm_moe_routing_and_shared_experts_match_reference(
             * expected_weights[token, slot, None]
         )
     shared = moe.shared_experts
+    routed_only = expected.clone()
     expected += expert_reference(
         hidden, shared.gate_up_proj.weight, shared.down_proj.weight
     )
@@ -139,7 +140,23 @@ def test_rocm_moe_routing_and_shared_experts_match_reference(
         init_workspace_manager(torch.device("cuda:0"))
     with set_forward_context(None, default_vllm_config, num_tokens=hidden.shape[0]):
         actual = moe(hidden, input_ids)
-    torch.testing.assert_close(actual.float(), expected, rtol=0.02, atol=5e-5)
+
+    # The kernel and the reference accumulate the same bf16 products in
+    # different orders, and most outputs are small enough that those roundings
+    # dominate them. An element-wise comparison then measures the worst single
+    # rounding, which shifts with the kernel configuration picked at runtime;
+    # the per-token norm does not.
+    def per_token_error(candidate: torch.Tensor) -> float:
+        assert candidate.shape == expected.shape, (candidate.shape, expected.shape)
+        return (
+            ((candidate - expected).norm(dim=-1) / expected.norm(dim=-1)).max().item()
+        )
+
+    error = per_token_error(actual.float())
+    assert error < 0.02, f"per-token relative error {error:.2%}"
+    # A bound is only worth asserting if it rejects a wrong layer: dropping the
+    # shared expert lands at about 75%.
+    assert per_token_error(routed_only) > 0.02
 
 
 def test_rocm_packed_kv_cache_auto_uses_ds_mla_layout() -> None:
