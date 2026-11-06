@@ -16,7 +16,7 @@ import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import GenerationConfig, PreTrainedConfig, Qwen3ASRConfig
+from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -425,6 +425,8 @@ class HFConfigParser(ConfigParserBase):
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
         elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
+            from transformers import Qwen3ASRConfig
+
             kwargs.setdefault("name_or_path", str(model))
             config_dict = _flatten_qwen3_asr_config(config_dict)
             config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
