@@ -45,13 +45,13 @@ Vision encoder inference incurs CUDA kernel launch overhead on the host side. Th
 
 Encoder CUDA Graphs eliminate this overhead by pre-capturing the full encoder forward pass at multiple token budget levels during model initialization, then replaying the appropriate graph at runtime.
 
-For two-tower vision encoders such as DeepSeek-OCR (SAM + CLIP with dynamic tiling), the global image path and local patch path have independent token profiles (272 tokens per global image vs. 100 tokens per local patch). Capturing a single monolithic graph for both paths would significantly reduce packing efficiency. The dual-path graph mode captures each path as a separate set of budgets, allowing the manager to pack and replay each path independently.
+For two-tower vision encoders such as DeepSeek-OCR (SAM + CLIP with dynamic tiling), the global image path and local patch path have independent token profiles (272 tokens per global image vs. 100 tokens per local patch). Capturing a single monolithic graph for both paths would significantly increase padding. The dual-path graph mode captures each path as a separate set of budgets, allowing the manager to select and replay a budget for each path independently.
 
 ## Design
 
 The encoder CUDA Graph system uses a **budget-based capture/replay** strategy, managed by [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]. The system contains the following core components:
 
-* [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]: orchestrates capture, replay, greedy packing, and data-parallel execution for encoder CUDA Graphs.
+* [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]: orchestrates capture, replay, dispatch, and data-parallel execution for encoder CUDA Graphs.
 * [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph]: a runtime-checkable protocol that models implement to opt-in to encoder CUDA Graphs.
 * [EncoderItemSpec][vllm.v1.worker.encoder_cudagraph_defs.EncoderItemSpec]: describes a single encoder input item (image or video) with its input size and output token count.
 * [BudgetGraphMetadata][vllm.v1.worker.encoder_cudagraph.BudgetGraphMetadata]: holds the captured CUDA Graph and its associated I/O buffers for a single token budget level.
@@ -71,7 +71,7 @@ class BudgetGraphMetadata:
     output_buffer: torch.Tensor      # encoder hidden states
 ```
 
-Budgets are auto-generated from a model-provided range via `get_encoder_cudagraph_budget_range()` on a subdivided grid — quarter-octave steps up to 1024 and half-octave steps above (e.g., `[64, 80, 96, ..., 12288, 16384]`, 25 levels for the range `[64, 16384]`) — with the model-provided minimum and maximum always included even when they do not fall on grid points. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
+Budgets are auto-generated over the model-provided range of `get_encoder_cudagraph_budget_range()`: quarter-octave steps up to 1024 tokens, steps of 128 up to 2560 tokens, then 1/8-octave steps rounded up to a multiple of 128 (e.g., `[64, 80, ..., 1024, 1152, ..., 2560, 2816, 3072, 3456, 3840, 4224, 4608, 5120]`, 36 levels for the range `[64, 16384]` with the default maximum). The model-provided minimum and maximum are always included even when they do not fall on a grid point. The largest generated budget is `encoder_cudagraph_max_token_budget` in `CompilationConfig` (default 5120; `None` captures up to the model's largest budget), like the LLM's maximum capture size: above it most encoders are GPU-bound, so eager is about as fast as a replay and needs no graph memory. Each batch replays at most one graph, the smallest budget that holds it; a larger batch runs eagerly in one forward. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`, which overrides both.
 
 The dense default table is affordable for every model because capture buffers are shared across budgets automatically, with no model opt-in: budgets are captured largest-first, the first capture of each (path, capture-axis) group provides one set of max-size input buffers and one max-size output buffer, and every later capture of the group records its graph into prefix views of them (the same pattern as decoder `input_ids[:num_tokens]`). At capture time the manager checks each probed buffer for prefix compatibility (same trailing dims and dtype, no more rows than the shared buffer; scalars are shared wholesale) and copies it into the shared buffer; buffers that do not fit this pattern keep their own per-budget allocation, so models need no code changes. Buffer memory therefore stays at ~1× the largest budget instead of scaling with the sum of all budgets.
 
@@ -83,17 +83,12 @@ Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured e
 
 **Budget generation.** Each path gets a separate budget list. For DeepSeek-OCR:
 
-* the `global` path — subdivided-grid budgets starting at the global path minimum (e.g., `[272, 320, 384, 448, 512, 640, 768, 896, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 13824]` for DeepSeek-OCR).
-* the `local` path — subdivided-grid budgets starting at the local path minimum (e.g., `[0, 100, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 13824]` for DeepSeek-OCR). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
+* the `global` path — multiples of its fixed item size (`min_token_budget`): every count of 1–16 items, then 1/8-octave steps in item count (e.g., `[272, 544, 816, ...]` for DeepSeek-OCR).
+* the `local` path — likewise multiples of the local patch size (e.g., `[0, 100, 200, 300, ...]` for DeepSeek-OCR). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
 
 Both lists are capped at the same `max_budget`.
 
-**Multi-path greedy packing.** Each `EncoderItemSpec` provides `path_output_tokens`, mapping each path to its contribution for that item. The packing algorithm constrains every path simultaneously:
-
-* Sort images by total output tokens (global + local), smallest first.
-* Greedily pack images: an image is added to the current sub-batch only if every accumulated path token count is within that path's maximum budget, with the image count ≤ `max_batch_size`.
-* Once any path constraint would overflow, or the budget-cliff deferral condition fires on any path, finalize the sub-batch and find the smallest fitting budget **independently** for each path.
-* Repeat until all images are packed.
+**Multi-path dispatch.** Each `EncoderItemSpec` provides `path_output_tokens`, mapping each path to its contribution for that item. The whole batch is dispatched once per path: each non-empty path replays its smallest budget that holds the path's total tokens.
 
 **Partial graph fallback.** For each non-empty path, the manager replays the smallest fitting graph or runs only that path eagerly when no graph fits. Paths with zero tokens are skipped; a `0`-budget graph is never captured or replayed.
 
@@ -104,11 +99,11 @@ Both lists are capped at the same `max_budget`.
 !!! note
     The dual-path design enables partial CUDA graph coverage — one path can hit while the other falls back to eager. This avoids wasted compute on zero-padded patch buffers for untiled images and avoids graph invalidation caused by variable `crop_shape` per image.
 
-### Greedy Bin-Packing at Runtime
+### One Replay per Batch
 
-When a batch of images arrives, the manager sorts images by output token count (smallest first) and greedily packs as many images as possible into each sub-batch while staying within the **largest** token budget and the maximum batch size. Once a sub-batch is finalized (the next image would overflow either constraint, or deferring it is cheaper), the manager finds the **smallest** budget that fits the sub-batch's total tokens and replays the corresponding CUDA Graph. This repeats until the batch is exhausted. Images that exceed all budgets fall back to eager execution.
+A graph only saves eager's host launch time. Eager latency is the larger of that launch time and the GPU time, while a replay costs the GPU time of its whole captured shape, padding included. A graph therefore helps only while eager is launch-bound, and splitting a batch into several replays only adds padding and fixed costs.
 
-For multi-path models, the same greedy packing loop constrains every configured path simultaneously.
+When a batch of images arrives, the manager replays the **smallest** budget that holds the whole batch, once per path. A batch that exceeds the largest captured budget, or has more images than the maximum batch size, runs as one eager forward.
 
 For each graph replay:
 
@@ -116,23 +111,6 @@ For each graph replay:
 2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
 3. Replay the CUDA Graph.
 4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays).
-
-**Budget-cliff deferral:**
-
-Greedy packing can be wasteful when a large image arrives after small ones: merging it into the current sub-batch may force the whole batch into a much larger budget graph even though splitting would cost less. Because token budgets are discrete (e.g., `[256, 4096, 8192]`), one extra token can double the required graph level — a "budget cliff". Images that overflow the largest budget still finalize the sub-batch unconditionally; for images that *fit*, the packer additionally applies a deferral test: finalize the current sub-batch (replaying it at its own small budget) and start a new sub-batch with the deferred image.
-
-For each candidate image, the packer compares three budgets per path: `b_cur` (the smallest budget fitting the current sub-batch), `b_alone` (the smallest budget fitting the image alone), and `b_merged` (the smallest budget fitting both). Merging costs `b_merged`; deferring costs `b_cur + b_alone` plus one extra replay. The image is deferred when, on any path, both conditions hold:
-
-1. `b_cur + b_alone < b_merged` — splitting strictly saves budget. The strict inequality makes ties merge: with budgets `[256, 4096, 8192]`, two 4000-token images tie (`4096 + 4096 == 8192`), and merging wins because a single replay avoids an extra graph launch.
-2. `b_alone >= b_cur` — the image alone occupies at least as large a budget bucket as the entire current sub-batch.
-
-**Condition 1 is the cost test.** For example, a 200-token image followed by a 4000-token image with budgets `[256, 4096, 8192]`: merging takes `b_merged = 8192` (4200 tokens round up to 8192), while deferring takes `256 + 4096 = 4352` — the image is deferred, saving 3840 tokens of padding compute.
-
-**Condition 2 separates "whales" from "tag-alongs".** Because images are sorted smallest first, a whale arrives last, and deferring it lets the small sub-batch replay at its own small budget instead of being dragged into a large bucket for one image's sake. Without condition 2, deferring mid-size images fragments a flood of similar images into extra replays: with budgets `[256, 2048, 4096, 8192]` and six equal 1366-token images, condition 1 alone defers every third image and yields three 4096 replays (12288 budget tokens in total), while with condition 2 five images merge into one 8192 replay plus a single 2048 replay — fewer replays *and* fewer budget tokens (10240).
-
-The conditions compose cleanly: when `b_alone == b_cur`, condition 1 requires `b_merged > 2 * b_cur`, i.e. deferral fires only when merging jumps at least two budget levels, so ties always merge. This also lets small images defer across a huge cliff: with budgets `[256, 4096]` and four 100-token images, adding the third image (300 tokens) would jump from 256 to 4096, so the packer defers it and packs the images as two 256-budget pairs.
-
-For multi-path items, the conditions are evaluated per path and OR-ed: any path on which the image is a whale defers the whole image, while paths where the image contributes zero tokens are skipped.
 
 ### ViT DP Mode Support
 
@@ -154,7 +132,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 * `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, buffer keys, output hidden size, padding logics, max frames per video).
 * `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
 * `get_encoder_cudagraph_item_specs(mm_kwargs)` — returns `list[EncoderItemSpec]` describing each item with its input size, total output token count (`output_tokens`), and per-path token counts (`path_output_tokens`) for multi-path models.
-* `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding.
+* `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during dispatch and DP sharding.
 * `prepare_encoder_cudagraph_capture_inputs(..., path="default")` — creates dummy inputs for graph capture. The `path` parameter (`"global"` or `"local"`) tells the model which path to generate dummy inputs for. Returns `EncoderCudaGraphCaptureInputs` with a single `values: dict[str, torch.Tensor]` that contains all buffers to be recorded into the graph.
 * `prepare_encoder_cudagraph_replay_buffers(mm_kwargs, max_batch_size, max_frames_per_batch, path="default")` — computes buffer values from actual batch inputs. The `path` parameter selects which modality keys to extract from `mm_kwargs`. Returns `EncoderCudaGraphReplayBuffers` with a `values` dict whose keys match the captured graph's `input_buffers.keys()`.
 * `encoder_cudagraph_forward(inputs: dict[str, torch.Tensor], path="default")` — forward pass accepting only fixed-shaped input tensors (the captured `values` dict). Called during both capture and replay. The `path` parameter dispatches to the correct encoder sub-module (e.g., global vs. local path for DeepSeek-OCR).
