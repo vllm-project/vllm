@@ -396,6 +396,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
     ),
+    "Lfm3ForCausalLM": _HfExamplesInfo("LiquidAI/LFM3-1.7B"),
     "LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.2-1B-Instruct",
         extras={
@@ -537,6 +538,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
     ),
+    "RicursiveForCausalLM": _HfExamplesInfo(
+        "ricursiveAI/Ripple-65B-Preview",
+        extras={"nvfp4": "ricursiveAI/Ripple-65B-Preview-NVFP4"},
+    ),
     "Rnj1ForCausalLM": _HfExamplesInfo(
         "EssentialAI/rnj-1-instruct",
         is_available_online=False,
@@ -596,6 +601,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "VaultGemmaForCausalLM": _HfExamplesInfo("google/vaultgemma-1b"),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
+    "ZayaForCausalLM": _HfExamplesInfo("Zyphra/ZAYA1-8B"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
@@ -900,6 +906,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
+    "UnlimitedOCR2TextForCausalLM": _HfExamplesInfo("baidu/Unlimited-OCR-2"),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
         "baidu/Unlimited-OCR",
     ),
@@ -1544,6 +1551,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DFlash2BeamDraftModel": _HfExamplesInfo(
         "reflection/Beam-1.0-501B-A23B-NVFP4",
         speculative_model="reflection/Beam-1.0-501B-A23B-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
+    "DFlash2RicursiveDraftModel": _HfExamplesInfo(
+        "ricursiveAI/Ripple-65B-Preview-NVFP4",
+        speculative_model="ricursiveAI/Ripple-65B-Preview-DFlash2",
         is_available_online=False,
         use_original_num_layers=True,
     ),
