@@ -52,6 +52,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+    clear_shared_transfer_engine,
+    register_shared_transfer_engine,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -1418,6 +1422,12 @@ class MooncakeConnectorWorker:
             self.hostname,
             self.rpc_port,
         )
+        register_shared_transfer_engine(
+            engine=self.engine,
+            hostname=self.hostname,
+            rpc_port=self.rpc_port,
+            protocol=str(protocol),
+        )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
@@ -1591,6 +1601,8 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
+        if hasattr(self, "engine"):
+            clear_shared_transfer_engine(self.engine)
         self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)

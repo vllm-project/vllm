@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar, cast
 
 import torch
@@ -75,7 +75,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.selective_lease import (  # noqa: E501
     SelectiveLookupLease,
 )
-from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+    SharedMooncakeTransferEngine,
+    get_shared_transfer_engine,
+    reuse_pd_transfer_engine_requested,
+)
+from vllm.distributed.mooncake_store import (
+    MooncakeStoreConfig,
+    setup_mooncake_store,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
@@ -1456,8 +1464,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 # ============================================================
 
 
+def _reused_transfer_engine() -> SharedMooncakeTransferEngine:
+    """Return the PD TransferEngine this store client should attach to."""
+    shared = get_shared_transfer_engine()
+    if shared is None:
+        raise RuntimeError(
+            "reuse_pd_transfer_engine is set, but this process has no "
+            "MooncakeConnector TransferEngine. List MooncakeConnector before "
+            "MooncakeStoreConnector in MultiConnector."
+        )
+    return shared
+
+
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
+
+    # Bare workers built with __new__ in tests read this default.
+    _reuse_pd_transfer_engine: bool = False
 
     @staticmethod
     def _create_mem_pool(
@@ -1550,16 +1573,36 @@ class MooncakeStoreWorker:
 
         self.num_kv_head = model_config.get_total_num_kv_heads()
 
-        # Initialize MooncakeDistributedStore with its own TransferEngine
+        # Initialize MooncakeDistributedStore. reuse_pd_transfer_engine attaches
+        # this client to the MooncakeConnector TransferEngine in this process
+        # instead of creating a second one inside setup().
         store_config = MooncakeStoreConfig.load_from_config()
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
+        self._reuse_pd_transfer_engine = reuse_pd_transfer_engine_requested(
+            extra_config
+        )
+        shared_engine: Any | None = None
+        if self._reuse_pd_transfer_engine:
+            shared = _reused_transfer_engine()
+            shared_engine = shared.engine.get_engine()
+            local_hostname = f"{shared.hostname}:{shared.rpc_port}"
+            store_config = replace(
+                store_config, metadata_server="", protocol=shared.protocol
+            )
+            logger.info(
+                "Mooncake store reusing MooncakeConnector TransferEngine at %s (%s)",
+                local_hostname,
+                shared.protocol,
+            )
+        else:
+            local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
-        local_ip = get_ip()
-        local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
-        setup_mooncake_store(self.store, store_config, local_hostname)
+        setup_mooncake_store(
+            self.store, store_config, local_hostname, engine=shared_engine
+        )
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
@@ -2027,6 +2070,12 @@ class MooncakeStoreWorker:
 
         self.num_blocks = self._kv_cache_config.num_blocks
         use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
+        register_kv = not self._reuse_pd_transfer_engine
+        if not register_kv:
+            logger.info(
+                "Mooncake store skipping KV registration; "
+                "MooncakeConnector already registered the device buffers."
+            )
 
         if not use_group_regions:
             store_layer_names = {
@@ -2053,16 +2102,17 @@ class MooncakeStoreWorker:
                     continue
                 seen_storage_ptrs.add(base_addr)
                 region_len = cache_storage.nbytes()
-                ret = self.store.register_buffer(base_addr, region_len)
-                if ret != 0:
-                    logger.error(
-                        "register_buffer failed for addr %#x len %d: %d",
-                        base_addr,
-                        region_len,
-                        ret,
-                    )
-                else:
-                    self._device_regions[base_addr] = region_len
+                if register_kv:
+                    ret = self.store.register_buffer(base_addr, region_len)
+                    if ret != 0:
+                        logger.error(
+                            "register_buffer failed for addr %#x len %d: %d",
+                            base_addr,
+                            region_len,
+                            ret,
+                        )
+                    else:
+                        self._device_regions[base_addr] = region_len
             for group_id, (group, db) in enumerate(
                 zip(self._kv_cache_groups, self.token_dbs, strict=True)
             ):
@@ -2131,16 +2181,17 @@ class MooncakeStoreWorker:
 
                 registered_len = registered_buffers.get(base_addr)
                 if registered_len is None:
-                    ret = self.store.register_buffer(base_addr, region_len)
-                    if ret != 0:
-                        mem_kind = "host" if is_host_resident else "device"
-                        raise RuntimeError(
-                            "Mooncake register_buffer failed for addr "
-                            f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
-                        )
+                    if register_kv:
+                        ret = self.store.register_buffer(base_addr, region_len)
+                        if ret != 0:
+                            mem_kind = "host" if is_host_resident else "device"
+                            raise RuntimeError(
+                                "Mooncake register_buffer failed for addr "
+                                f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
+                            )
+                        if not is_host_resident:
+                            self._device_regions[base_addr] = region_len
                     registered_buffers[base_addr] = region_len
-                    if not is_host_resident:
-                        self._device_regions[base_addr] = region_len
                 elif registered_len != region_len:
                     raise ValueError(
                         f"KV cache views at {base_addr:#x} expose inconsistent "
@@ -2625,9 +2676,12 @@ class MooncakeStoreWorker:
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
 
-        Closing the store frees its TransferEngine, the registered RDMA
-        buffers, and the connection to the master server. Idempotent so it is
-        safe to call from both the explicit shutdown path and ``__del__``.
+        Closing the store frees a TransferEngine it created, the RDMA buffers
+        it registered, and the connection to the master server. An engine
+        borrowed from MooncakeConnector stays owned by that connector; closing
+        the store drops the store client's reference and unmounts the segments
+        the store itself mounted. Idempotent so it is safe to call from both
+        the explicit shutdown path and ``__del__``.
         """
         store = getattr(self, "store", None)
         if store is None:
