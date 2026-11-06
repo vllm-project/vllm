@@ -1223,7 +1223,13 @@ class GroupedExperts:
             logits = torch.zeros(m, self.experts, dtype=logits_dtype, device=device)
             self(x, logits, bias, finalize=m in finalized)
 
-    def __call__(self, x, logits, bias, finalize=False):
+    def __call__(
+        self,
+        x: torch.Tensor,
+        logits: torch.Tensor,
+        bias: torch.Tensor,
+        finalize: bool = False,
+    ):
         """BF16 [M * top_k, hidden] routed expert outputs (one row per route),
         int32 [M, top_k] experts, FP32 [M, top_k] routing weights and the shared
         expert's BF16 [M, hidden] output; with ``finalize``, the BF16 [M, hidden]

@@ -199,7 +199,13 @@ _compiled: dict = {}
 
 
 def indexer_query(
-    q, k, weights, norm, scale: float, padded: int, weights_dtype=torch.float32
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    norm: torch.nn.Module,
+    scale: float,
+    padded: int,
+    weights_dtype: torch.dtype = torch.float32,
 ):
     """Returns (q_fp8 [M, padded, 128], weights [M, padded], key [M, 128]).
 

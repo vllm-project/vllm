@@ -354,7 +354,13 @@ def _flat(tensor):
     return tensor.as_strided((span,), (1,))
 
 
-def head_gemv(x, weight, out, scale=None, cache=None):
+def head_gemv(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    scale: torch.Tensor | None = None,
+    cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+):
     """``out[t, h] = x[t, h] @ weight[h]`` with ``x`` [M, H, I] BF16 (any token
     stride) and ``weight`` [H, I, J] BF16 (J contiguous); ``out`` [M, H, J] is
     BF16, or FP8 (statically quantized by ``scale``, a one-element FP32 tensor)
@@ -380,7 +386,8 @@ def head_gemv(x, weight, out, scale=None, cache=None):
         assert out.dtype == torch.float8_e4m3fn
         out = out.view(torch.uint8)
     dummy = torch.empty(64, dtype=torch.bfloat16, device=dev)
-    scale = scale if fp8 else dummy.view(torch.float32)[:1]
+    if scale is None:
+        scale = dummy.view(torch.float32)[:1]
     width, ints = 0, (Int32(1), Int64(0), Int64(0), Int32(0))
     kv_args = (dummy, dummy.view(torch.uint8), dummy.view(torch.int64)[:1], scale)
     if cache is not None:
