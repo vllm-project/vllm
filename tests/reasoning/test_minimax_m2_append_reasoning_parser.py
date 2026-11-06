@@ -4,8 +4,14 @@
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from tests.reasoning.utils import run_reasoning_extraction
+from tests.reasoning.utils import (
+    check_streaming_end_matches_default,
+    run_reasoning_extraction,
+)
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.minimax_m2_reasoning_parser import (
+    MiniMaxM2AppendThinkReasoningParser,
+)
 
 parser_name = "minimax_m2_append_think"
 end_token = "</think>"
@@ -193,3 +199,21 @@ def test_reasoning(
     output_ids = minimax_m2_tokenizer.convert_tokens_to_ids(output)
     is_reasoning_end = parser.is_reasoning_end(output_ids)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
+
+
+def test_is_reasoning_end_streaming_matches_default(minimax_m2_tokenizer):
+    parser = MiniMaxM2AppendThinkReasoningParser(minimax_m2_tokenizer)
+    start, end = parser.start_token_id, parser.end_token_id
+    assert start is not None and end is not None
+    check_streaming_end_matches_default(
+        parser,
+        alphabet=[1, 2, 3, start, end],
+        hand_cases=[
+            ([], [end], True),
+            # End then start in one delta: reasoning reopened.
+            ([1], [end, start], False),
+            # End inside a multi-token delta.
+            ([start, 1], [2, end, 3], True),
+            ([start, 1], [2, 3], False),
+        ],
+    )

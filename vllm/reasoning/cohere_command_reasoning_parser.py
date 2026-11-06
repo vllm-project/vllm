@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.reasoning import ReasoningParser
@@ -42,6 +42,13 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         if i >= 0 and input_ids[i] == self.chatbot_token_id:
             return False
         return rfind_tokens(input_ids, (self.end_token_id,), start=i + 1) >= 0
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        # Only a delta holding the end token can end reasoning, so the full
+        # check runs on that step, not on every decode step.
+        return self.end_token_id in delta_ids and self.is_reasoning_end(input_ids)
 
 
 class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
