@@ -646,12 +646,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 f"attention backend, but got {self.attn_backend.get_name()}. "
                 "Serving with it would silently run full attention."
             )
-        if use_sparse:
-            logger.info_once(
-                "Sparse (DSA) attention active: backend=%s, impl=%s",
-                self.attn_backend.get_name(),
-                type(self.impl).__name__,
-            )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
         # AMX reads kv_b_proj's weight directly and never calls it live; the

@@ -802,12 +802,10 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             # FlashInfer reads per-tensor fp8 MLA rows, not the ds_mla formats.
             if cache_config.cache_dtype == "auto":
                 cache_config.cache_dtype = "fp8_e4m3"
-                logger.info("Using per-tensor fp8 kv-cache for Kimi K3 DSA")
         elif cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
             "fp8"
         ):
             cache_config.cache_dtype = "fp8_ds_mla"
-            logger.info("Using custom fp8 kv-cache format for Kimi K3 DSA")
         if vllm_config.speculative_config is not None:
             from vllm.models.kimi_k3.nvidia.dense_draft import configure_dense_draft
 

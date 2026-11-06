@@ -246,7 +246,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = self.model_config.hf_text_config.index_topk
+        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -1089,9 +1089,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """``return_lse`` None means ``need_to_return_lse_for_decode``."""
         raise NotImplementedError
 
     @staticmethod
