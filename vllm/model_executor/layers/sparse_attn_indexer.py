@@ -764,10 +764,12 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Under ShardQ the chunks index the shardq_gather_indices tokens.
+        # Under ShardQ the chunks index the shardq_gather_indices tokens. The
+        # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
-        if (indices := prefill_metadata.shardq_gather_indices) is not None:
-            assert candidate_blocks is None
+        indices = prefill_metadata.shardq_gather_indices
+        assert indices is None or candidate_blocks is None
+        if indices is not None and q_quant.shape[0] != indices.shape[0]:
             prefill_q, prefill_weights = q_quant[indices], weights[indices]
             if q_scale is not None:
                 prefill_q_scale = q_scale[indices]
