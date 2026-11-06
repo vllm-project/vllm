@@ -306,19 +306,25 @@ def compute_prompt_logprobs_with_chunking(
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        requested_num = (
-            prompt_logits.shape[-1]
-            if num_prompt_logprobs == -1
-            else num_prompt_logprobs
-        )
+        vocab_size = prompt_logits.shape[-1]
+        requested_num = vocab_size if num_prompt_logprobs == -1 else num_prompt_logprobs
         rows_per_topk = max(1, TOPK_MAX_ELEMENTS // (requested_num + 1))
         for block_start in range(0, prompt_logits.shape[0], rows_per_topk):
             logits = prompt_logits[block_start : block_start + rows_per_topk]
             num_logits = len(logits)
             rows = slice(start_idx + block_start, start_idx + block_start + num_logits)
+            tgt_token_ids = prompt_token_ids[rows]
+            oov_mask = (tgt_token_ids < 0) | (tgt_token_ids >= vocab_size)
+            # Multimodal placeholders may not belong to the output vocabulary.
             result = compute_topk_scores(
-                logits, requested_num, prompt_token_ids[rows], logits_mode=logits_mode
+                logits,
+                requested_num,
+                tgt_token_ids.clamp(0, vocab_size - 1),
+                logits_mode=logits_mode,
             )
+            result.logprob_token_ids[:, 0] = tgt_token_ids
+            result.logprobs[:, 0].masked_fill_(oov_mask, float("-inf"))
+            result.selected_token_ranks.masked_fill_(oov_mask, vocab_size + 1)
             # Return token_ids as int32 to reduce peak memory usage.
             if num_logits == num_tokens:
                 logprob_token_ids = result.logprob_token_ids.to(torch.int32)
