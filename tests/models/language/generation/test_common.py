@@ -29,6 +29,42 @@ AITER_MODEL_LIST = [
 ]
 
 
+def _input_embeds(hf_model, model: str, prompts: list[str]) -> list[torch.Tensor]:
+    """Prompt embeddings for the vLLM inputs_embeds path, off the HF model."""
+    embeds = []
+    for prompt in prompts:
+        token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
+            hf_model.model.device
+        )
+        # Retained prompt values must not keep reference weights alive.
+        with torch.no_grad():
+            embed = hf_model.model.get_input_embeddings()(token_ids)
+
+        # MiniCPM models apply scale_emb to embeddings internally.
+        # vLLM expects pre-scaled embeddings when using inputs_embeds.
+        if model in EMBED_SCALING_MODELS:
+            embed = embed * hf_model.model.config.scale_emb
+
+        embeds.append(embed.squeeze(0))
+    return embeds
+
+
+@pytest.fixture(scope="module")
+def hf_reference_cache():
+    """Greedy HF logprobs, so one reference serves both use_prompt_embeds arms.
+
+    Without this, every model loads the HF checkpoint and decodes it once per
+    value of a parameter the reference does not depend on. The prompts are a
+    fixture constant and the only per-model edit to them is keyed on the model,
+    so the key covers everything the reference varies with. use_rocm_aiter
+    cannot reach a transformers forward pass, but stays in the key so each arm
+    keeps an independent reference. Entries hold no tensors; one is ~130 KiB.
+    """
+    cache: dict[tuple[str, bool, int, int], list] = {}
+    yield cache
+    cache.clear()
+
+
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
     "model",
@@ -118,6 +154,7 @@ def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
+    hf_reference_cache,
     model: str,
     max_tokens: int,
     num_logprobs: int,
@@ -147,41 +184,34 @@ def test_models(
             "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
         )
 
-    with hf_runner(
-        model,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-    ) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts,
-            max_tokens,
-            num_logprobs,
-            # Domyn's remote code decodes with torch varlen_attn, whose ROCm
-            # causal mask is top-left aligned when max_q < max_k:
-            # https://github.com/pytorch/pytorch/pull/201930
-            use_cache=not (
-                current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
-            ),
-        )
+    prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
+    cache_key = (model, use_rocm_aiter, max_tokens, num_logprobs)
+    hf_outputs = hf_reference_cache.get(cache_key)
 
-        prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
+    # Embeddings have to come off a live reference model, so the checkpoint is
+    # still loaded for the inputs_embeds runs even on a cache hit.
+    if hf_outputs is None or prompt_embeds is not None:
+        with hf_runner(
+            model,
+            revision=model_info.revision,
+            trust_remote_code=model_info.trust_remote_code,
+        ) as hf_model:
+            if hf_outputs is None:
+                hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                    example_prompts,
+                    max_tokens,
+                    num_logprobs,
+                    # Domyn's remote code decodes with torch varlen_attn, whose
+                    # ROCm causal mask is top-left aligned when max_q < max_k:
+                    # https://github.com/pytorch/pytorch/pull/201930
+                    use_cache=not (
+                        current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
+                    ),
+                )
+                hf_reference_cache[cache_key] = hf_outputs
 
-        for prompt in example_prompts:
-            token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
-                hf_model.model.device
-            )
             if prompt_embeds is not None:
-                # Retained prompt values must not keep reference weights alive.
-                with torch.no_grad():
-                    embed = hf_model.model.get_input_embeddings()(token_ids)
-
-                # MiniCPM models apply scale_emb to embeddings internally.
-                # vLLM expects pre-scaled embeddings when using inputs_embeds.
-                if model in EMBED_SCALING_MODELS:
-                    config = hf_model.model.config
-                    embed = embed * config.scale_emb
-
-                prompt_embeds.append(embed.squeeze(0))
+                prompt_embeds.extend(_input_embeds(hf_model, model, example_prompts))
 
     vllm_kwargs = {}
     if (
