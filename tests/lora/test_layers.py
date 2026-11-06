@@ -997,7 +997,9 @@ def test_column_parallel_packed(
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("present_groups", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize(
+    "present_groups", [(True, True), (True, False), (False, True), (False, False)]
+)
 def test_expand_packed_lora_with_missing_group(present_groups) -> None:
     layer = MergedColumnParallelLinearWithLoRA.__new__(
         MergedColumnParallelLinearWithLoRA
