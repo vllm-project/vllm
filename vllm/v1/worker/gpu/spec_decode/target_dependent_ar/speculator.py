@@ -44,7 +44,9 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
             # Draft prefill shares the target's padded attention metadata.
             varlen_decode=self.enable_adaptive_verification,
         )
