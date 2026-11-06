@@ -64,6 +64,8 @@ variants:
 compatible_strategies:
   - single_node_tp
   - single_node_tep
+  - multi_node_tp
+  - multi_node_tep
   - pd_cluster
 
 hardware_overrides: {}
