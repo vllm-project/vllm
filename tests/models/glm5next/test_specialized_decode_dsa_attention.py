@@ -180,7 +180,7 @@ def test_kda_gate_matches_linear(tokens):
         ((4096, 1536), 16),
         ((4096, 4096), 32),
         ((4096, 8192), 64),  # MTP eh_proj
-        ((38720, 4096), 8),  # MTP LM head shard
+        ((38720, 4096), 8),  # LM head shard
     ],
 )
 def test_split_k_projection_matches_linear(shape, tokens):
