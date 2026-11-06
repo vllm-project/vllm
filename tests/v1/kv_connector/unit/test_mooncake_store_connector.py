@@ -38,6 +38,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -260,11 +261,14 @@ def test_capacity_only_scheduler_allows_mamba_none_mode(
             KVConnectorRole.SCHEDULER,
             kv_cache_config,
         )
+        assert isinstance(connector, mooncake_store_connector.MooncakeStoreConnector)
         store_scheduler = connector.connector_scheduler
+        assert store_scheduler is not None
         assert store_scheduler.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
         meta = store_scheduler.build_connector_meta(SchedulerOutput.make_empty())
 
     mock_client.return_value.lookup.assert_not_called()
+    assert isinstance(meta, MooncakeStoreConnectorMetadata)
     assert meta.requests == []
 
 
@@ -309,6 +313,7 @@ def test_scheduler_role_initializes_store_scheduler_only():
     block_pool = MagicMock()
 
     connector.bind_gpu_block_pool(block_pool)
+    assert isinstance(mock_scheduler.return_value, MagicMock)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
@@ -330,7 +335,7 @@ def test_scheduler_reports_mooncake_cache_source():
     # Mooncake Store is an external cache service. Its internal memory and
     # local-storage policy is intentionally hidden behind that stable label.
     assert connector.get_external_cache_hit_sources(
-        None,  # type: ignore[arg-type]
+        None,
         32,
     ) == {CacheHitSource.EXTERNAL_UNSPECIFIED: 32}
 
@@ -629,6 +634,7 @@ def test_update_connector_output_and_take_events():
     connector.update_connector_output(output)
 
     assert connector._kv_cache_events is kv_events
+    assert isinstance(connector.connector_scheduler, MagicMock)
     connector.connector_scheduler.update_connector_output.assert_called_once_with(
         output
     )
@@ -908,7 +914,9 @@ def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
         assert finished == (False, None)
 
         gate.set()
-        assert client.lookup("busy", 48, []).hit_length == 32
+        result = client.lookup("busy", 48, [])
+        assert result is not None
+        assert result.hit_length == 32
         client.executor.submit(lambda: None).result(timeout=5)
         assert sock.send_multipart.call_count == 1
         assert request.request_id not in client._lookups
@@ -1452,7 +1460,9 @@ def test_finish_during_prefill_saves_only_completed_kv(
     out.kv_connector_block_state = KVConnectorBlockState(
         {request.request_id}, lambda _: block_ids, {}
     )
-    jobs = connector.build_connector_meta(out).requests
+    metadata = connector.build_connector_meta(out)
+    assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+    jobs = metadata.requests
     request.num_computed_tokens = 20
 
     if in_flight_tokens:
@@ -1467,7 +1477,9 @@ def test_finish_during_prefill_saves_only_completed_kv(
         out.kv_connector_block_state = KVConnectorBlockState(
             {request.request_id}, lambda _: block_ids, {}
         )
-        jobs.extend(connector.build_connector_meta(out).requests)
+        metadata = connector.build_connector_meta(out)
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        jobs.extend(metadata.requests)
         request.num_computed_tokens += in_flight_tokens
         request.num_in_flight_tokens = in_flight_tokens
 
@@ -1478,20 +1490,27 @@ def test_finish_during_prefill_saves_only_completed_kv(
     out.finished_req_ids = {request.request_id}
     final = connector.build_connector_meta(out)
     # The producer already scheduled this prefix; the consumer has not.
+    assert isinstance(final, MooncakeStoreConnectorMetadata)
     assert [m.token_len_chunk for m in final.requests] == (
         [16] if kv_role == "kv_consumer" else []
     )
     assert all(m.completed_token_len == 20 for m in final.requests)
     jobs.extend(final.requests)
+    completed_saves: dict[int, int] = {}
+    for job in jobs:
+        assert job.store_job_id is not None
+        completed_saves[job.store_job_id] = 1
     connector.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
-                completed_saves={m.store_job_id: 1 for m in jobs},
+                completed_saves=completed_saves,
             ),
         )
     )
     assert [b.ref_cnt for b in owned] == [0, 0]
-    assert connector.build_connector_meta(SchedulerOutput.make_empty()).requests == []
+    empty_metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(empty_metadata, MooncakeStoreConnectorMetadata)
+    assert empty_metadata.requests == []
 
 
 @pytest.mark.cpu_test
@@ -1565,12 +1584,15 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
         {},
     )
     initial = connector.build_connector_meta(out)
+    assert isinstance(initial, MooncakeStoreConnectorMetadata)
     assert len(initial.requests) == 1
     assert initial.requests[0].token_len_chunk == 16
+    initial_job_id = initial.requests[0].store_job_id
+    assert initial_job_id is not None
     connector.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
-                completed_saves={initial.requests[0].store_job_id: 1},
+                completed_saves={initial_job_id: 1},
             ),
         )
     )
@@ -1599,6 +1621,7 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
     out = SchedulerOutput.make_empty()
     out.finished_req_ids = {request.request_id}
     final = connector.build_connector_meta(out)
+    assert isinstance(final, MooncakeStoreConnectorMetadata)
     assert sorted(m.token_len_chunk for m in final.requests) == [0, 32]
     assert len({m.store_job_id for m in final.requests}) == 2
     tail_job = next(m for m in final.requests if m.token_len_chunk == 0)
@@ -1606,6 +1629,8 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
     first_job, second_job = (
         (tail_job, full_job) if tail_completes_first else (full_job, tail_job)
     )
+    assert first_job.store_job_id is not None
+    assert second_job.store_job_id is not None
     connector.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
@@ -1624,7 +1649,9 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
         )
     )
     assert [b.ref_cnt for b in owned] == [0, 0, 0]
-    assert connector.build_connector_meta(SchedulerOutput.make_empty()).requests == []
+    empty_metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(empty_metadata, MooncakeStoreConnectorMetadata)
+    assert empty_metadata.requests == []
 
 
 @pytest.mark.cpu_test
@@ -1655,8 +1682,12 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
             KVConnectorRole.SCHEDULER,
             kv_config,
         )
+    assert isinstance(connector, MultiConnector)
     store_connector = connector.sub_connectors[0]
+    assert isinstance(store_connector, mooncake_store_connector.MooncakeStoreConnector)
+    assert store_connector.connector_scheduler is not None
     coord = store_connector.connector_scheduler._store_coord
+    assert coord is not None
     assert coord.num_hash_lookahead_tokens == (num_lookahead if all_supported else 0)
     hashes = [bytes([i]) for i in range(4)]
     cached = ExternalCachedBlockPool(16, {(0, h) for h in hashes})
@@ -1689,6 +1720,7 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     )
     engine_scheduler.add_request(request)
     first = engine_scheduler.schedule()
+    assert isinstance(first.kv_connector_metadata, MooncakeStoreConnectorMetadata)
     assert [m.token_len_chunk for m in first.kv_connector_metadata.requests] == [16]
     engine_scheduler.update_from_output(
         first,
@@ -1700,7 +1732,9 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     )
     second = engine_scheduler.schedule()
     assert second.scheduled_cached_reqs.new_block_ids == [None]
+    assert isinstance(second.kv_connector_metadata, MooncakeStoreConnectorMetadata)
     assert [m.token_len_chunk for m in second.kv_connector_metadata.requests] == [32]
     (meta,) = second.kv_connector_metadata.requests
     assert meta.num_hash_lookahead_tokens == 1
+    assert meta.token_ids is not None
     assert meta.token_ids[-1] == 32
