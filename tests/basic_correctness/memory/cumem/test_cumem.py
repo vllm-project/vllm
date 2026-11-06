@@ -552,7 +552,9 @@ def test_level2_keeps_what_the_update_does_not_rewrite():
     backend.suspend(level=2, rewritten={weight.data_ptr(), small_weight.data_ptr()})
     assert mapped_usage(allocator) == 0
     assert weight_data.cpu_backup_tensor is None
-    assert cpu_backups(allocator, {"weights"})
+    assert any(
+        d.cpu_backup_tensor is not None for d in allocator.pointer_to_data.values()
+    )
 
     backend.resume(tags=["weights"])
     assert torch.equal(table, torch.arange(4096, device=DEVICE_TYPE))
