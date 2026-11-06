@@ -175,7 +175,7 @@ class EngineCoreClient(ABC):
                     *client_args,
                     renderer=renderer,
                 )
-            # Internal load balancer - client balances to all DP ranks.
+            # Internal/hybrid LB - client balances among its managed ranks.
             return DPLBAsyncMPClient(
                 *client_args,
                 renderer=renderer,
@@ -856,6 +856,11 @@ class MPClient(EngineCoreClient):
         # marks the engine as dead, and shuts down the client.
         def monitor_engine_cores():
             engine_manager.monitor_engine_liveness()
+            if (
+                isinstance(engine_manager, CoreEngineProcManager)
+                and engine_manager.retired
+            ):
+                return
             _self = self_ref()
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
@@ -1542,9 +1547,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self.current_wave = 0
         parallel_config = vllm_config.parallel_config
         self.external_eep_coordinator: ExternalElasticEPScaleCoordinator | None = None
-        if parallel_config.enable_elastic_ep and (
-            parallel_config.data_parallel_external_lb
-        ):
+        if parallel_config.uses_external_elastic_ep:
             self.external_eep_coordinator = ExternalElasticEPScaleCoordinator(self)
 
         super().__init__(
@@ -1616,9 +1619,9 @@ class DPAsyncMPClient(AsyncMPClient):
                         dp_rank = parallel_config.data_parallel_rank
                         assert dp_rank == 0
                         assert dp_size == new_engine_count
-                        assert not parallel_config.data_parallel_hybrid_lb
-                        # External LB clients continue to manage only local ranks.
-                        if not parallel_config.data_parallel_external_lb:
+                        # Native external clients retain their fixed local range.
+                        if not parallel_config.uses_external_elastic_ep:
+                            assert not parallel_config.data_parallel_hybrid_lb
                             self.engine_ranks_managed = list(range(dp_size))
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines += [
@@ -1652,6 +1655,8 @@ class DPAsyncMPClient(AsyncMPClient):
                         # Coordinator including all EngineCores. Slice to get
                         # just the cores managed by this client.
                         ranks = self.engine_ranks_managed
+                        if len(counts) <= ranks[-1]:
+                            continue
                         count_slice = slice(ranks[0], ranks[-1] + 1)
                         sliced_counts = counts[count_slice]
                         self.lb_engines = sliced_counts
@@ -1730,10 +1735,9 @@ class DPAsyncMPClient(AsyncMPClient):
             raise NotImplementedError(
                 "Elastic EP scaling requires enable_elastic_ep=True."
             )
-        if not parallel_config.data_parallel_external_lb:
+        if not parallel_config.uses_external_elastic_ep:
             raise NotImplementedError(
-                "DPAsyncMPClient only supports Elastic EP scaling in external "
-                "load-balancer mode."
+                "Elastic EP scaling requires native external control."
             )
         coordinator = self.external_eep_coordinator
         assert coordinator is not None
@@ -1904,6 +1908,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self: "DPAsyncMPClient", notification_data: tuple[str, int]
     ) -> None:
         assert isinstance(self, DPLBAsyncMPClient)
+        if self.external_eep_coordinator is not None:
+            await DPAsyncMPClient.eep_process_engine_core_notification(
+                self, notification_data
+            )
+            return
         cache = self.eep_scaling_cache
         notification_type_str, dp_rank = notification_data
         try:
@@ -1979,6 +1988,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def commit_elastic_ep(self) -> None:
         """Commit prepared elastic EP scaling."""
+        if self.external_eep_coordinator is not None:
+            await super().commit_elastic_ep()
+            return
         prepared = self._prepared_elastic_ep
         if prepared is None:
             raise RuntimeError("Elastic EP scaling has not been prepared")
@@ -1995,6 +2007,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Prepare elastic EP scaling without routing requests to new engines."""
+        if self.external_eep_coordinator is not None:
+            await super().prepare_elastic_ep(new_data_parallel_size)
+            return
         if (prepared := self._prepared_elastic_ep) is not None:
             if prepared[0] == new_data_parallel_size:
                 return
