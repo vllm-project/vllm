@@ -2509,6 +2509,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     worker._skip_dram_xfer = False
     worker.region_mem_types = ["DRAM", "VRAM"]
     worker.region_num_blocks = [2, 2]
+    worker._region_aliases = {}
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}
     worker._dram_src_handles_by_block_size = {}

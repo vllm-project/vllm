@@ -368,13 +368,20 @@ def get_hisparse_kv_cache_config(
         size / 2**30,
         num_blocks,
     )
+    kv_cache_groups = [*host_groups, *device_groups]
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=[*host_groups, *device_groups],
+        kv_cache_groups=kv_cache_groups,
         hisparse_host_num_blocks=hisparse_layout.host_num_blocks,
         hisparse_host_block_stride=hisparse_layout.host_block_stride,
         hisparse_shared_host_pool=hisparse_layout.shared_host_pool,
+        transfer_aliases={
+            name[: -len(HISPARSE_RESIDENT_SUFFIX)]: (name, group_id)
+            for group_id, group in enumerate(kv_cache_groups)
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+            for name in group.layer_names
+        },
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),

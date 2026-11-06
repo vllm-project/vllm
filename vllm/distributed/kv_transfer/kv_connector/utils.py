@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import torch
 
@@ -26,6 +26,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 
 logger = init_logger(__name__)
 
@@ -33,6 +34,39 @@ EngineId = str
 # block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
 # mutability and are for connector internal use only.
 BlockIds = tuple[list[int], ...] | list[list[int]]
+
+
+@dataclass(frozen=True)
+class KVImportLandingPlan:
+    alias_block_ids: dict[int, list[int]]
+    """Per-group blocks that receive aliased regions in place of the
+    request's own blocks (see ``KVCacheConfig.transfer_aliases``)."""
+    num_computed_blocks: tuple[int, ...]
+
+
+class KVImportLanding(Protocol):
+    """Redirects a connector's KV import into local alias blocks."""
+
+    def prepare(self, request_id: str) -> None:
+        """Called each time the connector reports an external load."""
+
+    def plan(
+        self,
+        request_id: str,
+        blocks: "KVCacheBlocks",
+        num_computed_blocks: tuple[int, ...],
+    ) -> KVImportLandingPlan | None:
+        """Where the import lands, or None to land it on its own blocks."""
+
+
+def get_kv_import_landing(
+    kv_cache_manager: "KVCacheManager",
+) -> KVImportLanding | None:
+    if kv_cache_manager.kv_cache_config.hisparse_host_num_blocks is None:
+        return None
+    from vllm.v1.hisparse.landing import HiSparseImportLanding
+
+    return HiSparseImportLanding(kv_cache_manager)
 
 
 def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:

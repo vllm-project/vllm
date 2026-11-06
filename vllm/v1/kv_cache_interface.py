@@ -1567,6 +1567,10 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    transfer_aliases: dict[str, tuple[str, int]] = field(default_factory=dict)
+    """Transferred layer -> (local layer, cache group) that may receive its
+    pages in its place. The alias layer is local and never transferred."""
+
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
 

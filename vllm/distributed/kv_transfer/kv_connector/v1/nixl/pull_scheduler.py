@@ -62,6 +62,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
+                self._prepare_landing(request)
                 return count, True
 
         if (
@@ -100,10 +101,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         self.kv_recompute_threshold,
                     )
                     return 0, False
+                self._prepare_landing(request)
                 return count, True
 
         # No remote prefill for this request.
         return 0, False
+
+    def _prepare_landing(self, request: "Request") -> None:
+        if self.landing is not None:
+            self.landing.prepare(request.request_id)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -167,6 +173,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         )
                         for group in blocks.blocks
                     )
+                    landing = (
+                        self.landing.plan(
+                            request.request_id, blocks, local_num_computed_blocks
+                        )
+                        if self.landing is not None and unhashed_local_block_ids
+                        else None
+                    )
+                    if landing is not None:
+                        self._reqs_alias_block_ids[request.request_id] = (
+                            landing.alias_block_ids
+                        )
+                        local_num_computed_blocks = landing.num_computed_blocks
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.

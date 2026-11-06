@@ -342,6 +342,7 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     worker.block_len_per_layer = [16, 16]
     worker.block_stride_per_layer = [16, 16]
     worker.region_num_blocks = [2, 3]
+    worker._region_aliases = {}
 
     descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
 

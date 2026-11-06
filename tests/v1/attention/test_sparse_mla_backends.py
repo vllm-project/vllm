@@ -3018,6 +3018,23 @@ def test_hisparse_swap_in_preserves_rows_across_eviction(row_width, kv_dtype):
     assert misses > 3 * valid_rows_per_step
     assert hits + misses == 5 * valid_rows_per_step
 
+    runtime.index_group.swap_stats.zero_()
+    runtime.begin_forward()
+    cache.swap_in(
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        logical_topk_indices=topk.clone(),
+        block_size=block_size,
+        num_valid_rows=_valid_rows(req_ids.numel()),
+    )
+    torch.accelerator.synchronize()
+    expected_stats = torch.tensor(
+        [(topk.shape[1] - 1) * num_reqs, 0],
+        dtype=torch.uint64,
+        device=device,
+    )
+    torch.testing.assert_close(runtime.index_group.swap_stats, expected_stats)
+
 
 @requires_hisparse_ops
 @pytest.mark.parametrize(

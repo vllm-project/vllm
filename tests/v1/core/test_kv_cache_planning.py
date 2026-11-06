@@ -125,6 +125,17 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert cache_config.hisparse_shared_host_pool is shared_host_pool
+    (resident_group_id,) = (
+        group_id
+        for group_id, group in enumerate(cache_config.kv_cache_groups)
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    )
+    assert cache_config.transfer_aliases == {
+        "model.layers.0.self_attn": (
+            "model.layers.0.self_attn.hisparse_resident",
+            resident_group_id,
+        )
+    }
     host_page = host_group.kv_cache_spec.page_size_bytes
     alignment = mmap.PAGESIZE if shared_host_pool else 1
     expected_host_stride = (host_page + alignment - 1) // alignment * alignment
@@ -2243,6 +2254,43 @@ def test_finalize_extensible_kv_cache_keeps_measured_count():
     )
     assert config.num_blocks == scheduler_config.num_blocks == 997
     assert vllm_config.cache_config.num_gpu_blocks == 997
+
+
+def test_hisparse_derived_groups_do_not_participate_in_hash_alignment():
+    source = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    groups = [
+        KVCacheGroupSpec(["source"], source),
+        KVCacheGroupSpec(
+            ["resident"], HiSparseResidentSpec(block_size=96, page_size=96)
+        ),
+        KVCacheGroupSpec(
+            ["hot"],
+            HiSparseHotSpec(block_size=96, page_size=96, blocks_per_request=1),
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=64,
+            enable_prefix_caching=False,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=object(),
+    )
+
+    assert kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    ) == (192, 64)
 
 
 def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
