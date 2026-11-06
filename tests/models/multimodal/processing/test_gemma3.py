@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm.model_executor.models.gemma3_mm import Gemma3ProcessingInfo
 from vllm.model_executor.models.gemma3n_audio_utils import (
     adjust_audio_features_to_expected_length,
 )
@@ -162,6 +163,7 @@ def test_get_image_size_with_most_features(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma3ProcessingInfo)
 
     hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
 
@@ -185,5 +187,6 @@ def test_get_image_size_with_most_features(
         )
         mm_kwargs_data = processed_inputs["mm_kwargs"].get_data()
         num_patches_tensor = mm_kwargs_data["num_patches"]
+        assert isinstance(num_patches_tensor, torch.Tensor)
         tokens = int(num_patches_tensor.item()) * image_seq_length
         assert tokens <= max_tokens
