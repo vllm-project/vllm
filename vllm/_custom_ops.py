@@ -3047,8 +3047,11 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     kv_k_scale: torch.Tensor | None = None,
     kv_v_scale: torch.Tensor | None = None,
     write_qkv: bool = True,
+    enable_pdl: bool = True,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
+
+    Set ``enable_pdl=False`` to use ordinary stream ordering on CUDA.
 
     Applies Gemma RMSNorm + partial NeoX RoPE to ``qkv`` in place. ``qkv`` is a
     single fused tensor:
@@ -3118,6 +3121,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         kv_k_scale,
         kv_v_scale,
         write_qkv,
+        enable_pdl,
     )
 
 

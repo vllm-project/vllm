@@ -231,7 +231,8 @@ def test_dense_insert_matches_reshape_and_cache_flash(
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
+@pytest.mark.parametrize("enable_pdl", [False, True])
+def test_sparse_full(num_tokens, block_size, kv_cache_dtype, enable_pdl):
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
@@ -308,6 +309,7 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
         kv_cache_dtype,
         q_fp8_out=q_fp8,
         q_fp8_scale=0.5,
+        enable_pdl=enable_pdl,
     )
 
     # ── norm+rope parity. q/index_q land in their gather buffers; k/index_k are
@@ -1171,8 +1173,9 @@ def test_sparse_full_nvfp4_index(num_tokens, kv_cache_dtype, page_pad):
 @pytest.mark.parametrize("num_heads,num_kv_heads", [(64, 4), (32, 2), (16, 1)])
 @pytest.mark.parametrize("index_cache_dtype", ["nvfp4", "fp8"])
 @pytest.mark.parametrize("scales", [(1.0, 1.0, 1.0), (0.5, 2.0, 0.5)])
+@pytest.mark.parametrize("enable_pdl", [False, True])
 def test_write_qkv_false(
-    num_tokens, num_heads, num_kv_heads, index_cache_dtype, scales
+    num_tokens, num_heads, num_kv_heads, index_cache_dtype, scales, enable_pdl
 ):
     """write_qkv=False without q_out writes the same q_fp8_out, index_q_out and
     cache bytes as a default call, and leaves qkv either untouched or as the
@@ -1227,7 +1230,7 @@ def test_write_qkv_false(
             torch.float8_e4m3fn
         )
 
-    def run(write_qkv):
+    def run(write_qkv, **kwargs):
         qkv = qkv0.clone()
         kv_cache, index_cache = kv_cache0.clone(), index_cache0.clone()
         q_fp8 = torch.empty(num_tokens, qsz, dtype=torch.float8_e4m3fn, device=device)
@@ -1262,11 +1265,12 @@ def test_write_qkv_false(
             kv_k_scale=torch.tensor(k_scale, dtype=torch.float32, device=device),
             kv_v_scale=torch.tensor(v_scale, dtype=torch.float32, device=device),
             write_qkv=write_qkv,
+            **kwargs,
         )
         return qkv, q_fp8, index_q, kv_cache, index_cache
 
     expected = run(True)
-    qkv, *got = run(False)
+    qkv, *got = run(False, enable_pdl=enable_pdl)
     assert torch.equal(qkv.view(torch.int16), qkv0.view(torch.int16)) or (
         torch.equal(qkv.view(torch.int16), expected[0].view(torch.int16))
     )
