@@ -49,7 +49,7 @@ from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
@@ -106,9 +106,9 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     config.method = "dspark"
     config.draft_model_config = None
     config.enable_adaptive_verification = False
-    fixed_hash = config.compute_hash()
+    fixed_hash = hash_config(config)
     config.enable_adaptive_verification = True
-    assert config.compute_hash() != fixed_hash
+    assert hash_config(config) != fixed_hash
 
 
 @pytest.mark.parametrize(
@@ -2161,7 +2161,7 @@ def test_engram_cpu_offload_default():
 def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None
-    assert config.compute_hash()
+    assert hash_config(config)
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -2284,7 +2284,7 @@ def test_engram_hash_tracks_execution_options():
         EngramConfig(cpu_offload=True, dp_shared_memory=True),
         EngramConfig(disk_offload=True),
     ]
-    assert len({config.compute_hash() for config in configs}) == len(configs)
+    assert len({hash_config(config) for config in configs}) == len(configs)
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -4869,3 +4869,24 @@ def test_quantized_replayssm_preserves_explicit_checkpoint_selection(state_dtype
         cache_config=cache, hf_config=PreTrainedConfig(mamba_ssm_cache_dtype="float32")
     )
     assert cache.mamba_ssm_cache_dtype == "auto"
+
+
+def test_layer_range_with_prefill_context_parallel(monkeypatch):
+    """Workers are laid out as PP x PCP x TP: every PCP and TP rank of a
+    stage gets that stage's layers, so layer counts match under an uneven
+    partition."""
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "5,7")
+    model_config = ModelConfig("facebook/opt-125m")  # 12 layers
+    ranges = [
+        model_config.get_layers_start_end_indices(
+            ParallelConfig(
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=2,
+                pipeline_parallel_size=2,
+                distributed_executor_backend="mp",
+                rank=rank,
+            )
+        )
+        for rank in range(8)
+    ]
+    assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
