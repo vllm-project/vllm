@@ -32,7 +32,6 @@ from vllm.v1.worker.extensible_kv_cache import (
     num_committable_kv_blocks,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.spec_decode.utils import max_num_tokens_after_draft_slots
 
 logger = init_logger(__name__)
 
@@ -149,11 +148,8 @@ def run_mixed_prefill_decode_warmup(
     if spec_config is not None:
         num_tokens = min(
             num_tokens,
-            max_num_tokens_after_draft_slots(
-                model_runner.max_num_tokens,
-                num_warmup_reqs,
-                spec_config.max_num_new_slots_for_drafting,
-            ),
+            model_runner.max_num_tokens
+            - num_warmup_reqs * spec_config.max_num_new_slots_for_drafting,
         )
     if num_tokens < 3:
         return False
