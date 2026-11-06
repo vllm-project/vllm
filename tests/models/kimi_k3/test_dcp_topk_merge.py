@@ -58,7 +58,7 @@ def _local_case(lengths: list[int], seed: int) -> tuple[torch.Tensor, torch.Tens
 
 
 def test_local_topk_sizing():
-    from vllm.v1.attention.ops.dcp_topk_merge import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
         dcp_merge_local_topk,
         packed_row_words,
     )
@@ -87,7 +87,7 @@ def test_local_topk_sizing():
 def test_local_topk_config_gating(dcp, pcp, backend, max_model_len, expected):
     from types import SimpleNamespace
 
-    from vllm.v1.attention.ops.dcp_topk_merge import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
         dcp_topk_merge_local_topk,
     )
 
@@ -112,8 +112,8 @@ def test_init_fails_closed(monkeypatch):
     import vllm.distributed as distributed
     import vllm.v1.attention.ops.cp_common as cp_common
     import vllm.v1.attention.ops.dcp as dcp
-    from vllm.v1.attention.ops import dcp_topk_merge as gate
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels
+    from vllm.models.kimi_k3.nvidia.ops import dcp_topk_merge as gate
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels
 
     def config(ubatching: bool = False, dcp_size: int = 8) -> SimpleNamespace:
         return SimpleNamespace(
@@ -167,7 +167,7 @@ def test_init_fails_closed(monkeypatch):
 
 def test_pack_layout_bit_exact():
     """The B' word layout, bit for bit, from a hand-computed reference."""
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack_indices,
     )
 
@@ -207,7 +207,7 @@ def test_pack_layout_bit_exact():
 def test_pack_drops_invalid_ids_and_nan(with_row_ends):
     """Ids outside ``[0, min(row_end, S, 2**17))`` and NaN scores pack as
     empty slots; +-inf scores pack as ordinary candidates."""
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack_indices,
     )
 
@@ -254,7 +254,7 @@ def test_pack_max_local_len_matches_narrow_logits():
     them by max_local_len (which moves DeepSelect off its <= 6-row cluster
     variant at >= 512K columns) packs the same candidates as logits of the
     local width."""
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         dcp_topk_pack,
     )
 
@@ -287,8 +287,8 @@ def test_merge_requires_rescue_workspace(monkeypatch):
     """No lossy path: without the rescue workspace the entry points raise,
     and packed mode needs the logits (a saturated rank re-reads its row)."""
     import vllm.distributed as distributed
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         dcp_topk_merge,
         dcp_topk_merge_rows,
         dcp_topk_pack,
@@ -322,7 +322,7 @@ def test_merge_requires_rescue_workspace(monkeypatch):
 def _host_only_workspace(world: int, max_rows: int, n: int):
     """A rescue workspace for the host-side checks only: local buffers, no
     peers. Every call below is refused before a kernel launches."""
-    from vllm.v1.attention.ops.dcp_topk_merge import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import (
         kernels,
         packed_row_words,
         rescue_slots,
@@ -349,8 +349,8 @@ def test_exact_call_checks(monkeypatch):
     tensors silently: the host refuses every call the workspace or the
     compiled layouts do not cover."""
     import vllm.distributed as distributed
-    from vllm.v1.attention.ops.dcp_topk_merge import kernels, packed_row_words
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels, packed_row_words
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         dcp_topk_merge_rows,
         dcp_topk_select,
     )
@@ -407,7 +407,7 @@ def test_packed_contract_validator():
     """``assert_packed_merge_contract`` accepts the stock producer (DeepSelect
     + pack, including short and empty rows) and catches a dropped word, a
     non-top word and a word whose score is not its logit."""
-    from vllm.v1.attention.ops.dcp_topk_merge.kernels import (
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
         assert_packed_merge_contract,
         dcp_topk_pack,
     )
