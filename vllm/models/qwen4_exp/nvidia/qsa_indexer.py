@@ -129,6 +129,19 @@ class QSAIndexer(nn.Module):
         # while continuing to update the QSA indexer cache.
         self.skip_topk = False
 
+        # Decode rows scale with the live batch: num_decode_reqs x query len,
+        # where the query len is 1 + num_spec_tokens under speculative
+        # decoding. The decode logits workspace is allocated at this bound so
+        # its size is stable between warmup and serving (see
+        # qsa_select_paged_decode).
+        spec_config = vllm_config.speculative_config
+        num_spec_tokens = (
+            spec_config.num_speculative_tokens if spec_config is not None else 0
+        ) or 0
+        self.max_decode_rows = vllm_config.scheduler_config.max_num_seqs * (
+            1 + num_spec_tokens
+        )
+
         self.index_qk_proj = ReplicatedLinear(
             int(config.hidden_size),
             (self.index_n_heads + self.index_kv_heads) * self.index_head_dim,
@@ -424,6 +437,7 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 decode_query_len,
                 block_indices[decode_slice],
+                max_decode_rows=self.max_decode_rows,
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.

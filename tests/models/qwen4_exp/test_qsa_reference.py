@@ -779,19 +779,25 @@ def test_qsa_decode_selection_correctness(
     )
 
     token_topk, compress_ratio = 2048, 4
-    actual = torch.empty(
-        (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
-    )
-    qsa_indexer_ops.qsa_select_paged_decode(
-        q,
-        cache,
-        page_table,
-        visible_blocks,
-        token_topk,
-        compress_ratio,
-        decode_query_len,
-        actual,
-    )
+    # Serving allocates the logits workspace at the worst-case decode batch
+    # (max_decode_rows); check both the exact and the padded allocation.
+    selections = []
+    for max_decode_rows in (None, rows + 16):
+        out = torch.empty(
+            (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
+        )
+        qsa_indexer_ops.qsa_select_paged_decode(
+            q,
+            cache,
+            page_table,
+            visible_blocks,
+            token_topk,
+            compress_ratio,
+            decode_query_len,
+            out,
+            max_decode_rows=max_decode_rows,
+        )
+        selections.append(out)
     expected = _qsa_select_paged_reference(
         q,
         cache,
@@ -812,19 +818,21 @@ def test_qsa_decode_selection_correctness(
         logits = _qsa_mqa_paged_reference(
             q, cache, page_table, token_to_req, visible_blocks
         )
-        for row in range(rows):
-            selected = actual[row][actual[row] >= 0]
-            wanted = expected[row][expected[row] >= 0]
-            assert selected.numel() == wanted.numel()
-            torch.testing.assert_close(
-                logits[row, selected.long()].sort().values,
-                logits[row, wanted.long()].sort().values,
-                rtol=rtol,
-                atol=atol,
-            )
+        for actual in selections:
+            for row in range(rows):
+                selected = actual[row][actual[row] >= 0]
+                wanted = expected[row][expected[row] >= 0]
+                assert selected.numel() == wanted.numel()
+                torch.testing.assert_close(
+                    logits[row, selected.long()].sort().values,
+                    logits[row, wanted.long()].sort().values,
+                    rtol=rtol,
+                    atol=atol,
+                )
         return
 
-    torch.testing.assert_close(actual.sort().values, expected.sort().values)
+    for actual in selections:
+        torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
 @requires_qsa_kernels
