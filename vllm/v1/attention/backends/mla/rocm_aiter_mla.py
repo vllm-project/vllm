@@ -57,7 +57,6 @@ from vllm.v1.attention.ops.rocm_aiter_mla_prefill import (
 from vllm.v1.attention.ops.triton_decode_attention import (
     decode_attention_fwd,
     decode_attention_fwd_verify,
-    select_verify_config,
     verify_num_kv_splits,
     warmup_decode_attention_fwd_verify,
 )
@@ -272,7 +271,7 @@ def _aiter_fp8_mla_decode_drops_v_scale(num_heads: int, qlen: int, q_fp8: bool) 
     gfx942's (gqa 16, qseqlen 4) FP8 kernel applies kv_scale to the scores but
     not to V, so its output is short by exactly kv_scale. Measured on a tiny
     causal block with kv_scale 2 rather than assumed per arch, so a fixed
-    AITER build turns the correction off by itself.
+    AITER build turns the correction off by itself (ROCm/aiter#6732).
     """
     try:
         from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
@@ -538,18 +537,7 @@ def _triton_verify_num_kv_splits(
     """
     if envs.VLLM_BATCH_INVARIANT:
         return 1
-    # Must agree with the launch config decode_attention_fwd_verify selects.
-    cfg = select_verify_config(num_reqs, qlen, num_heads)
-    return verify_num_kv_splits(
-        max_seq_len,
-        num_reqs,
-        qlen,
-        num_heads,
-        sm_count,
-        block_h=cfg["BLOCK_H"],
-        occupancy=cfg.get("occupancy", 1.0),
-        min_work_per_split=cfg["MIN_SPLIT_LEN"],
-    )
+    return verify_num_kv_splits(max_seq_len, num_reqs, qlen, num_heads, sm_count)
 
 
 def _reserve_triton_verify_workspace(
@@ -1430,7 +1418,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
             self._fp8_v_scale_fix_qlens = frozenset(
                 qlen
-                for qlen in range(2, min(self._mtp_decode_qlen, 4) + 1)
+                for qlen in range(
+                    2,
+                    min(self._mtp_decode_qlen, AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN)
+                    + 1,
+                )
                 if _aiter_fp8_mla_decode_drops_v_scale(
                     heads, qlen, self._kv_cache_dtype_str == "fp8"
                 )
@@ -3402,8 +3394,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         One Triton program covers a block of a request's (verify token, head)
         rows, so each KV tile is read once for all of them, and each row is
-        bounded by its own causal window. A graph padding request (or a
-        varlen tail past its real length) comes back as zeros.
+        bounded by its own causal window. A varlen tail past its real length
+        comes back as zeros.
         """
         assert decode.max_qo_len is not None
         num_rows, num_heads = q_mla.shape[:2]
