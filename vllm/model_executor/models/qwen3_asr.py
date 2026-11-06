@@ -28,6 +28,7 @@ from typing import Any
 import regex as re
 import torch
 import torch.nn as nn
+from transformers import Qwen3ASRConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_asr import Qwen3ASRFeatureExtractor, Qwen3ASRProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
@@ -88,10 +89,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen3_asr import (
-    Qwen3ASRConfig,
-    Qwen3ASRThinkerConfig,
-)
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -183,7 +180,7 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
 
 class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3ASRConfig).thinker_config
+        return self.ctx.get_hf_config(Qwen3ASRConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3ASRProcessor:
         return self.ctx.get_hf_processor(
@@ -440,25 +437,23 @@ class Qwen3ASRForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config  # needed for torch compile forward context
-        thinker_config: Qwen3ASRThinkerConfig = (
-            vllm_config.model_config.hf_config.thinker_config
-        )
+        config: Qwen3ASRConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.config = thinker_config
+        self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = Qwen3OmniMoeAudioEncoder(
-                thinker_config.audio_config,
+                config.audio_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3ForCausalLM(
                 vllm_config=vllm_config.with_hf_config(
-                    thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
+                    config.text_config, architectures=["Qwen3ForCausalLM"]
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
