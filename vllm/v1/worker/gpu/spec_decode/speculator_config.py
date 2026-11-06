@@ -138,7 +138,7 @@ class SpeculatorConfig:
         return None
 
     def hash_factors(self) -> list[Any]:
-        """Extra factors of `SpeculativeConfig.compute_hash`."""
+        """Extra factors of `SpeculativeConfig.compile_factors`."""
         return []
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
