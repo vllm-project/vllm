@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+from vllm.v1.metrics.reader import Gauge
 
 # The offloaded block size must stay a whole number of GPU blocks.
 CPU_BLOCK_SIZES: int
@@ -30,7 +31,9 @@ elif current_platform.is_rocm():
     # and the 16-token default.
     CPU_BLOCK_SIZES = 192
 else:
-    CPU_BLOCK_SIZES = 48
+    # A multiple of the 64-token default (and of any smaller backend-preferred
+    # size such as 16 or 32).
+    CPU_BLOCK_SIZES = 192
 
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
@@ -643,7 +646,9 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # ("tiiuae/falcon-mamba-7b", 16, 1),
-        ("state-spaces/mamba-1.4b-hf", 16, 1),
+        # The chunk size must be a multiple of the GPU block size, which
+        # defaults to 64 tokens.
+        ("state-spaces/mamba-1.4b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
@@ -843,3 +848,58 @@ def test_tiering_cache_reset_resumes_promotions_on_idle_engine(
         assert output.num_cached_tokens == len(prefix)
     finally:
         del llm
+
+
+def test_p2p_cache_reset_with_absent_decoder(monkeypatch):
+    """A real prefill engine can reset while its decoder never fetches KV."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        gpu_memory_utilization=0.2,
+        attention_config={"backend": "TRITON_ATTN"},
+        block_size=16,
+        enforce_eager=True,
+        async_scheduling=False,
+        disable_log_stats=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 8 << 20,
+                "block_size": 16,
+                "spec_name": "TieringOffloadingSpec",
+                "secondary_tiers": [{"type": "p2p", "host": "127.0.0.1", "port": 0}],
+            },
+        ),
+    )
+    prompt = TokensPrompt(prompt_token_ids=list(range(100, 165)))
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        extra_args={
+            "kv_transfer_params": {"remote_decoder": {"kv_request_id": "absent"}}
+        },
+    )
+
+    def has_parked_cascade():
+        llm.llm_engine.step()
+        return any(
+            isinstance(m, Gauge)
+            and m.name == "vllm:kv_offload_tiering_active_cascade_jobs"
+            and m.value > 0
+            for m in llm.get_metrics()
+        )
+
+    try:
+        before = llm.generate(prompt, params, use_tqdm=False)[0]
+        _poll_until(has_parked_cascade, timeout_s=10, what="a parked P2P store")
+        _wait_for_prefix_cache_reset(llm, reset_connector=True)
+        after = llm.generate(
+            prompt, SamplingParams(temperature=0, max_tokens=1), use_tqdm=False
+        )[0]
+        assert after.num_cached_tokens == 0
+        assert after.outputs[0].token_ids == before.outputs[0].token_ids
+    finally:
+        llm.llm_engine.engine_core.shutdown()

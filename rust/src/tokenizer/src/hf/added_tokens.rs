@@ -59,9 +59,9 @@ impl AddedTokenConfig {
 /// Read `tokenizer.json`, then merge in extra added tokens from `tokenizer_config.json`.
 pub(super) fn load_tokenizer_json_with_extra_tokens(path: &Path) -> Result<serde_json::Value> {
     let tokenizer_json = fs::read_to_string(path)
-        .map_err(|error| tokenizer_error!("failed to read {}: {}", path.display(), error))?;
+        .map_err(|error| backend!("failed to read {}: {}", path.display(), error))?;
     let mut tokenizer_json: TokenizerJson = serde_json::from_str(&tokenizer_json)
-        .map_err(|error| tokenizer_error!("failed to parse {}: {}", path.display(), error))?;
+        .map_err(|error| backend!("failed to parse {}: {}", path.display(), error))?;
 
     if let Some(parent) = path.parent() {
         let config_path = parent.join("tokenizer_config.json");
@@ -80,15 +80,15 @@ pub(super) fn load_tokenizer_json_with_extra_tokens(path: &Path) -> Result<serde
     }
 
     serde_json::to_value(tokenizer_json)
-        .map_err(|error| tokenizer_error!("failed to serialize tokenizer json: {}", error))
+        .map_err(|error| backend!("failed to serialize tokenizer json: {}", error))
 }
 
 /// Read and parse a sibling `tokenizer_config.json`.
 fn load_tokenizer_config_json(path: &Path) -> Result<TokenizerConfigJson> {
     let text = fs::read_to_string(path)
-        .map_err(|error| tokenizer_error!("failed to read {}: {}", path.display(), error))?;
+        .map_err(|error| backend!("failed to read {}: {}", path.display(), error))?;
     serde_json::from_str(&text)
-        .map_err(|error| tokenizer_error!("failed to parse {}: {}", path.display(), error))
+        .map_err(|error| backend!("failed to parse {}: {}", path.display(), error))
 }
 
 /// Merge added_tokens in `tokenizer.json` and `tokenizer_config.json`.

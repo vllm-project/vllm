@@ -341,8 +341,8 @@ from vllm import LLM
 llm = LLM(model="Qwen/Qwen3-8B")
 ```
 
-The `fastokens` Python package (>= 0.2.0) must be installed; if it isn't,
-vLLM raises a clear `ImportError` at tokenizer load. The override applies to
+The `fastokens` Python package (>= 0.3.5) must be installed; if it isn't, or
+is older, vLLM raises a clear `ImportError` at tokenizer load. The override applies to
 any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
 `deepseek_v32`, `deepseek_v4`, …). Models that don't use the HF
 fast tokenizer (`mistral`, `kimi_audio`) ignore the flag.
@@ -418,6 +418,11 @@ You can adjust the size of the cache by setting the value of `mm_processor_cache
 A processed item larger than this budget is served uncached (with a warning)
 instead of failing engine startup; raise `mm_processor_cache_gb` if you want
 those items cached.
+
+With processor-only caching, a request can contain more processed multi-modal
+data than the cache budget. Cached tensors and prompt updates needed by the
+request remain referenced while its inputs are merged, even if they are evicted
+from the LRU. The budget limits cache storage, not transient per-request memory.
 
 If you do not benefit much from the cache, you can disable both IPC
 and processor caching completely via `mm_processor_cache_gb=0`.
