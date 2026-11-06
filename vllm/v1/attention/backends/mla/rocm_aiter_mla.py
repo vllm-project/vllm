@@ -590,6 +590,63 @@ def _reserve_triton_dcp_verify_workspace(
 _NATIVE_CPRR_HEADS: Final = (16, 32, 64, 128)
 _MIN_CPRR_QLEN: Final = 3
 
+# AITER dispatches a kernel that returns uncorrelated output for this exact
+# combination, with no error: fp8 query + fp8 KV at gqa_ratio 16 and
+# decode_qlen 3 or 4, when the call is NOT persistent. Measured on gfx950 with
+# AITER's own op_tests/test_mla.py: cos_diff 0.840 at qlen 3 and 0.898 at qlen
+# 4, against AITER's own 3e-2 pass bar, while qlen 1 and 2 sit at 5e-4 / 1e-3.
+#
+# Cause, in csrc/py_itfs_cu/asm_mla.cu's gfx950 decode remap. Two chains run in
+# sequence. The gqa_ratio chain sends gqa_ratio=16 + fp8 through an
+# `else if (max_seqlen_q <= 4)` that carries no `persistent` and no arch
+# condition, setting sub_Q = 64. The gfx950 override chain that follows then
+# rescues ONLY the persistent case. So persistent is remapped to a supported
+# kernel, while non-persistent keeps sub_Q = 64 and dispatches
+# `mla_a8w8_qh64_qseqlen4_gqaratio16` -- note the qh64 and the missing `_ps`.
+# The identical combination at gqa_ratio=32 is rejected outright, because that
+# branch does require `persistent && arch_id == "gfx950"`.
+#
+# Refuse it here rather than return wrong attention silently. vLLM pins an
+# AITER version, so this stays worth checking after AITER fixes the guard.
+# See https://github.com/vllm-project/vllm/issues/66141
+_AITER_SILENT_WRONG_GQA: Final = 16
+_AITER_SILENT_WRONG_QLENS: Final = (3, 4)
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_mla_on_gfx950() -> bool:
+    """gfx950, cached: the guard below runs on every decode step."""
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(on_gfx950())
+
+
+def _aiter_mla_decode_is_silently_wrong(
+    *,
+    q_is_fp8: bool,
+    kv_is_fp8: bool,
+    gqa_ratio: int,
+    max_qo_len: int,
+    persistent: bool,
+    is_gfx950: bool,
+) -> bool:
+    """Whether AITER would dispatch the known bad MLA decode kernel.
+
+    Every condition is necessary: changing any one of them selects a different
+    AITER branch that computes correctly (verified by control runs with bf16,
+    with gqa_ratio 128, and with qlen <= 2).
+    """
+    return (
+        is_gfx950
+        and q_is_fp8
+        and kv_is_fp8
+        and gqa_ratio == _AITER_SILENT_WRONG_GQA
+        and max_qo_len in _AITER_SILENT_WRONG_QLENS
+        and not persistent
+    )
+
 
 class _DCPDecodeRoute(Enum):
     PLAIN = "plain"
@@ -3633,6 +3690,31 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             # qlen > 1. If that path is running without persistent metadata,
             # zero-fill so unwritten lanes cannot leak into logits.
             o.zero_()
+
+        # Refuse the AITER combination that returns uncorrelated output with no
+        # error, rather than pass it through. See the note on
+        # `_aiter_mla_decode_is_silently_wrong`.
+        fp8_dtype = current_platform.fp8_dtype()
+        if _aiter_mla_decode_is_silently_wrong(
+            q_is_fp8=mla_padded_q.dtype == fp8_dtype,
+            kv_is_fp8=kv_c_and_k_pe_cache.dtype == fp8_dtype,
+            gqa_ratio=mla_num_heads,
+            max_qo_len=decode.max_qo_len,
+            persistent=decode.has_persistent_metadata,
+            is_gfx950=_aiter_mla_on_gfx950(),
+        ):
+            raise RuntimeError(
+                "ROCM_AITER_MLA would dispatch "
+                "mla_a8w8_qh64_qseqlen4_gqaratio16, which returns output "
+                "uncorrelated with the reference and raises nothing: fp8 "
+                f"query + fp8 KV at gqa_ratio={mla_num_heads}, "
+                f"decode_qlen={decode.max_qo_len}, non-persistent, on gfx950. "
+                "Refusing so this cannot corrupt results silently. Workarounds: "
+                "use a speculative depth giving decode_qlen 1-2 or >4, a "
+                "different query-head count per rank, a non-fp8 KV cache, or "
+                "another MLA backend. See "
+                "https://github.com/vllm-project/vllm/issues/66141"
+            )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
