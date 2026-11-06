@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.utils import hash_config
 from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -411,6 +412,9 @@ class EngineCore:
                 scheduler_kv_cache_config,
                 compilation_times,
             )
+            max_model_len = vllm_config.model_config.max_model_len
+            if max_model_len != max_model_len_after:
+                self.collective_rpc("update_max_model_len", args=(max_model_len,))
             self.model_executor.extend_kv_cache(num_blocks)
         # Under the extensible KV cache, workers create the connector in
         # `extend_kv_cache`, so ask for its block count only afterwards.
@@ -1096,7 +1100,7 @@ class EngineCore:
                 - Level 0: Pause scheduling only. Requests are still accepted
                            but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
-                - Level 2: Discard all GPU memory.
+                - Level 2: Discard model parameters and KV cache.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
             reset_connector: Also reset the KV connector's cache; see
@@ -1550,8 +1554,8 @@ class EngineCoreProc(EngineCore):
             }
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+                ready_msg["parallel_config_hash"] = hash_config(
+                    vllm_config.parallel_config
                 )
             if vllm_config.parallel_config.enable_elastic_ep:
                 ready_msg["coord_store_port"] = (
@@ -2083,11 +2087,11 @@ class EngineCoreProc(EngineCore):
             )
 
     def _config_hash(self) -> str | None:
-        """`compute_hash()` of the initialized config, the hash part of a
+        """`hash_config()` of the initialized config, the hash part of a
         frontend's `system_fingerprint`. Like the frontend, never fail startup
         over the fingerprint."""
         try:
-            return self.vllm_config.compute_hash()
+            return hash_config(self.vllm_config)
         except Exception:
             return None
 
