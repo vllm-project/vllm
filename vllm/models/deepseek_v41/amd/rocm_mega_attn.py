@@ -92,7 +92,9 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
         super().__init__(*args, **kwargs)
         # Batches a CUDA graph can capture keep Q RoPE in the prep, since a
         # graph would replay one step's decode/prefill split. The prep and
-        # forward_mqa decide on the same row count.
+        # forward_mqa decide on the same row count. Below 512 rows the extra
+        # decode-row rotation costs about what the fused prep saves: on
+        # MI325X, a step with 4 decode rows breaks even near 384.
         captured = vllm_config.compilation_config.max_cudagraph_capture_size or 0
         self._attn_rotates_q_from = (
             max(captured, 512) + 1 if get_cdna_version() == 3 else None

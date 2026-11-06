@@ -1938,14 +1938,18 @@ def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
     torch.testing.assert_close(out.float() / mag, ref / mag, atol=3e-3, rtol=0.02)
     # The max error is set by BF16/FP8 rounding. A row sum built from P values
     # other than the rounded BF16 ones fed to PV shows up only in the RMS:
-    # over seeds 1-12 it is 2.1-2.3e-4 with the rounded P, 3.1-3.4e-4 without.
+    # this seed gives 2.1e-4 with the rounded P, and seeds 1-12 give
+    # 2.1-2.3e-4 with it and 3.1-3.4e-4 without.
     rms = ((out.float() - ref) / mag).pow(2).mean().sqrt().item()
     assert rms < 2.7e-4, rms
 
 
-def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
+def _mega_layer(
+    n_decode: int, n_prefill: int, device: torch.device, decode_len: int = 1
+):
     """A CDNA3 mega layer with only the attention state, over one prefill
-    request and ``n_decode`` one-token decode requests."""
+    request and ``n_decode`` decode requests of ``decode_len`` tokens each, as
+    speculative decoding verifies."""
     from vllm.forward_context import ForwardContext
     from vllm.models.deepseek_v41.amd.rocm_mega_attn import (
         DeepseekV41ROCMAiterMegaAttnAttention,
@@ -1955,7 +1959,8 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
     )
 
     heads, window, ratio, topk, block = 16, 32, 2, 64, 16
-    n_tokens = n_decode + n_prefill
+    decode_tokens = n_decode * decode_len
+    n_tokens = decode_tokens + n_prefill
     seq_len = ratio * topk + n_prefill
     layer = DeepseekV41ROCMAiterMegaAttnAttention.__new__(
         DeepseekV41ROCMAiterMegaAttnAttention
@@ -1994,11 +1999,13 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
     topk_rows[1::2, topk // 2 :] = -1
     layer.topk_indices_buffer = topk_rows
     swa_rows = torch.randint(
-        0, seq_len, (n_decode, window), device=device, dtype=torch.int32
+        0, seq_len, (decode_tokens, window), device=device, dtype=torch.int32
     )
-    swa_lens = torch.full((n_decode,), window, device=device, dtype=torch.int32)
+    swa_lens = torch.full((decode_tokens,), window, device=device, dtype=torch.int32)
     ragged, indptr = build_ragged_indices_from_dense(swa_rows, swa_lens)
-    starts = torch.tensor([*range(n_decode + 1), n_tokens], dtype=torch.int32)
+    starts = torch.tensor(
+        [*range(0, decode_tokens + 1, decode_len), n_tokens], dtype=torch.int32
+    )
     n_reqs = n_decode + 1
     swa_table = torch.arange(
         layer.swa_cache_layer.kv_cache.shape[0], device=device, dtype=torch.int32
@@ -2008,7 +2015,7 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
     compressed_rows = seq_len // ratio
     swa_metadata = SimpleNamespace(
         num_decodes=n_decode,
-        num_decode_tokens=n_decode,
+        num_decode_tokens=decode_tokens,
         num_prefills=1,
         num_prefill_tokens=n_prefill,
         block_size=block,
@@ -2020,7 +2027,9 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
         decode_swa_ragged_indptr=indptr,
         token_to_req_indices=torch.cat(
             (
-                torch.arange(n_decode, device=device, dtype=torch.int32),
+                torch.arange(
+                    n_decode, device=device, dtype=torch.int32
+                ).repeat_interleave(decode_len),
                 torch.full((n_prefill,), n_decode, device=device, dtype=torch.int32),
             )
         ),
@@ -2047,7 +2056,7 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
     )
     positions = torch.cat(
         (
-            torch.full((n_decode,), seq_len - 1, device=device),
+            torch.arange(seq_len - decode_len, seq_len, device=device).repeat(n_decode),
             torch.arange(prefill_start, seq_len, device=device),
         )
     )
@@ -2066,11 +2075,11 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
     def reference(q_rope: torch.Tensor) -> torch.Tensor:
         out = torch.zeros(n_tokens, heads, HEAD_DIM, device=device)
         for row in range(n_tokens):
-            if row < n_decode:
+            if row < decode_tokens:
                 slots = swa_rows[row].tolist()
                 candidates = topk_rows[row].tolist()
             else:
-                pos = prefill_start + row - n_decode
+                pos = prefill_start + row - decode_tokens
                 slots = list(range(max(0, pos - window + 1), pos + 1))
                 candidates = topk_rows[row, : (pos + 1) // ratio].tolist()
             kv = torch.cat([swa[slots], comp[[i for i in candidates if i >= 0]]])
@@ -2089,8 +2098,11 @@ def _mega_layer(n_decode: int, n_prefill: int, device: torch.device):
 
 @requires_cdna3
 @pytest.mark.parametrize("kernel_rotates_q", [False, True])
+@pytest.mark.parametrize("decode_len", [1, 3])
 @torch.inference_mode()
-def test_hip_mega_forward_mqa_decode_and_prefill(kernel_rotates_q: bool) -> None:
+def test_hip_mega_forward_mqa_decode_and_prefill(
+    kernel_rotates_q: bool, decode_len: int
+) -> None:
     """A decode+prefill step through the CDNA3 mega layer's forward_mqa. Q
     arrives rotated, or raw for the prefill kernel and forward_mqa to rotate.
     Prefill rows come back inverse-RoPE'd once: rotating them again, as a layer
@@ -2102,8 +2114,10 @@ def test_hip_mega_forward_mqa_decode_and_prefill(kernel_rotates_q: bool) -> None
     torch.manual_seed(31)
     init_workspace_manager(device)
     n_decode, n_prefill = 3, 37
-    layer, context, positions, reference = _mega_layer(n_decode, n_prefill, device)
-    q = torch.randn(n_decode + n_prefill, 16, HEAD_DIM, device=device).bfloat16()
+    layer, context, positions, reference = _mega_layer(
+        n_decode, n_prefill, device, decode_len
+    )
+    q = torch.randn(positions.shape[0], 16, HEAD_DIM, device=device).bfloat16()
     q_rope = _rope_q(q, positions, layer.rotary_emb.cos_sin_cache)
     expected = reference(q_rope)
     kv = torch.zeros(q.shape[0], HEAD_DIM, device=device, dtype=torch.bfloat16)
@@ -2121,6 +2135,52 @@ def test_hip_mega_forward_mqa_decode_and_prefill(kernel_rotates_q: bool) -> None
     layer._prefill_rotates_bf16 = False
     with pytest.raises(AssertionError):
         torch.testing.assert_close(run(), expected, atol=3e-3, rtol=0.02)
+
+
+@requires_cdna3
+@pytest.mark.parametrize("decode_len", [1, 3])
+@torch.inference_mode()
+def test_hip_mega_kernel_q_rope_matches_fused_prep(decode_len: int) -> None:
+    """Above the CUDA graph sizes the Q prep only inserts KV, and the prefill
+    kernel and forward_mqa rotate Q. The SWA cache bytes, the decode rows' Q
+    and the attention output all match the fused prep's bit for bit."""
+    from vllm.forward_context import override_forward_context
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda")
+    torch.manual_seed(37)
+    init_workspace_manager(device)
+    layer, context, positions, _ = _mega_layer(3, 37, device, decode_len)
+    layer.use_pcp = layer._pads_q_by_copy = False
+    tokens = positions.shape[0]
+    swa_metadata = context.attn_metadata["swa"]
+    cache = layer.swa_cache_layer.kv_cache
+    swa_metadata.slot_mapping = torch.randperm(
+        cache.shape[0] * swa_metadata.block_size, device=device
+    )[:tokens]
+    q = torch.randn(tokens, 16, HEAD_DIM, device=device).bfloat16()
+    kv = torch.randn(tokens, HEAD_DIM, device=device).bfloat16()
+    initial = cache.clone()
+
+    def step(rotates_from: int | None):
+        layer._attn_rotates_q_from = rotates_from
+        cache.copy_(initial)
+        with override_forward_context(context):
+            q_attn = layer._fused_qnorm_rope_kv_insert(
+                q.clone(), kv, positions, context.attn_metadata
+            )
+            out = layer._alloc_attn_out(tokens, q)
+            layer.forward_mqa(q_attn, kv, positions, out)
+        return cache.clone(), q_attn, out
+
+    fused_cache, fused_q, fused_out = step(None)
+    cache_bytes, q_attn, out = step(1)
+    assert layer._prefill_rotate_q
+    assert not torch.equal(fused_cache, initial)
+    assert torch.equal(cache_bytes, fused_cache)
+    decode_tokens = swa_metadata.num_decode_tokens
+    assert torch.equal(q_attn[:decode_tokens], fused_q[:decode_tokens])
+    assert torch.equal(out, fused_out)
 
 
 @requires_gfx950

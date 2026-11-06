@@ -1250,6 +1250,7 @@ steps:
     tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_paged_prefill_bf16_output
     tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_paged_prefill_bf16_long_ramp
     tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_forward_mqa_decode_and_prefill
+    tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_hip_mega_kernel_q_rope_matches_fused_prep
     tests/kernels/test_compressor_kv_cache.py::test_v41_fp8_ds_mla_record_has_no_negative_zero
   - >-
     pytest -v -s
