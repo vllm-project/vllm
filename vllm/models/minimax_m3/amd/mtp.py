@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
+from vllm.model_executor.utils import in_weight_update
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     msa_indexer_cp_enabled,
@@ -351,11 +352,6 @@ class MiniMaxM3MTP(nn.Module):
             return name.replace(".mtp.", ".")
         return None
 
-    def finish_checkpoint_load(self, loaded: set[str]) -> None:
-        # A complete checkpoint without embeddings borrows the target's.
-        if self._tracks_own_embed:
-            self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Map q/k/v projections to qkv_proj, and gate/up projections to gate_up_proj.
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
@@ -439,6 +435,10 @@ class MiniMaxM3MTP(nn.Module):
 
             loaded_params.add(name)
 
-        if self._tracks_own_embed and "model.embed_tokens.weight" in loaded_params:
-            self.has_own_embed_tokens = True
+        if self._tracks_own_embed:
+            if "model.embed_tokens.weight" in loaded_params:
+                self.has_own_embed_tokens = True
+            elif not in_weight_update(self):
+                # A complete checkpoint without embeddings borrows the target's.
+                self.has_own_embed_tokens = False
         return loaded_params

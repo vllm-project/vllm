@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
+from vllm.model_executor.utils import in_weight_update
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -232,7 +233,6 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
-    _loaded_confidence_head = False
     # The speculator this is a draft model of (see SpeculativeDraftModel).
     speculator_config_class = DSparkSpeculatorConfig
     model_cls = Qwen3DSparkModel
@@ -319,16 +319,12 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
-    def finish_checkpoint_load(self, loaded: set[str] | None) -> None:
-        # Cold start only: one bucket of an update may lack this optional head.
-        if not self._loaded_confidence_head:
-            self.model.confidence_head = None
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_embed_tokens = False
         includes_lm_head = False
         includes_draft_id_mapping = False
+        includes_confidence_head = False
         for name, loaded_weight in weights:
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
@@ -343,7 +339,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             if "lm_head" in name:
                 includes_lm_head = True
             if "confidence_head" in name:
-                self._loaded_confidence_head = True
+                includes_confidence_head = True
             model_weights[name] = loaded_weight
             # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
             # knows whether to keep these or alias the target's.
@@ -360,6 +356,8 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
+        if not includes_confidence_head and not in_weight_update(self):
+            self.model.confidence_head = None
         if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)

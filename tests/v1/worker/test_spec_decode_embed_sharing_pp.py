@@ -194,7 +194,7 @@ def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
         weights.append((key, torch.ones(VOCAB, HIDDEN)))
     loaded = draft.load_weights(weights)
     assert ("model.embed_tokens.weight" in loaded) is (key is not None)
-    draft.finish_checkpoint_load(loaded)
+    draft._in_weight_update = True
     draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
     assert draft.has_own_embed_tokens is (key is not None)
     target = _inner(_embed(fill=2.0))
@@ -217,6 +217,7 @@ def test_m3_direct_loader_embedding_ownership(make_m3_draft, m3_config, load_for
     draft.load_state_dict(
         {key: torch.ones_like(value) for key, value in draft.state_dict().items()}
     )
+    draft._in_weight_update = True
     draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
@@ -286,7 +287,8 @@ def test_m3_weight_transfer_updates_embedding_ownership(make_m3_draft, initial_e
     weights = [("model.mtp.layers.0.weight", torch.ones(1, 1))]
     if initial_embed:
         weights.append(("model.embed_tokens.weight", torch.ones(VOCAB, HIDDEN)))
-    draft.finish_checkpoint_load(draft.load_weights(weights))
+    draft.load_weights(weights)
+    draft._in_weight_update = True
     draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
     assert draft.has_own_embed_tokens is initial_embed
     draft.load_weights(

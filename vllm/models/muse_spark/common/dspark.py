@@ -544,9 +544,6 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             out = gather_columns(out.view(-1, out.shape[-1])).view(*out.shape[:-1], -1)
         return out
 
-    def finish_checkpoint_load(self, loaded: set[str] | None) -> None:
-        pass  # the config, not the checkpoint, decides this model's head
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         model_weights = {}
         for name, loaded_weight in weights:
