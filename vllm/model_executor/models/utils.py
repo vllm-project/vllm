@@ -992,7 +992,11 @@ def single_pp_stage() -> Iterator[None]:
 
 
 def get_pp_stage() -> PPStage:
-    """The pipeline stage of the model being built."""
+    """Return the pipeline stage of the model being built.
+
+    Only valid during model construction. Store the result on the model
+    instead of calling this in `forward`.
+    """
     if _single_pp_stage.get():
         return PPStage(rank_in_group=0, world_size=1)
     from vllm.distributed.parallel_state import get_pp_group
