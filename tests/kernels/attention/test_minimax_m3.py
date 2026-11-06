@@ -3,6 +3,7 @@
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -3493,3 +3494,99 @@ def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
         blk, intra = divmod(slot, BLOCK_SIZE)
         torch.testing.assert_close(kv_cache[blk, :, intra, :HEAD_DIM], key[t])
         torch.testing.assert_close(kv_cache[blk, :, intra, HEAD_DIM:], value[t])
+
+
+@pytest.mark.parametrize(
+    ("name", "expected", "shard_id"),
+    [
+        ("model.layers.0.self_attn.q_proj.weight_scale_inv", "qkv_proj", "q"),
+        ("model.layers.0.self_attn.index_q_proj.weight", "qkv_proj", "index_q"),
+        ("model.layers.0.self_attn.index_k_proj.weight", "qkv_proj", "index_k"),
+        ("model.layers.0.mlp.up_proj.weight", "gate_up_proj", 1),
+    ],
+)
+def test_weights_mapper_stacks_fused_projections(name, expected, shard_id):
+    from vllm.models.minimax_m3.nvidia import model as nvidia_model
+
+    mapper = nvidia_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
+
+    result = mapper._map_name_with_shard(name)
+
+    assert result is not None
+    assert expected in result[0] and "weight_scale_inv" not in result[0]
+    assert result[1] == shard_id
+
+
+def test_weights_mapper_drops_mtp_weights():
+    from vllm.models.minimax_m3.nvidia import model as nvidia_model
+
+    mapper = nvidia_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
+
+    assert mapper.map_name("mtp.layers.0.self_attn.q_proj.weight") is None
+
+
+def test_redirect_fused_shared_experts_only_moves_fused_layers():
+    from vllm.models.minimax_m3.nvidia import model as nvidia_model
+
+    def moe(fused):
+        experts = SimpleNamespace(has_fused_shared_experts=fused)
+        return SimpleNamespace(block_sparse_moe=SimpleNamespace(experts=experts))
+
+    model = SimpleNamespace(layers=[moe(True), moe(False), object()])
+    names = [
+        f"model.layers.{i}.block_sparse_moe.shared_experts.gate_proj.weight"
+        for i in range(3)
+    ]
+    weights = [(name, torch.ones(1)) for name in names]
+
+    redirected = nvidia_model._redirect_fused_shared_experts(weights, model)
+
+    assert [name for name, _ in redirected] == [
+        "model.layers.0.block_sparse_moe.experts.shared_experts.w1.weight",
+        names[1],
+        names[2],
+    ]
+
+
+def test_mega_moe_experts_load_routed_and_fused_shared_weights(monkeypatch):
+    from vllm.models.minimax_m3.nvidia import model as nvidia_model
+
+    experts_cls = nvidia_model.MiniMaxM3MegaMoEExperts
+    experts = experts_cls.__new__(experts_cls)
+    torch.nn.Module.__init__(experts)
+    calls = []
+
+    def weight_loader(param, weight, name, shard_id, expert_id):
+        calls.append((name, shard_id, expert_id))
+
+    for name in ("w13_weight", "w2_weight_scale_2", "w2_input_scale"):
+        setattr(experts, name, torch.nn.Parameter(torch.zeros(1)))
+        getattr(experts, name).weight_loader = weight_loader
+    monkeypatch.setattr(
+        experts,
+        "load_shared_expert_weight",
+        lambda name, weight: "experts.shared_l1_weight",
+        raising=False,
+    )
+    weight = torch.ones(1)
+    weights = [
+        ("3.w1.weight_packed", weight),
+        ("3.w2.weight_global_scale", weight),
+        ("3.w2.input_global_scale", weight),
+        ("3.w1.input_global_scale", weight),
+        ("shared_experts.w1.weight", weight),
+    ]
+
+    loaded = list(experts.load_weights(weights))
+
+    assert loaded == [
+        "w13_weight",
+        "w2_weight_scale_2",
+        "w2_input_scale",
+        "shared_l1_weight",
+    ]
+    assert calls == [
+        ("w13_weight", "w1", 3),
+        ("w2_weight_scale_2", "w2", 3),
+        ("w2_input_scale", "w2", 3),
+    ]
