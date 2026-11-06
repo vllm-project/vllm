@@ -144,29 +144,52 @@ def split_addresses(value: str | None) -> list[str]:
 
 
 def seed_address(
-    value: str | None, local_rank: int, global_rank: int, port_offset: int = 0
+    value: str | None,
+    local_rank: int,
+    global_rank: int,
+    port_offset: int = 0,
+    world_size: int | None = None,
 ) -> str | tuple[str, int] | None:
-    """Resolve one daemon's seed source address (per-GPU sockets or host:base_port)."""
-    addresses = split_addresses(value)
-    if not addresses:
+    """Resolve one daemon's seed source address.
+
+    A comma-separated list of Unix socket paths names one per local GPU
+    (same-host peer_ipc copies). One or more ``host:base_port`` entries name
+    a remote replica's nodes in node order, with one entry per source node:
+    global rank ``g`` dials entry ``g // (world_size // N)`` at
+    ``port + port_offset + g``.
+    """
+    parsed = [parse_seed_address(address) for address in split_addresses(value)]
+    if not parsed:
         return None
-    if len(addresses) > 1:
-        if local_rank >= len(addresses):
+    socket_paths = [address for address in parsed if isinstance(address, str)]
+    remote_hosts = [address for address in parsed if isinstance(address, tuple)]
+    if socket_paths and remote_hosts:
+        raise ValueError(
+            "--weight-cache-seed cannot mix Unix socket paths with host:port "
+            "entries; a same-host mirror takes socket paths only, and a "
+            "remote source takes one host:base_port per source node"
+        )
+    if socket_paths:
+        if len(socket_paths) == 1:
+            return socket_paths[0]
+        if local_rank >= len(socket_paths):
             raise ValueError(
-                f"--weight-cache-seed has {len(addresses)} addresses but local "
-                f"GPU {local_rank} needs one; pass one address per local GPU"
+                f"--weight-cache-seed has {len(socket_paths)} addresses but "
+                f"local GPU {local_rank} needs one; pass one address per "
+                "local GPU"
             )
-        address = parse_seed_address(addresses[local_rank])
-        if not isinstance(address, str):
+        return socket_paths[local_rank]
+    if len(remote_hosts) > 1:
+        if world_size is None or world_size % len(remote_hosts) != 0:
             raise ValueError(
-                "Per-GPU --weight-cache-seed addresses must be Unix socket "
-                "paths; a remote source takes a single host:base_port"
+                "Multi-host --weight-cache-seed passes one host:base_port "
+                f"per source node, so its count ({len(remote_hosts)}) must "
+                f"divide the world size ({world_size})"
             )
-        return address
-    address = parse_seed_address(addresses[0])
-    if isinstance(address, str):
-        return address
-    host, port = address
+        ranks_per_node = world_size // len(remote_hosts)
+        host, port = remote_hosts[global_rank // ranks_per_node]
+    else:
+        host, port = remote_hosts[0]
     return host, port + port_offset + global_rank
 
 

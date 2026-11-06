@@ -200,6 +200,54 @@ listeners sit past the target group's block, so the same address seeds the
 draft group too. An IPv6 source is written `[address]:base_port`. The remote
 form pulls over Mooncake RDMA and requires `--seed-token`.
 
+### Seeding from a source spread across multiple nodes
+
+When the source replica spans several nodes, `--weight-cache-seed` takes one
+`host:base_port` entry per source node, in source node order, and each entry
+may carry its own base port:
+
+```bash
+# source replica: TP8 across two 4-GPU nodes
+# node 0
+vllm preload --model /path/to/model --tensor-parallel-size 8 \
+    --nnodes 2 --node-rank 0 --master-addr 10.0.0.1 \
+    --weight-cache-master-port 29600 \
+    --seed-listen-host 0.0.0.0 --seed-listen-port 29700 \
+    --seed-token "$TOKEN"
+# node 1
+vllm preload --model /path/to/model --tensor-parallel-size 8 \
+    --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \
+    --weight-cache-master-port 29600 \
+    --seed-listen-host 0.0.0.0 --seed-listen-port 29700 \
+    --seed-token "$TOKEN"
+
+# mirror replica: also TP8 across two 4-GPU nodes; every mirror node's
+# launcher passes the same seed list
+# node 0
+vllm preload --model /path/to/model --tensor-parallel-size 8 \
+    --nnodes 2 --node-rank 0 --master-addr 10.0.0.3 \
+    --weight-cache-master-port 29600 \
+    --weight-cache-seed 10.0.0.1:29700,10.0.0.2:29700 \
+    --seed-token "$TOKEN"
+# node 1
+vllm preload --model /path/to/model --tensor-parallel-size 8 \
+    --nnodes 2 --node-rank 1 --master-addr 10.0.0.3 \
+    --weight-cache-master-port 29600 \
+    --weight-cache-seed 10.0.0.1:29700,10.0.0.2:29700 \
+    --seed-token "$TOKEN"
+```
+
+vLLM assigns global ranks to nodes in contiguous blocks, so global rank *g*
+resolves to entry `g // (world_size // N)` of the list: above, ranks 0-3
+seed from `10.0.0.1:29700` and ranks 4-7 from `10.0.0.2:29700`, with each
+rank dialing its entry's base port plus the group offset and its global
+rank — the same rule the source's listeners bind by. The number of entries
+must divide the world size, and a single entry is exactly the single-host
+form above. The draft daemon group's port block rule is unchanged: its
+listeners sit past the target group's block on each source node, so the
+same list seeds the draft group too. Socket paths and `host:port` entries
+cannot be mixed in one list.
+
 !!! warning
     The seed listener is a network service. It is JSON only and
     authenticates before it decodes a payload, so an unauthenticated peer
@@ -337,7 +385,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
   seeded; single-rank daemons use FlashInfer's managed v2 store and always
   tune in place. Seeding requires a trusted network — the TCP channel is
-  authenticated by a shared token but unencrypted.
+  authenticated by a shared token but unencrypted. The standalone
+  `--seed-source-host` / `--seed-source-port` form addresses a single host
+  only; the multi-entry list form applies to `--weight-cache-seed` alone.
 - **Weight seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC
   handle is node-local; `rdma` requires Mooncake on both sides. A mirror
   copies the weights into its own memory, so it does not depend on the

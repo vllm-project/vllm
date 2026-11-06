@@ -1341,6 +1341,83 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     assert json.loads(target.read_text()) == table
 
 
+def test_seed_address_single_remote_host_dials_base_plus_rank():
+    """One host:base_port keeps the existing dial rule on every rank."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        seed_address,
+    )
+
+    for rank in range(8):
+        assert seed_address("source.example.com:9000", rank, rank, 10) == (
+            "source.example.com",
+            9010 + rank,
+        )
+
+
+def test_seed_address_multi_host_maps_contiguous_rank_blocks():
+    """Global rank g dials entry g // (world_size // N) at that entry's port."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        seed_address,
+    )
+
+    value = "node0:8000,node1:9000"
+    for rank in range(4):
+        assert seed_address(value, rank, rank, 5, world_size=8) == (
+            "node0",
+            8005 + rank,
+        )
+    for rank in range(4, 8):
+        assert seed_address(value, rank, rank, 5, world_size=8) == (
+            "node1",
+            9005 + rank,
+        )
+
+
+def test_seed_address_multi_host_one_entry_per_rank():
+    """N == world_size: every rank resolves to its own entry."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        seed_address,
+    )
+
+    value = "node0:8000,node1:9000"
+    assert seed_address(value, 0, 0, world_size=2) == ("node0", 8000)
+    assert seed_address(value, 1, 1, world_size=2) == ("node1", 9001)
+
+
+def test_seed_address_multi_host_requires_divisible_world_size():
+    """The entry count must divide the world size (one entry per node)."""
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        seed_address,
+    )
+
+    with pytest.raises(ValueError, match="must divide the world size"):
+        seed_address("node0:8000,node1:9000", 0, 0, world_size=3)
+    with pytest.raises(ValueError, match="must divide the world size"):
+        seed_address("node0:8000,node1:9000", 0, 0)
+
+
+def test_seed_address_rejects_mixed_socket_and_remote_forms():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        seed_address,
+    )
+
+    with pytest.raises(ValueError, match="cannot mix Unix socket paths"):
+        seed_address("/tmp/source.sock,127.0.0.1:9000", 0, 0)
+
+
+def test_seed_address_unix_socket_forms_unchanged():
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        seed_address,
+    )
+
+    assert seed_address(None, 0, 0) is None
+    assert seed_address("", 0, 0) is None
+    assert seed_address("/tmp/source.sock", 1, 1) == "/tmp/source.sock"
+    assert seed_address("/tmp/a.sock,/tmp/b.sock", 1, 3) == "/tmp/b.sock"
+    with pytest.raises(ValueError, match="one address per local GPU"):
+        seed_address("/tmp/a.sock,/tmp/b.sock", 2, 0)
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
@@ -1471,6 +1548,72 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
             assert float(transfer.group(1)) < 10.0
             mirror_outputs = generate(
                 vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_d2d_weight_seeding_multi_host(vllm_runner, tmp_path):
+    """A multi-host --weight-cache-seed list seeds every rank from its own
+    host:base_port entry.
+
+    Both replicas run on this host at tp=2, but the exchange goes through the
+    token-authenticated TCP listener exactly as a cross-host seed would. The
+    mirror passes two comma-separated loopback entries, so with world_size ==
+    N == 2 global rank g resolves to entry g and dials base_port + g — the
+    source rank g's listener. Identical outputs with fallback disabled prove
+    the mirrored weights are real.
+    """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    pytest.importorskip("mooncake.engine")
+
+    case = replace(
+        QWEN_CASE,
+        llm_kwargs={**QWEN_CASE.llm_kwargs, "tensor_parallel_size": 2},
+    )
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    token = "d2d-multi-host-test-token"
+    base_port = get_open_port()
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=2,
+        extra_args=[
+            *case.daemon_args,
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(base_port),
+            "--seed-token",
+            token,
+        ],
+    ) as source:
+        source.wait_until_ready()
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[
+                *case.daemon_args,
+                "--weight-cache-seed",
+                f"127.0.0.1:{base_port},127.0.0.1:{base_port}",
+                "--seed-token",
+                token,
+            ],
+        ) as mirror:
+            mirror.wait_until_ready()
+            # Both ranks mirrored through the remote control plane.
+            assert mirror.logs.count(" over rdma ") == 2
+            transfers = re.findall(r"Mirrored .* in ([\d.]+)s", mirror.logs)
+            assert len(transfers) == 2
+            # Loopback RDMA is latency-dominated (~1s); bound stalls, not
+            # bandwidth.
+            assert all(float(transfer) < 10.0 for transfer in transfers)
+            mirror_outputs = generate(
+                vllm_runner, case, mirror.socket_dir, fallback=False
             )
 
     assert mirror_outputs == baseline_outputs

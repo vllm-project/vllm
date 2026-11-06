@@ -130,12 +130,20 @@ def _validate_seed_args(
         parse_seed_address(address)
         for address in split_addresses(args.weight_cache_seed)
     ]
-    remote_seed = any(not isinstance(address, str) for address in parsed)
-    if len(parsed) > 1 and remote_seed:
+    remote_hosts = [address for address in parsed if isinstance(address, tuple)]
+    if remote_hosts and len(remote_hosts) != len(parsed):
         raise ValueError(
-            "Per-GPU --weight-cache-seed addresses must be Unix socket "
-            "paths; a remote source takes a single host:base_port"
+            "--weight-cache-seed cannot mix Unix socket paths with host:port "
+            "entries; a same-host mirror takes socket paths only, and a "
+            "remote source takes one host:base_port per source node"
         )
+    if len(remote_hosts) > 1 and world_size % len(remote_hosts) != 0:
+        raise ValueError(
+            "Multi-host --weight-cache-seed passes one host:base_port per "
+            f"source node, so its count ({len(remote_hosts)}) must divide "
+            f"the world size ({world_size})"
+        )
+    remote_seed = bool(remote_hosts)
     # A token only protects the TCP planes: the listener and a remote source.
     has_remote = (
         args.seed_listen_host is not None
@@ -248,7 +256,10 @@ class PreloadSubcommand(CLISubcommand):
             "path per local GPU (comma separated, in device order) for "
             "same-host CUDA IPC copies, or one host:base_port for cross-host "
             "copies over Mooncake RDMA, where each rank dials base_port + "
-            "its global rank. The host:base_port form also seeds the "
+            "its global rank. A source replica spanning nodes takes one "
+            "host:base_port per source node (comma separated, in node "
+            "order); global rank g dials entry g // (world_size // N). The "
+            "host:base_port form also seeds the "
             "speculative draft daemon group, whose listeners sit past the "
             "target group's port block.",
         )
@@ -391,7 +402,11 @@ class PreloadSubcommand(CLISubcommand):
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
                 offset = port_offset + global_rank
                 peer_source = seed_address(
-                    args.weight_cache_seed, local_rank, global_rank, port_offset
+                    args.weight_cache_seed,
+                    local_rank,
+                    global_rank,
+                    port_offset,
+                    world_size=world_size,
                 )
                 source: str | tuple[str, int] | None
                 if peer_source is not None:
