@@ -162,6 +162,7 @@ def select_candidate_blocks(
     block_size: int,
     out: torch.Tensor,
     row_repeat: int = 1,
+    score_dtype: torch.dtype | None = None,
 ) -> None:
     """Select local block IDs by maximum score, pinning each row's newest block.
 
@@ -176,20 +177,21 @@ def select_candidate_blocks(
         out.fill_(-1)
         return
     nblocks = triton.cdiv(width, block_size)
+    score_dtype = score_dtype or logits.dtype
     # Logits are max_model_len wide (CUDA-graph static) but rows are shorter:
     # DeepSelect stops at each row's valid block count. Order does not matter.
     use_deep_select = has_deep_select() and nblocks >= topk_blocks
     if use_deep_select:
         in_align, out_align = get_deep_select_stride_requirement()
-        padded = round_up(nblocks, in_align // logits.element_size())
-        scores = logits.new_empty((rows, padded))[:, :nblocks]
+        padded = round_up(nblocks, in_align // score_dtype.itemsize)
+        scores = logits.new_empty((rows, padded), dtype=score_dtype)[:, :nblocks]
         use_deep_select = (
             out.stride(1) == 1
             and out.stride(0) * out.element_size() % out_align == 0
             and is_deep_select_supported(scores, topk_blocks)
         )
     else:
-        scores = logits.new_empty((rows, nblocks))
+        scores = logits.new_empty((rows, nblocks), dtype=score_dtype)
     valid_blocks = torch.empty(rows, dtype=torch.int32, device=logits.device)
     _block_scores_kernel[(rows, 32)](
         logits,
