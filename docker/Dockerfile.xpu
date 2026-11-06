@@ -190,8 +190,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
       --extra-index-url=https://wheels.vllm.ai/nightly/xpu/ \
       --extra-index-url=https://download.pytorch.org/whl/xpu \
             --index-strategy unsafe-best-match && \
-                uv pip install --no-build-isolation \
-                    --extra-index-url=https://wheels.vllm.ai/xpu/ \
-                    -r /workspace/vllm/requirements/test/xpu.txt
+        uv pip install --no-build-isolation \
+            --extra-index-url=https://wheels.vllm.ai/nightly/xpu/ \
+            --extra-index-url=https://wheels.vllm.ai/xpu/ \
+            --extra-index-url=https://download.pytorch.org/whl/xpu \
+            --index-strategy unsafe-best-match \
+            -r /workspace/vllm/requirements/test/xpu.txt
 
 ENTRYPOINT ["vllm", "serve"]
