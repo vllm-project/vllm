@@ -248,13 +248,13 @@ async def async_request_openai_completions(
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
+    stream_error: str | None = None
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
                 saw_done = False
                 server_aborted = False
-                stream_error: str | None = None
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
@@ -327,7 +327,6 @@ async def async_request_openai_completions(
                     )
                 else:
                     output.success = True
-                output.generated_text = generated_text
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
@@ -335,8 +334,9 @@ async def async_request_openai_completions(
     except Exception:
         output.success = False
         exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+        output.error = stream_error or "".join(traceback.format_exception(*exc_info))
 
+    output.generated_text = generated_text
     if pbar:
         pbar.update(1)
     return output
@@ -468,13 +468,13 @@ async def async_request_openai_chat_completions(
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
+    stream_error: str | None = None
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
                 saw_done = False
                 server_aborted = False
-                stream_error: str | None = None
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     if not chunk_bytes:
@@ -524,7 +524,6 @@ async def async_request_openai_chat_completions(
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
 
-                output.generated_text = generated_text
                 if stream_error is not None:
                     output.success = False
                     output.error = stream_error
@@ -552,8 +551,9 @@ async def async_request_openai_chat_completions(
     except Exception:
         output.success = False
         exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+        output.error = stream_error or "".join(traceback.format_exception(*exc_info))
 
+    output.generated_text = generated_text
     if pbar:
         pbar.update(1)
     return output

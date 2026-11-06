@@ -32,7 +32,9 @@ def _choice(backend: str, **kwargs) -> bytes:
     return _sse({"choices": [{"index": 0, **content, **kwargs}]})
 
 
-async def _request(backend: str, stream: bytes) -> RequestFuncOutput:
+async def _request(
+    backend: str, stream: bytes, *, close_early: bool = False
+) -> RequestFuncOutput:
     async def handler(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
         assert payload["stream"] is True
@@ -42,13 +44,21 @@ async def _request(backend: str, stream: bytes) -> RequestFuncOutput:
         # Split both UTF-8 characters and the terminal marker across writes.
         for offset in range(0, len(stream), 3):
             await response.write(stream[offset : offset + 3])
+        if close_early:
+            assert request.transport is not None
+            request.transport.close()
+            return response
         await response.write_eof()
         return response
 
     endpoint = "/v1/completions" if backend == "openai" else "/v1/chat/completions"
     app = web.Application()
     app.router.add_post(endpoint, handler)
-    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+    # Consume the partial body before the premature EOF reaches the client.
+    async with (
+        TestServer(app) as server,
+        aiohttp.ClientSession(read_bufsize=1 if close_early else 2**16) as session,
+    ):
         return await ASYNC_REQUEST_FUNCS[backend](
             RequestFuncInput(
                 prompt="Say hello",
@@ -73,6 +83,25 @@ def test_eof_without_done_is_not_a_success(backend: str, finish_reason: str | No
     assert not output.success
     assert "[DONE]" in output.error
     assert output.generated_text == "Hello 世界"
+
+
+@pytest.mark.parametrize("backend", ["openai", "openai-chat"])
+def test_payload_error_preserves_partial_output(backend: str):
+    """A failed chunked body keeps output received before the transport closes."""
+    output = asyncio.run(_request(backend, _choice(backend), close_early=True))
+    assert not output.success
+    assert "ClientPayloadError" in output.error
+    assert output.generated_text == "Hello 世界"
+
+
+@pytest.mark.parametrize("backend", ["openai", "openai-chat"])
+def test_payload_error_preserves_stream_error(backend: str):
+    error = {"message": "generation failed", "type": "server_error"}
+    stream = _choice(backend) + _sse({"error": error})
+    output = asyncio.run(_request(backend, stream, close_early=True))
+    assert not output.success
+    assert output.generated_text == "Hello 世界"
+    assert json.loads(output.error) == error
 
 
 @pytest.mark.parametrize("backend", ["openai", "openai-chat"])
