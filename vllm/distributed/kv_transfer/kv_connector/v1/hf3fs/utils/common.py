@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.v1.core.kv_cache_utils import resolve_block_hashes
 from vllm.v1.request import Request
 
 
@@ -23,6 +24,26 @@ class AtomicCounter:
             current = self._value
             self._value = (current + 1) % self._n
             return current
+
+
+def external_block_keys(
+    request: Request,
+    hash_block_size: int,
+    block_size: int,
+    num_blocks: int | None = None,
+) -> list[str]:
+    """External cache keys for a request's leading blocks, at ``block_size``.
+
+    Uses the engine's block hashes, which already fold in multimodal, LoRA,
+    ``cache_salt`` and prompt-embeds identity, viewed at the scheduler block size.
+    """
+    keys = [
+        bytes(block_hash).hex()
+        for block_hash in resolve_block_hashes(
+            request.block_hashes, hash_block_size, block_size
+        )
+    ]
+    return keys if num_blocks is None else keys[:num_blocks]
 
 
 @dataclass
@@ -94,6 +115,8 @@ class HF3FSRequestMetadata:
     request_id: str
     token_ids: list[int]
     block_ids: list[int]
+    # External cache key per full block, indexed from block 0.
+    block_keys: list[str] = field(default_factory=list)
     load_block_op: LoadBlockInfo | None = None
     save_block_op: SaveBlockInfo | None = None
 
@@ -101,10 +124,12 @@ class HF3FSRequestMetadata:
     def from_scheduling_state(
         state: "RequestSchedulingState",
         block_size: int,
+        hash_block_size: int,
         load_op: LoadBlockInfo | None = None,
         skip_leading_blocks: int | None = None,
     ) -> Optional["HF3FSRequestMetadata"]:
         """Create request metadata from scheduling state."""
+        assert state.request is not None
         token_count = len(state.token_ids)
         total_blocks = token_count // block_size
 
@@ -123,6 +148,9 @@ class HF3FSRequestMetadata:
             request_id=state.request_id,
             token_ids=state.token_ids,
             block_ids=state.allocated_block_ids,
+            block_keys=external_block_keys(
+                state.request, hash_block_size, block_size, total_blocks
+            ),
             load_block_op=load_op,
             save_block_op=SaveBlockInfo(skip_leading_blocks=skip_blocks),
         )
