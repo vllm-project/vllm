@@ -416,14 +416,26 @@ steps:
       source_file_dependencies:
       - csrc/attention/
       - csrc/core/vec_dtypes/
+      - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
       - vllm/v1/attention
       - vllm/model_executor/layers/attention
       - tests/kernels/attention
+      - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+      - vllm/models/minimax_m3/common/indexer.py
+      - vllm/models/minimax_m3/amd/ops/sparse_pa.py
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+      - >-
+        pytest -v -s
+        kernels/attention
+        --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+        kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -512,8 +524,9 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
 
-- label: ":nvidia: (L4) Quantization Kernels Shard %N"
+- label: ":nvidia: (L4) Quantization Kernels"
   key: kernels-quantization-test
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 30
@@ -522,11 +535,16 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 6
+    # test_cutlass_scaled_mm.py and test_fp8_quant.py each run in their own
+    # pytest: test_fp8_quant.py ran 2.4x slower after test_cutlass_scaled_mm.py
+    # in one process.
+    - pytest -v -s kernels/quantization --ignore=kernels/quantization/test_cutlass_scaled_mm.py --ignore=kernels/quantization/test_fp8_quant.py
+    - pytest -v -s kernels/quantization/test_cutlass_scaled_mm.py
+    - pytest -v -s kernels/quantization/test_fp8_quant.py
   mirror:
     amd:
-      label: ":amd: (MI300) Quantization Kernels Shard %N"
+      automatic_shard: true
+      label: ":amd: (MI300) Quantization Kernels"
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
@@ -549,7 +567,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation"
 
 - label: ":nvidia: (L4) MoE Kernels"
   key: kernels-moe-test
@@ -680,9 +698,11 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+      - tests/kernels/attention/test_minimax_m3_nvfp4_sparse_decode.py
       commands:
       - pytest -v -s tests/kernels/attention/test_minimax_m3.py
           tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+          tests/kernels/attention/test_minimax_m3_nvfp4_sparse_decode.py
 
 - label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
   key: kernels-minimax-m3-sparse-prefill-h100
@@ -753,6 +773,8 @@ steps:
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
+  - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/model_executor/layers/quantization/compressed_tensors/transform/
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -770,7 +792,6 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
@@ -781,7 +802,6 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
@@ -1208,6 +1228,7 @@ steps:
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
   key: dsv41-mono-decode-gfx942-amd
+  automatic_shard: true
   dind: false
   device: mi300_1
   num_devices: 1
