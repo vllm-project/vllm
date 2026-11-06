@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
@@ -118,7 +119,14 @@ class SparseMLAIndexGroup:
         idx_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         num_tokens = logical_topk_indices.shape[0]
-        if num_tokens > self.physical_topk_indices.shape[0]:
+        if (
+            num_tokens > self.physical_topk_indices.shape[0]
+            # Batch invariance: the side-stream conversion into the shared
+            # persistent buffer lets a later batch's attention kernels race
+            # the conversion writes (observed as partially-updated rows on
+            # SM100), so convert synchronously on the compute stream.
+            or envs.VLLM_BATCH_INVARIANT
+        ):
             return triton_convert_req_index_to_global_index(
                 req_id_per_token,
                 block_table,

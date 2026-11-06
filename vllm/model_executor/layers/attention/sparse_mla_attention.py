@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
@@ -612,7 +613,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         attention_config = self.vllm_config.attention_config
         # ShardQ's top-k are compact per rank, so its prefills run in forward_mqa.
         if (
-            attention_config.sparse_mla_force_mqa
+            envs.VLLM_BATCH_INVARIANT
+            or attention_config.sparse_mla_force_mqa
             or attention_config.hisparse_config is not None
             or use_shardq
         ):
