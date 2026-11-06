@@ -1736,10 +1736,10 @@ def _topk_split_combine_kernel(
         p = tl.load(P + row)
         e = tl.where(head, tl.exp(v - tl.max(v, 0)), 0.0)
         total = tl.sum(e, 0)
-        # Mass before a token < p, written on the suffix: a float32 prefix
-        # sum saturates at 1.0 and would truncate rows with p = 1.
+        # Same as "mass before the token < p"; p = 1 must also keep tokens
+        # whose exp underflows to 0.
         suffix = tl.flip(tl.cumsum(tl.flip(e, 0), 0), 0)
-        kept = head & (suffix > (1.0 - p) * total)
+        kept = head & ((suffix > (1.0 - p) * total) | (p >= 1.0))
     else:
         kept = head
 
