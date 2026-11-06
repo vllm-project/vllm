@@ -208,9 +208,12 @@ class InputBatch:
 
         tree_parents = None
         if input_buffers.tree_parents is not None:
-            # Contents are left as they are: any parent in [-1, row) is in range,
-            # which is all a dummy forward needs.
+            # Lay the dummy requests out as chains: the buffer still holds the
+            # last plan's parents, which can point past a dummy request's rows.
             tree_parents = input_buffers.tree_parents[:num_tokens]
+            tokens = torch.arange(num_tokens, dtype=torch.int32, device=device)
+            req = torch.searchsorted(query_start_loc[1:], tokens, right=True)
+            torch.sub(tokens - 1, query_start_loc[req], out=tree_parents)
 
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)

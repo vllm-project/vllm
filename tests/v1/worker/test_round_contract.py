@@ -274,6 +274,18 @@ def test_spec_round_verifies_the_rows_of_each_query():
     assert batch.tree_parents.tolist() == [-1, 0, -1, 0, 0]
 
 
+def test_dummy_batch_lays_out_chains_over_a_stale_plan():
+    """A dummy batch (the capture batches) gets chain parents, not the parents
+    the last plan left in the buffer, which point past its shorter queries."""
+    buffers = InputBuffers(4, 16, DEVICE)
+    buffers.tree_parents = _t([-1, 0, 0, 1, 1, 2, 2, 3] + [0] * 8)
+
+    batch = InputBatch.make_dummy(3, 7, buffers)
+
+    assert batch.tree_parents is not None
+    assert batch.tree_parents.tolist() == [-1, 0, -1, 0, -1, 0, 1]
+
+
 class _Staged:
     """A UVA-backed buffer's device view; ``RopeState.__init__`` pins host
     memory, which needs an accelerator."""
