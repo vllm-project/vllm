@@ -13,6 +13,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.utils import weights_already_processed
 
+from .direct import check_direct_reload_support, direct_reload_enabled
 from .lifecycle import finish_reload, start_reload
 
 logger = init_logger(__name__)
@@ -56,6 +57,9 @@ def reload_weights(
     """
     # TODO(@kylesayrs): generalize to all runners and loaders
     # argument validation
+    if direct_reload_enabled():
+        # before model_config changes; kernel-format reloads skip `begin`
+        check_direct_reload_support(model)
     if weights_iterator is None and not is_checkpoint_format:
         logger.warning(
             "Reloading from disk means that weights will be in checkpoint format. "

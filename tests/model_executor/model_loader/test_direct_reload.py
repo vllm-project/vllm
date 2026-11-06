@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, WeightTransferConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
 )
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsDirectReload
@@ -305,37 +306,14 @@ class TestRefusals:
         _assert_same(_state(model), before, addresses=True)
         assert "_direct_reload_begun" not in model.__dict__
 
-    @pytest.mark.parametrize("marked", [True, False])
-    def test_unmarked_model_warns_and_reloads(self, monkeypatch, marked):
-        from vllm.model_executor.model_loader.reload import direct
-
-        class _Unmarked(_ToyModel):  # the mark is not inherited
-            pass
-
-        warnings: list[tuple] = []
-        monkeypatch.setattr(
-            direct.logger, "warning_once", lambda *args: warnings.append(args)
-        )
-        cls = _ToyModel if marked else _Unmarked
-        with _DEVICE:
-            model = cls()
-        model.load_weights(_checkpoint().items())
-        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-        assert warnings == []  # cold start does not check
-        _reload(model, _checkpoint(1.01))
-        if marked:
-            assert warnings == []
-        else:
-            assert len(warnings) == 1 and warnings[0][1] == "_Unmarked"
-            assert "not validated" in warnings[0][0]
-        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
-
     @pytest.mark.parametrize(
         "kind,match",
         [
             # finish clears the guard that keeps online quantization from
             # quantizing its converted bytes again
             ("online", "online quantization"),
+            # elastic EP wraps the method after load
+            ("online-elastic-ep", "online quantization"),
             # post-load processing deletes the staging parameters a reload loads
             ("online-shared-experts", "online quantization"),
             # its post-load processing runs only once per quant method
@@ -343,28 +321,25 @@ class TestRefusals:
             ("HummingMoEMethod", "humming"),
         ],
     )
-    def test_quant_method_refused_as_seen_at_cold_start(self, kind, match):
-        # decided on the tree cold start records; post-load processing may
-        # wrap the method afterwards (elastic EP's FusedMoEModularMethod)
-        from vllm.model_executor.layers.quantization import humming as humming_mod
-        from vllm.model_executor.model_loader.reload.direct import (
-            record_checkpoint_layout,
+    def test_quant_method_refused(self, kind, match):
+        from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+            FusedMoEModularMethod,
         )
+        from vllm.model_executor.layers.quantization import humming as humming_mod
 
-        with _DEVICE:
-            model = _ToyModel()
-        model.load_weights(_checkpoint().items())
-        method = model.proj.quant_method
+        model = _cold_start(_checkpoint())
+        online = object.__new__(Fp8PerTensorOnlineLinearMethod)
         if kind == "online":
-            model.proj.quant_method = object.__new__(Fp8PerTensorOnlineLinearMethod)
+            method = online
+        elif kind == "online-elastic-ep":
+            method = object.__new__(FusedMoEModularMethod)
+            method.__dict__["old_quant_method"] = online
         elif kind == "online-shared-experts":
             model.proj.shared_expert_online_loader = object()
+            method = model.proj.quant_method
         else:
-            model.proj.quant_method = object.__new__(getattr(humming_mod, kind))
-        record_checkpoint_layout(model)  # does not raise: cold start succeeds
-        model.proj.quant_method = method  # the live tree no longer shows it
-        model.proj.__dict__.pop("shared_expert_online_loader", None)
-        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+            method = object.__new__(getattr(humming_mod, kind))
+        model.proj.__dict__["quant_method"] = method
         self._assert_begin_refused(model, match)
 
     @pytest.mark.parametrize(
@@ -417,6 +392,96 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
         assert "_direct_reload_begun" not in model.__dict__
+
+
+def _worker(model, draft=None):
+    from vllm.v1.worker.gpu_worker import Worker
+
+    worker = object.__new__(Worker)
+    worker.vllm_config = SimpleNamespace(parallel_config=None, model_config=None)
+    worker.device = _DEVICE
+    worker.model_runner = SimpleNamespace(
+        get_model=lambda: model, get_draft_model=lambda: draft
+    )
+    return worker
+
+
+def _reload_config(**model_config) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(**vars(_MODEL_CONFIG), **model_config),
+        load_config=SimpleNamespace(device=None, load_format="auto"),
+        device_config=SimpleNamespace(device=_DEVICE),
+        lora_config=None,
+    )
+
+
+def _refused(model):
+    model.supports_direct_reload = False
+    model.direct_reload_unsupported_reason = "weight copies are built once"
+    return model
+
+
+class TestCheckedEarly:
+    """The model check also runs when the weight-transfer engine is created and
+    at the top of `reload_weights`, not only in `begin`."""
+
+    @pytest.mark.parametrize("refused", ["target", "draft"])
+    def test_refused_model_fails_engine_creation(self, refused):
+        # at startup, before a trainer connects and waits in a collective
+        target, draft = _cold_start(_checkpoint()), _cold_start(_checkpoint())
+        _refused(target if refused == "target" else draft)
+        worker = _worker(target, draft)
+        with pytest.raises(RuntimeError, match="weight copies are built once"):
+            worker._create_weight_transfer_engine(WeightTransferConfig(backend="ipc"))
+        assert not hasattr(worker, "weight_transfer_engine")
+
+    def test_layerwise_engine_creation_not_checked(self, monkeypatch):
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+        worker = _worker(_refused(_cold_start(_checkpoint())))
+        worker._create_weight_transfer_engine(WeightTransferConfig(backend="ipc"))
+        assert worker.weight_transfer_engine is not None
+
+    @pytest.mark.parametrize("is_checkpoint_format", [True, False])
+    def test_reload_weights_refused_before_config_changes(self, is_checkpoint_format):
+        model = _refused(_cold_start(_checkpoint()))
+        config = _reload_config(model="old", model_weights="w", revision="r")
+        before = _state(model)
+        with pytest.raises(RuntimeError, match="weight copies are built once"):
+            reload_weights(
+                config,
+                model,
+                None if is_checkpoint_format else iter(_checkpoint(1.01).items()),
+                "new" if is_checkpoint_format else None,
+                is_checkpoint_format,
+            )
+        assert vars(config.model_config) == vars(
+            _reload_config(model="old", model_weights="w", revision="r").model_config
+        )
+        _assert_same(_state(model), before, addresses=True)
+
+    @pytest.mark.parametrize("marked", [True, False])
+    def test_unmarked_model_warns_once(self, caplog_vllm, marked):
+        class _UnmarkedOnce(_ToyModel):  # the mark is not inherited
+            pass
+
+        cls = _ToyModel if marked else _UnmarkedOnce
+        with _DEVICE:
+            model = cls()
+        model.load_weights(_checkpoint().items())
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        _worker(model)._create_weight_transfer_engine(
+            WeightTransferConfig(backend="ipc")
+        )
+        for scale in (1.01, 1.02):
+            reload_weights(
+                _reload_config(), model, iter(_checkpoint(scale).items()), None, True
+            )
+        warnings = [r for r in caplog_vllm.records if "not validated" in r.getMessage()]
+        if marked:
+            assert warnings == []
+        else:
+            assert len(warnings) == 1 and "_UnmarkedOnce" in warnings[0].getMessage()
+        _assert_same(_state(model), _state(_cold_start(_checkpoint(1.02))))
 
 
 def test_retry_after_aborted_update_matches_cold_start():

@@ -21,6 +21,7 @@ import vllm.envs as envs
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
+    WeightTransferConfig,
     set_current_vllm_config,
     update_config,
 )
@@ -667,18 +668,32 @@ class Worker(WorkerBase):
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
-        if self.vllm_config.weight_transfer_config is not None:
-            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config,
-                self.device,
-                self.model_runner.get_model(),
-            )
+        if (config := self.vllm_config.weight_transfer_config) is not None:
+            self._create_weight_transfer_engine(config)
 
         # Preserve parallel weight loading, then use serving's thread count
         # for profiling and compilation so Dynamo's global-state guards remain
         # valid when requests arrive.
         set_torch_threads_for_runtime()
+
+    def _create_weight_transfer_engine(self, config: WeightTransferConfig) -> None:
+        from vllm.model_executor.model_loader.reload.direct import (
+            check_direct_reload_support,
+            direct_reload_enabled,
+        )
+
+        model = self.model_runner.get_model()
+        if direct_reload_enabled():
+            # refuse at startup, before a trainer connects and waits on us
+            for m in (model, self.get_draft_model()):
+                if m is not None:
+                    check_direct_reload_support(m)
+        self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+            config,
+            self.vllm_config,
+            self.device,
+            model,
+        )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
