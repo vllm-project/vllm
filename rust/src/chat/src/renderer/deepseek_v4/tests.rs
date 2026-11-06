@@ -12,7 +12,9 @@ use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 fn render_request(request: &ChatRequest) -> String {
@@ -843,23 +845,13 @@ fn custom_roles_are_rejected_as_request_errors() {
         .assert_eq(&error.to_report_string());
 }
 
-/// Unlike V4.1, Python's V4 encoding accepts only text and image blocks.
+/// Like deepseek-recipe's Messages conversion: a tool reference is written as
+/// the tool's name, and V4 lists every tool, deferred ones included, up front.
+/// The expected prompt is deepseek-recipe's (`935817c`) for the same Messages
+/// request.
 #[test]
-fn tool_references_are_rejected_as_request_errors() {
-    let request = ChatRequest {
-        messages: vec![
-            ChatMessage::user("find the weather tool"),
-            ChatMessage::tool_response(
-                vec![ChatContentPart::tool_reference("get_weather")],
-                "call-1",
-            ),
-        ],
-        ..ChatRequest::for_test()
-    };
-
-    let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
-
-    assert!(error.is_request_validation_error());
-    expect!["`tool_reference` content parts are not supported by this chat renderer"]
-        .assert_eq(&error.to_report_string());
+fn tool_references_render_as_tool_names_like_deepseek_recipe() {
+    expect_file!["fixtures/tool_search_references.txt"].assert_eq(&render_request(
+        &tool_search_request(&["get_weather", "get_time"]),
+    ));
 }

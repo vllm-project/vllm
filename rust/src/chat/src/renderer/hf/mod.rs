@@ -1259,7 +1259,7 @@ mod tests {
             name: "lookup".to_string(),
             arguments: "{}".to_string(),
         });
-        let request = sample_request(vec![
+        let messages = vec![
             ChatMessage::assistant_blocks(
                 ["a", "", "b"]
                     .map(|text| AssistantContentBlock::Text {
@@ -1287,7 +1287,20 @@ mod tests {
                 ],
                 "call_1",
             ),
-        ]);
+        ];
+        let weather = ChatTool {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: Some(true),
+        };
+        let tool_context = ResolvedToolContext::new(&messages, vec![weather], None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            ..sample_request(Vec::new())
+        };
         let template = "{% for m in messages %}{{ m.content | tojson }}\n{% endfor %}";
         let rendered: String = [
             ChatTemplateContentFormatOption::String,

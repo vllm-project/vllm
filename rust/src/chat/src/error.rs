@@ -106,6 +106,10 @@ pub enum Error {
     ToolChoiceRequiresTools,
     #[error("tool_choice function `{name}` was not found in the available tools")]
     ToolChoiceFunctionNotFound { name: String },
+    #[error("tool_reference `{name}` was not found in the available tools")]
+    ToolReferenceNotFound { name: String },
+    #[error("at least one tool must have defer_loading=false; all tools cannot be deferred")]
+    AllToolsDeferred,
     #[error("failed to build output grammar")]
     OutputGrammar {
         #[source]
@@ -129,6 +133,8 @@ impl Error {
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::ToolReferenceNotFound { .. }
+            | Self::AllToolsDeferred
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate

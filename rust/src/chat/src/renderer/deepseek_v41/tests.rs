@@ -5,14 +5,18 @@ use std::path::PathBuf;
 
 use expect_test::{expect, expect_file};
 use serde_json::{Value, json};
+use thiserror_ext::AsReport as _;
 
 use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool, tool_search_request,
+};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
+    ResolvedToolContext,
 };
 
 fn render(request: &ChatRequest) -> String {
@@ -228,40 +232,77 @@ fn rejects_image_placeholder_in_message_text() {
     }
 }
 
-/// Like Python's V4.1 encoding: the system prompt already lists every tool,
-/// deferred ones included, so a tool reference is written as the tool's name.
+/// Unlike Python's V4.1 encoding, which lists every tool and writes only the
+/// name, deepseek-recipe leaves deferred tools out of the tool prompt and lists
+/// the referenced ones in a system turn after the tool search result's user
+/// turn. The expected prompt is deepseek-recipe's (`935817c`) for the same
+/// Messages request.
 #[test]
-fn renders_tool_references_as_tool_names() {
-    let mut request = ChatRequest {
-        messages: vec![
-            ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
-                AssistantToolCall {
-                    id: "call-1".to_string(),
-                    name: "tool_search".to_string(),
-                    arguments: "{}".to_string(),
-                },
-            )]),
-            ChatMessage::tool_response(
-                vec![
-                    ChatContentPart::tool_reference("get_weather"),
-                    ChatContentPart::tool_reference("get_time"),
-                ],
-                "call-1",
-            ),
-        ],
+fn tool_references_list_deferred_tools_like_deepseek_recipe() {
+    expect_file!["fixtures/tool_search_references.txt"]
+        .assert_eq(&render(&tool_search_request(&["get_weather", "get_time"])));
+}
+
+/// A reference to a tool already listed up front is listed again, and
+/// duplicates are kept, as deepseek-recipe does.
+#[test]
+fn tool_references_keep_order_and_duplicates() {
+    let prompt = render(&tool_search_request(&[
+        "get_time",
+        "tool_search",
+        "get_time",
+    ]));
+    let schemas = prompt.split("### Updated Tool Schemas\n\n").nth(1).unwrap();
+    let schemas = schemas.strip_suffix("<｜Assistant｜></think>").unwrap();
+    let names = schemas
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["name"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [json!("get_time"), json!("tool_search"), json!("get_time")]
+    );
+}
+
+/// Like deepseek-recipe: every tool deferred leaves nothing to search with.
+#[test]
+fn rejects_requests_whose_tools_are_all_deferred() {
+    let messages = vec![ChatMessage::user("question")];
+    let tools = vec![tool("get_time", "Time", json!({"type": "object"}), true)];
+    let request = ChatRequest {
+        tool_context: ResolvedToolContext::new(&messages, tools, None, true).unwrap(),
+        messages,
         ..ChatRequest::for_test()
     };
-    request
-        .chat_options
-        .template_kwargs
-        .insert("thinking".into(), Value::Bool(false));
-    let prompt = render(&request);
-    assert!(
-        prompt.ends_with(
-            "<｜User｜><tool_result>get_weather\n\nget_time</tool_result><｜Assistant｜></think>"
+
+    let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
+
+    assert!(error.is_request_validation_error());
+    expect!["at least one tool must have defer_loading=false; all tools cannot be deferred"]
+        .assert_eq(&error.to_report_string());
+
+    // A listed message-scoped tool is enough.
+    let messages = vec![
+        ChatMessage::developer(
+            "policy",
+            Some(vec![tool(
+                "tool_search",
+                "Search",
+                json!({"type": "object"}),
+                false,
+            )]),
         ),
-        "{prompt}"
-    );
+        ChatMessage::user("question"),
+    ];
+    let tools = vec![tool("get_time", "Time", json!({"type": "object"}), true)];
+    let request = ChatRequest {
+        tool_context: ResolvedToolContext::new(&messages, tools, None, true).unwrap(),
+        messages,
+        ..ChatRequest::for_test()
+    };
+    let prompt = render(&request);
+    assert!(prompt.contains("\"name\": \"tool_search\""), "{prompt}");
+    assert!(!prompt.contains("get_time"), "{prompt}");
 }
 
 fn image_part(uuid: &str) -> ChatContentPart {
