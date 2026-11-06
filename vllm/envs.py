@@ -581,7 +581,7 @@ def get_vllm_port() -> int | None:
 def get_tp_fp16_partial_sums_shift() -> int:
     """Get VLLM_TP_FP16_PARTIAL_SUMS_SHIFT, an integer in [0, 14]."""
     value = os.getenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2")
-    if not (value.isdigit() and 0 <= int(value) <= 14):
+    if not (value.isascii() and value.isdigit() and 0 <= int(value) <= 14):
         raise ValueError(
             f"VLLM_TP_FP16_PARTIAL_SUMS_SHIFT must be an integer in [0, 14], "
             f"got {value!r}"

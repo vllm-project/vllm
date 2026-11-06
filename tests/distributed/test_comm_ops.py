@@ -954,6 +954,47 @@ def test_tp_fp16_partial_sums_scale_is_exact_and_overflows():
     )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
+def test_tp_fp16_partial_sums_nvfp4_kernel():
+    """NVFP4 CUTLASS ("kernel" mode): the FP16 partial sum carries the 2^-k
+    prescale on alpha and on the rank-0 bias, with the bias in the GEMM
+    epilogue (SM120) or added after it."""
+    from vllm._custom_ops import scaled_fp4_quant
+    from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
+    from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
+        CutlassNvFp4LinearKernel,
+    )
+
+    if not CutlassNvFp4LinearKernel.is_supported()[0]:
+        pytest.skip("needs the CUTLASS NVFP4 GEMM (SM100/SM120)")
+    torch.manual_seed(0)
+    m, k, n = 64, 2048, 1024
+    x = torch.randn(m, k, device="cuda").bfloat16()
+    w = (torch.randn(n, k, device="cuda") / k**0.5).bfloat16()
+    b = torch.randn(n, device="cuda").bfloat16()
+    fp4_range = torch.finfo(torch.float8_e4m3fn).max * 6.0
+    x_global = (fp4_range / x.float().abs().max()).reshape(1)
+    w_global = (fp4_range / w.float().abs().max()).reshape(1)
+    w_fp4, w_sf = scaled_fp4_quant(w, w_global)  # swizzled, as after loading
+    layer = torch.nn.Module()
+    layer.weight, layer.weight_scale = w_fp4, w_sf
+    layer.alpha = 1.0 / (x_global * w_global)
+    layer.input_global_scale_inv = x_global
+    layer.input_size_per_partition, layer.output_size_per_partition = k, n
+    kernel = CutlassNvFp4LinearKernel(NvFp4LinearLayerConfig())
+
+    for bias_epilogue in {kernel.bias_epilogue, False}:
+        kernel.bias_epilogue = bias_epilogue
+        layer.partial_sum_dtype, layer.partial_sum_scale = None, 1.0
+        ref = kernel.apply_weights(layer, x, b)
+        layer.partial_sum_dtype, layer.partial_sum_scale = torch.float16, 0.25
+        part = kernel.apply_weights(layer, x, b)
+        assert ref.dtype == torch.bfloat16 and part.dtype == torch.float16
+        rms = float(ref.float().pow(2).mean().sqrt())
+        diff = float((part.float() * 4 - ref.float()).abs().mean()) / rms
+        assert diff < 1e-2, (bias_epilogue, diff)
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
 def test_tp_fp16_partial_sums_row_parallel(monkeypatch: pytest.MonkeyPatch):
