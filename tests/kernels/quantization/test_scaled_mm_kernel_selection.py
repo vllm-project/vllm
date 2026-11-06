@@ -116,13 +116,19 @@ def test_triton_fp8_backend_requires_fp8(
     """The registered ROCm Triton backend requires FP8-capable hardware."""
     platform_mock._enum = PlatformEnum.ROCM
     platform_mock.get_device_capability.return_value = (12, 0)
+    triton_platform_mock.is_rocm.return_value = True
     triton_platform_mock.supports_fp8.return_value = supports_fp8
     monkeypatch.setattr(
-        "vllm.utils.platform_utils.num_compute_units", lambda *_args: 32
+        TritonFp8PerTokenScaledMMKernel,
+        "_has_rdna4_config_selector",
+        staticmethod(lambda: False),
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic.get_device_cache_size",
-        lambda *_args: 64 * 1024**2,
+        "vllm.utils.platform_utils.get_device_name_as_file_name", lambda: "test_gpu"
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.fp8_utils.get_w8a8_per_token_fp8_configs",
+        lambda *_args: {1: {}},
     )
     monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
     config = VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))

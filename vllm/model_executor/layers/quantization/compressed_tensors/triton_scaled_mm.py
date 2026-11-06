@@ -259,7 +259,7 @@ def triton_scaled_mm(
     block_size_m: int = 32,
     block_size_n: int = 32,
     block_size_k: int = 32,
-    use_heuristic=True,
+    use_default_config=True,
     use_td: bool | None = None,
     num_warps: int = 4,
     num_stages: int | None = None,
@@ -296,7 +296,7 @@ def triton_scaled_mm(
 
     has_scalar = lambda x: x.shape[0] == 1 and x.shape[1] == 1
 
-    if use_heuristic:
+    if use_default_config:
         is_small_N = N < 8192
         next_power_of_2_M = max(32, triton.next_power_of_2(M))
         if next_power_of_2_M <= 32:

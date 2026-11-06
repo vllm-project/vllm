@@ -9,7 +9,7 @@ Example:
         --save-path ./fp8-configs
 
 The default search sweeps powers-of-two M from 1 through 32768, refines the
-best tiles, and confirms winners against the production RDNA heuristic in
+best tiles, and confirms winners against the device's default Triton launch in
 seven paired rounds. Model IDs select matrix workloads from weight_shapes.py;
 model configuration and weights are not loaded. Expert kernels are separate.
 Omit --save-path to print results without exporting tuning files.
@@ -32,7 +32,7 @@ import torch
 from weight_shapes import TP_WEIGHT_SHAPES, WEIGHT_SHAPES
 
 from vllm.model_executor.layers.quantization.utils import (
-    fp8_per_token_heuristic as heuristic,
+    fp8_per_token_config_selector as config_selector,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_w8a8_per_token_fp8_config_filename,
@@ -81,7 +81,7 @@ def launch_config(config):
     }
 
 
-def staged_candidates(heuristic, previous):
+def staged_candidates(default_config, previous):
     keys = ("BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages")
     choices = [
         launch_config(dict(zip(keys, values)))
@@ -104,15 +104,15 @@ def staged_candidates(heuristic, previous):
             )
     if previous is not None:
         choices.append(previous)
-    if heuristic is not None:
+    if default_config is not None:
         choices.append(
             launch_config(
                 dict(
-                    BLOCK_SIZE_M=heuristic["block_size_m"],
-                    BLOCK_SIZE_N=heuristic["block_size_n"],
-                    BLOCK_SIZE_K=heuristic["block_size_k"],
-                    num_warps=heuristic.get("num_warps", 4),
-                    num_stages=heuristic.get("num_stages", 2),
+                    BLOCK_SIZE_M=default_config["block_size_m"],
+                    BLOCK_SIZE_N=default_config["block_size_n"],
+                    BLOCK_SIZE_K=default_config["block_size_k"],
+                    num_warps=default_config.get("num_warps", 4),
+                    num_stages=default_config.get("num_stages", 2),
                 )
             )
         )
@@ -137,16 +137,16 @@ def staged_refinements(ranked, m, n, k):
 
 def select_staged_config(record):
     timings, medians = record["samples_us"], record["median_us"]
-    winner = min((name for name in medians if name != "heuristic"), key=medians.get)
+    winner = min((name for name in medians if name != "default"), key=medians.get)
     config = (
         record["old_tuned"]
         if winner == "old_tuned"
         else record["ranked"][int(winner.removeprefix("candidate_"))]["config"]
     )
-    baseline, best = medians["heuristic"], medians[winner]
-    wins = sum(a < b for a, b in zip(timings[winner], timings["heuristic"]))
+    baseline, best = medians["default"], medians[winner]
+    wins = sum(a < b for a, b in zip(timings[winner], timings["default"]))
     accepted = best < baseline * 0.98 and baseline - best > 0.15 and wins >= 5
-    exported = {"USE_HEURISTIC": True}
+    exported = {"USE_CONFIG_SELECTOR": True}
     if accepted:
         exported = dict(
             BLOCK_SIZE_M=config["block_size_m"],
@@ -167,7 +167,7 @@ def select_staged_config(record):
         winner=winner,
         paired_wins=wins,
         accepted=accepted,
-        heuristic_us=baseline,
+        default_us=baseline,
         tuned_us=best if accepted else baseline,
         speedup=baseline / best if accepted else 1.0,
     )
@@ -177,29 +177,31 @@ def staged_search(a, b, sa, sb, previous, num_processors, cache_size_bytes, out_
     m, k = a.shape
     n = b.size(1)
     inputs = a, b, sa, sb
-    use_heuristic = heuristic.can_use_fp8_per_token_heuristic(
+    uses_config_selector = config_selector.can_use_config_selector(
         a, b, sa, sb, out_dtype, None
     )
     choice = (
-        heuristic.get_heuristic_config(m, n, k, num_processors, cache_size_bytes)
-        if use_heuristic
+        config_selector.select_config(m, n, k, num_processors, cache_size_bytes)
+        if uses_config_selector
         else None
     )
     previous = (
         launch_config(previous)
-        if previous and not previous.get("USE_HEURISTIC")
+        if previous and not previous.get("USE_CONFIG_SELECTOR")
         else None
     )
 
     def run(config, operands=inputs):
-        if use_heuristic:
-            return heuristic.launch_fp8_per_token(*operands, out_dtype, None, config)
+        if uses_config_selector:
+            return config_selector.launch_fp8_per_token(
+                *operands, out_dtype, None, config
+            )
         if config is None:
-            return heuristic.shared_mm.triton_scaled_mm(*operands, out_dtype)
-        return heuristic.shared_mm.triton_scaled_mm(
+            return config_selector.shared_mm.triton_scaled_mm(*operands, out_dtype)
+        return config_selector.shared_mm.triton_scaled_mm(
             *operands,
             out_dtype,
-            use_heuristic=False,
+            use_default_config=False,
             block_size_m=config["block_size_m"],
             block_size_n=config["block_size_n"],
             block_size_k=config["block_size_k"],
@@ -320,7 +322,7 @@ def staged_search(a, b, sa, sb, previous, num_processors, cache_size_bytes, out_
     for config in staged_refinements(ranked, m, n, k):
         test(config)
     ranked.sort(key=lambda row: row["graph_us"])
-    finalists = {"heuristic": choice}
+    finalists = {"default": choice}
     if previous is not None:
         finalists["old_tuned"] = previous
     finalists.update(
@@ -337,8 +339,8 @@ def staged_search(a, b, sa, sb, previous, num_processors, cache_size_bytes, out_
         M=m,
         N=n,
         K=k,
-        heuristic=choice,
-        uses_rdna_heuristic=use_heuristic,
+        default_config=choice,
+        uses_config_selector=uses_config_selector,
         old_tuned=previous,
         median_us={name: statistics.median(t) for name, t in samples.items()},
         samples_us=samples,
@@ -375,7 +377,7 @@ def tune_on_gpu(task):
     device = current_platform.device_type
     device_name = get_device_name_as_file_name(gpu)
     processors = num_compute_units(gpu)
-    cache = heuristic.get_device_cache_size(gpu)
+    cache = config_selector.get_device_cache_size(gpu)
     references = {
         f"{n},{k}": get_w8a8_per_token_fp8_configs(n, k, device_name, dtype, out_dtype)
         or {}
@@ -391,9 +393,9 @@ def tune_on_gpu(task):
         sources = [
             Path(__file__),
             Path(__file__).with_name("weight_shapes.py"),
-            Path(heuristic.__file__),
+            Path(config_selector.__file__),
             Path(get_w8a8_per_token_fp8_configs.__wrapped__.__code__.co_filename),
-            Path(heuristic.shared_mm.__file__),
+            Path(config_selector.shared_mm.__file__),
         ]
         metadata = dict(
             model=args.model,
@@ -417,7 +419,7 @@ def tune_on_gpu(task):
             },
         )
         (folder / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    counts = dict(tuned=0, heuristic=0)
+    counts = dict(tuned=0, default=0)
     for n, k in shapes:
         configs = {}
         table = references[f"{n},{k}"]
@@ -433,7 +435,7 @@ def tune_on_gpu(task):
             print(f"[GPU {gpu}] Searching M={m}, N={n}, K={k}", flush=True)
             record = staged_search(a, b, sa, sb, previous, processors, cache, out_dtype)
             configs[m] = record["config"]
-            counts["tuned" if record["accepted"] else "heuristic"] += 1
+            counts["tuned" if record["accepted"] else "default"] += 1
             if folder:
                 with (folder / "results.jsonl").open("a") as stream:
                     stream.write(json.dumps(record) + "\n")
@@ -486,7 +488,7 @@ def main(args):
         results = list(pool.map(tune_on_gpu, tasks))
     print(
         f"Completed: {sum(r['tuned'] for r in results)} tuned, "
-        f"{sum(r['heuristic'] for r in results)} heuristic fallbacks",
+        f"{sum(r['default'] for r in results)} default launches",
         flush=True,
     )
 

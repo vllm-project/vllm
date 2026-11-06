@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-token FP8 launch heuristics and specialized contiguous kernels."""
+"""Per-token FP8 launch configuration selection and specialized contiguous kernels."""
 
 from functools import cache, lru_cache
 from typing import Any
@@ -154,7 +154,7 @@ def _shape_config(
 
 
 @lru_cache(maxsize=2048)
-def get_heuristic_config(
+def select_config(
     m: int,
     n: int,
     k: int,
@@ -245,13 +245,15 @@ def get_device_cache_size(device: int) -> int:
         return 0
 
 
-def can_use_fp8_per_token_heuristic(a, b, sa, sb, out_dtype, bias) -> bool:
+def can_use_config_selector(a, b, sa, sb, out_dtype, bias) -> bool:
     from vllm import envs
+    from vllm.platforms.rocm import on_rdna4
 
     m, k = a.shape
     n = b.shape[1]
     return (
-        m > 0
+        on_rdna4()
+        and m > 0
         and n > 0
         and k > 0
         and m * n < 2**31

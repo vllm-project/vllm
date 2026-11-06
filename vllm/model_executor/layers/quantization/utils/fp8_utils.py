@@ -950,6 +950,9 @@ def get_w8a8_per_token_fp8_configs(
         )
         configs = {int(m): config for m, config in json.load(f).items()}
     for config in configs.values():
+        # Normalize the fallback marker in tables exported by earlier tuners.
+        if config.pop("USE_HEURISTIC", False):
+            config.setdefault("USE_CONFIG_SELECTOR", True)
         assert config.get("GROUP_M", 1) >= 1, "GROUP_M must be positive"
         assert config.get("N_STRIPE", 0) >= 0, "N_STRIPE must be nonnegative"
     return configs
@@ -967,7 +970,7 @@ def get_w8a8_per_token_fp8_config(
     config = configs.get(M)
     if config is None:
         config = configs[min(configs, key=lambda m: abs(m - M))]
-    if config.get("USE_HEURISTIC", False) or (
+    if config.get("USE_CONFIG_SELECTOR", False) or (
         M not in configs and config.get("EXACT_M", False)
     ):
         return None

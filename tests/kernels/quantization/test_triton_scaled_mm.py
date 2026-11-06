@@ -139,8 +139,8 @@ def test_scaled_mm(
 
 
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
-@pytest.mark.parametrize("use_heuristic", [True, False])
-def test_scaled_mm_adds_bias_before_rounding(in_dtype, use_heuristic):
+@pytest.mark.parametrize("use_default_config", [True, False])
+def test_scaled_mm_adds_bias_before_rounding(in_dtype, use_default_config):
     # The accumulator is 1 + 3 * 2**-10 and the bias 2**-8. Rounding to bf16
     # first gives 1.0 (1 + 2**-8 is a tie, to even); adding first, 1 + 2**-7.
     a = torch.ones((1, 32), device=device).to(in_dtype)
@@ -151,7 +151,7 @@ def test_scaled_mm_adds_bias_before_rounding(in_dtype, use_heuristic):
     bias = torch.full((16,), 2**-8, device=device, dtype=torch.bfloat16)
     args = (a, b, scale_a, scale_b, torch.bfloat16, bias)
 
-    out = triton_scaled_mm(*args, use_heuristic=use_heuristic)
+    out = triton_scaled_mm(*args, use_default_config=use_default_config)
     expected = torch_scaled_mm(*args)
     assert (expected == 1 + 2**-7).all()
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
@@ -194,11 +194,15 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Requires FP8")
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.supports_fp8(),
+    reason="Requires ROCm FP8",
+)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [False, True])
-@pytest.mark.parametrize("tuned", [False, True])
-@pytest.mark.parametrize("rdna", [False, True])
+@pytest.mark.parametrize(
+    ("rdna4", "tuned"), [(True, False), (True, True), (False, True)]
+)
 @pytest.mark.parametrize("num_processors", [16, 32])
 @pytest.mark.parametrize("cache_size_bytes", [32 * 1024**2, 64 * 1024**2])
 def test_triton_fp8_per_token_backend_preserves_linear_shape(
@@ -207,7 +211,7 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
     out_dtype,
     use_bias,
     tuned,
-    rdna,
+    rdna4,
     num_processors,
     cache_size_bytes,
 ):
@@ -223,17 +227,14 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
         kFp8StaticChannelSym,
     )
 
-    if current_platform.is_rocm():
-        monkeypatch.setattr("vllm.platforms.rocm.on_rdna", lambda: rdna)
-        # Keep FP8 support when simulating the non-RDNA ROCm path.
-        monkeypatch.setattr("vllm.platforms.rocm.on_cdna", lambda: not rdna)
-        monkeypatch.setattr(
-            "vllm.utils.platform_utils.num_compute_units", lambda *_args: num_processors
-        )
-        monkeypatch.setattr(
-            "vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic.get_device_cache_size",
-            lambda *_args: cache_size_bytes,
-        )
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: rdna4)
+    monkeypatch.setattr(
+        "vllm.utils.platform_utils.num_compute_units", lambda *_args: num_processors
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.fp8_per_token_config_selector.get_device_cache_size",
+        lambda *_args: cache_size_bytes,
+    )
 
     if tuned:
         per_token_fp8_configs[33] = {
@@ -256,9 +257,9 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
             weight_shape=(n, k),
         )
     assert isinstance(kernel, TritonFp8PerTokenScaledMMKernel)
-    assert kernel.use_heuristic == (current_platform.is_rocm() and rdna)
-    assert kernel.num_processors == (num_processors if kernel.use_heuristic else 0)
-    assert kernel.cache_size_bytes == (cache_size_bytes if kernel.use_heuristic else 0)
+    assert kernel.config_selector is rdna4
+    assert kernel.num_processors == (num_processors if rdna4 else 0)
+    assert kernel.cache_size_bytes == (cache_size_bytes if rdna4 else 0)
     if not tuned:
 
         def unexpected_lookup(*_args):
@@ -289,13 +290,60 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.supports_fp8(),
+    reason="Requires ROCm FP8",
+)
+@pytest.mark.parametrize("linear_backend", ["auto", "triton"])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_triton_fp8_per_token_untuned_non_rdna4_uses_torch(
+    per_token_fp8_configs, monkeypatch, linear_backend, out_dtype
+):
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.kernels.linear import (
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        RowWiseTorchFP8ScaledMMLinearKernel,
+        init_fp8_linear_kernel,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+    )
+
+    if not RowWiseTorchFP8ScaledMMLinearKernel.is_supported()[0]:
+        pytest.skip("Requires Torch rowwise FP8 support")
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: False)
+    monkeypatch.setenv(
+        "VLLM_DISABLED_KERNELS",
+        "AiterHipbMMPerTokenFp8ScaledMMLinearKernel,"
+        "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,"
+        "AiterPerTokenFp8ScaledMMLinearKernel",
+    )
+    with set_current_vllm_config(
+        VllmConfig(kernel_config=KernelConfig(linear_backend=linear_backend))
+    ):
+        kernel = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticChannelSym,
+            input_dtype=out_dtype,
+            out_dtype=out_dtype,
+            weight_shape=(256, 128),
+        )
+    expected = (
+        RowWiseTorchFP8ScaledMMLinearKernel
+        if out_dtype == torch.bfloat16
+        else ChannelWiseTorchFP8ScaledMMLinearKernel
+    )
+    assert isinstance(kernel, expected)
+
+
+@pytest.mark.skipif(
     not current_platform.supports_fp8() or not current_platform.is_cuda_alike(),
     reason="Requires FP8 and CUDA/ROCm graph support",
 )
 @pytest.mark.parametrize("tuned", [False, True])
-@pytest.mark.parametrize("use_heuristic", [False, True])
+@pytest.mark.parametrize("config_selector", [False, True])
 def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
-    per_token_fp8_configs, tuned, use_heuristic
+    per_token_fp8_configs, tuned, config_selector
 ):
     """Compiled prefill/decode and graph replay must preserve current inputs."""
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
@@ -315,8 +363,8 @@ def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
     sb = torch.rand(n, 1, device=device) + 0.5
 
     def run(a, sa):
-        return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            a, b, sa, sb, torch.bfloat16, None, tuned, use_heuristic
+        return torch.ops.vllm.triton_fp8_per_token_scaled_mm(
+            a, b, sa, sb, torch.bfloat16, None, tuned, config_selector
         )
 
     compiled = torch.compile(run, fullgraph=True, dynamic=True)
@@ -360,7 +408,7 @@ def test_triton_fp8_per_token_new_inputs_and_offset_storage(
         sa = torch.rand(m + offset, device=device)[offset:].view(m, 1) + 0.5
         sb = torch.rand(n + offset, device=device)[offset:].view(n, 1) + 0.5
         bias = torch.randn(n, device=device, dtype=out_dtype)
-        actual = torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
+        actual = torch.ops.vllm.triton_fp8_per_token_scaled_mm(
             a, b, sa, sb, out_dtype, bias, False, True
         )
         expected = torch_scaled_mm(a, b, sa, sb, out_dtype, bias)
@@ -387,7 +435,7 @@ def test_triton_fp8_per_token_large_parent_storage(per_token_fp8_configs):
         )
         a = allocation[-m * k :].view(m, k)
         a.copy_((0.2 * torch.randn(m, k, device=device)).to(a.dtype))
-        actual = torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
+        actual = torch.ops.vllm.triton_fp8_per_token_scaled_mm(
             a, b, sa, sb, torch.bfloat16, None, False, True
         )
         torch.testing.assert_close(
@@ -412,7 +460,7 @@ def test_triton_fp8_per_token_preserves_launch_hooks(per_token_fp8_configs):
     sa, sb = torch.rand(m, 1, device=device), torch.rand(n, 1, device=device)
 
     def run():
-        return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
+        return torch.ops.vllm.triton_fp8_per_token_scaled_mm(
             a, b, sa, sb, torch.bfloat16, None, False, True
         )
 
@@ -505,7 +553,7 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
         sa,
         sb,
         torch.bfloat16,
-        use_heuristic=False,
+        use_default_config=False,
         use_td=False,
         block_size_m=32,
         block_size_n=32,
@@ -527,26 +575,26 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
 @pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048), (2048, 4096), (4096, 4096)])
 @pytest.mark.parametrize("num_processors", [16, 32])
 @pytest.mark.parametrize("cache_size_bytes", [32 * 1024**2, 64 * 1024**2])
-def test_triton_fp8_per_token_heuristic_handles_token_counts(
+def test_triton_fp8_per_token_config_selector_handles_token_counts(
     n, k, num_processors, cache_size_bytes
 ):
     """Hardware-based launch rules must handle odd and aligned token counts."""
     from vllm.model_executor.layers.quantization.utils import (
-        fp8_per_token_heuristic as heuristic,
+        fp8_per_token_config_selector as selector,
     )
 
     for m in (1, 3, 15, 17, 33, 63, 65, 127, 129, 161, 191, 192, 193, 255, 257):
         a = (0.2 * torch.randn(m, k, device=device)).to(current_platform.fp8_dtype())
         b = (0.2 * torch.randn(n, k, device=device)).to(a.dtype).t()
         sa, sb = torch.rand(m, 1, device=device), torch.rand(n, 1, device=device)
-        out = heuristic.launch_fp8_per_token(
+        out = selector.launch_fp8_per_token(
             a,
             b,
             sa,
             sb,
             torch.bfloat16,
             None,
-            heuristic.get_heuristic_config(m, n, k, num_processors, cache_size_bytes),
+            selector.select_config(m, n, k, num_processors, cache_size_bytes),
         )
         torch.testing.assert_close(
             out,
