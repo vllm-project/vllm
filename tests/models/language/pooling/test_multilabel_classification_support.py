@@ -7,7 +7,7 @@ from transformers import AutoModelForSequenceClassification
 
 @pytest.mark.parametrize(
     "model",
-    ["Rami/multi-label-class-classification-on-github-issues"],
+    ["vllm-project/multi-label-class-classification-on-github-issues"],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(
