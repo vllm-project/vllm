@@ -1008,11 +1008,12 @@ def context_attention_fwd(
     TRITON_BLOCK_SIZE = 32
 
     num_unroll_cache = 4
-    # Unroll 4 spills above head size 128 on gfx942.
+    # Unroll 4 spills above head size 128 on gfx942; it only repays that past 2 GiB.
     if sliding_window > 0 and Lk_padded > 128 and current_platform.is_rocm():
         from vllm.platforms.rocm import get_cdna_version
 
-        if get_cdna_version() == 3:
+        within_2gb = v_cache.untyped_storage().size() <= 2**31 - 1
+        if get_cdna_version() == 3 and within_2gb:
             num_unroll_cache = 1
 
     grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
