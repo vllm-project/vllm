@@ -9,6 +9,7 @@ from vllm.distributed import parallel_state
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
@@ -81,6 +82,62 @@ def test_pp_stage_does_not_retake_previous_stage_last_tap(monkeypatch):
     for layer_idx in (3, 6):
         model._maybe_add_hidden_state(taps, layer_idx, torch.tensor([layer_idx]), None)
     assert [t.item() for t in taps] == [6]
+
+
+class _ToyDecoder(EagleModelMixin):
+    """Layer i adds 1, so the aux hidden state of tap t holds t. Like gpt-oss,
+    it offers its entry hidden state on every stage."""
+
+    def __init__(self, start_layer: int, end_layer: int):
+        self.start_layer, self.end_layer = start_layer, end_layer
+
+    def forward(self, hidden: torch.Tensor):
+        aux = self._maybe_add_hidden_state([], self.start_layer, hidden, None)
+        for layer_idx in range(self.start_layer, self.end_layer):
+            hidden = hidden + 1
+            self._maybe_add_hidden_state(aux, layer_idx + 1, hidden, None)
+        return hidden, aux
+
+
+@pytest.mark.parametrize(
+    "taps",
+    [
+        (0, 2, 4, 5),  # boundary taps 2 and 4, taps on every stage
+        (0, 2, 4),  # the last stage takes none itself
+        (5, 6),  # only the last stage takes any
+        (1, 3),  # the last stage only receives
+    ],
+)
+def test_pp3_relay_delivers_every_tap_once_in_layer_order(monkeypatch, taps):
+    group = SimpleNamespace(world_size=3, is_first_rank=True, is_last_rank=False)
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    received = None
+    hidden = torch.zeros(1)
+    for rank, (start, end) in enumerate([(0, 2), (2, 4), (4, 6)]):
+        group.is_first_rank, group.is_last_rank = rank == 0, rank == 2
+        decoder = _ToyDecoder(start, end)
+        decoder._set_aux_hidden_state_layers(taps)
+        handler = PPHandler.__new__(PPHandler)
+        handler.configure_aux_hidden_state_relay(SimpleNamespace(model=decoder))
+        if received is not None:
+            # The receive buffers are reserved for exactly these keys.
+            assert set(received.tensors) - {"hidden_states"} == set(
+                handler.upstream_aux_keys
+            )
+            hidden = received["hidden_states"]
+        hidden, aux = decoder.forward(hidden)
+        if group.is_last_rank:
+            break
+        sent = IntermediateTensors(
+            {"hidden_states": hidden, **decoder.pack_local_aux_hidden_states(aux)}
+        )
+        received = handler.relay_aux_hidden_states(received, sent)
+
+    _, full = handler.add_upstream_aux_hidden_states(
+        received, (hidden, aux) if aux else hidden
+    )
+    assert [t.item() for t in full] == list(taps)
 
 
 def test_mimo_does_not_inherit_aux_hidden_state_pp_support():

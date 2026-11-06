@@ -1679,6 +1679,44 @@ class EagleModelMixin:
             for i, t in enumerate(aux_hidden_states)
         }
 
+    def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """`IntermediateTensors` keys of the aux hidden states this PP stage
+        receives from earlier stages, and of those it takes and sends on (none
+        on the last stage).
+
+        The forward returns only the aux hidden states this stage takes; the
+        runner adds the received ones once, on the last stage.
+        """
+        from vllm.distributed.parallel_state import get_pp_group
+
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return (), ()
+        base = self._aux_slot_base_cached
+        end = (
+            base
+            if pp.is_last_rank
+            else bisect_right(self.aux_hidden_state_layers, self.end_layer)
+        )
+        key = self.AUX_HIDDEN_STATE_KEY
+        return (
+            tuple(f"{key}{i}" for i in range(base)),
+            tuple(f"{key}{i}" for i in range(base, end)),
+        )
+
+
+def get_eagle_decoder(model: object) -> EagleModelMixin | None:
+    """The decoder of `model` that takes the aux hidden states, if any."""
+    parent_ref = model
+    if hasattr(model, "get_language_model"):
+        parent_ref = model.get_language_model()
+    elif hasattr(model, "language_model"):
+        parent_ref = model.language_model
+    # A multimodal model that builds its decoder inside `_mark_language_model`
+    # has get_language_model() return the decoder itself, with no `.model`.
+    holder = getattr(parent_ref, "model", parent_ref)
+    return holder if isinstance(holder, EagleModelMixin) else None
+
 
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
@@ -1733,17 +1771,8 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
                 hidden states.
 
         """
-        parent_ref = self
-        if hasattr(self, "get_language_model"):
-            parent_ref = self.get_language_model()
-        elif hasattr(self, "language_model"):
-            parent_ref = self.language_model
-        # A multimodal model that builds its decoder inside
-        # `_mark_language_model` has get_language_model() return the inner
-        # decoder itself, which IS the EagleModelMixin and has no further
-        # `.model`. Unwrap only when there is something to unwrap.
-        holder = getattr(parent_ref, "model", parent_ref)
-        assert isinstance(holder, EagleModelMixin), (
+        holder = get_eagle_decoder(self)
+        assert holder is not None, (
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
         holder._set_aux_hidden_state_layers(layers)

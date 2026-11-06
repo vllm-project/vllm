@@ -108,11 +108,13 @@ class PPHandler:
         return self.max_sample_len if input_batch.num_draft_tokens > 0 else 1
 
     def configure_aux_hidden_state_relay(self, model: torch.nn.Module) -> None:
-        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-            aux_hidden_state_keys,
-        )
+        from vllm.model_executor.models.interfaces import get_eagle_decoder
 
-        self.upstream_aux_keys, self.local_aux_keys = aux_hidden_state_keys(model)
+        decoder = get_eagle_decoder(model)
+        assert decoder is not None
+        self.upstream_aux_keys, self.local_aux_keys = (
+            decoder.aux_hidden_state_slot_keys()
+        )
 
     def relay_aux_hidden_states(
         self,
@@ -144,7 +146,9 @@ class PPHandler:
         intermediate_tensors: IntermediateTensors | None,
         model_output: torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]],
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """Put earlier stages' aux hidden states before the last stage's."""
+        """Turn the last stage's model output, which carries only the aux hidden
+        states this stage took, into the full list the speculator reads. Call it
+        once per forward."""
         if isinstance(model_output, tuple):
             hidden_states, aux_hidden_states = model_output
         else:
