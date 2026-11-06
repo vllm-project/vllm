@@ -702,10 +702,14 @@ class ModelCudaGraphManager(CudaGraphManager):
         def store_capture_output(num_tokens: int, model_output: Any) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
             if self.is_last_pp_rank:
-                # Last PP rank (common case).
-                if self.use_aux_hidden_state_outputs:
+                # Last PP rank (common case). Under PP it may take no aux
+                # hidden states itself and return a bare tensor.
+                if isinstance(model_output, tuple):
                     hidden_states, aux_hidden_states = model_output
                 else:
+                    assert not (
+                        self.use_aux_hidden_state_outputs and self.is_first_pp_rank
+                    ), "The model returned no aux hidden states."
                     hidden_states = model_output
                     aux_hidden_states = []
                 if self.hidden_states is None:

@@ -1908,7 +1908,6 @@ class MuseSpark1xModel(LlamaModel):
         )
         if sp_active and self.is_sequence_parallel_input:
             x = sp_shard(x)
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         if (
             get_pp_group().is_first_rank
@@ -1962,7 +1961,6 @@ class MuseSpark1xModel(LlamaModel):
             aux_hidden_states = [
                 sp_all_gather(a)[: positions.shape[0]] for a in aux_hidden_states
             ]
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return output, aux_hidden_states
         return output
