@@ -575,6 +575,27 @@ def test_chunked_push_final_job_queued_before_first_chunk_is_ready():
     assert submitted == [(0, False), (1, False)]
 
 
+def test_chunk_path_not_used_when_decode_tp_differs():
+    w = _StubWriterWorker.fresh()
+    w.world_size = 1
+    w.transfer_topo = MagicMock()
+    w.transfer_topo.get_engine_info.return_value.remote_tp_size = 2
+    job = NixlPushChunkJob(
+        request_id="req-p",
+        local_block_ids=([1, 2],),
+        start_block=0,
+        end_block=1,
+        total_blocks=2,
+        is_final=False,
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker.logger"
+    ) as mock_logger:
+        assert not w._chunk_path_supported(job, _registration_data("req-d"))
+    mock_logger.warning_once.assert_called_once()
+    assert mock_logger.warning_once.call_args.args[1:] == ("decode-engine", 2, 1)
+
+
 class TestPushWriterRegSend:
     """`_do_send_reg_notif`: the PUSH_REG goes to every handshaked agent of
     the P engine, and the agent map is read under `_handshake_lock` so the

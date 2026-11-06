@@ -465,10 +465,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         engine_id = reg_data["decode_engine_id"]
         assert self.transfer_topo is not None
         remote_info = self.transfer_topo.get_engine_info(engine_id)
-        return (
-            remote_info.remote_tp_size == self.world_size
-            and job.total_blocks >= len(remote[0])
-        )
+        if remote_info.remote_tp_size != self.world_size:
+            logger.warning_once(
+                "NIXL chunked push is not used for decode engine %s: its TP "
+                "size %d differs from the prefill TP size %d. Falling back to "
+                "whole-request push.",
+                engine_id,
+                remote_info.remote_tp_size,
+                self.world_size,
+            )
+            return False
+        return job.total_blocks >= len(remote[0])
 
     def _process_chunk_jobs(self) -> None:
         if not self._chunk_deferred:
