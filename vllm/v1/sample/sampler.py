@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -132,8 +134,11 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
+        apply_grammar: Callable[[torch.Tensor], None] | None = None,
     ) -> SamplerOutput:
-        if mixed_sample_eligible(sampling_metadata, predict_bonus_token):
+        if apply_grammar is None and mixed_sample_eligible(
+            sampling_metadata, predict_bonus_token
+        ):
             return SamplerOutput(
                 sampled_token_ids=_aiter_raw_fused_sample(logits, sampling_metadata),
                 logprobs_tensors=None,
@@ -156,6 +161,8 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
+        if apply_grammar is not None:
+            apply_grammar(logits)
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token

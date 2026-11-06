@@ -56,6 +56,11 @@ Four modes are supported: `raw_logprobs` (default), `processed_logprobs`, `raw_l
 Raw means the values before applying any logit processors, like bad words.
 Processed means the values after applying all processors, including temperature and top_k/top_p.
 
+For structured outputs, `raw_logprobs` and `raw_logits` also use the logits before
+the grammar mask is applied. They may therefore include tokens that the grammar
+does not allow. Sampling still follows the grammar; use a processed mode to
+return scores from the constrained distribution.
+
 #### Prompt Logprobs with Prefix Caching
 
 While V1 supports passing prompt logprobs with prefix caching enabled, it no longer caches the logprobs.
