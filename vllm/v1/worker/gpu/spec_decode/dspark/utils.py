@@ -112,12 +112,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         ),
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
-    # replace() marks the copied block_size as user-specified, so the draft's attention
-    # backend would have to support that size, which is only a placeholder until model
-    # load. Keep the target's flag.
-    draft_vllm_config.cache_config.user_specified_block_size = (
-        vllm_config.cache_config.user_specified_block_size
-    )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
     draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)

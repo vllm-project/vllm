@@ -299,6 +299,9 @@ class CudaGraphManager:
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         decode_sizes = decode_sizes or []
+        max_decode_tokens = (
+            self.max_num_reqs * self.vllm_config.uniform_decode_query_len
+        )
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
@@ -354,7 +357,11 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             prefill_sizes, self.lora_capture_cases
         ):
-            if mixed_mode:
+            # recoverSSM cannot capture a dummy query wider than its workspace.
+            if mixed_mode and (
+                not self.vllm_config.cache_config.use_kda_recoverssm
+                or num_tokens <= max_decode_tokens
+            ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
                 # For breakable PW graphs, break-point kernels read the real batch

@@ -57,7 +57,6 @@ from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
-    is_quantized_kv_cache,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 
@@ -761,8 +760,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
-        # As MLAAttention.forward_impl: nvfp4_ds_mla also quantizes the query.
-        fp8_attention = is_quantized_kv_cache(kv_cache_dtype)
+        fp8_attention = kv_cache_dtype.startswith("fp8")
 
         # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
@@ -779,7 +777,7 @@ class MockSparseMLAAttentionLayer:
                 scale=self._k_scale,
             )
 
-        if fp8_attention and kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"):
+        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]

@@ -375,16 +375,9 @@ def resolve_kv_cache_layout(
         if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
-    is_hybrid = any(isinstance(spec, MambaSpec) for spec in kv_cache_specs)
-    if len(dcp_sharding) > 1 and len(page_sizes) > 1 and not is_hybrid:
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
         # Sharded target and replicated draft caches need independent groups.
         # Block-outer layouts can pack those groups without equalizing pages.
-        # Targets with linear-attention layers (MambaSpec: Mamba, KDA, GDN) are
-        # not narrowed to block-outer layouts: they keep a layer-compact layout,
-        # and page unification pads the draft's smaller pages up to the target's.
-        # Their state pages force large blocks (1536 tokens for Kimi-K3 at TP8)
-        # that packed attention caches cannot split into kernel blocks, and NIXL
-        # cannot transfer packed rows that hold the state.
         candidates = [layout for layout in candidates if layout.is_block_outermost]
         if not candidates:
             raise ValueError(
@@ -1292,32 +1285,6 @@ def get_dcp_local_seq_lens(
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens
-
-
-@triton.jit
-def dcp_local_to_global_index(local, dcp_rank, dcp_size, cp_kv_cache_interleave_size):
-    """Global position of a KV slot held locally by ``dcp_rank``.
-
-    Inverse of ``dcp_global_to_local_index``. Both describe the same
-    interleaving as ``get_dcp_local_seq_lens`` and must stay consistent
-    with it.
-    """
-    return (
-        local // cp_kv_cache_interleave_size * (dcp_size * cp_kv_cache_interleave_size)
-        + dcp_rank * cp_kv_cache_interleave_size
-        + local % cp_kv_cache_interleave_size
-    )
-
-
-@triton.jit
-def dcp_global_to_local_index(pos, dcp_size, cp_kv_cache_interleave_size):
-    """Owning DCP rank and that rank's local KV slot for global position ``pos``."""
-    owner = pos // cp_kv_cache_interleave_size % dcp_size
-    local = (
-        pos // (cp_kv_cache_interleave_size * dcp_size) * cp_kv_cache_interleave_size
-        + pos % cp_kv_cache_interleave_size
-    )
-    return owner, local
 
 
 @triton.jit(

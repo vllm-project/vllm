@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
@@ -43,7 +42,6 @@ from vllm.v1.attention.backends.mla.index_group import (
     HiSparseMLAIndexGroup,
     SparseMLAIndexGroup,
     SparseMLAIndexGroupBuilder,
-    get_sparse_mla_index_group_max_rows,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
@@ -51,7 +49,6 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.cp_common import symm_mem_available
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.shardq import ShardQMetadata, build_shardq_split
@@ -65,7 +62,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQPlanner
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -173,9 +169,6 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     shardq: ShardQMetadata | None = None
     # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0
-    # The KV cache holds every DCP rank's rows (a DCP ShardQ step's gathered
-    # context), so the top-k converts without the DCP filter.
-    kv_gathered: bool = False
 
 
 T = TypeVar("T", bound=SparseMLACommonMetadata)
@@ -186,17 +179,10 @@ def build_shardq_metadata(
     vllm_config: "VllmConfig",
     metadata: SparseMLACommonMetadata,
     device: torch.device,
-    dcp_shardq: "DcpShardQPlanner | None" = None,
 ) -> ShardQMetadata | None:
     """This step's ShardQ, with ``metadata`` narrowed to this rank's tokens,
-    or None. Under DCP (``dcp_shardq``), those tokens attend the step's
-    gathered context."""
+    or None."""
     split = build_shardq_split(common_attn_metadata, vllm_config)
-    gathered_context = None
-    if dcp_shardq is not None:
-        gathered_context = dcp_shardq.plan(common_attn_metadata, split)
-        if gathered_context is None:
-            return None
     if split is None:
         return None
     num_decode_tokens = split.num_decode_tokens
@@ -207,15 +193,7 @@ def build_shardq_metadata(
         rank_offsets=async_tensor_h2d(
             np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
         ),
-        gathered_context=gathered_context,
     )
-    gathered = {}
-    if gathered_context is not None:
-        gathered = dict(
-            block_table=gathered_context.block_table,
-            block_size=gathered_context.block_size,
-            kv_gathered=True,
-        )
     # The indexer wrote these tokens' top-k compactly after the decodes.
     shardq.attn_metadata = replace(
         metadata,
@@ -225,7 +203,6 @@ def build_shardq_metadata(
             shardq.local_token_ids + num_decode_tokens
         ],
         topk_start=num_decode_tokens,
-        **gathered,
     )
     return shardq
 
@@ -246,7 +223,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = self.model_config.hf_text_config.index_topk
+        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -321,67 +298,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.use_shardq = any(
             getattr(layers[name], "use_shardq", False) for name in layer_names
         )
-        # Under DCP, ShardQ steps attend a gathered copy of their context.
-        self.dcp_shardq: DcpShardQPlanner | None = None
-        if self.use_shardq and self.dcp_world_size > 1:
-            self.use_shardq = self._init_dcp_shardq(
-                kv_cache_spec, vllm_config, layers[layer_names[0]]
-            )
-
-    def _init_dcp_shardq(
-        self,
-        kv_cache_spec: "AttentionSpec",
-        vllm_config: "VllmConfig",
-        attention_layer: Any,
-    ) -> bool:
-        """Whether DCP ShardQ steps can gather this layer's caches
-        (vllm.v1.attention.ops.dcp_shardq)."""
-        from vllm.v1.attention.ops.dcp_shardq import context as shardq_context
-        from vllm.v1.attention.ops.dcp_shardq.context import (
-            ContextLayout,
-            DcpShardQPlanner,
-            capacity_pages,
-            dcp_fallback_max_tokens,
-            register_warmup,
-        )
-
-        layout = ContextLayout.from_layer(
-            kv_cache_spec, getattr(attention_layer, "indexer", None)
-        )
-        if layout is None:
-            logger.warning_once(
-                "DCP ShardQ needs a packed MLA cache format in blocks of "
-                "whole 64-token pages and an fp8 indexer key cache; DCP "
-                "prefill steps keep the DCP path."
-            )
-            return False
-        from vllm.v1.attention.backends.mla.indexer import (
-            DeepseekV32IndexerMetadataBuilder,
-            get_max_prefill_buffer_size,
-        )
-
-        decode_query_len = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
-            vllm_config
-        )
-        # DCP spans the TP group, so DCP ranks also index the workspace peers.
-        self.dcp_shardq = DcpShardQPlanner(
-            layout,
-            capacity_pages(
-                shardq_context.workspace_max_tokens(vllm_config),
-                vllm_config.scheduler_config.max_num_seqs,
-            ),
-            get_max_prefill_buffer_size(vllm_config),
-            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            # Rows the indexer scores as decodes keep the DCP path.
-            decode_query_len,
-            self.dcp_world_size,
-            get_dcp_group().rank_in_group,
-            self.device,
-            label=f"{self.layer_names[0]}, {len(self.layer_names)} layers",
-            max_fallback_tokens=dcp_fallback_max_tokens(vllm_config, decode_query_len),
-        )
-        register_warmup(layout, self.dcp_world_size, self.topk_tokens)
-        return True
 
     def _init_reorder_batch_threshold(
         self,
@@ -566,11 +482,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         if self.use_shardq:
             metadata.shardq = build_shardq_metadata(
-                common_attn_metadata,
-                self.vllm_config,
-                metadata,
-                self.device,
-                self.dcp_shardq,
+                common_attn_metadata, self.vllm_config, metadata, self.device
             )
         return metadata
 
@@ -777,9 +689,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     group_conversion_decode_only: ClassVar[bool] = False
     # Whether forward_mqa runs ShardQ metadata and is validated.
     supports_shardq: ClassVar[bool] = False
-    # Whether forward_mqa also runs a DCP ShardQ step's gathered context
-    # (kv_gathered metadata) and is validated.
-    supports_dcp_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -823,10 +732,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
-            index_group_builder = SparseMLAIndexGroupBuilder(
-                self.topk_indices_buffer,
-                get_sparse_mla_index_group_max_rows(get_current_vllm_config()),
-            )
+            index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if index_group_builder is not None:
             vllm_config = get_current_vllm_config()
             self.index_group, self.index_group_index = (
@@ -862,35 +768,13 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         cudagraph_mode = (
             vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
         )
-        dcp_size = parallel_config.decode_context_parallel_size
-        kv_transfer_config = vllm_config.kv_transfer_config
-        # A disaggregated decode instance receives its prefills' KV, so it
-        # would hold the gathered-context workspace for nothing.
-        decode_instance = (
-            kv_transfer_config is not None
-            and kv_transfer_config.kv_role == "kv_consumer"
-        )
         # The attention layer decides whether to use ShardQ.
         self.use_shardq = (
             self.supports_shardq
             and vllm_config.attention_config.sparse_mla_shard_q
             and vllm_config.attention_config.hisparse_config is None
             and parallel_config.tensor_parallel_size > 1
-            and (
-                dcp_size == 1
-                or (
-                    self.supports_dcp_shardq
-                    and not decode_instance
-                    and dcp_size == parallel_config.tensor_parallel_size
-                    # The gathered context is laid out for interleave 1, in
-                    # one workspace that micro-batches would share, and its
-                    # exchanges need symmetric memory.
-                    and parallel_config.cp_kv_cache_interleave_size == 1
-                    and not parallel_config.use_ubatching
-                    and current_platform.is_device_capability_family(100)
-                    and symm_mem_available
-                )
-            )
+            and parallel_config.decode_context_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
         )
@@ -938,7 +822,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         index_group = self.index_group
         if not isinstance(index_group, HiSparseMLAIndexGroup):
             _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
-            if self.dcp_world_size > 1 and not attn_metadata.kv_gathered:
+            if self.dcp_world_size > 1:
                 physical_topk, valid_counts = triton_filter_and_convert_dcp_index(
                     attn_metadata.req_id_per_token[:num_tokens],
                     attn_metadata.block_table,
@@ -953,16 +837,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 )
             # A mixed ShardQ step's decode tokens take the index group's
             # conversion, so its token-sharded ones convert here.
-            elif (
-                topk_start
-                or attn_metadata.kv_gathered
-                or (
-                    self.group_conversion_decode_only
-                    and not (
-                        index_group is not None
-                        and index_group.num_layers > 1
-                        and num_decode_tokens >= num_tokens
-                    )
+            elif topk_start or (
+                self.group_conversion_decode_only
+                and not (
+                    index_group is not None
+                    and index_group.num_layers > 1
+                    and num_decode_tokens >= num_tokens
                 )
             ):
                 physical_topk, valid_counts = triton_convert_req_index_to_global_index(
@@ -981,9 +861,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     block_stride_rows=block_stride_rows,
                     return_valid_counts=True,
                 )
-            # A gathered-context step's output goes straight back to the head
-            # shards: no DCP combine reads its LSE.
-            extra = {"return_lse": False} if attn_metadata.kv_gathered else {}
             return self._forward_mqa_kernel(
                 q,
                 kv_c_and_k_pe_cache,
@@ -992,7 +869,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 layer=layer,
                 block_size=block_size,
                 is_decode=num_decode_tokens >= num_tokens,
-                **extra,
             )
 
         assert self.dcp_world_size == 1
@@ -1089,9 +965,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """``return_lse`` None means ``need_to_return_lse_for_decode``."""
         raise NotImplementedError
 
     @staticmethod

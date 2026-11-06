@@ -138,8 +138,8 @@ def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
 
 @pytest.mark.parametrize("sm100", [False, True])
 def test_flashmla_quantized_cache_kernel_pages(monkeypatch, sm100):
-    """Quantized blocks are read as 64-token pages on every architecture: the
-    blocks stay whole, and their stride is a whole number of pages."""
+    """Quantized blocks are read as 64-token pages; SM100 only row-aligns them
+    (TMA) and keeps 64-token blocks."""
     monkeypatch.setattr(
         current_platform,
         "is_device_capability_family",
@@ -155,9 +155,11 @@ def test_flashmla_quantized_cache_kernel_pages(monkeypatch, sm100):
         state_content_bytes=656,
     )
 
-    assert select_common_block_size(1152, [FlashMLASparseBackend], [spec]) == 1152
-    aligned = FlashMLASparseBackend.customize_spec(spec)
-    assert aligned.get_block_stride_alignment() == 64 * 656
+    kernel_block_size = 64 if sm100 else 1152
+    assert (
+        select_common_block_size(1152, [FlashMLASparseBackend], [spec])
+        == kernel_block_size
+    )
 
 
 def test_fp8_kv_pages_address_packed_blocks():

@@ -22,11 +22,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
     dsa_indexer_uses_fp4,
 )
-from vllm.v1.kv_cache_interface import (
-    DS_MLA_STATE_CONTENT_BYTES,
-    MLAAttentionSpec,
-    get_kv_quant_mode,
-)
+from vllm.v1.kv_cache_interface import MLAAttentionSpec, get_kv_quant_mode
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
@@ -165,6 +161,8 @@ def dense_mla_draft_bytes_per_token(vllm_config: VllmConfig) -> int:
     kv_lora_rank = getattr(draft_config, "kv_lora_rank", None)
     if kv_lora_rank is None:
         return 0
+    from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
+
     cache_dtype = spec_config.kv_cache_dtype or vllm_config.cache_config.cache_dtype
     page = MLAAttentionSpec(
         block_size=1,

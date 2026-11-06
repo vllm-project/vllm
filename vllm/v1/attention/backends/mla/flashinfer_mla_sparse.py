@@ -2,18 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
-import bisect
 import math
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
 from vllm import envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -22,7 +19,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -94,7 +90,6 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
-        "nvfp4_ds_mla",  # prims_ts kernel only
     ]
 
     @staticmethod
@@ -141,20 +136,6 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
             )
         if kv_cache_dtype == "fp8_ds_mla":
             return f"{cls.get_name()} SM10 does not support fp8_ds_mla kv-cache dtype"
-        if kv_cache_dtype == "nvfp4_ds_mla":
-            from vllm.utils.flashinfer import has_flashinfer_prims_ts_sparse_mla
-
-            if vllm_config.kernel_config.flashinfer_sparse_mla_kernel == "trtllm":
-                return (
-                    f"{cls.get_name()} reads nvfp4_ds_mla only with the prims_ts "
-                    "kernel (kernel_config.flashinfer_sparse_mla_kernel=trtllm)"
-                )
-            if not has_flashinfer_prims_ts_sparse_mla():
-                return (
-                    f"{cls.get_name()} reads nvfp4_ds_mla with FlashInfer's "
-                    "prims_ts sparse MLA decode, which the installed FlashInfer "
-                    "lacks (needs a build with flashinfer-ai/flashinfer#7410)"
-                )
 
         # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
         if vllm_config.model_config is not None:
@@ -325,31 +306,20 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
             and vllm_config.attention_config.hisparse_config is None
         )
 
-        # trtllm-gen's buffers are baked into CUDA graphs, so they reach their
-        # final size here, before the first forward/capture (no lazy regrow):
-        # under DCP the workspace holds the softmax-stats slab, and the
-        # multi-CTA KV counters cover every launch. The prims_ts kernel owns its
-        # own (small) plan workspaces.
-        kv_cache_dtype = (
-            getattr(kv_cache_spec, "cache_dtype_str", None)
-            or vllm_config.cache_config.cache_dtype
-        )
-        if not use_prims_ts(vllm_config, kv_cache_dtype):
+        # Under DCP the workspace must hold the trtllm-gen softmax-stats slab.
+        # The buffer address is baked into CUDA graphs, so it has to reach its
+        # final size here, before the first forward/capture (no lazy regrow).
+        if self.dcp_world_size > 1:
             num_q_heads = vllm_config.model_config.get_num_attention_heads(
                 vllm_config.parallel_config
             )
-            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-            if self.dcp_world_size > 1:
-                _get_workspace_buffer(
-                    device,
-                    _required_workspace_bytes(
-                        self.dcp_world_size, num_q_heads, max_tokens
-                    ),
-                )
-            _reserve_kv_counters(
+            _get_workspace_buffer(
                 device,
-                max_tokens,
-                trtllm_gen_query_heads(num_q_heads * self.dcp_world_size),
+                _required_workspace_bytes(
+                    self.dcp_world_size,
+                    num_q_heads,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                ),
             )
 
     def update_draft_decode_metadata(
@@ -367,8 +337,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
 
 # Global workspace buffer (lazily initialized)
 _fi_sparse_workspace: torch.Tensor | None = None
-# Shared trtllm-gen multi-CTA KV counters (see _reserve_kv_counters).
-_fi_sparse_kv_counters: torch.Tensor | None = None
 
 # trtllm-gen carves a softmax-stats slab from the workspace whenever LSE is
 # requested (FlashInfer csrc/trtllm_fmha_kernel_launcher.cu, unchanged from
@@ -384,13 +352,6 @@ _TRTLLM_GEN_SOFTMAX_GUARD_BYTES = 1024 * 1024
 # Keep in sync with the VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE default in
 # vllm/envs.py.
 _DEFAULT_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
-
-
-def trtllm_gen_query_heads(num_heads: int) -> int:
-    """Query heads the trtllm-gen MLA decode runs: it takes no head count strictly
-    between 64 and 128 (e.g. 96 gathered under DCP8 at 12 heads per rank), so
-    those are zero-padded to 128."""
-    return 128 if 64 < num_heads < 128 else num_heads
 
 
 def compute_trtllm_sparse_mla_workspace_bytes(
@@ -416,7 +377,7 @@ def compute_trtllm_sparse_mla_workspace_bytes(
         return base_workspace_bytes
     softmax_bytes = (
         _TRTLLM_GEN_SOFTMAX_STAT_BYTES
-        * trtllm_gen_query_heads(num_heads_per_rank * dcp_world_size)
+        * (num_heads_per_rank * dcp_world_size)
         * min(max_num_batched_tokens, _TRTLLM_GEN_MAX_REQUESTS)
         * _TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN
         + _TRTLLM_GEN_SOFTMAX_GUARD_BYTES
@@ -477,320 +438,6 @@ def _get_workspace_buffer(
     return _fi_sparse_workspace
 
 
-# prims_ts: FlashInfer's task-scheduled sparse MLA decode
-# (flashinfer.attention.prims_ts.BatchSparseMLADecodePagedTSWrapper), an
-# experimental API. Each query row attends its own int32 storage-row indices,
-# so it serves decode, MTP verify and sparse prefill rows alike.
-_PRIMS_TS_FORMATS = {
-    # D576 per-tensor E4M3 rows (NoPE + RoPE); the tensor descale is folded into
-    # the softmax and output scales.
-    "fp8": "native",
-    "fp8_e4m3": "native",
-    # Byte-identical to vLLM's nvfp4_ds_mla (352 B: E2M1 NoPE, unscaled E4M3
-    # RoPE, E4M3 block scales).
-    "nvfp4_ds_mla": "nvfp4.fp8rope",
-}
-# FlashInfer builds without flashinfer-ai/flashinfer#7984 choose the 2-CTA
-# schedule (KV rows loaded and converted once per CTA pair) only for exactly 128
-# query heads; other counts in (64, 128) run as two M64 tiles that load every KV
-# row twice, 1.7x (fp8) to 2.7x (nvfp4) slower at 96 heads (DCP8 decode). There
-# such queries are zero-padded to 128 heads. Builds with it schedule 96 heads on
-# the same 2-CTA tile directly, which saves the padded query/output copies.
-_PRIMS_TS_2CTA_HEADS = 128
-# Rows per prims_ts call. Bounds the head-padded query/output of long prefill
-# steps.
-_PRIMS_TS_MAX_ROWS = 4096
-
-
-def use_prims_ts(vllm_config: VllmConfig, kv_cache_dtype: str) -> bool:
-    """Whether FLASHINFER_MLA_SPARSE runs this model's sparse MLA on prims_ts.
-
-    "auto" uses prims_ts under DCP when it can run (faster than trtllm-gen
-    for per-tensor fp8 prefill and decode on SM100 there) and trtllm-gen
-    otherwise, including TP-only (DCP 1). "trtllm" keeps trtllm-gen for
-    per-tensor fp8. nvfp4_ds_mla (no trtllm-gen kernel) always uses prims_ts.
-    Raises if prims_ts is required but cannot run."""
-    kernel = vllm_config.kernel_config.flashinfer_sparse_mla_kernel
-    required = kv_cache_dtype == "nvfp4_ds_mla" or kernel == "prims_ts"
-    if not required and (
-        kernel == "trtllm"
-        or vllm_config.parallel_config.decode_context_parallel_size <= 1
-    ):
-        return False
-    reason = _prims_ts_unsupported_reason(vllm_config, kv_cache_dtype)
-    if not required:
-        return reason is None
-    if reason is not None:
-        raise ValueError(
-            f"FLASHINFER_MLA_SPARSE cannot run the prims_ts kernel: {reason}"
-        )
-    return True
-
-
-def _prims_ts_row_buckets(vllm_config: VllmConfig) -> tuple[int, ...]:
-    """Row capacities to plan: every CUDA graph size (graph replays keep the
-    schedule FlashInfer picks for their exact row count) and the powers of two
-    up to the largest call, which serve every other row count."""
-    max_rows = min(
-        vllm_config.scheduler_config.max_num_batched_tokens, _PRIMS_TS_MAX_ROWS
-    )
-    sizes = {1 << i for i in range(max_rows.bit_length())} | {max_rows}
-    graph_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
-    sizes.update(s for s in graph_sizes if s <= max_rows)
-    return tuple(sorted(sizes))
-
-
-def _prims_ts_unsupported_reason(
-    vllm_config: VllmConfig, kv_cache_dtype: str
-) -> str | None:
-    from vllm.utils.flashinfer import (
-        has_flashinfer_prims_ts_sparse_mla,
-        prims_ts_sparse_mla_format_error,
-    )
-
-    if kv_cache_dtype not in _PRIMS_TS_FORMATS:
-        return f"kv-cache dtype {kv_cache_dtype!r} (needs fp8 or nvfp4_ds_mla)"
-    text_config = vllm_config.model_config.hf_text_config
-    dims = (text_config.kv_lora_rank, text_config.qk_rope_head_dim)
-    if dims != (512, 64):
-        return f"(kv_lora_rank, qk_rope_head_dim) {dims} (needs (512, 64))"
-    if vllm_config.attention_config.hisparse_config is not None:
-        return "HiSparse"
-    if vllm_config.parallel_config.use_ubatching:
-        # The shared plans and workspace serve one stream at a time.
-        return "micro-batching (DBO / ubatching)"
-    if not current_platform.is_device_capability_family(100):
-        return "this GPU (needs SM100 / SM103)"
-    if not has_flashinfer_prims_ts_sparse_mla():
-        return (
-            "the installed FlashInfer has no prims_ts sparse MLA decode "
-            "(BatchSparseMLADecodePagedTSWrapper)"
-        )
-    return prims_ts_sparse_mla_format_error(_PRIMS_TS_FORMATS[kv_cache_dtype])
-
-
-class _PrimsTSPlans:
-    """Planned prims_ts wrappers, shared by all layers.
-
-    A plan fixes FlashInfer's schedule (chosen from its row capacity) and
-    compiles that schedule's kernel on first use, which takes seconds. So every
-    row capacity of a geometry is planned at once, at startup (from the profile
-    run's ``reserve_workspace``), and a call runs on the smallest capacity that
-    holds its rows: no planning or compilation happens while serving, and the
-    plan count stays fixed. Each plan is a packed-query plan of ``capacity``
-    one-token requests, so its schedule is the one FlashInfer picks for
-    ``capacity`` decode rows; a call with fewer rows passes the matching
-    offsets (``qo_indptr`` = [0, 1, ..., rows, ..., rows]).
-
-    The sparse MLA layers run one at a time on one stream, so every plan shares
-    one workspace. A geometry that needs more workspace replaces it; plans keep
-    the buffer they were planned with, so graphs captured with them stay valid.
-    """
-
-    def __init__(self) -> None:
-        self._plans: dict[tuple, dict[int, tuple[object, torch.Tensor]]] = {}
-        self._workspace: torch.Tensor | None = None
-
-    def get(
-        self,
-        device: torch.device,
-        buckets: tuple[int, ...],
-        heads: int,
-        kv_cache_format: str,
-        max_topk: int,
-        return_lse: bool,
-    ) -> dict[int, tuple[object, torch.Tensor]]:
-        """{capacity: (wrapper, qo_indptr of a full call)} for one geometry."""
-        key = (device, buckets, heads, kv_cache_format, max_topk, return_lse)
-        plans = self._plans.get(key)
-        if plans is not None:
-            return plans
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "prims_ts sparse MLA was not planned before CUDA graph capture"
-            )
-        from flashinfer.attention.prims_ts import (
-            BatchSparseMLADecodePagedTSWrapper,
-            get_prims_ts_sparse_mla_decode_workspace_size,
-        )
-
-        kwargs = dict(
-            max_topk=max_topk,
-            max_q_len=1,
-            packed_query=True,
-            q_dtype=torch.float8_e4m3fn,
-            qk_rope_head_dim=64,
-            kv_cache_format=kv_cache_format,
-            return_lse=return_lse,
-        )
-        size = max(
-            get_prims_ts_sparse_mla_decode_workspace_size(device, rows, heads, **kwargs)
-            for rows in buckets
-        )
-        if self._workspace is None or self._workspace.numel() < size:
-            self._workspace = torch.empty(size, dtype=torch.uint8, device=device)
-        start = time.perf_counter()
-        plans = {}
-        for rows in buckets:
-            plan = BatchSparseMLADecodePagedTSWrapper(self._workspace)
-            plan.plan(device, rows, heads, **kwargs)
-            qo_indptr = torch.arange(rows + 1, dtype=torch.int32, device=device)
-            plans[rows] = (plan, qo_indptr)
-        logger.info(
-            "Planned FlashInfer prims_ts sparse MLA (%s, %d heads, top-k %d) for "
-            "%d row capacities up to %d in %.1f s",
-            kv_cache_format,
-            heads,
-            max_topk,
-            len(buckets),
-            buckets[-1],
-            time.perf_counter() - start,
-        )
-        self._plans[key] = plans
-        return plans
-
-
-_prims_ts_plans = _PrimsTSPlans()
-
-
-def _kv_counter_bytes(num_rows: int, num_heads: int, device: torch.device) -> int:
-    from flashinfer.utils import (
-        get_device_sm_count,
-        get_trtllm_gen_multi_ctas_kv_counter_bytes,
-    )
-
-    return get_trtllm_gen_multi_ctas_kv_counter_bytes(
-        num_rows, num_heads, get_device_sm_count(device)
-    )
-
-
-def _reserve_kv_counters(device: torch.device, num_rows: int, num_heads: int) -> None:
-    """Allocates the zeroed trtllm-gen multi-CTA KV counters for launches of up
-    to ``num_rows`` x ``num_heads``, before CUDA graph capture. The kernel
-    resets them after each launch, so all layers share them, as they share the
-    workspace. Without them FlashInfer zero-allocates counters on every call."""
-    global _fi_sparse_kv_counters
-    nbytes = _kv_counter_bytes(num_rows, num_heads, device)
-    if _fi_sparse_kv_counters is None or _fi_sparse_kv_counters.nbytes < nbytes:
-        _fi_sparse_kv_counters = torch.zeros(nbytes, dtype=torch.uint8, device=device)
-
-
-def _kv_counters(
-    num_rows: int, num_heads: int, device: torch.device
-) -> dict[str, torch.Tensor]:
-    """``multi_ctas_kv_counter_buffer`` for one launch when the reserved
-    counters cover it; otherwise FlashInfer allocates its own."""
-    counters = _fi_sparse_kv_counters
-    if counters is None or counters.nbytes < _kv_counter_bytes(
-        num_rows, num_heads, device
-    ):
-        return {}
-    return {"multi_ctas_kv_counter_buffer": counters}
-
-
-@triton.jit
-def _pad_query_heads_kernel(
-    src_ptr,
-    dst_ptr,
-    src_row_stride,
-    row_words,
-    padded_row_words,
-    BLOCK: tl.constexpr,
-):
-    """One query row of 8-byte words, zero-extended to the padded heads."""
-    row = tl.program_id(0).to(tl.int64)
-    words = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    value = tl.load(
-        src_ptr + row * src_row_stride + words, mask=words < row_words, other=0
-    )
-    tl.store(
-        dst_ptr + row * padded_row_words + words, value, mask=words < padded_row_words
-    )
-
-
-def _pad_query_heads(query: torch.Tensor, heads: int) -> torch.Tensor:
-    """``query`` [T, H, D] in a new contiguous [T, ``heads``, D] buffer whose
-    extra heads are zero (the head count a decode kernel runs), in one kernel."""
-    num_tokens, num_heads, dim = query.shape
-    padded = query.new_empty((num_tokens, heads, dim))
-    element_size = query.element_size()
-    if (
-        query.stride(2) != 1
-        or query.stride(1) != dim
-        or query.stride(0) * element_size % 8
-        or dim * element_size % 8
-        or query.data_ptr() % 8
-    ):
-        padded[:, num_heads:].zero_()
-        padded[:, :num_heads].copy_(query)
-        return padded
-    if num_tokens:
-        padded_row_words = heads * dim * element_size // 8
-        block = 1024
-        _pad_query_heads_kernel[(num_tokens, triton.cdiv(padded_row_words, block))](
-            query.view(torch.int64),
-            padded.view(torch.int64),
-            query.stride(0) * element_size // 8,
-            num_heads * dim * element_size // 8,
-            padded_row_words,
-            BLOCK=block,
-        )
-    return padded
-
-
-@triton.jit
-def _finish_dcp_partials_kernel(
-    out_ptr,
-    lse_ptr,
-    counts_ptr,
-    heads,
-    out_row_stride,
-    lse_row_stride,
-    HEAD_DIM: tl.constexpr,
-    HEADS_BLOCK: tl.constexpr,
-    OUT_BLOCK: tl.constexpr,
-):
-    """One row of a trtllm-gen DCP partial: without top-k entries (count 0) its
-    output is zeroed and its LSE set to -inf; other rows are not touched."""
-    row = tl.program_id(0).to(tl.int64)
-    if tl.load(counts_ptr + row) == 0:
-        head = tl.arange(0, HEADS_BLOCK)
-        lse_row = lse_ptr + row * lse_row_stride
-        tl.store(lse_row + head, float("-inf"), mask=head < heads)
-        out_row = out_ptr + row * out_row_stride
-        zeros = tl.zeros([OUT_BLOCK], dtype=out_ptr.dtype.element_ty)
-        for start in range(0, heads * HEAD_DIM, OUT_BLOCK):
-            item = start + tl.arange(0, OUT_BLOCK)
-            tl.store(out_row + item, zeros, mask=item < heads * HEAD_DIM)
-
-
-def _finish_dcp_partials(
-    out: torch.Tensor, lse: torch.Tensor, counts: torch.Tensor
-) -> None:
-    """In place, for trtllm-gen's DCP partials ``out`` [T, H, D] and ``lse``
-    [T, H] (views of its head-padded buffers): rows without top-k entries
-    (``counts`` 0; the DCP index conversion compacts a row's valid entries to
-    its front and counts them, so these are the rows whose entries are all -1)
-    get output 0 and LSE -inf, the empty-shard identity of the DCP combine. One
-    small kernel that writes only the empty rows."""
-    num_tokens, heads, head_dim = out.shape
-    assert out.stride(2) == 1 and out.stride(1) == head_dim and lse.stride(1) == 1
-    assert counts.shape == (num_tokens,) and counts.is_contiguous()
-    if num_tokens == 0:
-        return
-    _finish_dcp_partials_kernel[(num_tokens,)](
-        out,
-        lse,
-        counts,
-        heads,
-        out.stride(0),
-        lse.stride(0),
-        HEAD_DIM=head_dim,
-        HEADS_BLOCK=triton.next_power_of_2(heads),
-        OUT_BLOCK=4096,
-    )
-
-
 class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """FlashInfer MLA Sparse implementation.
 
@@ -798,17 +445,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     sparse attention computation.
     """
 
-    use_prims_ts: bool = False
-
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     lse_base_on_e: bool = False
     supports_shardq: ClassVar[bool] = True
-    supports_dcp_shardq: ClassVar[bool] = True
-    # fp8 query quantization is required when using fp8 kv_cache,
-    # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
-    # for query and kv_cache (mixed bf16+fp8 is not supported).
-    supports_quant_query_input: bool = True
 
     def __init__(
         self,
@@ -866,21 +506,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # top-k length tensor.
         self.is_nope_mla = self.qk_rope_head_dim == 0
 
-        # The layer quantizes the query with its static per-tensor q_scale (a
-        # dynamic scale cannot reach the kernel's host-scalar softmax scale in a
-        # CUDA graph) before the DCP query all-gather.
-        vllm_config = get_current_vllm_config()
-        self.use_prims_ts = use_prims_ts(vllm_config, kv_cache_dtype)
-        if self.use_prims_ts:
-            # prims_ts returns natural-log LSE; (0, -inf) for rows without
-            # entries, the DCP merge identity.
-            self.lse_base_on_e = True
-            self.prims_ts_format = _PRIMS_TS_FORMATS[kv_cache_dtype]
-            self.prims_ts_buckets = _prims_ts_row_buckets(vllm_config)
-            logger.info_once(
-                "FLASHINFER_MLA_SPARSE: FlashInfer prims_ts sparse MLA (%s cache)",
-                kv_cache_dtype,
-            )
+        # fp8 query quantization is required when using fp8 kv_cache,
+        # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
+        # for query and kv_cache (mixed bf16+fp8 is not supported).
+        self.supports_quant_query_input = True
 
     def _prepare_mqa_kernel(
         self,
@@ -898,147 +527,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             self.bmm2_scale = 1.0
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
-
-    def _prims_ts_query_heads(self, num_heads: int) -> int:
-        from vllm.utils.flashinfer import prims_ts_sparse_mla_schedules_native_heads
-
-        if 64 < num_heads < _PRIMS_TS_2CTA_HEADS and (
-            not prims_ts_sparse_mla_schedules_native_heads()
-        ):
-            return _PRIMS_TS_2CTA_HEADS
-        return num_heads
-
-    def _get_prims_ts_plans(self, device: torch.device, heads: int, max_topk: int):
-        return _prims_ts_plans.get(
-            device,
-            self.prims_ts_buckets,
-            self._prims_ts_query_heads(heads),
-            self.prims_ts_format,
-            max_topk,
-            self.need_to_return_lse_for_decode,
-        )
-
-    def reserve_workspace(self) -> None:
-        if not self.use_prims_ts:
-            return
-        heads = self.num_heads * self.dcp_world_size
-        # ShardQ steps attend their token slice with every TP rank's heads.
-        shardq_heads = self.num_heads * get_tensor_model_parallel_world_size()
-        # Plan (and compile) every row capacity before serving starts.
-        if self.topk_indices_buffer is not None:
-            for num_heads in {heads, shardq_heads} if self.use_shardq else {heads}:
-                self._get_prims_ts_plans(
-                    torch.device(
-                        current_platform.device_type,
-                        torch.accelerator.current_device_index(),
-                    ),
-                    num_heads,
-                    self.topk_indices_buffer.shape[1],
-                )
-        # Claim the transient peak of one long prefill step in the profile run:
-        # one chunk's head-padded query, output and LSE, and, for a step of
-        # several chunks, the step output.
-        # A ShardQ step attends only this rank's token slice, with every head.
-        vllm_config = get_current_vllm_config()
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        steps = [(max_tokens, heads)]
-        if self.use_shardq:
-            # A rank owns at most two chunks of ceil(n / (2 * world)) per
-            # request (allocate_shardq_buffers).
-            max_reqs = vllm_config.scheduler_config.max_num_seqs
-            world = get_tensor_model_parallel_world_size()
-            rank_tokens = min(max_tokens, -(-max_tokens // world) + 2 * max_reqs)
-            steps.append((rank_tokens, shardq_heads))
-        peak = max(self._prims_ts_peak_bytes(*step) for step in steps)
-        _ = torch.empty(peak, dtype=torch.uint8, device=current_platform.device_type)
-
-    def _prims_ts_peak_bytes(self, num_tokens: int, heads: int) -> int:
-        padded = self._prims_ts_query_heads(heads)
-        rows = min(num_tokens, self.prims_ts_buckets[-1])
-        peak = rows * padded * (self.kv_lora_rank + self.qk_rope_head_dim + 1024 + 4)
-        if num_tokens > rows:
-            peak += num_tokens * heads * self.kv_lora_rank * 2
-        return peak
-
-    def _forward_prims_ts(
-        self,
-        q: torch.Tensor,
-        kv_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
-        valid_counts: torch.Tensor,
-        layer: AttentionLayer,
-        block_size: int,
-        return_lse: bool | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Sparse MLA of every row of ``q`` [T, H, 576] (E4M3, quantized by the
-        layer with ``q_scale``) over its ``valid_counts`` leading physical rows
-        of ``topk_indices`` (-1 entries are masked). ``return_lse`` None means
-        ``need_to_return_lse_for_decode``."""
-        assert q.dtype == torch.float8_e4m3fn, q.dtype
-        num_tokens, heads, _ = q.shape
-        padded = self._prims_ts_query_heads(heads)
-        # Storage rows; the backend aligns block strides to whole rows.
-        is_fp8 = self.prims_ts_format == "native"
-        rows, _ = flat_kv_row_view(
-            kv_cache.view(torch.float8_e4m3fn if is_fp8 else torch.uint8), block_size
-        )
-        kv_descale = layer._k_scale_float if is_fp8 else 1.0
-        softmax_scale = self.scale * layer._q_scale_float * kv_descale
-        if return_lse is None:
-            return_lse = self.need_to_return_lse_for_decode
-        buckets = self.prims_ts_buckets
-        # A call of one chunk (every decode step) returns views of the kernel's
-        # head-padded output and LSE: the DCP combine reads them in place.
-        out_heads = padded if num_tokens <= buckets[-1] else heads
-        out = q.new_empty(
-            (num_tokens, out_heads, self.kv_lora_rank), dtype=torch.bfloat16
-        )
-        lse = (
-            q.new_empty((num_tokens, out_heads), dtype=torch.float32)
-            if return_lse
-            else None
-        )
-        plans = self._get_prims_ts_plans(q.device, heads, topk_indices.shape[1])
-        for start in range(0, num_tokens, buckets[-1]):
-            end = min(num_tokens, start + buckets[-1])
-            n = end - start
-            capacity = buckets[bisect.bisect_left(buckets, n)]
-            plan, qo_indptr = plans[capacity]
-            if n < capacity:
-                qo_indptr = qo_indptr.clamp(max=n)
-            query = q[start:end]
-            chunk_out, chunk_lse = (
-                out[start:end],
-                None if lse is None else lse[start:end],
-            )
-            if padded != heads:
-                # Zero query heads: computed, then dropped.
-                query = _pad_query_heads(query, padded)
-            if out_heads != padded:
-                chunk_out = out.new_empty((n, padded, self.kv_lora_rank))
-                if lse is not None:
-                    chunk_lse = lse.new_empty((n, padded))
-            plan.run(
-                query,
-                rows,
-                topk_indices[start:end],
-                valid_counts[start:end],
-                qo_indptr=qo_indptr,
-                softmax_scale=softmax_scale,
-                output_scale=kv_descale,
-                out=chunk_out,
-                lse=chunk_lse,
-                validate=False,
-            )
-            if out_heads != padded:
-                # The copy moves 8-byte words (1 KiB output rows).
-                out[start:end].view(torch.int64).copy_(
-                    chunk_out.view(torch.int64)[:, :heads]
-                )
-                if lse is not None:
-                    assert chunk_lse is not None
-                    lse[start:end] = chunk_lse[:, :heads]
-        return out[:, :heads], None if lse is None else lse[:, :heads]
 
     def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
         """Autotune the largest legal HiSparse decode batch."""
@@ -1100,21 +588,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
-        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if return_lse is None:
-            return_lse = self.need_to_return_lse_for_decode
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             if q_pe.shape[-1] == 0 and ql_nope.is_contiguous():
                 q = ql_nope
             else:
                 q = torch.cat(q, dim=-1)
-
-        if self.use_prims_ts:
-            return self._forward_prims_ts(
-                q, kv_cache, topk_indices, seq_lens, layer, block_size, return_lse
-            )
 
         self._prepare_mqa_kernel(layer, q.device)
         assert self._workspace_buffer is not None
@@ -1130,11 +610,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kv_cache = kv_rows.view(
             -1, math.gcd(block_stride_rows, block_size, 64), kv_rows.shape[-1]
         )
-
-        num_heads = q.shape[1]
-        padded_heads = trtllm_gen_query_heads(num_heads)
-        if padded_heads != num_heads:
-            q = _pad_query_heads(q, padded_heads)
 
         # Single-token sparse decode. trtllm-gen requires the q_len_per_request
         # dim, but the sparse attention mask is fully per-token (each query token
@@ -1164,20 +639,20 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if needs_empty_query_guard:
                 topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
 
-        num_tokens = q.shape[0]
+        num_tokens, num_heads = q.shape[0], q.shape[1]
         out = q.new_empty(
-            (num_tokens, padded_heads, self.kv_lora_rank), dtype=torch.bfloat16
+            (num_tokens, num_heads, self.kv_lora_rank), dtype=torch.bfloat16
         )
         lse = None
-        if return_lse:
-            lse = q.new_empty((num_tokens, padded_heads), dtype=torch.float32)
+        if self.need_to_return_lse_for_decode:
+            lse = q.new_empty((num_tokens, num_heads), dtype=torch.float32)
 
         # One trtllm-gen request per token, and requests map to gridDim.z: a
         # launch over more than 65535 tokens fails without raising and leaves
         # ``out`` unwritten (flashinfer-ai/flashinfer#3125). Launch row chunks.
         for start in range(0, num_tokens, _TRTLLM_GEN_MAX_REQUESTS):
             end = min(start + _TRTLLM_GEN_MAX_REQUESTS, num_tokens)
-            extra_kwargs = _kv_counters(end - start, padded_heads, q.device)
+            extra_kwargs: dict[str, torch.Tensor] = {}
             if topk_lens is not None:
                 extra_kwargs["sparse_mla_top_k_lens"] = topk_lens[start:end]
             if lse is not None:
@@ -1199,9 +674,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 return_lse=lse is not None,
                 **extra_kwargs,
             )
-        out = out[:, :num_heads]
-        if lse is not None:
-            lse = lse[:, :num_heads]
         if self.is_nope_mla and needs_empty_query_guard:
             empty_queries = seq_lens == 0
             if lse is not None:
@@ -1210,5 +682,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             else:
                 out.masked_fill_(empty_queries[:, None, None], 0.0)
         elif lse is not None:
-            _finish_dcp_partials(out, lse, seq_lens)
+            empty_rows = (topk_indices == -1).all(dim=-1)
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
