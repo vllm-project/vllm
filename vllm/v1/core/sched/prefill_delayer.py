@@ -113,7 +113,7 @@ class PrefillDelayer:
                 # Not a hold step, but work arriving meanwhile still counts.
                 if self._work_changed(state):
                     self._stall_steps = 0
-                return False, "protected"
+                return False, "hold_protected"
 
         if not state.prefillable:
             return self._fire("no_prefill")
@@ -142,13 +142,13 @@ class PrefillDelayer:
             # finishes; wait for it unless that cannot happen within the bound.
             if state.unreachable and stalled:
                 return self._fire("stall")
-            return self._hold("align")
+            return self._hold("hold_align")
         fill_target = FILL_TARGET * state.prefillable * self.token_budget
         if state.pending_tokens >= fill_target:
             return self._fire("fill")
         if stalled:
             return self._fire("stall")
-        return self._hold("fill")
+        return self._hold("hold_fill")
 
     def _work_changed(self, state: PrefillDelayerState) -> bool:
         changed = (
