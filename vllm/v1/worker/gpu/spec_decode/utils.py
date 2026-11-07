@@ -16,6 +16,13 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 logger = init_logger(__name__)
 
 
+def max_num_tokens_after_draft_slots(
+    max_num_tokens: int, num_reqs: int, max_num_new_slots_per_req: int
+) -> int:
+    """Return the input-token budget after reserving each request's draft slots."""
+    return max_num_tokens - num_reqs * max_num_new_slots_per_req
+
+
 def get_drafter_hidden_states(
     model: torch.nn.Module, hidden_states: torch.Tensor
 ) -> torch.Tensor:
