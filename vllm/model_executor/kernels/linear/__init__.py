@@ -1248,6 +1248,26 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         elif not prefers_humming(compute_capability):
             force_kernel = MarlinNvFp4LinearKernel
+            # On sm_12x the faster of Marlin and CuTe-DSL depends on the layer shape
+            # and the number of tokens, so pick per layer unless
+            # VLLM_NVFP4_W4A16_DISPATCH=0.
+            if (
+                envs.VLLM_NVFP4_W4A16_DISPATCH
+                and cutedsl_ok
+                and MarlinNvFp4LinearKernel.is_supported()[0]
+                and compute_capability is not None
+                and 120 <= compute_capability < 130
+            ):
+                from vllm.model_executor.kernels.linear.nvfp4.dispatch import (
+                    MarlinCuteDslNvFp4W4A16DispatchKernel,
+                )
+
+                logger.info_once(
+                    "Using MarlinCuteDslNvFp4W4A16DispatchKernel for NVFP4 GEMM: it "
+                    "times Marlin and CuTe-DSL per layer shape while loading the "
+                    "weights. Set VLLM_NVFP4_W4A16_DISPATCH=0 to use Marlin only."
+                )
+                return MarlinCuteDslNvFp4W4A16DispatchKernel(config)
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:

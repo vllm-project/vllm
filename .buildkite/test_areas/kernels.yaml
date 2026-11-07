@@ -537,6 +537,7 @@ steps:
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/kernels/linear/
   - tests/kernels/quantization
   commands:
     # test_cutlass_scaled_mm.py and test_fp8_quant.py each run in their own
