@@ -98,7 +98,7 @@ def _format_mib(num_bytes: int | None) -> str:
 
 
 @pytest.fixture(scope="function")
-def llm(monkeypatch):
+def llm(monkeypatch, request):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     # pytest caches the fixture so we use weakref.proxy to
@@ -115,6 +115,7 @@ def llm(monkeypatch):
     )
     if current_platform.is_rocm():
         llm_kwargs["attention_backend"] = "TRITON_ATTN"
+    llm_kwargs.update(getattr(request, "param", {}))
 
     llm = LLM(**llm_kwargs)
 
@@ -185,6 +186,55 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
         )
 
 
+def _encoder_storage_sizes(worker) -> tuple[int, int, int]:
+    outputs = worker.model_runner.encoder_cache.encoder_outputs
+    storages = {
+        output.untyped_storage().data_ptr(): output.untyped_storage().nbytes()
+        for output in outputs.values()
+    }
+    return len(outputs), sum(t.nbytes for t in outputs.values()), sum(storages.values())
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    "llm",
+    [
+        {
+            "max_model_len": 2048,
+            "max_num_batched_tokens": 1152,
+            "mm_processor_cache_gb": 0,
+            "mm_processor_kwargs": {"max_pixels": 512 * 512},
+            "limit_mm_per_prompt": {"image": {"count": 1, "width": 512, "height": 512}},
+        }
+    ],
+    indirect=True,
+)
+def test_batched_encoder_cache_bounds_retained_storage(llm) -> None:
+    """Hot images must not retain unbounded backing from older encoder batches."""
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    # Keep images 0 and 4 hot while replacing their batch peers in a four-image cache.
+    for round_id, ids in enumerate(((0, 1, 2, 3), (0,), (4, 5, 6), (0, 4), (7, 8))):
+        prompts = [
+            {
+                "prompt": f"<|im_start|>user\nRound {round_id}: "
+                "<|vision_start|><|image_pad|><|vision_end|>"
+                "Describe the image.<|im_end|>\n<|im_start|>assistant\n",
+                "multi_modal_data": {
+                    "image": Image.new("RGB", (512, 512), (i * 11, i * 7, i * 3))
+                },
+            }
+            for i in ids
+        ]
+        outputs = llm.generate(prompts, params, use_tqdm=False)
+        assert all(len(o.outputs[0].token_ids) == 8 for o in outputs)
+    snapshots = llm.collective_rpc(_encoder_storage_sizes)
+    assert snapshots and all(count == 4 for count, _, _ in snapshots), snapshots
+    # Compaction waits until it reclaims at least as many bytes as it copies.
+    assert all(
+        logical <= storage <= 2 * logical for _, logical, storage in snapshots
+    ), snapshots
+
+
 def _live_mm_payloads(worker) -> dict[str, list[bool]]:
     cache = worker.model_runner.encoder_cache
     return {
@@ -193,11 +243,25 @@ def _live_mm_payloads(worker) -> dict[str, list[bool]]:
     }
 
 
+def _arena_registered_bytes(worker) -> list[int]:
+    from vllm.distributed.device_communicators.shm_tensor_arena import _TENSOR_ARENAS
+
+    return [sum(arena._pinned_sizes) for arena in _TENSOR_ARENAS.values()]
+
+
 @pytest.mark.core_model
+@pytest.mark.parametrize(
+    "llm",
+    [{}, {"enable_shm_tensor_arena": True, "distributed_executor_backend": "mp"}],
+    indirect=True,
+    ids=["default", "arena"],
+)
 def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
-    """An M-RoPE model must release pixels while its request is still decoding."""
+    """Release consumed pixels; arena transport must register only the used pages."""
     assert llm.llm_engine.vllm_config.use_v2_model_runner
     engine = llm.llm_engine
+    arena = engine.vllm_config.parallel_config.enable_shm_tensor_arena
+    image_size = 1536 if arena else 64
     engine.add_request(
         "cpu-input-lifetime",
         {
@@ -205,7 +269,9 @@ def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
                 "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
                 "Describe the image.<|im_end|>\n<|im_start|>assistant\n"
             ),
-            "multi_modal_data": {"image": Image.new("RGB", (64, 64), "red")},
+            "multi_modal_data": {
+                "image": Image.new("RGB", (image_size, image_size), "red")
+            },
         },
         SamplingParams(temperature=0, max_tokens=16, ignore_eos=True),
     )
@@ -220,6 +286,10 @@ def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
             for snapshot in snapshots
             for payloads in snapshot.values()
         ), snapshots
+        if arena:
+            sizes = llm.collective_rpc(_arena_registered_bytes)
+            assert sizes and all(len(rank) == 1 for rank in sizes), sizes
+            assert all(0 < rank[0] <= 32 * MiB_bytes for rank in sizes), sizes
         while engine.has_unfinished_requests():
             outputs = engine.step()
         assert len(outputs[0].outputs[0].token_ids) == 16
