@@ -129,7 +129,7 @@ fi
 echo "Using vllm: ${VLLM_BIN}"
 echo "Using python: ${PYTHON_BIN}"
 
-SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || echo "")
+SMI_BIN=$(command -v nvidia-smi || command -v rocm-smi || command -v amd-smi || echo "")
 
 # Trap SIGINT/SIGTERM/EXIT to kill background jobs.
 trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
@@ -153,13 +153,12 @@ cleanup_instances() {
 }
 
 get_num_gpus() {
-  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
-  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    $SMI_BIN -l | grep -c GPU
-  else
-    echo "1"
-  fi
+  case "$(basename "$SMI_BIN")" in
+    nvidia-smi) $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l ;;
+    rocm-smi)   $SMI_BIN -l | grep -c GPU ;;
+    amd-smi)    $SMI_BIN list | grep -c "^GPU" ;;
+    *)          echo 1 ;;
+  esac
 }
 
 # Build the OffloadingConnector kv-transfer-config for a given PD port.
