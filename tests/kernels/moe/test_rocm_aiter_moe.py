@@ -6,6 +6,7 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
 - enablement gating for ``VLLM_ROCM_USE_AITER_MOE`` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
+- gfx950 128x128 block FP8 accuracy (``AiterFp8BlockExperts``)
 - AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
   gfx950-only W4A16 accuracy and determinism
 - MoE-facing FP8 group-quant activation quality
@@ -1521,6 +1522,64 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
         pass_rate=1.0,
         max_violation_factor=1.5,
     )
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.parametrize(
+    "M,N,K,E,topk",
+    [(1, 256, 7168, 16, 6), (83, 512, 512, 8, 2), (1335, 4608, 7168, 2, 1)],
+)
+def test_aiter_fused_moe_block_fp8_accuracy(M, N, K, E, topk, default_vllm_config):
+    """The 128x128 block FP8 MoE path used by ``AiterFp8BlockExperts`` should
+    match the block FP8 reference. AITER keeps the intermediate in fp32 and
+    quantizes with torch's rounding, so the reference does the same."""
+    from aiter import ActivationType, QuantType
+
+    from tests.kernels.moe.test_block_fp8 import torch_w8a8_block_fp8_moe
+    from tests.kernels.moe.utils import make_test_weights
+    from tests.kernels.quant_utils import native_per_token_group_quant_fp8
+
+    _assert_aiter_supported()
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    block_shape = [128, 128]
+    a = torch.randn(M, K, dtype=torch.bfloat16) / 10
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_shape
+    )
+    router_probs = torch.softmax(torch.randn(M, E), dim=-1)
+    topk_weights, topk_ids = torch.topk(router_probs, k=topk, dim=-1)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = torch_w8a8_block_fp8_moe(
+        a.float(),
+        w1,
+        w2,
+        w1_s,
+        w2_s,
+        topk_weights,
+        topk_ids,
+        block_shape,
+        quant_fn=native_per_token_group_quant_fp8,
+    )
+
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(w1, w2)
+    out = torch.ops.vllm.rocm_aiter_fused_moe(
+        a,
+        w1_shuffled,
+        w2_shuffled,
+        topk_weights,
+        topk_ids,
+        expert_mask=None,
+        activation_method=int(ActivationType.Silu),
+        quant_method=int(QuantType.per_128x128),
+        doweight_stage1=False,
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+    )
+
+    torch.testing.assert_close(out.float(), ref_out, atol=0.035, rtol=0.035)
 
 
 # Weight alignment tests --------------------------------------------------
