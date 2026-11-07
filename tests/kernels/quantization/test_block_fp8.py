@@ -14,6 +14,10 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear import (
+    CutlassFp8BlockScaledMMKernel,
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
     _run_b12x_fp8_block_scaled_mm,
@@ -22,6 +26,10 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -174,6 +182,20 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
     block_size = [128, 128]
     out_dtype = torch.bfloat16
     seed = 0
+
+    if current_platform.is_device_capability_family(120):
+        # The SM12x blockwise mainloop needs N % 128 == 0 and K % 128 == 0,
+        # so the kernel selector must not route this shape to CUTLASS.
+        config = FP8ScaledMMLinearLayerConfig(
+            weight_quant_key=kFp8Static128BlockSym,
+            activation_quant_key=kFp8Dynamic128Sym,
+            weight_shape=(N, K),
+            input_dtype=out_dtype,
+            out_dtype=out_dtype,
+        )
+        can_impl, _ = CutlassFp8BlockScaledMMKernel.can_implement(config)
+        assert not can_impl
+        pytest.skip("SM12x CUTLASS block FP8 needs N and K divisible by 128.")
 
     torch.manual_seed(seed)
     factor_for_scale = 1e-2

@@ -18,6 +18,7 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
+    CutlassFp8BlockScaledMMKernel,
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
@@ -176,6 +177,33 @@ def test_aiter_int8_kernel_can_implement_scale_layouts(
         is_fused_module=is_fused_module,
     )
     can_impl, _ = AiterInt8ScaledMMLinearKernel.can_implement(config)
+    assert can_impl is expected
+
+
+@pytest.mark.parametrize(
+    ("is_sm12x", "weight_shape", "expected"),
+    [
+        (True, (2816, 2048), True),
+        # Gemma 4 26B-A4B shared-MLP down_proj
+        (True, (2816, 2112), False),
+        # DeepSeek-V3 kv_a_proj_with_mqa
+        (True, (576, 7168), False),
+        (False, (576, 7168), True),
+    ],
+)
+@patch("vllm.model_executor.kernels.linear.scaled_mm.cutlass.current_platform")
+def test_cutlass_fp8_block_kernel_can_implement_shapes(
+    platform_mock, is_sm12x, weight_shape, expected
+):
+    platform_mock.is_device_capability_family.return_value = is_sm12x
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8Static128BlockSym,
+        activation_quant_key=kFp8Dynamic128Sym,
+        weight_shape=weight_shape,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+    can_impl, _ = CutlassFp8BlockScaledMMKernel.can_implement(config)
     assert can_impl is expected
 
 
