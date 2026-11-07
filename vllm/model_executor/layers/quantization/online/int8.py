@@ -59,6 +59,32 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
 
         layer._already_called_process_weights_after_loading = True
 
+    def arrival_row_group(self, layer: Module, name: str) -> int | None:
+        return self._row_local(layer, name, 1)
+
+    def quantize_param(
+        self, layer: Module, name: str, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        """Per-row int8; the scale as ``(experts, rows, 1)``."""
+        vmax = torch.iinfo(torch.int8).max
+        qweight = torch.empty_like(weight, dtype=torch.int8)
+        scale = torch.zeros(
+            *weight.shape[:2], 1, device=weight.device, dtype=torch.float32
+        )
+        if name == "w2_weight":
+            amax = weight_amax(weight, dim=-1)
+            amax = amax_for_moe_weight_quant(amax, self.moe.tp_size)
+        for expert in range(weight.shape[0]):
+            w = weight[expert, :, :]
+            if name == "w2_weight":
+                scales = amax[expert] / vmax  # over the whole intermediate dim
+            else:
+                scales = w.abs().amax(dim=1) / vmax  # over the hidden dim
+            q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
+            qweight[expert, :, :] = q.to(torch.int8)
+            scale[expert, :, 0] = scales
+        return qweight, scale
+
     def _quantize_weights(
         self,
         layer: Module,
@@ -67,45 +93,12 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     ) -> None:
         w13_weight = layer.w13_weight if w13_weight is None else w13_weight
         w2_weight = layer.w2_weight if w2_weight is None else w2_weight
-        vmax = torch.iinfo(torch.int8).max
-
-        w13 = torch.empty_like(w13_weight, dtype=torch.int8)
-        w2 = torch.empty_like(w2_weight, dtype=torch.int8)
-        w13_scale = torch.zeros(
-            layer.num_experts,
-            w13_weight.shape[1],
-            device=w13.device,
-            dtype=torch.float32,
-        )
-        w2_scale = torch.zeros(
-            layer.num_experts,
-            w2_weight.shape[1],
-            device=w2.device,
-            dtype=torch.float32,
-        )
-
-        w2_amax = weight_amax(w2_weight, dim=-1)
-        w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
-
-        for expert in range(layer.local_num_experts):
-            # w13: per-row quantization over hidden_size dim
-            w = w13_weight[expert, :, :]
-            scales = w.abs().amax(dim=1) / vmax
-            q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
-            w13[expert, :, :] = q.to(torch.int8)
-            w13_scale[expert, :] = scales
-
-            # w2: per-row quantization over intermediate_size dim
-            w = w2_weight[expert, :, :]
-            scales = w2_amax[expert] / vmax
-            q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
-            w2[expert, :, :] = q.to(torch.int8)
-            w2_scale[expert, :] = scales
-
+        w13, w13_scale = self.quantized_param(layer, "w13_weight", w13_weight)
+        w2, w2_scale = self.quantized_param(layer, "w2_weight", w2_weight)
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_scale", w13_scale)
-        replace_parameter(layer, "w2_scale", w2_scale)
+        replace_parameter(layer, "w13_scale", w13_scale.squeeze(-1))
+        replace_parameter(layer, "w2_scale", w2_scale.squeeze(-1))
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         w13, w2 = convert_to_int8_moe_kernel_format(

@@ -30,6 +30,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import store_params_in_triton
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.online.arrival import OnlineArrivalMixin
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
@@ -164,6 +165,31 @@ class _OnlineMethod(_Method):
             return
         super().process_weights_after_loading(layer)
         layer._already_called_process_weights_after_loading = True
+
+
+class _RowwiseOnlineMethod(OnlineArrivalMixin, _OnlineMethod):
+    """An online scheme with one int8 scale per ``group`` rows: a direct
+    reload quantizes each arriving shard at once."""
+
+    def __init__(self, group):
+        super().__init__(self._quantize)
+        self.group = group
+
+    def arrival_row_group(self, layer, name):
+        return self.group if name == "weight" else None
+
+    def quantize_param(self, layer, name, weight):
+        rows, cols = weight.shape
+        blocks = -(-rows // self.group)
+        padded = torch.nn.functional.pad(weight.float(), (0, 0, 0, blocks * self.group - rows))
+        scale = padded.view(blocks, -1).abs().amax(-1, keepdim=True) / 127
+        row_scale = scale.repeat_interleave(self.group, 0)[:rows]
+        return (weight.float() / row_scale).round().to(torch.int8), scale
+
+    def _quantize(self, layer):
+        qweight, scale = self.quantized_param(layer, "weight", layer.weight)
+        replace_parameter(layer, "weight", qweight)
+        replace_parameter(layer, "weight_scale", scale)
 
 
 class _Layer(torch.nn.Module):
@@ -494,6 +520,45 @@ class TestOnlineStaging:
         assert not hasattr(layer.w13_weight, "weight_loader_numel")
         assert not hasattr(layer.w2_weight, "weight_loader_numel")
 
+    @pytest.mark.parametrize("group,on_arrival", [(1, True), (2, True), (4, False)])
+    def test_row_local_scheme_quantizes_shards_on_arrival(
+        self, monkeypatch, group, on_arrival
+    ):
+        # a scheme whose scales cover only their own rows quantizes each
+        # arriving shard (here the two halves of a merged weight) at once,
+        # holding no high-precision copy; a shard that splits a group of rows
+        # is buffered instead; either way the result equals a cold start
+        init = _ToyModel.__init__
+
+        def merged(param, loaded_weight, rows=None):
+            param.data[slice(None) if rows is None else rows].copy_(loaded_weight)
+
+        def with_rowwise_scheme(self):
+            init(self)
+            online = self.deq.online
+            online.quant_method = _RowwiseOnlineMethod(group)
+            self.deq.quant_method = _Method(lambda layer: None)
+            online.weight.weight_loader = merged
+            initialize_online_processing(online)
+
+        monkeypatch.setattr(_ToyModel, "__init__", with_rowwise_scheme)
+        model = _cold_start(_checkpoint())
+        new = _checkpoint(1.01)
+        online = model.deq.online
+        info = get_layerwise_info(online)
+        begin_direct_reload(model)
+        received = new["deq.online.weight"][:2].clone()
+        alive = weakref.ref(received)
+        online.weight.weight_loader(online.weight, received, slice(0, 2))
+        del received
+        assert alive() is None
+        assert bool(info.loaded_weights) is not on_arrival
+        assert ("weight" in info.arrival) is on_arrival
+        online.weight.weight_loader(online.weight, new["deq.online.weight"][2:], slice(2, 4))
+        model.load_weights((n, t) for n, t in new.items() if n != "deq.online.weight")
+        finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+        _assert_same(_state(model), _state(_cold_start(new)))
+
     def test_staged_load_buffers_only_this_ranks_shard(self, monkeypatch):
         # a TP loader copies one shard of the received tensor: only the shard
         # is buffered, so the received tensor (with packed NCCL, a view of
@@ -521,6 +586,117 @@ class TestOnlineStaging:
         model.load_weights((n, t) for n, t in new.items() if n != "deq.online.weight")
         finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
         _assert_same(_state(model), _state(_cold_start(new)))
+
+
+def _scheme(cls, **attrs):
+    method = object.__new__(cls)
+    method.requantization_source = None
+    for name, value in attrs.items():
+        setattr(method, name, value)
+    return method
+
+
+def _schemes():
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerBlockOnlineLinearMethod,
+        Fp8PerBlockOnlineMoEMethod,
+        Fp8PtpcOnlineLinearMethod,
+        Fp8PtpcOnlineMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.int8 import (
+        Int8OnlineMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4OnlineLinearMethod,
+        Mxfp4OnlineMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.mxfp8 import (
+        Mxfp8OnlineLinearMethod,
+        Mxfp8OnlineMoEMethod,
+    )
+
+    moe = SimpleNamespace(
+        tp_size=1,
+        intermediate_size_per_partition_unpadded=256,
+        hidden_dim_unpadded=256,
+    )
+    block = {"weight_block_size": [128, 128]}
+    return {
+        "fp8-per-channel-linear": _scheme(Fp8PtpcOnlineLinearMethod),
+        "fp8-per-block-linear": _scheme(Fp8PerBlockOnlineLinearMethod, **block),
+        "mxfp8-linear": _scheme(Mxfp8OnlineLinearMethod),
+        "mxfp4-linear": _scheme(Mxfp4OnlineLinearMethod),
+        "fp8-per-channel-moe": _scheme(Fp8PtpcOnlineMoEMethod, moe=moe),
+        "fp8-per-block-moe": _scheme(Fp8PerBlockOnlineMoEMethod, moe=moe, **block),
+        "mxfp8-moe": _scheme(Mxfp8OnlineMoEMethod, moe=moe),
+        "mxfp4-moe": _scheme(
+            Mxfp4OnlineMoEMethod, moe=moe, mxfp4_backend=Mxfp4MoeBackend.TRITON
+        ),
+        "int8-moe": _scheme(Int8OnlineMoEMethod, moe=moe),
+    }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="quantization kernels")
+@pytest.mark.parametrize(
+    "scheme",
+    [
+        "fp8-per-channel-linear",
+        "fp8-per-block-linear",
+        "mxfp8-linear",
+        "mxfp4-linear",
+        "fp8-per-channel-moe",
+        "fp8-per-block-moe",
+        "mxfp8-moe",
+        "mxfp4-moe",
+        "int8-moe",
+    ],
+)
+def test_row_local_scheme_quantizes_on_arrival_as_whole(scheme):
+    # each real scheme with row-local scales: quantizing the arriving shards
+    # into the outputs (no high-precision buffer) gives the bytes quantizing
+    # the whole weight gives; rows that never arrive (padding) included
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        _quantize_on_arrival,
+    )
+    from vllm.model_executor.model_loader.reload.types import (
+        LayerReloadingInfo,
+        RecordedCopies,
+    )
+
+    method = _schemes()[scheme]
+    moe = scheme.endswith("moe")
+    name = "w13_weight" if moe else "weight"
+    shape = (2, 256, 256) if moe else (256, 256)
+    layer = torch.nn.Module()
+    layer.quant_method = method
+    layer.tp_size, layer.logical_widths = 1, [128, 128]
+    for param_name in (name, "w2_weight") if moe else (name,):
+        param = torch.nn.Parameter(torch.empty(shape, device="meta"), False)
+        param.weight_loader_numel = param.numel()
+        layer.register_parameter(param_name, param)
+    param = getattr(layer, name)
+    group = method.arrival_row_group(layer, name)
+    assert group is not None
+
+    weight = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    weight[..., 128:, :] = 0  # never arrives
+    pieces = [(0, 64), (64, 128)] if group == 1 else [(0, 128)]
+    copies = RecordedCopies()
+    for expert in range(shape[0]) if moe else [None]:
+        for first, end in pieces:
+            index = (expert, slice(first, end)) if moe else slice(first, end)
+            view = param.data[index]
+            copies.append(
+                (view.size(), view.stride(), view.storage_offset(), weight[index].clone())
+            )
+    info = LayerReloadingInfo(({}, {}), torch.device("cuda"))
+    assert _quantize_on_arrival(layer, info, name, copies)
+    for arrived, whole in zip(
+        info.arrival[name].outputs, method.quantize_param(layer, name, weight)
+    ):
+        assert arrived.shape == whole.shape
+        assert torch.equal(arrived.view(torch.uint8), whole.contiguous().view(torch.uint8))
 
 
 class TestRefusals:

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
+from vllm.model_executor.layers.quantization.online.arrival import OnlineArrivalMixin
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
@@ -23,7 +24,9 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.utils import set_weight_attrs
 
 
-class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
+class OnlineMoEMethodBase(
+    OnlineArrivalMixin, OnlineRequantizationMixin, FusedMoEMethodBase
+):
     """Base for MoE methods that load full-precision weights on meta device
     and quantize them after loading via the QeRL layerwise processing system.
     """
@@ -135,6 +138,26 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         layer.w2_input_scale = None
 
         initialize_online_processing(layer)
+
+    def _row_local(self, layer: torch.nn.Module, name: str, group: int) -> int | None:
+        """``group`` if parameter ``name`` can be quantized on arrival: its
+        loads copy only checkpoint rows (the base loader, which also leaves
+        padding zero) at ``group``-aligned row offsets."""
+        param = getattr(layer, name, None)
+        if (
+            name not in ("w13_weight", "w2_weight")
+            or self.requantization_source is not None
+            or not hasattr(param, "weight_loader_numel")
+        ):
+            return None
+        moe = self.moe
+        for unpadded, padded in (
+            (moe.intermediate_size_per_partition_unpadded, layer.w2_weight.shape[-1]),
+            (moe.hidden_dim_unpadded, layer.w2_weight.shape[-2]),
+        ):
+            if unpadded % group and unpadded != padded:
+                return None
+        return group
 
     def get_weights_for_quantization(
         self, layer: torch.nn.Module

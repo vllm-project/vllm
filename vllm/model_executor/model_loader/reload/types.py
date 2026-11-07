@@ -5,7 +5,7 @@ from inspect import BoundArguments
 
 import torch
 
-__all__ = ["LayerTensors", "LayerReloadingInfo", "RecordedCopies"]
+__all__ = ["ArrivalState", "LayerTensors", "LayerReloadingInfo", "RecordedCopies"]
 
 # encodes both parameters and buffers separately
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
@@ -19,6 +19,19 @@ class RecordedCopies(list[tuple[torch.Size, tuple[int, ...], int, torch.Tensor]]
         for size, stride, offset, source in self:
             view = param.data.as_strided(size, stride, param.storage_offset() + offset)
             view.copy_(source)
+
+
+@dataclass
+class ArrivalState:
+    """The quantized outputs of one parameter, filled as its shards arrive."""
+
+    # full-size outputs of `quantize_param`, initialized as for all-zero rows
+    outputs: list[torch.Tensor]
+    # input rows per output row, for each output
+    output_groups: list[int]
+    # input rows quantized together, and which groups were written (CPU)
+    group: int
+    written: torch.Tensor
 
 
 @dataclass
@@ -38,6 +51,9 @@ class LayerReloadingInfo:
     loaded_weights: list[tuple[str, BoundArguments | RecordedCopies]] = field(
         default_factory=list
     )
+
+    # parameters quantized as their shards arrived (staged online modules)
+    arrival: dict[str, "ArrivalState"] = field(default_factory=dict)
 
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None

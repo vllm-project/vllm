@@ -26,7 +26,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
-from .types import LayerReloadingInfo, RecordedCopies
+from .types import ArrivalState, LayerReloadingInfo, RecordedCopies
 from .utils import (
     get_info_size,
     get_layer_params_buffers,
@@ -230,12 +230,18 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # nothing (another rank's expert) is not replayed, so not buffered.
         # A staged online module buffers only what its loader copied (this
         # rank's shard), not the received tensor.
-        copies = None
+        # A scheme with row-local scales quantizes the shard at once instead.
+        copies, quantized = None, False
         if info.kernel_tensors is not None and stages_online_quant(layer):
             num_loaded, ret, copies = _record_copies(original_loader, bound_args)
+            quantized = bool(copies) and _quantize_on_arrival(
+                layer, info, param_name, copies
+            )
         else:
             num_loaded, ret = get_numel_loaded(original_loader, bound_args)
-        if num_loaded or not get_tensor_load_numel(bound_args.arguments["param"]):
+        if not quantized and (
+            num_loaded or not get_tensor_load_numel(bound_args.arguments["param"])
+        ):
             info.loaded_weights.append((param_name, copies or bound_args))
         info.load_numel += num_loaded
 
@@ -327,6 +333,100 @@ def _record_copies(
         for dst, src in recorder.copies
     )
     return numel, ret, copies
+
+
+def _row_box(
+    param: torch.Tensor, size, stride, offset: int, group: int
+) -> tuple[tuple[int, ...], tuple[int, ...], int, int, int] | None:
+    """Where a copy into ``param`` (contiguous, rows on dim -2) landed:
+    (leading starts, leading sizes, first row, end row, columns), if it is a
+    box of whole ``group``-aligned rows from column 0. None otherwise."""
+    shape, strides, ndim = param.shape, param.stride(), len(size)
+    if param.dim() < 2 or not param.is_contiguous() or not 0 < ndim <= param.dim():
+        return None
+    if any(n > 1 and s != t for n, s, t in zip(size, stride, strides[-ndim:])):
+        return None
+    start = []
+    for s in strides:
+        start.append(offset // s)
+        offset %= s
+    sizes = [1] * (param.dim() - ndim) + list(size)
+    if start[-1] != 0 or any(a + n > d for a, n, d in zip(start, sizes, shape)):
+        return None
+    first, end = start[-2], start[-2] + sizes[-2]
+    if first % group or (end % group and end != shape[-2]):
+        return None
+    return tuple(start[:-2]), tuple(sizes[:-2]), first, end, sizes[-1]
+
+
+def _quantize_on_arrival(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    name: str,
+    copies: RecordedCopies,
+) -> bool:
+    """Quantize the rows a load copied into parameter ``name`` straight into
+    its quantized outputs, if its scheme quantizes rows apart: nothing of the
+    load is then buffered. False if the parameter needs its whole tensor."""
+    method = layer.quant_method
+    row_group = getattr(method, "arrival_row_group", None)
+    group = row_group(layer, name) if row_group is not None else None
+    if group is None:
+        return False
+    param = getattr(layer, name)
+    boxes = [_row_box(param, *copy[:3], group) for copy in copies]
+    state = info.arrival.get(name)
+    if None in boxes:
+        if state is not None:
+            raise RuntimeError(
+                f"{type(layer).__name__}.{name}: a load copied rows that cannot "
+                "be quantized apart after earlier loads were quantized"
+            )
+        return False
+    with info.restore_device:
+        if state is None:
+            state = info.arrival[name] = _new_arrival_state(
+                layer, method, name, param, group
+            )
+        for box, (*_, source) in zip(boxes, copies):
+            assert box is not None
+            _write_arrival(layer, method, name, param, state, box, source)
+    return True
+
+
+def _new_arrival_state(layer, method, name, param, group) -> ArrivalState:
+    """Outputs as quantized from all-zero rows (rows no load writes, such as
+    padding), which are the same for every group of rows."""
+    rows, lead = min(group, param.shape[-2]), param.shape[:-2]
+    zeros = torch.zeros(*(1,) * len(lead), rows, param.shape[-1], dtype=param.dtype)
+    outputs, output_groups = [], []
+    for out in method.quantize_param(layer, name, zeros):
+        out_group = rows // out.shape[-2]
+        full_rows = -(-param.shape[-2] // out_group)
+        outputs.append(
+            out[..., :1, :].expand(*lead, full_rows, out.shape[-1]).contiguous()
+        )
+        output_groups.append(out_group)
+    written = torch.zeros(
+        *lead, -(-param.shape[-2] // group), dtype=torch.bool, device="cpu"
+    )
+    return ArrivalState(outputs, output_groups, group, written)
+
+
+def _write_arrival(layer, method, name, param, state, box, source) -> None:
+    lead_start, lead_size, first, end, cols = box
+    rows = torch.zeros(*lead_size, end - first, param.shape[-1], dtype=param.dtype)
+    rows[..., :cols] = source.reshape(*lead_size, end - first, cols)
+    lead = tuple(slice(a, a + n) for a, n in zip(lead_start, lead_size))
+    written = state.written[(*lead, slice(first // state.group, -(-end // state.group)))]
+    if written.any():
+        raise RuntimeError(f"{type(layer).__name__}.{name}: rows loaded twice")
+    written.fill_(True)
+    for full, out_group, out in zip(
+        state.outputs, state.output_groups, method.quantize_param(layer, name, rows)
+    ):
+        out_first = first // out_group
+        full[(*lead, slice(out_first, out_first + out.shape[-2]))] = out
 
 
 def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
@@ -495,8 +595,21 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
             if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
             else nullcontext()
         )
-        with timing_context:
-            quant_method.process_weights_after_loading(layer)
+        # what was quantized on arrival, taken by `quantized_param`
+        if info.arrival:
+            layer._quantized_on_arrival = {
+                name: tuple(state.outputs) for name, state in info.arrival.items()
+            }
+        try:
+            with timing_context:
+                quant_method.process_weights_after_loading(layer)
+        finally:
+            left = layer.__dict__.pop("_quantized_on_arrival", None)
+        if left:
+            raise RuntimeError(
+                f"{type(layer).__name__}: processing did not take the weights "
+                f"quantized on arrival ({sorted(left)})"
+            )
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.

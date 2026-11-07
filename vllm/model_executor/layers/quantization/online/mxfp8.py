@@ -96,7 +96,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
             return
 
         weight = self.get_weight_for_quantization(layer)
-        weight_fp8, weight_scale = mxfp8_e4m3_quantize(weight.contiguous())
+        weight_fp8, weight_scale = self.quantized_param(layer, "weight", weight)
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)
@@ -106,6 +106,14 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
         self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
+
+    def arrival_row_group(self, layer: Module, name: str) -> int | None:
+        return 1 if name == "weight" and self.requantization_source is None else None
+
+    def quantize_param(
+        self, layer: Module, name: str, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        return mxfp8_e4m3_quantize(weight.contiguous())
 
     def apply(
         self,
@@ -157,6 +165,14 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         )
 
         layer.weight_block_size = [1, MXFP8_BLOCK_SIZE]
+
+    def arrival_row_group(self, layer: Module, name: str) -> int | None:
+        return self._row_local(layer, name, 1)
+
+    def quantize_param(
+        self, layer: Module, name: str, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        return self._quantize_mxfp8_moe_weight(weight)
 
     def _quantize_mxfp8_moe_weight(
         self, weight: torch.Tensor
@@ -261,8 +277,8 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
         def quantize(w13_weight: torch.Tensor, w2_weight: torch.Tensor):
             return (
-                *self._quantize_mxfp8_moe_weight(w13_weight),
-                *self._quantize_mxfp8_moe_weight(w2_weight),
+                *self.quantized_param(layer, "w13_weight", w13_weight),
+                *self.quantized_param(layer, "w2_weight", w2_weight),
             )
 
         w13, w13_scale, w2, w2_scale = self.quantize_weights(layer, quantize)
