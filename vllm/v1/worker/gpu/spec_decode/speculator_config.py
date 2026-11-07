@@ -214,6 +214,15 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             hf_overrides=draft_hf_overrides,
             config_format=target.config_format,
         )
+        # Drafts sharing the target checkpoint (e.g. MTP) must load weights
+        # from the target's object-storage source, not the local cache dir.
+        draft = spec.draft_model_config
+        if (
+            not draft.model_weights
+            and target.model_weights
+            and draft.model == target.model
+        ):
+            draft.model_weights = target.model_weights
 
         config_cls = _resolve_checkpoint_config_class(spec, cls)
         if spec.method is None:
