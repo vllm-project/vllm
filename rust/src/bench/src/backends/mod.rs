@@ -23,6 +23,8 @@ pub struct CompletionChunk {
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<ChunkUsage>,
     pub metrics: Option<serde_json::Value>,
+    pub error: Option<serde_json::Value>,
+    pub object: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +39,44 @@ pub struct ChatChunk {
     pub choices: Vec<ChatChoice>,
     pub usage: Option<ChunkUsage>,
     pub metrics: Option<serde_json::Value>,
+    pub error: Option<serde_json::Value>,
+    pub object: Option<String>,
+}
+
+/// The error in an in-stream error chunk, either nested (`{"error": {...}}`)
+/// or flat (`{"object": "error", ...}`).
+pub fn stream_error(
+    error: Option<&serde_json::Value>,
+    object: Option<&str>,
+    chunk: &str,
+) -> Option<String> {
+    match error {
+        Some(e) if !e.is_null() => Some(e.to_string()),
+        _ if object == Some("error") => Some(chunk.to_string()),
+        _ => None,
+    }
+}
+
+/// Mark a finished stream as successful only if it produced output, ended
+/// with `[DONE]` and carried no error, as the Python client does. A stream
+/// that closes early can still deliver tokens and even a usage chunk.
+pub fn finish_stream(
+    output: &mut RequestFuncOutput,
+    stream_error: Option<String>,
+    first_token_received: bool,
+    saw_done: bool,
+) {
+    if let Some(error) = stream_error {
+        output.error = error;
+    } else if !first_token_received {
+        output.error = NO_VALID_CHUNK_ERROR.to_string();
+    } else if !saw_done {
+        output.error = "Stream ended without [DONE]. \
+                        This response will be marked as failed!"
+            .to_string();
+    } else {
+        output.success = true;
+    }
 }
 
 #[derive(Deserialize)]
@@ -355,5 +395,118 @@ mod tests {
 
         assert_eq!(output.server_queue_time, None);
         assert_eq!(output.server_ttft, Some(0.5));
+    }
+
+    /// Serve each event as a `data:` message on one streaming response over a
+    /// raw socket, then close the connection. Returns the server URL.
+    fn spawn_sse_server(events: &[&str]) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         connection: close\r\n\r\n{body}"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// (backend, one token chunk) for the two OpenAI streaming backends.
+    const STREAMING: [(&str, &str); 2] = [
+        ("openai", r#"{"choices":[{"text":"a"}]}"#),
+        ("openai-chat", r#"{"choices":[{"delta":{"content":"a"}}]}"#),
+    ];
+    const USAGE: &str = r#"{"choices":[],"usage":{"completion_tokens":2}}"#;
+
+    async fn run_stream(backend: &str, events: &[&str]) -> RequestFuncOutput {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(events),
+            model: "test-model".to_string(),
+            output_len: 2,
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        let output = match backend {
+            "openai" => {
+                openai_completions::OpenAICompletionsBackend.send_request(&input, &client).await
+            }
+            _ => openai_chat::OpenAIChatBackend.send_request(&input, &client).await,
+        };
+        output.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_complete_stream_is_a_success() {
+        for (backend, token) in STREAMING {
+            let output = run_stream(backend, &[token, token, USAGE, "[DONE]"]).await;
+            assert!(output.success, "{backend}: {}", output.error);
+            assert_eq!(output.output_tokens, 2, "{backend}");
+        }
+    }
+
+    /// A proxy can close an HTTP 200 stream cleanly after some tokens, or even
+    /// after the usage chunk.
+    #[tokio::test]
+    async fn test_stream_without_done_is_not_a_success() {
+        for (backend, token) in STREAMING {
+            for events in [&[token][..], &[token, token, USAGE][..]] {
+                let output = run_stream(backend, events).await;
+                assert!(!output.success, "{backend}: {events:?}");
+                assert!(
+                    output.error.contains("[DONE]"),
+                    "{backend}: {}",
+                    output.error
+                );
+                assert!(!output.generated_text.is_empty(), "{backend}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_error_is_not_a_success() {
+        let nested = r#"{"error":{"message":"generation failed","type":"server_error"}}"#;
+        let flat = r#"{"object":"error","message":"generation failed","type":"server_error"}"#;
+        for (backend, token) in STREAMING {
+            for error in [nested, flat] {
+                let output = run_stream(backend, &[token, error, "[DONE]"]).await;
+                assert!(!output.success, "{backend}: {error}");
+                assert!(
+                    output.error.contains("generation failed"),
+                    "{backend}: {}",
+                    output.error
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_done_without_output_is_not_a_success() {
+        for (backend, _) in STREAMING {
+            let output = run_stream(backend, &["[DONE]"]).await;
+            assert!(!output.success, "{backend}");
+            assert!(output.error.contains("TTFT"), "{backend}: {}", output.error);
+        }
     }
 }
