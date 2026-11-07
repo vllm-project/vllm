@@ -22,14 +22,16 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
         use_fp4_dispatch: bool = False,
+        use_mxfp8_dispatch: bool = False,
     ):
         super().__init__()
-        assert not (use_fp8_dispatch and use_fp4_dispatch)
+        assert sum((use_fp8_dispatch, use_fp4_dispatch, use_mxfp8_dispatch)) <= 1
         self.mori_op = mori_op
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_fp4_dispatch = use_fp4_dispatch
+        self.use_mxfp8_dispatch = use_mxfp8_dispatch
         self._dispatch_topk_ids: torch.Tensor | None = None
 
     @property
@@ -103,6 +105,19 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # when it receives pre-quantized FP4 input.
             quant_func = get_hip_quant(QuantType.per_1x32)
             a1, scale = quant_func(a1, shuffle=False)
+        elif self.use_mxfp8_dispatch and not defer_input_quant:
+            from aiter import QuantType, dtypes, get_hip_quant
+
+            # MXFP8 [M, K] with e8m0 scales [M, K // 32]. As with FP4 above the
+            # scales stay unshuffled; AITER sorts them itself rather than
+            # re-quantizing when it receives a pre-quantized FP8 operand.
+            quant_func = get_hip_quant(QuantType.per_1x32)
+            a1, scale = quant_func(
+                a1,
+                quant_dtype=current_platform.fp8_dtype(),
+                scale_type=dtypes.fp8_e8m0,
+                shuffle=False,
+            )
 
         # mori's combine() reduces over this rank's own [num_tokens, topk]
         # routing. The modular kernel rebinds topk_ids to the dispatched ids

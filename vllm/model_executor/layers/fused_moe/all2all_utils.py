@@ -12,6 +12,7 @@ from vllm.distributed import (
     get_ep_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -186,6 +187,79 @@ def maybe_roundup_layer_hidden_size(
         )
 
     return hidden_size
+
+
+# Elements per E8M0 exponent in AITER's per_1x32 MXFP8 activation quant.
+MXFP8_GROUP_SIZE = 32
+
+# The AITER activation each MoEActivation is handed to fused_moe() as, mirroring
+# rocm_aiter_fused_moe_impl(); AITER rejects anything absent here.
+_AITER_MOE_ACTIVATION_NAMES = {
+    MoEActivation.SILU: "silu",
+    MoEActivation.GELU: "gelu",
+    MoEActivation.SWIGLUOAI: "swiglu",
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE: "swiglu",
+    MoEActivation.SITU: "situ",
+}
+
+
+def mori_use_mxfp8_dispatch(
+    moe: FusedMoEConfig, quant_config: FusedMoEQuantConfig
+) -> bool:
+    """Whether MoRI should carry MXFP8 activations instead of raw BF16.
+
+    Only safe where AITER would have produced MXFP8 itself: it sorts a
+    pre-quantized FP8 operand's E8M0 scales rather than re-quantizing, while a
+    BF16-activation kernel would cast the payload back and never apply the
+    scales, and an FP4-activation one would hand it to an MXFP4 quant that
+    takes BF16/FP16 only. So ask AITER with the activation and gate mode
+    AiterExperts will pass, not stand-ins: they select which input decides the
+    dtype, and the branches read different ones.
+    """
+    if not current_platform.is_rocm() or not quant_config.use_mxfp4_w4a16:
+        return False
+    # The DeepSeek-V4.1 a4w4 opt-in overrides q_dtype_a on the fused_moe call
+    # itself, so no query of the resolver can see that decision.
+    if moe.use_mxfp4_w4a4_dsv4:
+        return False
+    if moe.hidden_dim % MXFP8_GROUP_SIZE != 0:
+        return False
+
+    from aiter import QuantType, dtypes
+    from aiter.fused_moe import resolve_activation_dtype
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    activation_name = _AITER_MOE_ACTIVATION_NAMES.get(moe.activation)
+    if activation_name is None:
+        return False
+    activation = rocm_aiter_ops.get_aiter_activation_type(activation_name)
+    if activation is None:
+        return False
+
+    if moe.activation == MoEActivation.SITU:
+        gate_mode = (
+            GateMode.INTERLEAVE
+            if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            else GateMode.SEPARATED
+        )
+    else:
+        gate_mode = GateMode.INTERLEAVE
+
+    # The token count is unknown this early, hence M=None. AITER still
+    # resolves a dtype unless the branch it takes depends on M, where it
+    # answers None instead of guessing and the dispatch stays BF16.
+    return (
+        resolve_activation_dtype(
+            QuantType.per_1x32,
+            dtypes.fp4x2,
+            activation=activation,
+            gate_mode=gate_mode,
+            M=None,
+        )
+        == dtypes.fp8
+    )
 
 
 def maybe_make_prepare_finalize(
@@ -365,14 +439,27 @@ def maybe_make_prepare_finalize(
         # MXFP4 activations are dispatched as packed FP4 with their e8m0
         # block scales, which the experts consume without re-quantizing.
         use_fp4_dispatch = quant_config.use_mxfp4_w4a4
+        # MXFP4 experts declare BF16 activations, but AITER quantizes them to
+        # group-32 MXFP8 before stage 1. Doing that in prepare() instead means
+        # a token is quantized once by the rank that owns it rather than once
+        # per rank it was replicated to, and halves the dispatch payload.
+        use_mxfp8_dispatch = not use_fp4_dispatch and mori_use_mxfp8_dispatch(
+            moe, quant_config
+        )
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = not use_fp4_dispatch and (
+        use_fp8_dispatch = not (use_fp4_dispatch or use_mxfp8_dispatch) and (
             quant_config.is_per_act_token
             or quant_config.is_block_quantized
             or quant_config.is_per_tensor
         )
-        if use_fp4_dispatch:
+        if use_mxfp8_dispatch:
+            # One e8m0 scale per 32-element block, one byte each, not the fp32
+            # the per-token/per-tensor FP8 paths below assume.
+            quant_dtype = current_platform.fp8_dtype()
+            scale_dim = moe.hidden_dim // MXFP8_GROUP_SIZE
+            scale_type_size = torch.float8_e8m0fnu.itemsize
+        elif use_fp4_dispatch:
             # One e8m0 scale per 32-element block. token_hidden_size stays
             # the unpacked hidden size: mori sizes its token buffers by the
             # BF16 input type, which also covers the BF16 combine.
@@ -416,6 +503,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
             use_fp4_dispatch=use_fp4_dispatch,
+            use_mxfp8_dispatch=use_mxfp8_dispatch,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
