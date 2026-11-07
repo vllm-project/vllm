@@ -233,10 +233,8 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)" release-images'
 
-      # CUDA_VERSION must match FINAL_BASE_IMAGE: it selects the runtime CUDA
-      # packages and the ptxas Triton uses for SM107. PyTorch has no CUDA 13.5
-      # manylinux builder or cu135 wheels yet, so the build stage stays on the
-      # cuda13.4 builder and the cu134 torch pins in rubin-prerelease.txt.
+      # CUDA_VERSION must match FINAL_BASE_IMAGE. The build stage stays on the
+      # cuda13.4 builder until PyTorch publishes a cuda13.5 one.
       - label: "Build release image - x86_64 - Rubin CUDA 13.5"
         depends_on: ~
         id: build-release-image-x86-rubin-cuda-13-5
