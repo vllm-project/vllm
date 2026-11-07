@@ -589,14 +589,24 @@ class TestCohereErrorEnvelope:
     responses.
     """
 
-    def test_validation_error_body_is_cohere_shaped(self):
+    @pytest.mark.parametrize("path", ["/cohere/v2/chat", "/cohere/v2/chat/render"])
+    @pytest.mark.parametrize(
+        ("root_path", "prefix"),
+        [("", ""), ("/proxy", "/proxy"), ("/proxy", ""), ("/co", "")],
+    )
+    def test_validation_error_body_is_cohere_shaped(self, path, root_path, prefix):
         # ``model=""`` and ``messages=[]`` trip our custom field
         # validators, which raise VLLMValidationError and are routed
         # through ``vllm_error_handler`` in the real vLLM
         # server (producing the ``{"error": {...}}`` shape).
         app = _build_app_with_vllm_handlers(handler=None)
+        app.root_path = root_path
         with TestClient(app) as client:
-            r = client.post("/cohere/v2/chat", json={"messages": [], "model": ""})
+            r = client.post(
+                prefix + path,
+                json={"messages": [], "model": ""},
+                headers={"X-Request-Id": "req-root"},
+            )
         assert r.status_code == HTTPStatus.BAD_REQUEST
         body = r.json()
         # ``CohereError`` has ``message`` at the top level, not nested
@@ -604,6 +614,7 @@ class TestCohereErrorEnvelope:
         assert "error" not in body
         assert "message" in body
         assert isinstance(body["message"], str) and body["message"]
+        assert body["id"] == "req-root"
 
     @pytest.mark.parametrize("path", ["/cohere/v2/chat", "/cohere/v2/chat/render"])
     def test_required_tool_choice_without_tools_returns_400(self, path):
@@ -636,20 +647,47 @@ class TestCohereErrorEnvelope:
         body = r.json()
         assert body == {"message": "teapot"}
 
-    def test_non_cohere_path_is_not_translated(self):
+    @pytest.mark.parametrize("root_path", ["", "/proxy", "/cohere"])
+    def test_non_cohere_path_is_not_translated(self, root_path):
         app = _build_app_with_vllm_handlers(handler=None)
+        app.root_path = root_path
 
         @app.get("/v1/other")
         async def _other():
             raise HTTPException(status_code=400, detail="nope")
 
         with TestClient(app) as client:
-            r = client.get("/v1/other")
+            r = client.get(root_path + "/v1/other")
         assert r.status_code == HTTPStatus.BAD_REQUEST
         body = r.json()
         # Non-cohere paths keep the vLLM ``ErrorResponse`` shape.
         assert "error" in body
         assert body["error"]["message"] == "nope"
+
+    def test_mounted_app_error_body_is_cohere_shaped(self):
+        parent = FastAPI()
+        parent.mount("/proxy", _build_app_with_vllm_handlers(handler=None))
+        with TestClient(parent) as client:
+            r = client.post("/proxy/cohere/v2/chat", json={"messages": [], "model": ""})
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        assert "error" not in r.json()
+        assert r.json()["message"]
+
+    def test_unrelated_mounted_app_is_not_translated(self):
+        app = _build_app_with_vllm_handlers(handler=None)
+        child = FastAPI()
+        child.state.args = app.state.args
+
+        @child.get("/cohere/v2/boom")
+        async def _boom():
+            raise HTTPException(status_code=400, detail="child error")
+
+        child.exception_handler(HTTPException)(http_exception_handler)
+        app.mount("/other", child)
+        with TestClient(app) as client:
+            r = client.get("/other/cohere/v2/boom")
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        assert r.json()["error"]["message"] == "child error"
 
     def test_streaming_response_passes_through(self):
         # SSE responses have content-type text/event-stream; the
