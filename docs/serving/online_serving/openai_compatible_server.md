@@ -174,6 +174,12 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+With `--tokenizer-mode deepseek_v41`, a `developer` message that reaches rendering
+must have non-empty content; empty or missing content returns HTTP 400. Default
+thinking preprocessing can discard developer messages before the last user turn,
+so this validation does not apply to those discarded messages. Empty `system`
+content remains supported.
+
 With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
 
 With `--reasoning-parser`, `/v1/chat/completions/batch` sums `reasoning_tokens` across conversations in `usage.completion_tokens_details`, as `/v1/chat/completions` does for one conversation, also when `include_reasoning` is `false`.
