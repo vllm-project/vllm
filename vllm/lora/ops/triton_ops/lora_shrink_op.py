@@ -278,9 +278,13 @@ def _lora_shrink(
         return
 
     assert inputs.dtype == lora_a_weights[0].dtype
-    assert inputs.dtype in [torch.float16, torch.bfloat16]
+    assert inputs.dtype in [torch.float16, torch.bfloat16], (
+        f"LoRA shrink requires float16 or bfloat16 inputs, got {inputs.dtype}"
+    )
     for weight in lora_a_weights:
-        assert weight.dtype in [torch.float16, torch.bfloat16]
+        assert weight.dtype in [torch.float16, torch.bfloat16], (
+            f"LoRA shrink requires float16 or bfloat16 weights, got {weight.dtype}"
+        )
 
     assert inputs.size(1) == lora_a_weights[0].size(-1)
     inputs = inputs.contiguous()
