@@ -12,54 +12,70 @@ from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
 )
 
 
-def test_vision_warmup_calls_only_position_and_rotary_paths() -> None:
+@torch.inference_mode()
+def test_vision_warmup_matches_runtime_rotary_layout(
+    default_vllm_config, dist_init
+) -> None:
+    import einops
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
+
     from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
-    calls: list[tuple[str, object]] = []
+    config = Qwen3VLVisionConfig(
+        depth=1,
+        hidden_size=144,
+        num_heads=2,
+        intermediate_size=32,
+        out_hidden_size=32,
+        num_position_embeddings=16,
+        patch_size=2,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        deepstack_visual_indexes=[],
+    )
+    device = torch.device(current_platform.device_type)
+    with set_default_torch_dtype(torch.float16), torch.device(device):
+        visual = Qwen3_VisionTransformer(config).to(device)
+    attention = visual.blocks[0].attn
+    attention.qkv.quant_method.process_weights_after_loading(attention.qkv)
+    layouts: list[tuple[torch.Size, tuple[int, ...]]] = []
 
-    class FakeAttention:
-        num_attention_heads_per_partition = 4
-        hidden_size_per_attention_head = 8
+    def record_layout(module, args):
+        qk, _, _ = args
+        layouts.append((qk.shape, qk.stride()))
 
-        def apply_rotary_emb(self, qk, cos, sin):
-            calls.append(("rotary", qk.shape))
+    def reject_tower_forward(module, args):
+        raise AssertionError("vision warmup must not run the full tower")
 
-    class FakeVisual(Qwen3_VisionTransformer):
-        spatial_merge_size = 2
+    expected = []
+    for seq_len in (256, 32, 32, 4):
+        x = torch.zeros(
+            seq_len, 1, config.hidden_size, dtype=visual.dtype, device=device
+        )
+        projected, _ = attention.qkv(x)
+        qkv = einops.rearrange(
+            projected,
+            "s b (three head head_dim) -> b s three head head_dim",
+            three=3,
+            head=config.num_heads,
+        )
+        qk = qkv[:, :, :2].flatten(2, 3)
+        expected.append((qk.shape, qk.stride()))
 
-        def __init__(self) -> None:
-            torch.nn.Module.__init__(self)
-            self.blocks = [SimpleNamespace(attn=FakeAttention())]
-            self.pos_embed = torch.nn.Embedding(4, 4, device="cpu")
+    with (
+        attention.apply_rotary_emb.register_forward_pre_hook(record_layout),
+        visual.register_forward_pre_hook(reject_tower_forward),
+        visual.blocks[0].register_forward_pre_hook(reject_tower_forward),
+    ):
+        _warm_vision(visual, device)
+        assert layouts == expected
 
-        def fast_pos_embed_interpolate(self, grid_thw):
-            calls.append(("position", grid_thw[0]))
-
-        def rot_pos_emb(self, grid_thw):
-            _, h, w = grid_thw[0]
-            shape = (h * w, 4)
-            return torch.empty(shape), torch.empty(shape)
-
-        def forward(self, *args, **kwargs):
-            raise AssertionError("vision warmup must not run the full tower")
-
-    model = torch.nn.Module()
-    model.visual = FakeVisual()
-    _warm_vision(model, torch.device("cpu"))
-
-    grids = [(1, 16, 16), (1, 16, 2), (1, 2, 16), (1, 2, 2)]
-    assert [value for name, value in calls if name == "position"] == [
-        list(grid) for grid in grids
-    ]
-    assert [value for name, value in calls if name == "rotary"] == [
-        torch.Size((2, h * w, 4, 8)) for _, h, w in grids
-    ]
-
-    # CPU offloading leaves tower weights off the accelerator, so the Triton
-    # paths must not be launched on host pointers.
-    calls.clear()
-    _warm_vision(model, torch.device("cuda"))
-    assert calls == []
+        visual.cpu()
+        layouts.clear()
+        _warm_vision(visual, torch.device("cuda"))
+        assert layouts == []
 
 
 @pytest.mark.parametrize(

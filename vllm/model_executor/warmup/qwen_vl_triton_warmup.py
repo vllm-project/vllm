@@ -47,11 +47,13 @@ def _warm_vision(model: torch.nn.Module, device: torch.device) -> None:
             grid_thw = [list(grid)]
             visual.fast_pos_embed_interpolate(grid_thw)
             cos, sin = visual.rot_pos_emb(grid_thw)
-            qk = torch.empty(
-                (2, grid[0] * grid[1] * grid[2], num_heads, head_size),
+            qkv = torch.empty(
+                (grid[0] * grid[1] * grid[2], 1, 3, num_heads, head_size),
                 dtype=cos.dtype,
                 device=cos.device,
             )
+            # Match the packed Q/K view used by Qwen2_5_VisionAttention.
+            qk = qkv.transpose(0, 1)[:, :, :2].flatten(2, 3)
             attention.apply_rotary_emb(qk, cos, sin)
 
         logger.info(
