@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.multimodal.image import rescale_image_size
+from vllm.platforms import current_platform
 
 from ...conftest import IMAGE_ASSETS, ImageTestAssets, VllmRunner
 from ..utils import check_logprobs_close
@@ -161,4 +162,102 @@ def test_awq_models(
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
+    )
+
+
+def _on_rdna() -> bool:
+    """Lazy RDNA check: importing vllm.platforms.rocm reads gcnArchName, so it
+    must not run at collection time on non-ROCm hosts."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    return on_gfx1x()
+
+
+@pytest.mark.skipif(
+    not _on_rdna(),
+    reason="the RDNA W4A16 path is gfx1x-only; CDNA keeps the failing bf16 path",
+)
+@torch.inference_mode()
+def test_awq_bfloat16_on_rocm(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+) -> None:
+    """AWQ must run in bfloat16 on RDNA.
+
+    Regression test for issue #63455: the AutoAWQ config returned the generic AWQ
+    linear method, whose kernel calls tl.dot(..., out_dtype=bfloat16), which Triton
+    rejects, so a bfloat16 AWQ model failed at the first forward pass. Selecting a
+    mixed-precision W4A16 kernel on RDNA makes bfloat16 work.
+    """
+    with vllm_runner(
+        "Qwen/Qwen2.5-0.5B-Instruct-AWQ",
+        quantization="awq",
+        dtype="bfloat16",
+        max_model_len=256,
+        enforce_eager=True,
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(example_prompts[:2], max_tokens=16)
+
+    assert len(outputs) == 2
+    assert all(text for _, text in outputs), "AWQ model produced empty output"
+
+
+@pytest.mark.skipif(not _on_rdna(), reason="requires the RDNA AutoAWQ routing path")
+@torch.inference_mode()
+def test_awq_legacy_fallback_on_rdna(
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
+    enable_pickle,
+) -> None:
+    """Disabling MP kernels must preserve FP16 AWQ loading and generation."""
+    disabled_kernels = ",".join(
+        [
+            "RDNA3W4A16LinearKernel",
+            "RDNAHybridW4A16LinearKernel",
+            "TritonW4A16LinearKernel",
+            "ConchLinearKernel",
+            "ExllamaLinearKernel",
+        ]
+    )
+    prompts = ["The capital of France is", "One plus one equals"]
+    outputs = []
+    for disabled in ("", disabled_kernels):
+        monkeypatch.setenv("VLLM_DISABLED_KERNELS", disabled)
+
+        def check_method(
+            model: torch.nn.Module, use_legacy: bool = bool(disabled)
+        ) -> None:
+            from vllm.model_executor.layers.quantization.auto_awq import (
+                AutoAWQLinearMethod,
+                AutoAWQMarlinLinearMethod,
+            )
+
+            expected = AutoAWQLinearMethod if use_legacy else AutoAWQMarlinLinearMethod
+            method = model.model.layers[0].self_attn.qkv_proj.quant_method
+            assert isinstance(method, expected), type(method)
+
+        with vllm_runner(
+            "Qwen/Qwen2.5-0.5B-Instruct-AWQ",
+            quantization="awq",
+            dtype="float16",
+            max_model_len=256,
+            enforce_eager=True,
+            seed=0,
+            kernel_config={"linear_backend": "auto"},
+        ) as vllm_model:
+            vllm_model.apply_model(check_method)
+            result = vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens=16, num_logprobs=5
+            )
+            assert len(result) == len(prompts)
+            assert all(token_ids for token_ids, _, _ in result)
+            outputs.append(result)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="mixed_precision_awq",
+        name_1="legacy_awq_fallback",
     )
