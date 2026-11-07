@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     MMPayload,
+    PerRequestMetrics,
     resolve_return_mm_kwargs_alias,
 )
 
@@ -436,6 +437,7 @@ class AnthropicStreamEvent(BaseModel):
     index: int | None = None
     error: AnthropicError | None = None
     usage: AnthropicUsage | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class AnthropicMessagesResponse(BaseModel):
@@ -451,6 +453,7 @@ class AnthropicMessagesResponse(BaseModel):
     ) = None
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
+    metrics: PerRequestMetrics | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
     kv_transfer_params: dict[str, Any] | None = Field(
