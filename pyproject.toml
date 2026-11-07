@@ -229,6 +229,8 @@ stride_bse = "stride_bse"
 shs = "shs"
 shw = "shw"
 opf = "opf"
+# DeepSeek-V4.1 asm decode layers: AMDGPU buffer instructions' offset-enable modifier
+offen = "offen"
 certifi = "certifi"
 MoNE = "MoNE"
 mone = "mone"
