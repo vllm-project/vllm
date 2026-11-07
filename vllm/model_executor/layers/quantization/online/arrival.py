@@ -21,7 +21,9 @@ class OnlineArrivalMixin:
 
     def arrival_row_group(self, layer: torch.nn.Module, name: str) -> int | None:
         """Rows of parameter ``name`` quantized together, or None if its
-        quantization needs the whole tensor (a per-tensor or global scale)."""
+        quantization needs the whole tensor (a per-tensor or global scale) or
+        reduces a scale across ranks (once per shard would be a collective
+        per load)."""
         return None
 
     def quantize_param(

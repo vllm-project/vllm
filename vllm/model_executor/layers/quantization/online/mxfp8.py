@@ -108,7 +108,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        return 1 if name == "weight" and self.requantization_source is None else None
+        return 1 if name == "weight" else None
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor

@@ -598,7 +598,6 @@ class TestOnlineStaging:
 
 def _scheme(cls, **attrs):
     method = object.__new__(cls)
-    method.requantization_source = None
     for name, value in attrs.items():
         setattr(method, name, value)
     return method

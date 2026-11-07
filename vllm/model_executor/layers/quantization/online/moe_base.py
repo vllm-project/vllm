@@ -144,10 +144,8 @@ class OnlineMoEMethodBase(
         loads copy only checkpoint rows (the base loader, which also leaves
         padding zero) at ``group``-aligned row offsets."""
         param = getattr(layer, name, None)
-        if (
-            name not in ("w13_weight", "w2_weight")
-            or self.requantization_source is not None
-            or not hasattr(param, "weight_loader_numel")
+        if name not in ("w13_weight", "w2_weight") or not hasattr(
+            param, "weight_loader_numel"
         ):
             return None
         # w13 rows are the (2 shards of the) intermediate dim, w2 rows hidden

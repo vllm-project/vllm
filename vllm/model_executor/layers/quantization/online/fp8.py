@@ -396,11 +396,7 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
         assert self.weight_block_size is not None
         block_n = self.weight_block_size[0]
-        if (
-            name != "weight"
-            or self.requantization_source is not None
-            or any(width % block_n for width in layer.logical_widths)
-        ):
+        if name != "weight" or any(width % block_n for width in layer.logical_widths):
             return None  # a block would span two separately loaded shards
         return block_n
 
@@ -514,11 +510,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        if (
-            name != "weight"
-            or self.requantization_source is not None
-            or _is_tp_sharded(layer, reduces_output_dim=False)
-        ):
+        if name != "weight" or _is_tp_sharded(layer, reduces_output_dim=False):
             return None  # a row-parallel scale is reduced over the TP group
         return 1
 
