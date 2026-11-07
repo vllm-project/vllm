@@ -14,6 +14,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 
 from ..common.qsa_indexer import (
     QSACompressedKeyCache,
@@ -53,12 +54,23 @@ def apply_qsa_rope(
         )
         return tensor.reshape(shape)
 
-    rotated = rotary_emb.apply_rotary_emb.forward_cuda(
+    apply_rotary_emb = rotary_emb.apply_rotary_emb
+    if current_platform.is_cuda():
+        apply_rotary_emb = apply_rotary_emb.forward_cuda
+    rotated = apply_rotary_emb(
         tensor[..., :rotary_dim],
         cos,
         sin,
     )
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
+
+
+def _gemma_rmsnorm(norm: GemmaRMSNorm, x: torch.Tensor) -> torch.Tensor:
+    if current_platform.is_cuda():
+        from flashinfer.norm import gemma_rmsnorm
+
+        return gemma_rmsnorm(x, norm.weight, norm.variance_epsilon)
+    return norm(x)
 
 
 def _supports_fused_pre_indexer(
@@ -320,13 +332,9 @@ class QSAIndexer(nn.Module):
             )
         else:
             # Unfused reference path
-            from flashinfer.norm import gemma_rmsnorm
-
             q = projected_q.reshape(-1, self.index_n_heads, self.index_head_dim)
-            q = gemma_rmsnorm(
-                q.reshape(-1, self.index_head_dim),
-                self.q_layernorm.weight,
-                self.q_layernorm.variance_epsilon,
+            q = _gemma_rmsnorm(
+                self.q_layernorm, q.reshape(-1, self.index_head_dim)
             ).reshape_as(q)
             q = apply_qsa_rope(self.rotary_emb, positions, q)
             q = q.to(self.indexer_dtype)
@@ -353,10 +361,8 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 rope_position_cache,
             )
-            compressed_keys = gemma_rmsnorm(
-                pooled.reshape(-1, self.index_head_dim),
-                self.k_layernorm.weight,
-                self.k_layernorm.variance_epsilon,
+            compressed_keys = _gemma_rmsnorm(
+                self.k_layernorm, pooled.reshape(-1, self.index_head_dim)
             ).reshape(-1, 1, self.index_head_dim)
             if getattr(self.rotary_emb, "mrope_section", None):
                 first_positions = first_positions.transpose(0, 1)
