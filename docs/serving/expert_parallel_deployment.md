@@ -418,3 +418,6 @@ removed rank hosted the DP store, also provide a reachable surviving
 Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`
 endpoint is no longer registered.
+
+With EPLB enabled, an async EPLB worker error is also a fault. `retry` resumes
+rebalancing unless an earlier `scale_down` disabled it.
