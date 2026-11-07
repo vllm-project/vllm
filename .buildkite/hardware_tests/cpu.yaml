@@ -17,6 +17,8 @@ steps:
   - vllm/v1/attention/backends/mla/amx_mla.py
   - vllm/model_executor/layers/attention/mla_attention.py
   - tests/kernels/test_deepseek_v4_cpu_kernels.py
+  - vllm/models/deepseek_v4/cpu/
+  - vllm/v1/attention/backends/mla/sparse_swa.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
   - tests/kernels/moe/test_zen_cpu_int8_moe.py
