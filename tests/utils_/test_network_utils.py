@@ -5,6 +5,7 @@ import threading
 
 import pytest
 import zmq
+import zmq.asyncio
 
 from vllm.utils import network_utils
 from vllm.utils.network_utils import (
@@ -19,6 +20,50 @@ from vllm.utils.network_utils import (
     split_host_port,
     split_zmq_path,
 )
+
+
+@pytest.mark.parametrize("context_type", [zmq.Context, zmq.asyncio.Context])
+@pytest.mark.parametrize("failure", ["bind", "path", "interrupt"])
+def test_make_zmq_socket_closes_socket_when_setup_fails(
+    context_type, monkeypatch, failure
+):
+    """A failed allocation must not leave an unreachable socket in the context."""
+    ctx = context_type()
+    try:
+        blocker = ctx.socket(zmq.ROUTER)
+        port = blocker.bind_to_random_port("tcp://127.0.0.1")
+        created = []
+        new_socket = ctx.socket
+
+        def record_socket(*args, **kwargs):
+            result = new_socket(*args, **kwargs)
+            created.append(result)
+            return result
+
+        monkeypatch.setattr(ctx, "socket", record_socket)
+        path = f"tcp://127.0.0.1:{port}"
+        expected_error: type[BaseException] = zmq.ZMQError
+        if failure == "path":
+            path = "not-a-zmq-address"
+            expected_error = ValueError
+        elif failure == "interrupt":
+
+            def interrupt_setup():
+                raise KeyboardInterrupt
+
+            monkeypatch.setattr(
+                network_utils, "_get_zmq_socket_buffer_size", interrupt_setup
+            )
+            expected_error = KeyboardInterrupt
+        with pytest.raises(expected_error):
+            make_zmq_socket(ctx, path, zmq.ROUTER)
+
+        assert len(created) == 1
+        assert created[0].closed
+        assert not blocker.closed
+        assert not ctx.closed
+    finally:
+        ctx.destroy(linger=0)
 
 
 def test_get_file_store_init_method_is_unique():
