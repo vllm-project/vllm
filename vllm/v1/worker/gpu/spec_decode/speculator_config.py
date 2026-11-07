@@ -110,6 +110,12 @@ class SpeculatorConfig:
         return False
 
     @property
+    def uses_post_norm_final_aux(self) -> bool:
+        """Whether a requested final aux layer means the target's post-final-norm
+        output rather than the pre-norm residual the in-loop capture records."""
+        return False
+
+    @property
     def num_lookahead_tokens(self) -> int:
         """See `VllmConfig.num_lookahead_tokens`."""
         return 0
@@ -297,6 +303,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
+    "pard2": _builtin("pard2.config", "Pard2SpeculatorConfig"),
 }
 
 
@@ -397,7 +404,7 @@ def _get_draft_declared_config_class(
 
 
 # Methods detected by `matches` (in order) if the draft model declares none.
-_CHECKPOINT_DETECTION_ORDER = ("eagle", "eagle3", "dflash", "dspark", "mtp")
+_CHECKPOINT_DETECTION_ORDER = ("eagle", "eagle3", "dflash", "dspark", "pard2", "mtp")
 
 
 def _resolve_checkpoint_config_class(

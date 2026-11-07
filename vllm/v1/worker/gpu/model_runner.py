@@ -167,6 +167,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_aux_layers_from_config,
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
@@ -301,6 +302,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
+        # The aux capture of the final layer is the PRE-final-norm residual;
+        # when True, swap it for the POST-norm output the drafter expects.
+        self._swap_final_aux_to_post_norm = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(
@@ -419,6 +423,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(
                     self.model, self.speculative_config, self.use_pp
+                )
+                # Only drafters that ask for the final layer need the swap, so
+                # this never fires for EAGLE3/DFlash/DSpark.
+                aux_layers = (
+                    get_eagle3_aux_layers_from_config(self.speculative_config) or ()
+                )
+                self._swap_final_aux_to_post_norm = (
+                    self.speculative_config.speculator_config.uses_post_norm_final_aux
+                    and self.model_config.hf_text_config.num_hidden_layers in aux_layers
                 )
                 if self.pp_handler is not None:
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
@@ -2162,6 +2175,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert isinstance(model_output, tuple)
                 hidden_states, aux_hidden_states = model_output
+                if self._swap_final_aux_to_post_norm and aux_hidden_states:
+                    # The in-loop capture records the final layer's PRE-norm
+                    # residual, but the post-norm value is what the model
+                    # returns as hidden_states.
+                    aux_hidden_states[-1] = hidden_states
             else:
                 assert isinstance(model_output, torch.Tensor)
                 hidden_states = model_output
