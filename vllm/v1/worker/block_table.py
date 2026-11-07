@@ -125,8 +125,16 @@ class BlockTable:
         self.block_table.np[row_idx, start : start + num_blocks] = block_ids
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
+        prev_num_blocks = self.num_blocks_per_row[row_idx]
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
+        # Clear the tail left by a shrinking rebuild: readers index rows by
+        # request metadata (e.g. kv_len / slot-mapping positions) instead of
+        # num_blocks_per_row, so stale ids beyond the live region can still
+        # be dereferenced after the blocks have been freed and reallocated.
+        self.block_table.np[
+            row_idx, self.num_blocks_per_row[row_idx] : prev_num_blocks
+        ] = 0
 
     def clear_row(self, row_idx: int) -> None:
         num_blocks = self.num_blocks_per_row[row_idx]
@@ -135,15 +143,20 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] = 0
 
     def move_row(self, src: int, tgt: int) -> None:
+        if src == tgt:
+            return
         num_blocks = self.num_blocks_per_row[src]
+        prev_tgt_num_blocks = self.num_blocks_per_row[tgt]
         block_table_np = self.block_table.np
         block_table_np[tgt, :num_blocks] = block_table_np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
         # Clear the vacated source row: dummy-run batches dereference stale
         # rows as mamba state slots and write state in place there, possibly
-        # after the blocks have been freed and reallocated.
+        # after the blocks have been freed and reallocated. Also clear the
+        # target-row tail left by a shrinking move, for the same reason.
         block_table_np[src, :num_blocks] = 0
         self.num_blocks_per_row[src] = 0
+        block_table_np[tgt, num_blocks:prev_tgt_num_blocks] = 0
 
     def swap_row(self, src: int, tgt: int) -> None:
         src_tgt, tgt_src = [src, tgt], [tgt, src]

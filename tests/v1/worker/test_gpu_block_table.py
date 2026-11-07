@@ -258,6 +258,83 @@ def test_v1_block_table_move_row_clears_vacated_row():
     assert (block_table.block_table.np[1] == 0).all()
 
 
+def test_v1_block_table_move_row_self_move_is_noop():
+    """A self-move must be a no-op. condense() only calls move_row with
+    src != tgt (it breaks when empty_index >= last_req_index), but the
+    vacated-row clear would zero the row if a future caller passed
+    src == tgt."""
+    from vllm.v1.worker.block_table import BlockTable
+
+    block_table = BlockTable(
+        block_size=16,
+        max_num_reqs=4,
+        max_num_blocks_per_req=8,
+        max_num_batched_tokens=64,
+        pin_memory=False,
+        device=torch.device("cuda"),
+        cp_kv_cache_interleave_size=1,
+    )
+    block_table.add_row([1, 2, 3], row_idx=0)
+
+    block_table.move_row(0, 0)
+
+    assert block_table.num_blocks_per_row[0] == 3
+    assert block_table.block_table.np[0, :3].tolist() == [1, 2, 3]
+
+
+def test_v1_block_table_move_row_clears_target_row_tail():
+    """A move onto a shorter target row must also clear the target row's
+    tail. Readers index rows by request metadata (e.g. kv_len /
+    slot-mapping positions) instead of num_blocks_per_row, so stale ids
+    beyond the live region can still be dereferenced after the blocks
+    have been freed and reallocated (hybrid mamba/GDN groups recycle
+    block ids across groups)."""
+    from vllm.v1.worker.block_table import BlockTable
+
+    block_table = BlockTable(
+        block_size=16,
+        max_num_reqs=4,
+        max_num_blocks_per_req=8,
+        max_num_batched_tokens=64,
+        pin_memory=False,
+        device=torch.device("cuda"),
+        cp_kv_cache_interleave_size=1,
+    )
+    block_table.add_row([1, 2, 3], row_idx=0)
+    block_table.add_row([4, 5], row_idx=1)
+
+    block_table.move_row(1, 0)
+
+    assert block_table.num_blocks_per_row[0] == 2
+    assert block_table.block_table.np[0, :2].tolist() == [4, 5]
+    assert (block_table.block_table.np[0, 2:] == 0).all()
+
+
+def test_v1_block_table_add_row_clears_tail_of_shrunk_row():
+    """Rebuilding a row shorter than its previous content (e.g. a request
+    landing on a recycled row slot) must clear the stale tail for the
+    same reason as move_row: consumers bypass num_blocks_per_row and
+    dereference row cells by request-derived lengths."""
+    from vllm.v1.worker.block_table import BlockTable
+
+    block_table = BlockTable(
+        block_size=16,
+        max_num_reqs=4,
+        max_num_blocks_per_req=8,
+        max_num_batched_tokens=64,
+        pin_memory=False,
+        device=torch.device("cuda"),
+        cp_kv_cache_interleave_size=1,
+    )
+    block_table.add_row(list(range(6)), row_idx=0)
+
+    block_table.add_row([7, 8], row_idx=0)
+
+    assert block_table.num_blocks_per_row[0] == 2
+    assert block_table.block_table.np[0, :2].tolist() == [7, 8]
+    assert (block_table.block_table.np[0, 2:] == 0).all()
+
+
 def test_get_dummy_block_tables_returns_zeroed_rows():
     """Dummy runs bypass the gather, so the persistent input_block_tables
     hold the previous real step's rows. Mamba/GDN metadata routes in-place
