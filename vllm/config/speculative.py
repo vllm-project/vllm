@@ -805,9 +805,12 @@ class SpeculativeConfig:
             hf_config.update(transformers_mtp_overrides)
             return hf_config
         initial_architecture = hf_config.architectures[0]
-        if (
-            initial_architecture == "DSparkDraftModel"
-            and hf_config.model_type == "qwen3"
+        if initial_architecture == "DSparkDraftModel" and hf_config.model_type in (
+            "qwen3",
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
         ):
             # Qwen3 DSpark drafts reuse the DeepSeek-V4 DSpark architecture name.
             hf_config.update({"architectures": ["Qwen3DSparkModel"]})
@@ -1116,6 +1119,9 @@ class SpeculativeConfig:
             "qwen3_5_moe",
             "qwen3_5_text",
             "qwen3_5_moe_text",
+        ) and initial_architecture not in (
+            "Qwen3DSparkModel",
+            _QWEN3_OMNI_DSPARK_ARCHITECTURE,
         ):
             # Checkpoints that ship only the text config resolve to the
             # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
