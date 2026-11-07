@@ -3,6 +3,8 @@ job_dirs:
   - ".buildkite/image_build"
   - ".buildkite/test_areas"
   - ".buildkite/hardware_tests"
+fallback_dirs:
+  - ".buildkite/queue_fallbacks"
 run_all_patterns:
   - "docker/Dockerfile"
   - "CMakeLists.txt"
