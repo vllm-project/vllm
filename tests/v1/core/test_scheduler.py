@@ -1491,6 +1491,64 @@ def test_cache_aware_admission_protects_resident_prefix_from_eviction(window: in
         assert scheduler.kv_cache_manager.get_num_cached_tokens(warm) < cached_before
 
 
+@pytest.mark.parametrize(
+    "start,large_first,large_work",
+    [
+        (None, True, 1),
+        (0, False, 65),
+        (16, False, 49),
+        (31, False, 49),
+        (48, False, 17),
+        (49, False, 17),
+        (64, True, 1),
+    ],
+)
+def test_cache_aware_admission_ranks_reusable_prefixes(start, large_first, large_work):
+    """A resident prefix beyond a scoring bound must not displace usable KV."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        cache_aware_admission_window=4,
+        cache_aware_admission_threshold=0,
+        num_blocks=10,
+        max_num_batched_tokens=128,
+    )
+    seed_peer = create_requests(2, num_tokens=49, max_tokens=1)[1]
+    (seed_large,) = create_requests(1, num_tokens=65, max_tokens=1)
+    for seed in (seed_peer, seed_large):
+        scheduler.add_request(seed)
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, make_output(scheduler))
+        assert seed.is_finished()
+
+    peer = create_requests(2, num_tokens=49, max_tokens=1, req_ids=["unused", "peer"])[
+        1
+    ]
+    (large,) = create_requests(
+        1,
+        num_tokens=65,
+        req_ids=["large"],
+        sampling_params=SamplingParams(
+            max_tokens=1,
+            prompt_logprobs=1 if start is not None else None,
+            prompt_logprob_start=start,
+            skip_reading_prefix_cache=False,
+        ),
+    )
+    scheduler.add_request(peer)
+    scheduler.add_request(large)
+
+    output = scheduler.schedule()
+
+    expected_order = ["large", "peer"] if large_first else ["peer", "large"]
+    assert [r.req_id for r in output.scheduled_new_reqs] == expected_order
+    assert output.num_scheduled_tokens == {"peer": 1, "large": large_work}
+    assert output.total_num_scheduled_tokens == 1 + large_work
+    assert not scheduler.waiting
+    scheduler.update_from_output(output, make_output(scheduler))
+    assert peer.is_finished() and large.is_finished()
+    scheduler.shutdown()
+
+
 def test_cache_aware_admission_keeps_blocked_and_started_requests_in_place():
     """Reordering is confined to plain waiting peers.
 

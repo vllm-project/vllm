@@ -1585,6 +1585,49 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
         assert second.prompt_logprobs == first.prompt_logprobs
 
 
+def test_cache_aware_admission_preserves_reusable_prefix_for_scoring(monkeypatch):
+    """A scoring bound must not inflate ranking and evict a peer's usable KV."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    peer = TokensPrompt(prompt_token_ids=list(range(100, 149)))
+    large = TokensPrompt(prompt_token_ids=list(range(65)))
+    params = SamplingParams(temperature=0, max_tokens=1)
+    scoring = SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        prompt_logprobs=0,
+        prompt_logprob_start=16,
+        skip_reading_prefix_cache=False,
+    )
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=80,
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        num_gpu_blocks_override=10,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        async_scheduling=False,
+        cache_aware_admission_window=4,
+        cache_aware_admission_threshold=0,
+        block_size=16,
+        gpu_memory_utilization=0.25,
+        enforce_eager=True,
+    ) as vllm_model:
+        llm = vllm_model.llm
+        llm.generate([peer], params)
+        llm.generate([large], params)
+
+        peer_output, scored_output = llm.generate([peer, large], [params, scoring])
+
+        assert peer_output.num_cached_tokens == 48
+        assert scored_output.num_cached_tokens == 16
+        assert scored_output.prompt_logprobs is not None
+        assert scored_output.prompt_token_ids == large["prompt_token_ids"]
+        assert len(scored_output.prompt_logprobs) == len(large["prompt_token_ids"])
+        assert all(lp is None for lp in scored_output.prompt_logprobs[:17])
+        assert all(scored_output.prompt_logprobs[17:])
+
+
 @large_gpu_mark(min_gb=24)
 def test_token_logprobs_large_batch_int64_row_offset():
     """Regression: logprob kernel row offset (row * vocab_size) must use int64.

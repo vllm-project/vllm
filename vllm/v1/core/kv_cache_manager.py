@@ -270,7 +270,7 @@ class KVCacheManager:
             return 0
         # Mirrors `get_computed_blocks`: the last token is always recomputed.
         _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes, request.get_max_cache_hit_length()
         )
         return num_computed_tokens
 

@@ -3178,6 +3178,59 @@ def test_fixed_token_scores_reuse_only_unscored_prefix(
 
 
 @pytest.mark.parametrize(
+    "start,cached_tokens,prompt_tokens,expected_hit",
+    [
+        (None, 16, 17, 16),
+        (0, 16, 17, 0),
+        (3, 16, 17, 0),
+        (4, 16, 17, 4),
+        (5, 16, 17, 4),
+        (12, 8, 17, 8),
+        (16, 16, 17, 16),
+        (None, 16, 16, 12),
+    ],
+)
+def test_cached_token_probe_respects_request_limit_without_adopting_blocks(
+    start, cached_tokens, prompt_tokens, expected_hit
+):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(4, 16),
+        max_model_len=32,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=4,
+    )
+    warm = make_request("warm", list(range(cached_tokens)), 4, sha256)
+    assert manager.allocate_slots(warm, cached_tokens) is not None
+    manager.free(warm)
+    manager.take_events()
+    request = make_request(
+        "probe",
+        list(range(prompt_tokens)),
+        4,
+        sha256,
+        sampling_params=SamplingParams(
+            prompt_logprobs=1 if start is not None else None,
+            prompt_logprob_start=start,
+            skip_reading_prefix_cache=False,
+            extra_args={"kv_cache_report_mode": "full"},
+        ),
+    )
+    pool = manager.block_pool
+    before = [(block.ref_cnt, block.block_hash) for block in pool.blocks]
+    free_before = pool.free_block_queue.get_all_free_blocks()
+    cache_before = dict(pool.cached_block_hash_to_block._cache)
+
+    assert manager.get_num_cached_tokens(request) == expected_hit
+
+    assert [(block.ref_cnt, block.block_hash) for block in pool.blocks] == before
+    assert pool.free_block_queue.get_all_free_blocks() == free_before
+    assert pool.cached_block_hash_to_block._cache == cache_before
+    assert all(not m.req_to_blocks for m in manager.coordinator.single_type_managers)
+    assert manager.take_events() == []
+
+
+@pytest.mark.parametrize(
     "kwargs,expected_limit",
     [
         ({}, None),

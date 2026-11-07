@@ -225,7 +225,7 @@ class SchedulerConfig:
     requests, those whose prefix is already in the KV cache are admitted ahead
     of requests that would have to compute theirs, so a cold request does not
     evict blocks a resident one still needs. 0 (the default) admits strictly in
-    arrival order.
+    arrival order. Ranking respects each request's prefix-cache reuse limit.
 
     Reordering is confined to the window and to requests that are merely
     waiting, so a request that is blocked or already partially computed keeps
