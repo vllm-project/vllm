@@ -15,6 +15,7 @@ from tests.ir.ir_test_utils import (
 from tests.utils import set_random_seed
 from vllm import ir
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -35,6 +36,7 @@ def test_rms_norm_registration():
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "rmsnorm"),
+        "triton": HAS_TRITON and current_platform.is_cuda(),
     }
 
     actual = {
@@ -222,6 +224,7 @@ def test_fused_add_rms_norm_registration():
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "fused_add_rms_norm"),
+        "triton": HAS_TRITON and current_platform.is_cuda(),
     }
 
     actual = {
@@ -442,3 +445,33 @@ class TestFusedAddRMSNorm:
                 torch.library.opcheck(
                     torch.ops.vllm_ir.fused_add_rms_norm.maybe_inplace, args
                 )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("n_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
+@pytest.mark.parametrize("residual", [False, True])
+@pytest.mark.skipif(
+    not (HAS_TRITON and current_platform.is_cuda()), reason="triton needs CUDA"
+)
+def test_triton_fp32_weight(dtype, n_tokens, hidden_size, residual):
+    """GemmaRMSNorm passes an fp32 (1 + weight) on a 16-bit activation; the
+    triton impl takes those calls and matches native."""
+    set_random_seed(0)
+    device = current_platform.device_type
+    x = torch.randn(n_tokens, hidden_size, dtype=dtype, device=device)
+    x_residual = torch.randn_like(x)
+    weight = torch.randn(hidden_size, dtype=dtype, device=device).float() + 1.0
+    if residual:
+        op, args = ir.ops.fused_add_rms_norm, (x, x_residual, weight, 1e-6)
+    else:
+        op, args = ir.ops.rms_norm, (x, weight, 1e-6)
+    impl = op.impls["triton"]
+    assert impl.supports_args(*args)
+    assert not impl.supports_args(*args[:-2], weight.to(dtype), 1e-6)
+    assert not impl.supports_args(*args, 4)
+
+    assert_close(op, impl.impl_fn(*clone_args(args)), op.impls["native"].impl_fn(*args))
+    with op.set_priority(["triton", "native"]):
+        dispatched = op(*clone_args(args))
+    torch.testing.assert_close(dispatched, impl.impl_fn(*args), rtol=0.0, atol=0.0)
