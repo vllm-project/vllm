@@ -379,6 +379,7 @@ An example of using `structural_tag` can be found here: [examples/features/struc
 
 Offline inference allows for the same types of structured outputs.
 To use it, we'll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
+`structured_outputs` must be a `StructuredOutputsParams` instance or `None`; other values, such as a raw schema string or a dict, are rejected with a validation error.
 The main available options inside `StructuredOutputsParams` are:
 
 - `json`
