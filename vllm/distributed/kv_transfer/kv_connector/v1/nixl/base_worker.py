@@ -2861,6 +2861,23 @@ class NixlBaseConnectorWorker:
                     "LBNHC cache by setting 'enable_permute_local_kv'=True "
                     "in --kv-transfer-config."
                 )
+        # NVFP4 pages keep data and scales in separate areas, so the receive
+        # post-process cannot re-block or permute them by token row.
+        if (
+            not self.use_mla
+            and (block_size_ratio > 1 or self.enable_permute_local_kv)
+            and any(
+                isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
+                for spec in self._layer_specs.values()
+            )
+        ):
+            raise RuntimeError(
+                "NIXL does not support NVFP4 KV cache with different block sizes "
+                f"(local {self.block_size}, remote {nixl_agent_meta.block_size}) "
+                f"or KV cache layouts (local {kv_cache_layout}, remote "
+                f"{nixl_agent_meta.kv_cache_layout}) on prefill and decode. "
+                "Use the same block size and KV cache layout on both."
+            )
         # if remote_agent used attn is not same as local,
         # hint heterogenuous attn post process
         if (

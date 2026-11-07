@@ -1917,6 +1917,89 @@ class TestNixlHandshake:
         else:
             worker.add_remote_agent(meta, remote_tp_size=remote_tp)
 
+    @pytest.mark.parametrize(
+        ("kv_quant_mode", "block_size_ratio", "remote_layout", "rejected"),
+        [
+            (KVQuantMode.NVFP4, 4, "LBNHC", True),
+            (KVQuantMode.NVFP4, 1, "LBHNC", True),
+            (KVQuantMode.NVFP4, 1, "LBNHC", False),
+            (KVQuantMode.NONE, 4, "LBNHC", False),
+            (KVQuantMode.NONE, 1, "LBHNC", False),
+        ],
+    )
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_rejects_nvfp4_receive_conversion(
+        self,
+        default_vllm_config,
+        dist_init,
+        kv_quant_mode,
+        block_size_ratio,
+        remote_layout,
+        rejected,
+    ):
+        """NVFP4 pages cannot be re-blocked or permuted after receive."""
+        block_size = maybe_update_block_size(64)
+        # An LBHNC remote turns on the permute for this LBNHC local cache.
+        vllm_config = create_vllm_config(
+            enable_permute_local_kv=True, block_size=block_size
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer0"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=8,
+                        head_size=16,
+                        dtype=torch.uint8,
+                        kv_quant_mode=kv_quant_mode,
+                    ),
+                )
+            ],
+        )
+        worker = FakeNixlConnectorWorker(
+            vllm_config,
+            "engine",
+            hand_shake_latency=0,
+            kv_cache_layout="LBNHC",
+            kv_cache_config=kv_cache_config,
+        )
+        local_len = 4096 * worker.block_size
+        worker.block_len_per_layer = [local_len]
+        worker.num_blocks = 1
+        worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+        # Local registration state that add_remote_agent reads for ratio > 1.
+        worker.block_stride_per_layer = [local_len]
+        worker.region_num_blocks = [worker.num_blocks]
+        worker.region_mem_types = [worker.nixl_memory_type]
+        worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank] = [0]
+        meta = NixlAgentMetadata(
+            engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+            kv_caches_base_addr=[0],
+            device_id=0,
+            num_blocks=block_size_ratio,
+            block_lens=[local_len // block_size_ratio],
+            block_strides=[local_len // block_size_ratio],
+            kv_cache_layout=remote_layout,
+            block_size=worker.block_size // block_size_ratio,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=1,
+        )
+        _advertise_one_layer_per_region(worker, meta)
+
+        if rejected:
+            with pytest.raises(RuntimeError, match="NVFP4"):
+                worker.add_remote_agent(meta, remote_tp_size=1)
+        else:
+            worker.add_remote_agent(meta, remote_tp_size=1)
+
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
