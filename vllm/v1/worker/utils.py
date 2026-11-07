@@ -915,17 +915,20 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
     alone does not release the KV cache memory on teardown paths.
     """
     for layer in layers:
-        if not hasattr(layer, "kv_cache"):
-            continue
-        kv_cache = layer.kv_cache
-        layer.kv_cache = torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+        if hasattr(layer, "kv_cache"):
+            kv_cache = layer.kv_cache
+            layer.kv_cache = (
+                torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+            )
         # Clean up quantized KV cache scale views
-        # (int8_per_token_head, fp8_per_token_head)
-        if hasattr(layer, "impl"):
-            if hasattr(layer.impl, "_k_scale_cache"):
-                layer.impl._k_scale_cache = None
-            if hasattr(layer.impl, "_v_scale_cache"):
-                layer.impl._v_scale_cache = None
+        # (int8_per_token_head, fp8_per_token_head). A layer can hold these
+        # without a kv_cache attribute, so they are cleared independently.
+        impl = getattr(layer, "impl", None)
+        if impl is not None:
+            if hasattr(impl, "_k_scale_cache"):
+                impl._k_scale_cache = None
+            if hasattr(impl, "_v_scale_cache"):
+                impl._v_scale_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):
             if hasattr(layer, name):
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
