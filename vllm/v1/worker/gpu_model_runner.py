@@ -256,16 +256,24 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
-def count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
-    """Per-row NaN counts, left on device."""
-    return logits.isnan().sum(dim=-1, dtype=torch.int32)
+def count_nans_per_request(
+    logits: torch.Tensor, spec_decode_metadata: SpecDecodeMetadata | None
+) -> torch.Tensor:
+    """Per-request NaN counts, left on device.
+
+    With spec decode, each request's rows are summed by `cu_num_sampled_tokens`.
+    """
+    num_nans = logits.isnan().sum(dim=-1, dtype=torch.int32)
+    if spec_decode_metadata is None:
+        return num_nans
+    cu_num_nans = num_nans.cumsum(0)[spec_decode_metadata.cu_num_sampled_tokens - 1]
+    return torch.diff(cu_num_nans, prepend=cu_num_nans.new_zeros(1))
 
 
 def nans_to_dict(counts: list[int], req_id_to_index: dict[str, int]) -> dict[str, int]:
-    """Map per-row NaN counts onto request ids.
+    """Map per-request NaN counts onto request ids.
 
-    Rows and requests need not correspond one-to-one, so requests without a
-    row are reported as 0.
+    Requests without a count are reported as 0.
     """
     return {
         req_id: int(counts[i]) if i < len(counts) else 0
@@ -3533,6 +3541,7 @@ class GPUModelRunner(
         logits: torch.Tensor | None,
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
+        spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
         dict[str, int],
         torch.Tensor | None,
@@ -3549,9 +3558,15 @@ class GPUModelRunner(
             if self.use_async_scheduling:
                 # Keep the counts on device; they ride the async output copy
                 # stream rather than blocking here.
-                num_nans = None if logits is None else count_nans_per_row(logits)
+                num_nans = (
+                    None
+                    if logits is None
+                    else count_nans_per_request(logits, spec_decode_metadata)
+                )
             else:
-                num_nans_in_logits = self._get_nans_in_logits(logits)
+                num_nans_in_logits = self._get_nans_in_logits(
+                    logits, spec_decode_metadata
+                )
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -4542,6 +4557,7 @@ class GPUModelRunner(
                 logits,
                 hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
+                spec_decode_metadata,
             )
 
         if draft_after_bookkeeping:
@@ -5447,7 +5463,11 @@ class GPUModelRunner(
 
         return prompt_logprobs_dict
 
-    def _get_nans_in_logits(self, logits: torch.Tensor | None) -> dict[str, int]:
+    def _get_nans_in_logits(
+        self,
+        logits: torch.Tensor | None,
+        spec_decode_metadata: SpecDecodeMetadata | None = None,
+    ) -> dict[str, int]:
         """Count NaNs per request, reading the result back to the host.
 
         Only used under sync scheduling, The async path keeps the counts
@@ -5457,7 +5477,11 @@ class GPUModelRunner(
             # Reporting per-request NaN counts requires them on the host; this
             # path is opt-in diagnostics, so the D2H is intended.
             with gpu_sync_allowed():
-                counts = [] if logits is None else count_nans_per_row(logits).tolist()
+                counts = (
+                    []
+                    if logits is None
+                    else count_nans_per_request(logits, spec_decode_metadata).tolist()
+                )
             num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(num_nans_in_logits)

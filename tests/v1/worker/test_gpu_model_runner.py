@@ -901,6 +901,22 @@ def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 2, "req_1": 0}
 
+    # Spec decode: req_0 has 2 drafts (rows 0-2), req_1 has none (row 3).
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        [[1, 2], []], device=DEVICE_TYPE
+    )
+    logits = torch.tensor(
+        [
+            [float("nan"), 1.0, 2.0],
+            [1.0, 2.0, 3.0],
+            [1.0, float("nan"), float("nan")],
+            [float("nan"), 2.0, 3.0],
+        ],
+        device=DEVICE_TYPE,
+    )
+    result = model_runner._get_nans_in_logits(logits, spec_decode_metadata)
+    assert result == {"req_0": 3, "req_1": 1}
+
 
 def test_update_states_no_changes(model_runner, dist_init):
     req_id = "req_0"
