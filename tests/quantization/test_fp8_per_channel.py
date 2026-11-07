@@ -144,3 +144,52 @@ def test_gfx942_moe_weight_quant_avoids_dynamic_per_token_op(monkeypatch) -> Non
     assert torch.equal(got_w2_scale, expected_w2_scale)
     assert torch.equal(got_w2, expected_w2)
     assert layer._already_called_process_weights_after_loading
+
+
+def test_fp8_ptpc_selects_kernel_before_allocating_weights(monkeypatch) -> None:
+    """PTPC must select the kernel before OnlineLinearBase allocates the meta
+    weight, and chooser errors must propagate unchanged (issue #61316).
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.quantization.online import fp8 as fp8_mod
+
+    class _ChooserError(ValueError):
+        pass
+
+    layer = MagicMock()
+    layer._parameters = {}
+
+    def _raise_chooser_error(**kwargs):
+        raise _ChooserError(
+            "Failed to find a kernel that can implement the "
+            "ScaledMM linear layer. Reasons: \n"
+            "MarlinFP8ScaledMMLinearKernel is W8A16 weight-only and "
+            "cannot honor per-token activation quantization."
+        )
+
+    monkeypatch.setattr(fp8_mod, "init_fp8_linear_kernel", _raise_chooser_error)
+
+    model_config = MagicMock()
+    model_config.dtype = torch.bfloat16
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+
+    with set_current_vllm_config(vllm_config):
+        method = Fp8PtpcOnlineLinearMethod()
+        with pytest.raises(_ChooserError, match="Reasons:") as ei:
+            method.create_weights(
+                layer,
+                input_size_per_partition=128,
+                output_partition_sizes=[256],
+                input_size=128,
+                output_size=256,
+                params_dtype=torch.bfloat16,
+            )
+
+    message = str(ei.value)
+    assert "MarlinFP8ScaledMMLinearKernel" in message
+    assert "per-token" in message
+    # Must fail before OnlineLinearBase allocates the meta weight.
+    layer.register_parameter.assert_not_called()
