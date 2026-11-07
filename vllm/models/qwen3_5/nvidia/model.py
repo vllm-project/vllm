@@ -37,6 +37,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+from vllm import ir
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -54,6 +55,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
 )
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -119,11 +121,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.utils.flashinfer import has_flashinfer
 
 from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
 from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
@@ -175,11 +178,14 @@ def _fused_gdn_gated_rms_norm_quant(
     )
 
 
-class Qwen3_5RMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by flashinfer kernels.
+class Qwen3_5RMSNorm(GemmaRMSNorm):
+    """Gemma-style RMS normalization backed by flashinfer kernels, or by
+    the `vllm.ir` norm ops below SM80 or without FlashInfer.
 
-    When `residual` is given, the fused add + norm runs in place and the
-    updated `(x, residual)` pair is returned.
+    When `residual` is given, the fused add + norm is applied and the
+    updated `(x, residual)` pair is returned. The flashinfer path updates
+    `x` and `residual` in place, the `ir` path does not: use the returned
+    tensors.
 
     `reduce_inputs`: in `forward_fused`, an `x` that comes with a
     residual is the un-reduced TP partial of a row-parallel linear, and the
@@ -190,23 +196,29 @@ class Qwen3_5RMSNorm(nn.Module):
     def __init__(
         self, hidden_size: int, eps: float = 1e-6, reduce_inputs: bool = False
     ) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.zeros(hidden_size))
-        set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
-        self.variance_epsilon = eps
+        super().__init__(hidden_size, eps)
         self.reduce_inputs = reduce_inputs
+        self.use_flashinfer = (
+            current_platform.has_device_capability(80) and has_flashinfer()
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_flashinfer:
+            # Same dtype as x so the fused vllm_c kernels are eligible.
+            weight = (self.weight.float() + 1.0).to(x.dtype)
+            if residual is None:
+                return ir.ops.rms_norm(x, weight, self.variance_epsilon)
+            return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
+
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
         if residual is None:
             return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
 
-        # gemma_fused_add_rmsnorm mutates x and residual in place.
         gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
         return x, residual
 
