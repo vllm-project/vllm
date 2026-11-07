@@ -24,11 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.models.common.ops.sequence_parallel import (
-    sp_all_gather,
-    sp_reduce_scatter,
-    sp_shard,
-)
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -44,6 +40,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
 )
 from ..common.ops.ple import ple_conv, ple_gate, ple_ngram_ids
+from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
 
 logger = init_logger(__name__)
 
