@@ -23,6 +23,9 @@ if HAS_TRITON:
         _topp_split_step,
         apply_top_k_top_p_triton,
     )
+    from vllm.v1.sample.ops.topp_histogram_triton import (
+        register_warmups as register_top_p_histogram_warmups,
+    )
 
 logger = init_logger(__name__)
 
@@ -35,6 +38,8 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_stats.register_warmup()
             _topp_split_step.register_warmup()
             _topp_split_mask.register_warmup()
+        if current_platform.is_cuda():
+            register_top_p_histogram_warmups()
 
 
 def _aiter_temp_gumbel_sample(
