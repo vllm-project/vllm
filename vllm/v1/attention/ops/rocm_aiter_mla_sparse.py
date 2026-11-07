@@ -968,6 +968,17 @@ def mqa_logits_module():
     return None
 
 
+@functools.lru_cache
+def _aiter_mqa_logits() -> Callable | None:
+    # AITER's shape-dispatched entry point (ROCm/aiter#6185): it picks the
+    # Triton/Gluon or FlyDSL kernel from its tuned table.
+    try:
+        from aiter.mqa_logits import mqa_logits
+    except ImportError:
+        return None
+    return mqa_logits
+
+
 def rocm_fp8_mqa_logits(
     q: torch.Tensor,
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -1003,6 +1014,13 @@ def rocm_fp8_mqa_logits(
         return flydsl_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
         )
+
+    if _ON_GFX950 and rocm_aiter_ops.is_enabled():
+        aiter_mqa_logits = _aiter_mqa_logits()
+        if aiter_mqa_logits is not None:
+            return aiter_mqa_logits(
+                q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=False
+            )
 
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
