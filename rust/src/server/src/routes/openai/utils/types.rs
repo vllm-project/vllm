@@ -427,9 +427,8 @@ pub enum ToolChoice {
     },
     AllowedTools {
         #[serde(rename = "type")]
-        tool_type: String,
-        mode: String,
-        tools: Vec<ToolReference>,
+        tool_type: AllowedToolsChoiceType,
+        allowed_tools: AllowedTools,
     },
 }
 
@@ -490,6 +489,36 @@ impl ToolReference {
             ToolReference::ImageGeneration => "image_generation".to_string(),
         }
     }
+}
+
+/// Discriminator for an allowed-tools choice.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AllowedToolsChoiceType {
+    #[serde(rename = "allowed_tools")]
+    AllowedTools,
+}
+
+/// Allowed function tools and their invocation mode.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AllowedTools {
+    pub mode: AllowedToolsMode,
+    pub tools: Vec<ChatToolReference>,
+}
+
+/// Invocation mode for an allowed-tools choice.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowedToolsMode {
+    Auto,
+    Required,
+}
+
+/// Tool reference for `ToolChoice::AllowedTools`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum ChatToolReference {
+    #[serde(rename = "function")]
+    Function { function: FunctionChoice },
 }
 
 // ============================================================================
