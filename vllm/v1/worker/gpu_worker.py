@@ -614,7 +614,19 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
             self._external_weight_charges.track(),
         ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            snapshot = self._weight_snapshot_path()
+            restore = snapshot is not None and snapshot.exists()
+            self.model_runner.load_model(
+                load_dummy_weights=load_dummy_weights or restore
+            )
+        if snapshot is not None and not load_dummy_weights:
+            from vllm.device_allocator import weight_snapshot
+
+            roots = self._weight_snapshot_roots()
+            if restore:
+                weight_snapshot.restore(roots, snapshot)
+            else:
+                weight_snapshot.save(roots, snapshot)
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
@@ -638,6 +650,26 @@ class Worker(WorkerBase):
         # for profiling and compilation so Dynamo's global-state guards remain
         # valid when requests arrive.
         set_torch_threads_for_runtime()
+
+    def _weight_snapshot_path(self):
+        # Prototype: snapshot of post-processed weights, keyed by config hash.
+        if not envs.VLLM_WEIGHT_SNAPSHOT_DIR:
+            return None
+        from vllm.device_allocator import weight_snapshot
+
+        return weight_snapshot.snapshot_path(
+            envs.VLLM_WEIGHT_SNAPSHOT_DIR,
+            weight_snapshot.weights_key(self.vllm_config),
+            self.rank,
+        )
+
+    def _weight_snapshot_roots(self) -> dict[str, nn.Module]:
+        roots = {"model": self.model_runner.model}
+        speculator = getattr(self.model_runner, "speculator", None)
+        for name, value in vars(speculator).items() if speculator else ():
+            if isinstance(value, nn.Module):
+                roots[f"speculator.{name}"] = value
+        return roots
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
