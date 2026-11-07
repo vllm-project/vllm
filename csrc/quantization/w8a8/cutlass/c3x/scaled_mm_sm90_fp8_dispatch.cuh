@@ -101,7 +101,7 @@ struct cutlass_3x_gemm_sm90_fp8 {
 
 template <typename InType, typename OutType, bool EnableBias>
 struct sm90_fp8_config_default {
-  // M in (128, inf)
+  // M in (192, 256] and (448, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
@@ -129,6 +129,42 @@ struct sm90_fp8_config_M8192_K6144 {
   using TileShape = Shape<_256, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
 
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueBias,
+                               TileShape, ClusterShape, KernelSchedule,
+                               EpilogueSchedule>,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
+                               ClusterShape, KernelSchedule, EpilogueSchedule>>;
+};
+
+template <typename InType, typename OutType, bool EnableBias>
+struct sm90_fp8_config_M448 {
+  // M in (256, 448]
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _256, _128>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueBias,
+                               TileShape, ClusterShape, KernelSchedule,
+                               EpilogueSchedule>,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
+                               ClusterShape, KernelSchedule, EpilogueSchedule>>;
+};
+
+template <typename InType, typename OutType, bool EnableBias>
+struct sm90_fp8_config_M192 {
+  // M in (128, 192]
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _128>;
+  using ClusterShape = Shape<_1, _1, _1>;
   using Cutlass3xGemm = conditional_t<
       EnableBias,
       cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueBias,
@@ -301,6 +337,10 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
                                            EnableBias>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
       typename sm90_fp8_config_M128<InType, OutType, EnableBias>::Cutlass3xGemm;
+  using Cutlass3xGemmM192 =
+      typename sm90_fp8_config_M192<InType, OutType, EnableBias>::Cutlass3xGemm;
+  using Cutlass3xGemmM448 =
+      typename sm90_fp8_config_M448<InType, OutType, EnableBias>::Cutlass3xGemm;
 
   using Cutlass3xGemmM64_N1280 =
       typename sm90_fp8_config_M64_N1280<InType, OutType,
@@ -339,11 +379,23 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
     // m in (64, 128]
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM128>(
         out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
+  } else if (m <= 192) {
+    // m in (128, 192]
+    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM192>(
+        out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
+  } else if (m <= 256) {
+    // m in (192, 256]
+    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmDefault>(
+        out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
+  } else if (m <= 448) {
+    // m in (256, 448]
+    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM448>(
+        out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   } else if (m >= 8192 && k >= 6144) {
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM8192_K6144>(
         out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   } else {
-    // m in (128, inf)
+    // m in (448, inf)
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmDefault>(
         out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   }
