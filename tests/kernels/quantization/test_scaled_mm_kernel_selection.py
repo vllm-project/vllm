@@ -26,10 +26,14 @@ from vllm.model_executor.kernels.linear import (
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
+    _prefer_humming_on_sm100,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
     register_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    MPLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -38,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
+from vllm.scalar_type import scalar_types
 
 pytestmark = pytest.mark.cpu_test
 
@@ -422,3 +427,44 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "weight_type,group_size,zero_points,expected",
+    [
+        (scalar_types.uint4b8, 128, False, True),
+        (scalar_types.uint4, 32, True, False),
+        (scalar_types.uint4, 128, True, False),
+        (scalar_types.uint4b8, 32, False, False),
+        (scalar_types.uint8b128, 128, False, False),
+    ],
+)
+def test_humming_priority_sm100_mixed_precision(
+    weight_type, group_size, zero_points, expected
+):
+    """SM100 moves Humming directly ahead of Marlin only for int4 symmetric
+    group-128 weights; no other kernel moves and other devices are unchanged."""
+    kernels = _POSSIBLE_KERNELS[PlatformEnum.CUDA]
+    original = list(kernels)
+    config = MPLinearLayerConfig(
+        full_weight_shape=(5120, 5120),
+        partition_weight_shape=(5120, 5120),
+        weight_type=weight_type,
+        act_type=torch.bfloat16,
+        group_size=group_size,
+        zero_points=zero_points,
+    )
+
+    assert _prefer_humming_on_sm100(kernels, config, 103) == original
+    reordered = _prefer_humming_on_sm100(kernels, config, 100)
+    assert kernels == original
+    names = [k.__name__ for k in reordered]
+    humming = names.index("HummingLinearKernel")
+    marlin = names.index("MarlinLinearKernel")
+    assert (humming == marlin - 1) == expected
+    if not expected:
+        assert reordered == original
+    del names[humming]
+    assert names == [
+        k.__name__ for k in original if k.__name__ != "HummingLinearKernel"
+    ]
