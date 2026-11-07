@@ -798,7 +798,9 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
 def turboquant_run_config():
     """Current config of a run whose KV cache dtype is a turboquant_* preset."""
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4")
+        model_config=None,
+        speculative_config=None,
+        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4"),
     )
     with patch(
         "vllm.config.get_current_vllm_config_or_none",
@@ -1066,3 +1068,68 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+@pytest.mark.parametrize(
+    "speculative, hybrid, kv_connector, aiter_found, expected_backend",
+    [
+        (False, False, False, True, AttentionBackendEnum.ROCM_ATTN),
+        (True, False, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, True, False, False, AttentionBackendEnum.TRITON_ATTN),
+        (True, True, False, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, False, True, True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+    ],
+)
+def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
+    speculative,
+    hybrid,
+    kv_connector,
+    aiter_found,
+    expected_backend,
+    mock_get_cdna_version,
+):
+    """Speculative decoding and hybrid models would run ROCM_ATTN's Triton
+    fallbacks, so the unified backends rank above it. ROCM_ATTN stays in the
+    list as the last fallback, except with a KV connector."""
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms.rocm import RocmPlatform, _get_backend_priorities
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace() if speculative else None,
+        model_config=SimpleNamespace(is_hybrid=hybrid),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+    )
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_kv_connector=kv_connector,
+    )
+    with (
+        set_current_vllm_config(config),
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found),
+    ):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=None, attn_selector_config=attn_selector_config
+        )
+        priorities = _get_backend_priorities(
+            use_mla=False,
+            use_sparse=False,
+            use_kv_connector=kv_connector,
+            use_spec_decode=speculative,
+            is_hybrid=hybrid,
+        )
+
+    assert backend_path == expected_backend.get_path()
+    rocm_attn = AttentionBackendEnum.ROCM_ATTN
+    triton_attn = AttentionBackendEnum.TRITON_ATTN
+    if kv_connector:
+        assert rocm_attn not in priorities
+    elif speculative or hybrid:
+        assert priorities.index(rocm_attn) == priorities.index(triton_attn) + 1
