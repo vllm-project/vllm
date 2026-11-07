@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -59,6 +60,8 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
     Mxfp8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.nf12 import Nf12OnlineLinearMethod
+from vllm.model_executor.layers.quantization.online.nf12_moe import Nf12OnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
@@ -80,6 +83,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kLutBStatic,
     kMxfp4Static,
     kMxfp8Static,
+    kNf12,
     kNvfp4Static,
 )
 
@@ -101,6 +105,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    kNf12: Nf12OnlineLinearMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.
@@ -115,6 +120,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
     kLutBStatic: LutBOnlineMoEMethod,
+    kNf12: Nf12OnlineMoEMethod,
 }
 
 # Quantizers for full-precision fused shared-expert weights, keyed by the routed
@@ -318,13 +324,19 @@ class OnlineQuantizationConfig(QuantizationConfig):
         return cls
 
     def resolve_quant_method_cls(
-        self, layer_cls: type[torch.nn.Module], prefix: str
+        self,
+        layer_cls: type[torch.nn.Module],
+        prefix: str,
+        *,
+        layer: torch.nn.Module | None = None,
     ) -> tuple[OnlineQuantizationSource, str, str | None, QuantSpec, type] | None:
         """Resolve quantization metadata and method class without instantiating it.
 
         Args:
             layer_cls: Type of layer for which to resolve online quantization.
             prefix: Fully qualified layer name.
+            layer: Optional instance for runtime capability checks. Class-only
+                callers resolve configured metadata without these checks.
 
         Returns:
             A tuple of source, quantization key string, target pattern, spec
@@ -366,6 +378,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         quant_method_cls = self._get_method_cls(quant_spec, table, layer_cls)
         if quant_method_cls is None:
             return None
+        if quant_method_cls is Nf12OnlineLinearMethod and issubclass(
+            layer_cls, GateLinear
+        ):
+            # Keep the router's unquantized FP32-output GEMM path.
+            return None
         assert quant_spec is not None
         assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
         explicit = "activation" in quant_spec.fields_set
@@ -381,6 +398,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
             # `InputHadamardLinearMethod`.
             hadamard_size=quant_spec.hadamard_size,
         )
+        if quant_method_cls is Nf12OnlineMoEMethod and layer is not None:
+            supported, reason = quant_method_cls.can_implement(layer)
+            if not supported:
+                logger.warning_once("Skipping NF12 for unsupported experts: %s", reason)
+                return None
         return source, quant_key_str, target_pattern, quant_spec, quant_method_cls
 
     def _resolve_targets_quant_method_metadata(
@@ -464,7 +486,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
-        resolved = self.resolve_quant_method_cls(type(layer), prefix)
+        resolved = self.resolve_quant_method_cls(type(layer), prefix, layer=layer)
         if resolved is not None:
             source, quant_key_str, target_pattern, quant_spec, quant_method_cls = (
                 resolved
