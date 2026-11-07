@@ -28,6 +28,9 @@ from .utils import (
     BeamSearchSequence,
     create_sort_beams_key_function,
     get_beam_search_eos_token_ids,
+    resolve_returned_logprobs_cap,
+    trim_step_logprobs,
+    validate_beam_width,
 )
 
 logger = init_logger(__name__)
@@ -119,10 +122,19 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             watermarking=False,
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
+            logprobs_are_internal=True,
         )
         params.configure_logprobs(
             base_sampling_params, self.llm_engine.input_processor.vllm_config
         )
+        validate_beam_width(
+            beam_width,
+            base_sampling_params,
+            self.llm_engine.input_processor.vllm_config,
+        )
+        # The search asks for 2 * beam_width candidates per step; each returned beam
+        # carries no more per-step logprobs than a client may be returned. -1 is
+        # "uncapped" and reaches `trim_step_logprobs` as None.
         if params.structured_outputs is not None:
             (
                 structured_output_backend,
@@ -227,6 +239,14 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
         Returns True if all beams are exhausted and search should stop.
         """
+        # Resolved here rather than passed in: threading it through this
+        # method's signature breaks callers that supply their own
+        # `_beam_search_step` with the previous signature, which several existing
+        # tests do. The resolution is an attribute walk, negligible against a
+        # decode step.
+        returned_logprobs_cap = resolve_returned_logprobs_cap(
+            self.llm_engine.input_processor.vllm_config
+        )
         all_beams: list[BeamSearchSequence] = list(
             itertools.chain.from_iterable(
                 instance.beams for instance in instances_batch
@@ -360,7 +380,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         new_beam = BeamSearchSequence(
                             current_beam.orig_prompt,
                             tokens=current_beam.tokens + [token_id],
-                            logprobs=current_beam.logprobs + [logprobs],
+                            logprobs=current_beam.logprobs
+                            + [
+                                trim_step_logprobs(
+                                    logprobs, token_id, returned_logprobs_cap
+                                )
+                            ],
                             lora_request=current_beam.lora_request,
                             cum_logprob=current_beam.cum_logprob + logprob_obj.logprob,
                         )

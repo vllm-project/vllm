@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.inputs import (
     DecoderOnlyEngineInput,
@@ -12,9 +12,165 @@ from vllm.inputs import (
     mm_input,
     tokens_input,
 )
+from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
+
+
+def validate_beam_width(
+    beam_width: int, sampling_params: SamplingParams, config: "VllmConfig"
+) -> None:
+    """Reject a `beam_width` the engine cannot serve at all.
+
+    Beam search asks the engine for ``2 * beam_width`` logprobs per step to expand
+    the beams. That request is exempt from ``max_logprobs``, which caps what a
+    client may be *returned* rather than how widely the search may look; the
+    per-step logprobs stored on each returned beam are capped separately by
+    `trim_step_logprobs`.
+
+    What remains is the one hard limit: a top-k over the vocabulary cannot ask for
+    more entries than the vocabulary holds, so ``2 * beam_width <= vocab_size``.
+
+    One soft limit is also reported. Every live beam materializes its own
+    candidate mapping before trimming, so a step holds
+    ``beam_width * 2 * beam_width`` `Logprob` objects -- quadratic in the width.
+    Dropping the `max_logprobs` bound widens the reachable range from about 10 at
+    the default config to ``VLLM_MAX_N_SEQUENCES`` (16384), where that product
+    reaches ~5e8 objects. This logs a warning rather than raising: `beam_width` is
+    already capped by ``VLLM_MAX_N_SEQUENCES``, which is the operator's knob for
+    exactly this, and raising would refuse widths that work today.
+
+    Call this *after* `BeamSearchParams.configure_logprobs`, which clears
+    ``logprobs`` on the exact-ID path where no top-k is taken.
+
+    Args:
+        beam_width: The requested beam width.
+        sampling_params: The configured per-step params, already passed through
+            `configure_logprobs`.
+        config: The engine config supplying the vocabulary size.
+
+    Raises:
+        ValueError: If ``2 * beam_width`` exceeds the vocabulary size.
+
+    """
+    required = sampling_params.logprobs
+    if required is None:
+        return
+
+    # Resolve the vocabulary size defensively. Callers legitimately pass a
+    # stubbed or mocked model config -- several existing beam-search tests do,
+    # since they do not care about the vocabulary -- in which case
+    # `get_vocab_size` may be absent entirely or return a non-integer. Neither
+    # can bound the search, so validate nothing rather than raising
+    # AttributeError or TypeError from a config the caller never meant to be
+    # real.
+    getter = getattr(config.model_config, "get_vocab_size", None)
+    vocab_size = getter() if callable(getter) else None
+    if not isinstance(vocab_size, int):
+        return
+
+    if required > vocab_size:
+        raise ValueError(
+            f"beam_width={beam_width} needs {required} logprobs per step "
+            f"(2 x beam_width), which exceeds the vocabulary size {vocab_size}. "
+            f"Lower beam_width to at most {vocab_size // 2}."
+        )
+
+    # Every live beam builds its own candidate mapping before trimming, so one
+    # step holds `beam_width * 2 * beam_width` entries. Warn rather than reject:
+    # `beam_width` is already capped by VLLM_MAX_N_SEQUENCES, which is the
+    # operator's knob for this, and rejecting here would refuse widths that work
+    # today. Surfacing the quadratic at request time is what was missing.
+    aggregate = beam_width * required
+    if aggregate > vocab_size:
+        logger.warning_once(
+            "beam_width=%d materializes about %d logprob entries per step "
+            "(beam_width x 2 x beam_width), more than the %d-token vocabulary. "
+            "Peak host memory grows with the square of beam_width; lower it or "
+            "lower VLLM_MAX_N_SEQUENCES if the engine runs out of memory.",
+            beam_width,
+            aggregate,
+            vocab_size,
+        )
+
+
+def resolve_returned_logprobs_cap(vllm_config: "VllmConfig") -> int | None:
+    """How many per-step logprobs a returned beam may carry, or None for no cap.
+
+    `max_logprobs` of -1 means uncapped. Every attribute on the way to it is read
+    defensively: callers are not required to supply a fully-formed config, and
+    several existing beam-search tests pass a stub that omits `model_config` or
+    `max_logprobs` entirely. A stub cannot express a cap, so it yields None
+    rather than an AttributeError from a config the caller never meant to be real.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    max_logprobs = getattr(model_config, "max_logprobs", None)
+    if not isinstance(max_logprobs, int) or max_logprobs == -1:
+        return None
+    return max_logprobs
+
+
+def trim_step_logprobs(
+    step_logprobs: dict[int, "Logprob"], chosen_token_id: int, cap: int | None
+) -> dict[int, "Logprob"]:
+    """Cap one step's logprobs for storage on a single beam.
+
+    Beam search requests ``2 * beam_width`` candidates per step, but every beam
+    carries its step logprobs out to the caller, so what is stored stays bounded by
+    ``max_logprobs`` -- the search may look wider than a client may be shown.
+
+    Two things this must not get wrong:
+
+    * The beam's own ``chosen_token_id`` is kept whenever the candidate set contains
+      it, which at every call site it does. A naive "top ``cap``" would drop it for
+      any beam whose token ranked below the cap, leaving that beam describing a step
+      it did not take.
+    * The result is a fresh dict. The candidate mapping is shared by every sibling
+      expanded from one parent, so trimming in place would corrupt the siblings.
+
+    Returns the chosen token plus the next highest-scoring candidates, ordered by
+    descending logprob, for a total of exactly ``cap`` entries.
+
+    ``cap`` entries, not ``cap + 1``. ``SamplingParams.logprobs`` says a response
+    may hold "up to `logprobs+1` elements", which reads like the chosen token
+    should be additional to the cap -- but ``max_logprobs`` is a hard ceiling on
+    what is returned, and measuring ordinary generation confirms it: at
+    ``max_logprobs=4`` with ``logprobs=4`` a step carries 4 entries, not 5. Beam
+    search matches that rather than returning one more than the engine would.
+
+    ``cap`` of ``None`` means no cap and the mapping is copied unchanged; ``0`` is a
+    legal ``max_logprobs`` meaning nothing may be returned, and yields an empty
+    mapping.
+    """
+    if cap is None or cap < 0:
+        return dict(step_logprobs)
+    if cap == 0:
+        return {}
+    if len(step_logprobs) <= cap:
+        return dict(step_logprobs)
+
+    ordered = sorted(
+        step_logprobs.items(), key=lambda item: item[1].logprob, reverse=True
+    )
+    kept = [item for item in ordered[:cap] if item[0] != chosen_token_id]
+    chosen = step_logprobs.get(chosen_token_id)
+    if chosen is None:
+        # The chosen token is absent from its own candidate set; keep the top `cap`
+        # rather than inventing an entry.
+        return dict(ordered[:cap])
+    return dict(
+        sorted(
+            [(chosen_token_id, chosen), *kept[: cap - 1]],
+            key=lambda item: item[1].logprob,
+            reverse=True,
+        )
+    )
 
 
 @dataclass

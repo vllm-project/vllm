@@ -452,6 +452,21 @@ class SamplingParams(
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
 
+    logprobs_are_internal: bool = False
+    """Internal flag indicating that `logprobs` was requested by the engine to
+    drive a search, not by a client who wants them back. Beam search sets it: it
+    asks for `2 * beam_width` candidates per step to expand its beams, and caps
+    what each returned beam carries separately. `max_logprobs` bounds what a
+    client may be returned, so it does not apply to such a request; the vocabulary
+    size does.
+
+    Internal by convention, as `skip_clone` below is: nothing in tree sets it except
+    beam search, and the OpenAI layer cannot, since it builds SamplingParams from an
+    explicit field allowlist. A caller using the Python API directly can still set
+    it, which widens only how far the sampler's top-k looks -- what is returned stays
+    capped by `max_logprobs` wherever beams are built.
+    """
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -932,10 +947,17 @@ class SamplingParams(
         if num_logprobs := self.logprobs:
             if num_logprobs == -1:
                 num_logprobs = model_config.get_vocab_size()
-            if num_logprobs > max_logprobs:
+            # An engine-internal search request is not bounded by what a client
+            # may be returned, only by what a top-k over the vocabulary can hold.
+            sample_cap = (
+                model_config.get_vocab_size()
+                if self.logprobs_are_internal
+                else max_logprobs
+            )
+            if num_logprobs > sample_cap:
                 raise VLLMValidationError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
+                    f"which is greater than max allowed: {sample_cap}",
                     parameter="logprobs",
                     value=num_logprobs,
                 )
