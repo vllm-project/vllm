@@ -333,6 +333,20 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
         validate_parsed_serve_args(args)
 
 
+@pytest.mark.parametrize("cli_args", [[], ["--fingerprint-value", ""]])
+def test_custom_fingerprint_requires_value(serve_parser, cli_args):
+    args = serve_parser.parse_args(args=["--fingerprint-mode", "custom", *cli_args])
+    with pytest.raises(ValueError, match="--fingerprint-value"):
+        validate_parsed_serve_args(args)
+
+
+def test_custom_fingerprint_with_value_passes(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--fingerprint-mode", "custom", "--fingerprint-value", "deploy-42"]
+    )
+    validate_parsed_serve_args(args)
+
+
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 
