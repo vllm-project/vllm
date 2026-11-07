@@ -177,9 +177,11 @@ def test_openai_privacy_filter(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(PRIVACY_FILTER_PROMPTS)
 
+    hf_dtype = "float32" if current_platform.is_xpu() else dtype
+
     with hf_runner(
         model,
-        dtype=dtype,
+        dtype=hf_dtype,
         auto_cls=AutoModelForTokenClassification,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
