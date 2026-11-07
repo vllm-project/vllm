@@ -26,6 +26,7 @@ spec.loader.exec_module(helper)
 class TestSharedMemoryAttachment(unittest.TestCase):
     def test_nonowner_can_close_without_unlinking_owner(self):
         owner = shared_memory.SharedMemory(create=True, size=1)
+        assert owner.buf is not None
         try:
             owner.buf[0] = 41
             register = resource_tracker.register
@@ -47,6 +48,7 @@ class TestSharedMemoryAttachment(unittest.TestCase):
 
     def test_independent_process_does_not_unlink_owner(self):
         owner = shared_memory.SharedMemory(create=True, size=1)
+        assert owner.buf is not None
         try:
             owner.buf[0] = 17
             child = """

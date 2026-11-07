@@ -719,7 +719,9 @@ def test_busy_reader_consumes_write_notifications():
         reader.shutdown()
 
 
-def test_acquire_read_releases_slot_when_reader_raises():
+@pytest.mark.parametrize("backend", ["stock", "futex"])
+def test_acquire_read_releases_slot_when_reader_raises(monkeypatch, backend):
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", backend)
     writer = MessageQueue(
         n_reader=1,
         n_local_reader=1,
@@ -739,9 +741,12 @@ def test_acquire_read_releases_slot_when_reader_raises():
         ):
             raise RuntimeError("reader failed")
 
-        with writer.buffer.get_metadata(0) as metadata_buffer:
-            assert metadata_buffer[0] == 1
-            assert metadata_buffer[1] == 1
+        if backend == "stock":
+            # Stock keeps slot state in the ring metadata; the futex backend keeps
+            # it in its control block, so only the reacquire below is common.
+            with writer.buffer.get_metadata(0) as metadata_buffer:
+                assert metadata_buffer[0] == 1
+                assert metadata_buffer[1] == 1
 
         with writer.acquire_write(timeout=0.1) as buf:
             buf[0] = 0
