@@ -72,7 +72,7 @@ def test_gemma4_dspark_loads_confidence_head(
         else []
     )
     if not (enabled and has_weights):
-        assert model.model.confidence_head is None
+        assert (model.model.confidence_head is None) is not enabled
         assert not loaded
         return
 

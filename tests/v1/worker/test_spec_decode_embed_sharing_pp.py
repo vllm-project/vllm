@@ -9,9 +9,7 @@ import torch.nn as nn
 
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import ParallelConfig
-from vllm.model_executor.model_loader.mtp_validation import (
-    disable_mtp_completeness_check,
-)
+from vllm.model_executor.model_loader.reload import lifecycle
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     spec_decode_needs_target_embed,
@@ -188,7 +186,7 @@ def make_m3_draft(monkeypatch, m3_modules, m3_config):
     "key",
     [None, "model.embed_tokens.weight", "language_model.model.embed_tokens.weight"],
 )
-def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
+def test_m3_checkpoint_embedding_ownership(monkeypatch, make_m3_draft, key):
     """Actual M3 loading determines sharing and survives an unrelated reload."""
     draft = make_m3_draft()
     assert draft.has_own_embed_tokens
@@ -197,8 +195,8 @@ def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
         weights.append((key, torch.ones(VOCAB, HIDDEN)))
     loaded = draft.load_weights(weights)
     assert ("model.embed_tokens.weight" in loaded) is (key is not None)
-    with disable_mtp_completeness_check():
-        draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    draft.load_weights([("lm_head.weight", torch.zeros(VOCAB, HIDDEN))])
     assert draft.has_own_embed_tokens is (key is not None)
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
@@ -213,15 +211,17 @@ def test_m3_checkpoint_embedding_ownership(make_m3_draft, key):
 @pytest.mark.parametrize(
     "load_format", ["dummy", "sharded_state", "runai_streamer_sharded", "tensorizer"]
 )
-def test_m3_direct_loader_embedding_ownership(make_m3_draft, m3_config, load_format):
+def test_m3_direct_loader_embedding_ownership(
+    monkeypatch, make_m3_draft, m3_config, load_format
+):
     """Directly loaded embeddings survive transfers and share only when equal."""
     m3_config.load_config.load_format = load_format
     draft = make_m3_draft()
     draft.load_state_dict(
         {key: torch.ones_like(value) for key, value in draft.state_dict().items()}
     )
-    with disable_mtp_completeness_check():
-        draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens
     eagle_utils.maybe_share_target_embed(draft, draft.model, target)
@@ -284,19 +284,21 @@ def test_m3_target_allocates_embedding_on_required_stage(
 
 
 @pytest.mark.parametrize("initial_embed", [False, True])
-def test_m3_weight_transfer_updates_embedding_ownership(make_m3_draft, initial_embed):
+def test_m3_weight_transfer_updates_embedding_ownership(
+    monkeypatch, make_m3_draft, initial_embed
+):
     """Layer transfers retain ownership; newly loaded embeddings become owned."""
     draft = make_m3_draft()
     weights = [("model.mtp.layers.0.weight", torch.ones(1, 1))]
     if initial_embed:
         weights.append(("model.embed_tokens.weight", torch.ones(VOCAB, HIDDEN)))
     draft.load_weights(weights)
-    with disable_mtp_completeness_check():
-        draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
-        assert draft.has_own_embed_tokens is initial_embed
-        draft.load_weights(
-            [("model.embed_tokens.weight", torch.full((VOCAB, HIDDEN), 3.0))]
-        )
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    draft.load_weights([("model.mtp.layers.0.weight", torch.zeros(1, 1))])
+    assert draft.has_own_embed_tokens is initial_embed
+    draft.load_weights(
+        [("model.embed_tokens.weight", torch.full((VOCAB, HIDDEN), 3.0))]
+    )
     assert draft.has_own_embed_tokens
     target = _inner(_embed(fill=2.0))
     original = draft.model.embed_tokens

@@ -19,9 +19,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -274,8 +271,6 @@ class AutoWeightsLoader:
         # would write the same storage twice, so only the first name reached by
         # module traversal is loaded and the rest are skipped.
         self.aliased_params = _get_tied_embedding_params(module)
-        self._skipped_aliases = dict[str, str]()
-        self._loaded_params_are_complete = True
 
     def _groupby_prefix(
         self,
@@ -409,7 +404,6 @@ class AutoWeightsLoader:
                     logger.warning(
                         "Unable to collect loaded parameters for module %s", module
                     )
-                    self._loaded_params_are_complete = False
                 else:
                     yield from map(
                         lambda x: self._get_qualname(base_prefix, x),
@@ -490,36 +484,16 @@ class AutoWeightsLoader:
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
-        autoloaded_weights = set(self._load_module("", self.module, weights))
-        self._check_skipped_aliases(autoloaded_weights)
-        return autoloaded_weights
+        return set(self._load_module("", self.module, weights))
 
     def _filter_skipped(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, weight in weights:
-            if (canonical := self.aliased_params.get(name)) is not None:
-                self._skipped_aliases[name] = canonical
             if self._can_skip(name):
                 continue
 
             yield name, weight
-
-    def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
-        """Guard against skipping an alias whose canonical name never loads."""
-        if (
-            not self._loaded_params_are_complete
-            or not is_mtp_completeness_check_enabled()
-        ):
-            return
-        for alias, canonical in self._skipped_aliases.items():
-            if canonical not in autoloaded_weights:
-                raise ValueError(
-                    f"{alias!r} was skipped because it is tied to {canonical!r} "
-                    f"in {self.module._get_name()}, but {canonical!r} was not "
-                    "found in the checkpoint, so the tied weight is "
-                    "uninitialized."
-                )
 
 
 def get_fused_shared_expert_layers(

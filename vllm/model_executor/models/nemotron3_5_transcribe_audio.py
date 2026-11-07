@@ -1102,10 +1102,4 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
                 with torch.no_grad():
                     target.copy_(tensor.to(device=target.device, dtype=target.dtype))
             loaded.add(name)
-        missing = sorted(set(targets) - loaded)
-        if missing:
-            raise ValueError(
-                f"Audio tower weights missing from the checkpoint ({len(missing)}): "
-                f"{missing[:8]}"
-            )
         return loaded
