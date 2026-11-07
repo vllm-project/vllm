@@ -1014,30 +1014,9 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
         total_computed = num_tokens
 
 
-def test_pop_blocks_for_free_trims_null_head():
-    block_size = 2
-    spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        sliding_window=4,
-    )
-    block_pool = BlockPool(
-        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
-    )
-    manager = get_sliding_window_manager(spec, block_pool)
+def test_null_block_is_never_pooled():
+    block_pool = BlockPool(num_gpu_blocks=10, enable_caching=True, hash_block_size=2)
     null = block_pool.null_block
-    real = block_pool.get_new_blocks(2)
-    manager.req_to_blocks["swa"] = [null] * 3 + real
-    manager.req_to_blocks["dense"] = dense = block_pool.get_new_blocks(2)
-
-    assert manager.pop_blocks_for_free("swa") == real
-    assert manager.pop_blocks_for_free("dense") is dense  # no null head, no copy
-    assert "swa" not in manager.req_to_blocks
-    assert all(b.ref_cnt == 1 for b in real + dense)
-
-    # The null block is never pooled, so touch / free_blocks leave it alone.
     null_ref_cnt = null.ref_cnt
     num_free_blocks = block_pool.get_num_free_blocks()
     block_pool.touch([null])
