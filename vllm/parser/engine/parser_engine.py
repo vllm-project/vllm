@@ -634,16 +634,21 @@ class ParserEngine(Parser):
             )
         self._reset()
         self._streaming_initialized = True
-        result = self.extract_tool_calls_streaming(
-            previous_text="",
-            current_text=model_output,
-            delta_text=model_output,
-            previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[],
-            request=request,
-        )
-        finish_delta = self.finish_streaming()
+        stream_arg_deltas = self._stream_arg_deltas
+        self._stream_arg_deltas = False
+        try:
+            result = self.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=model_output,
+                delta_text=model_output,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=request,
+            )
+            finish_delta = self.finish_streaming()
+        finally:
+            self._stream_arg_deltas = stream_arg_deltas
         return self._build_extracted_result(result, finish_delta)
 
     def extract_tool_calls_from_content(
@@ -819,7 +824,12 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events, finished=True)
+        stream_arg_deltas = self._stream_arg_deltas
+        self._stream_arg_deltas = False
+        try:
+            delta = self._events_to_delta(events, finished=True)
+        finally:
+            self._stream_arg_deltas = stream_arg_deltas
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None

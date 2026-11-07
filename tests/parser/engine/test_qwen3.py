@@ -11,6 +11,9 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import TokenizersBackend
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
@@ -19,10 +22,12 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    _qwen3_arg_converter,
     qwen3_config,
 )
 
@@ -43,6 +48,82 @@ def parser(mock_tokenizer):
         mock_tokenizer,
         parser_engine_config=qwen3_config(thinking=False),
     )
+
+
+class TestBufferedConversionWork:
+    @pytest.mark.parametrize("entry_point", ["parse", "extract_tool_calls"])
+    @pytest.mark.parametrize("repeat_parameter", [False, True])
+    def test_large_argument_is_converted_only_when_complete(
+        self, entry_point, repeat_parameter
+    ):
+        tokenizer = TokenizersBackend(
+            tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+            unk_token="[UNK]",
+        )
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[{"role": "user", "content": "test"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"content": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            tool_choice="auto",
+        )
+        conversions = []
+
+        def convert(raw, partial):
+            conversions.append(partial)
+            return _qwen3_arg_converter(raw, partial)
+
+        parser = ParserEngine(
+            tokenizer,
+            parser_engine_config=dataclasses.replace(
+                qwen3_config(thinking=False), arg_converter=convert
+            ),
+            tools=request.tools,
+        )
+        value = "a>b<c " * 2000
+        previous = "<parameter=content>old</parameter>" if repeat_parameter else ""
+        text = (
+            "<tool_call><function=write_file>"
+            + previous
+            + f"<parameter=content>{value}</parameter></function></tool_call>"
+        )
+        if entry_point == "parse":
+            reasoning, content, calls = parser.parse(text, request, True)
+            assert reasoning is None and content is None
+            assert calls is not None
+            result = [(call.name, json.loads(call.arguments)) for call in calls]
+        else:
+            extracted = parser.extract_tool_calls(text, request)
+            result = [
+                (call.function.name, json.loads(call.function.arguments))
+                for call in extracted.tool_calls
+            ]
+
+        assert result == [("write_file", {"content": value})]
+        assert conversions == [False, False]
+
+        stream_text = (
+            "<tool_call><function=write_file><parameter=content>"
+            "hello world</parameter></function></tool_call>"
+        )
+        conversions.clear()
+        results = simulate_tool_streaming(
+            parser,
+            request,
+            [stream_text[i : i + 4] for i in range(0, len(stream_text), 4)],
+        )
+        assert any(conversions)
+        assert json.loads(collect_tool_arguments(results)) == {"content": "hello world"}
 
 
 class TestNonStreaming:
