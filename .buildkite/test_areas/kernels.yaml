@@ -580,6 +580,7 @@ steps:
   num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
+  - benchmarks/kernels/benchmark_moe.py
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
@@ -601,6 +602,7 @@ steps:
       device: mi300_1
       timeout_in_minutes: 55
       source_file_dependencies:
+      - benchmarks/kernels/benchmark_moe.py
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
