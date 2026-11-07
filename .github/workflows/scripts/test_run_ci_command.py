@@ -1676,15 +1676,14 @@ class RocmCacheTest(unittest.TestCase):
         ci_builds: list[dict[str, Any]] | None = None,
         actor: str = "reviewer",
     ) -> FakeBuildkite:
-        amd = FakeBuildkite([[]])
         ci = FakeBuildkite([ci_builds or []])
-        run(make_event(command, actor), github, amd, ci_buildkite=ci)
-        return amd
+        run(make_event(command, actor), github, ci)
+        return ci
 
-    def test_commands_are_rocm_ci_commands_on_amd_ci(self) -> None:
+    def test_commands_run_on_ci(self) -> None:
         for command in (COMMAND_ROCM_CACHE, COMMAND_ROCM_NOCACHE):
             self.assertEqual(parse_command(command), command)
-            self.assertEqual(pipeline_for_command(command), "amd-ci")
+            self.assertEqual(pipeline_for_command(command), "ci")
 
     def test_cache_copies_the_images_this_prs_ci_recorded(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
@@ -1695,13 +1694,14 @@ class RocmCacheTest(unittest.TestCase):
             ci_build(created_at="3", meta_data={"rocm-rocm-stack": "s"}),  # partial
         ]
 
-        amd = self.comment(github, ci_builds=builds)
+        ci = self.comment(github, ci_builds=builds)
 
-        (build,) = amd.created_builds
+        (build,) = ci.created_builds
         self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
         self.assertEqual(
             build["env"],
             {
+                "VLLM_CI_ONLY_STEP_KEYS": '["rocm-base-image-cache"]',
                 "ROCM_PROMOTE_PR": "42",
                 "ROCM_PROMOTE_SHA": "0123456789abcdef",
                 "ROCM_PROMOTE_IMAGES": "w@d2 s@d1",
@@ -1713,9 +1713,9 @@ class RocmCacheTest(unittest.TestCase):
     def test_nocache_records_the_decision_without_a_build(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
 
-        amd = self.comment(github, COMMAND_ROCM_NOCACHE)
+        ci = self.comment(github, COMMAND_ROCM_NOCACHE)
 
-        self.assertEqual(amd.created_builds, [])
+        self.assertEqual(ci.created_builds, [])
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
         self.assertIn("@reviewer chose not to cache", github.comments[0])
 
@@ -1736,18 +1736,18 @@ class RocmCacheTest(unittest.TestCase):
         ]
         for github, builds, actor, text in cases:
             with self.subTest(text=text):
-                amd = self.comment(github, ci_builds=builds, actor=actor)
+                ci = self.comment(github, ci_builds=builds, actor=actor)
 
-                self.assertEqual(amd.created_builds, [])
+                self.assertEqual(ci.created_builds, [])
                 self.assertIn(text, github.comments[0])
                 self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
     def test_prs_that_keep_the_base_image_have_nothing_to_do(self) -> None:
         github = FakeGitHub(files=["vllm/foo.py"])
 
-        amd = self.comment(github)
+        ci = self.comment(github)
 
-        self.assertEqual(amd.created_builds, [])
+        self.assertEqual(ci.created_builds, [])
         self.assertIn("nothing to do", github.comments[0])
         self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
