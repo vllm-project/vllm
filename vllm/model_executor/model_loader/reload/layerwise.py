@@ -4,9 +4,11 @@ import inspect
 from collections.abc import Callable
 from contextlib import nullcontext
 from functools import wraps
+from inspect import BoundArguments
 from weakref import WeakKeyDictionary, WeakSet
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -24,13 +26,15 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
-from .types import LayerReloadingInfo
+from .types import ArrivalState, LayerReloadingInfo, RecordedCopies
 from .utils import (
     get_info_size,
     get_layer_params_buffers,
     get_layer_size,
     get_layer_tensors,
+    get_tensor_load_numel,
     has_device_tensors,
+    stages_online_quant,
 )
 
 logger = init_logger(__name__)
@@ -39,6 +43,8 @@ __all__ = [
     "get_layerwise_info",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
+    "stage_layer_for_reload",
+    "unstage_layer",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
     "max_layer_reload_bytes",
@@ -118,23 +124,45 @@ def initialize_layerwise_reload(
     model._do_torchao_reload = False
 
     for layer in model.modules():
-        info = get_layerwise_info(layer)
+        stage_layer_for_reload(layer, defer_processing=defer_processing)
 
-        # Skip if the layer has already been initialized
-        if info.can_load():
-            continue
 
-        # Save current tensors for later copying
-        info.kernel_tensors = get_layer_params_buffers(layer)
-        # snapshot now: restore_layer_on_meta drops alias buffers from the live set
-        info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+def stage_layer_for_reload(
+    layer: torch.nn.Module, *, defer_processing: bool = False
+) -> None:
+    """Keep the layer's kernel tensors aside and restore it on the meta device:
+    its wrapped loaders buffer the checkpoint tensors until the layer is
+    complete, then process it and copy the result into the kernel tensors.
+    A layer already staged is left as is."""
+    info = get_layerwise_info(layer)
 
-        # Restore layer parameters/buffers onto meta device
-        restore_layer_on_meta(layer, info)
+    # Already staged (an update aborted): start its loading over
+    if info.can_load():
+        info.loaded_weights.clear()
+        info.arrival.clear()
+        info.load_numel = 0
+        return
 
-        # Wrap weight loaders to buffer loading
-        initialize_online_processing(layer)
-        info.defer_processing = defer_processing
+    # Save current tensors for later copying
+    info.kernel_tensors = get_layer_params_buffers(layer)
+    # snapshot now: restore_layer_on_meta drops alias buffers from the live set
+    info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+
+    # Restore layer parameters/buffers onto meta device
+    restore_layer_on_meta(layer, info)
+
+    # Wrap weight loaders to buffer loading
+    initialize_online_processing(layer)
+    info.defer_processing = defer_processing
+
+
+def unstage_layer(layer: torch.nn.Module) -> None:
+    """Undo `stage_layer_for_reload`: put the kernel tensors back and drop
+    what the loaders buffered."""
+    info = get_layerwise_info(layer)
+    if info.kernel_tensors is not None:
+        _place_kernel_tensors(layer, info)
+    info.reset()
 
 
 def initialize_online_processing(layer: torch.nn.Module):
@@ -201,9 +229,37 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
 
-        # Buffer loaded weights, track loading progress
-        info.loaded_weights.append((param_name, bound_args))
-        num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        # Buffer loaded weights, track loading progress. A load that writes
+        # nothing (another rank's expert) is not replayed, so not buffered.
+        # A staged online module buffers only what its loader copied (this
+        # rank's shard), not the received tensor.
+        # A scheme with row-local scales quantizes the shard at once instead.
+        param = bound_args.arguments["param"]
+        copies, quantized = None, False
+        staged = info.kernel_tensors is not None and stages_online_quant(layer)
+        if staged:
+            _join_staged_work(info)
+            num_loaded, ret, views = _record_copies(original_loader, bound_args)
+            # deferred processing would keep every layer's outputs at once
+            quantized = (
+                bool(views)
+                and not info.defer_processing
+                and _quantize_on_arrival(layer, info, param_name, views)
+            )
+            if not quantized and param_name in info.arrival:
+                raise RuntimeError(
+                    f"{type(layer).__name__}.{param_name}: a load cannot be "
+                    "quantized on arrival after earlier loads were"
+                )
+            if views is not None:
+                copies = _keep_copies(views, param.dtype)
+        else:
+            num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        if not quantized and (num_loaded or not get_tensor_load_numel(param)):
+            buffered = bound_args if copies is None else copies
+            info.loaded_weights.append((param_name, buffered))
+        if staged:
+            _mark_staged_work(info)
         info.load_numel += num_loaded
 
         logger.debug(
@@ -243,6 +299,187 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         return ret
 
     return online_process_loader
+
+
+class _CopyRecorder(TorchDispatchMode):
+    """Counts copied elements as `CopyCounter` does, and records the copies
+    into one parameter; `whole` if the loader also wrote another way."""
+
+    def __init__(self, param: torch.Tensor):
+        super().__init__()
+        self.storage = param.untyped_storage()._cdata
+        self.dtype = param.dtype
+        self.copied_numel = 0
+        self.copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.whole = False
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func is torch.ops.aten.copy_.default:
+            dst, src = args[0], args[1]
+            self.copied_numel += dst.numel()
+            # a source derived from the parameter (meta) has no bytes to keep
+            if (
+                dst.untyped_storage()._cdata == self.storage
+                and dst.dtype == self.dtype
+                and not src.is_meta
+            ):
+                self.copies.append((dst, src))
+            else:
+                self.whole = True
+        elif func._schema.is_mutable:
+            self.whole = True
+        return func(*args, **(kwargs or {}))
+
+
+def _record_copies(
+    loader: Callable, args: BoundArguments
+) -> tuple[int, object, RecordedCopies | None]:
+    """As `get_numel_loaded`, plus the copies the loader made into the
+    parameter, as (size, stride, offset into it, source view). None if the
+    loader's writes cannot be replayed as copies."""
+    param = args.arguments["param"]
+    with _CopyRecorder(param) as recorder:
+        ret = loader(*args.args, **args.kwargs)
+    numel = min(recorder.copied_numel, get_tensor_load_numel(param))
+    if recorder.whole:
+        return numel, ret, None
+    base = param.storage_offset()
+    views = RecordedCopies(
+        (dst.size(), dst.stride(), dst.storage_offset() - base, src.detach())
+        for dst, src in recorder.copies
+    )
+    return numel, ret, views
+
+
+def _keep_copies(views: RecordedCopies, dtype: torch.dtype) -> RecordedCopies:
+    """The copies to buffer: device sources copied out, so the received
+    tensor (or the packed receive buffer it views) is not kept alive; host
+    sources (file-backed checkpoint tensors) kept as views."""
+    return RecordedCopies(
+        (*geometry, src if src.device.type == "cpu" else src.to(dtype, copy=True))
+        for *geometry, src in views
+    )
+
+
+def _join_staged_work(info: LayerReloadingInfo) -> None:
+    """Order the current stream after the staged work earlier loads queued:
+    packed transfers run their loads on alternating streams."""
+    if info.staged_event is not None:
+        torch.cuda.current_stream().wait_event(info.staged_event)
+
+
+def _mark_staged_work(info: LayerReloadingInfo) -> None:
+    if info.restore_device.type == "cuda":
+        info.staged_event = torch.cuda.Event()
+        info.staged_event.record()
+
+
+def _on_current_stream(tensor: torch.Tensor) -> None:
+    """Keep a tensor allocated on another stream from being reused while
+    work queued on this one still reads it."""
+    if tensor.is_cuda:
+        tensor.record_stream(torch.cuda.current_stream(tensor.device))
+
+
+def _row_box(
+    param: torch.Tensor, size, stride, offset: int, group: int
+) -> tuple[tuple[int, ...], tuple[int, ...], int, int, int] | None:
+    """Where a copy into ``param`` (contiguous, rows on dim -2) landed:
+    (leading starts, leading sizes, first row, end row, columns), if it is a
+    box of whole ``group``-aligned rows from column 0. None otherwise."""
+    shape, strides, ndim = param.shape, param.stride(), len(size)
+    if param.dim() < 2 or not param.is_contiguous() or not 0 < ndim <= param.dim():
+        return None
+    if any(n > 1 and s != t for n, s, t in zip(size, stride, strides[-ndim:])):
+        return None
+    start = []
+    for s in strides:
+        start.append(offset // s)
+        offset %= s
+    sizes = [1] * (param.dim() - ndim) + list(size)
+    if start[-1] != 0 or any(a + n > d for a, n, d in zip(start, sizes, shape)):
+        return None
+    first, end = start[-2], start[-2] + sizes[-2]
+    if first % group or (end % group and end != shape[-2]):
+        return None
+    return tuple(start[:-2]), tuple(sizes[:-2]), first, end, sizes[-1]
+
+
+def _quantize_on_arrival(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    name: str,
+    copies: RecordedCopies,
+) -> bool:
+    """Quantize the rows a load copied into parameter ``name`` straight into
+    its quantized outputs, if its scheme quantizes rows apart: nothing of the
+    load is then buffered. False if the parameter needs its whole tensor."""
+    method = layer.quant_method
+    row_group = getattr(method, "arrival_row_group", None)
+    group = row_group(layer, name) if row_group is not None else None
+    if group is None:
+        return False
+    if any(buffered == name for buffered, _ in info.loaded_weights):
+        return False  # earlier loads of it were buffered
+    param = getattr(layer, name)
+    boxes = [_row_box(param, *copy[:3], group) for copy in copies]
+    state = info.arrival.get(name)
+    if None in boxes:
+        if state is not None:
+            raise RuntimeError(
+                f"{type(layer).__name__}.{name}: a load copied rows that cannot "
+                "be quantized apart after earlier loads were quantized"
+            )
+        return False
+    with info.restore_device:
+        if state is None:
+            state = info.arrival[name] = _new_arrival_state(
+                layer, method, name, param, group
+            )
+        for box, (*_, source) in zip(boxes, copies):
+            assert box is not None
+            _write_arrival(layer, method, name, param, state, box, source, info)
+    return True
+
+
+def _new_arrival_state(layer, method, name, param, group) -> ArrivalState:
+    """Outputs as quantized from all-zero rows (rows no load writes, such as
+    padding), which are the same for every group of rows."""
+    rows, lead = min(group, param.shape[-2]), param.shape[:-2]
+    zeros = torch.zeros(*(1,) * len(lead), rows, param.shape[-1], dtype=param.dtype)
+    outputs, output_groups = [], []
+    for out in method.quantize_param(layer, name, zeros):
+        out_group = rows // out.shape[-2]
+        full_rows = -(-param.shape[-2] // out_group)
+        outputs.append(
+            out[..., :1, :].expand(*lead, full_rows, out.shape[-1]).contiguous()
+        )
+        output_groups.append(out_group)
+    written = torch.zeros(
+        *lead, -(-param.shape[-2] // group), dtype=torch.bool, device="cpu"
+    )
+    return ArrivalState(outputs, output_groups, group, written)
+
+
+def _write_arrival(layer, method, name, param, state, box, source, info) -> None:
+    lead_start, lead_size, first, end, cols = box
+    shape = (*lead_size, end - first)
+    if cols == param.shape[-1]:
+        rows = source.reshape(*shape, cols).to(info.restore_device, param.dtype)
+    else:  # columns past the checkpoint's are padding: zero, as at cold start
+        rows = torch.zeros(*shape, param.shape[-1], dtype=param.dtype)
+        rows[..., :cols] = source.reshape(*shape, cols)
+    lead = tuple(slice(a, a + n) for a, n in zip(lead_start, lead_size))
+    written = state.written[(*lead, slice(first // state.group, -(-end // state.group)))]
+    if written.any():
+        raise RuntimeError(f"{type(layer).__name__}.{name}: rows loaded twice")
+    written.fill_(True)
+    for full, out_group, out in zip(
+        state.outputs, state.output_groups, method.quantize_param(layer, name, rows)
+    ):
+        _on_current_stream(full)
+        out_first = first // out_group
+        full[(*lead, slice(out_first, out_first + out.shape[-2]))] = out
 
 
 def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
@@ -341,6 +578,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
 
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
+        assert isinstance(args, BoundArguments)  # attention is not recorded
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
@@ -373,6 +611,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     3. Runs quantization processing if applicable
     4. Copies processed values back to original tensor storage
     """
+    _join_staged_work(info)
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
 
@@ -388,6 +627,9 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Load all buffered weights into materialized layer (using original loaders)
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
+        if isinstance(args, RecordedCopies):
+            args.replay(param)
+            continue
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
 
@@ -407,8 +649,24 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
             if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
             else nullcontext()
         )
-        with timing_context:
-            quant_method.process_weights_after_loading(layer)
+        # what was quantized on arrival, taken by `quantized_param`
+        if info.arrival:
+            for state in info.arrival.values():
+                for output in state.outputs:
+                    _on_current_stream(output)
+            layer._quantized_on_arrival = {
+                name: tuple(state.outputs) for name, state in info.arrival.items()
+            }
+        try:
+            with timing_context:
+                quant_method.process_weights_after_loading(layer)
+        finally:
+            left = layer.__dict__.pop("_quantized_on_arrival", None)
+        if left:
+            raise RuntimeError(
+                f"{type(layer).__name__}: processing did not take the weights "
+                f"quantized on arrival ({sorted(left)})"
+            )
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.
@@ -445,15 +703,32 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     non_persistent = info.kernel_non_persistent_buffers
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
+        _copy_into_kernel_tensor(getattr(layer, name), param)
     for name, buffer in buffers.items():
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
             continue
-        buffer.data.copy_(getattr(layer, name))
+        _copy_into_kernel_tensor(getattr(layer, name), buffer)
+    # objects holding a processed param's data (triton_kernels storages)
+    for name, holder in getattr(layer, "_param_storage_aliases", {}).items():
+        if name in parameters:
+            holder.data = parameters[name].data
 
     _place_kernel_tensors(layer, info)
+
+
+def _copy_into_kernel_tensor(processed: torch.Tensor, kernel: torch.Tensor) -> None:
+    """Copy into the kernel tensor, then rebind the processed tensor to it:
+    objects post-load processing built around that tensor object (a quant
+    config's scales) then read the kernel tensor."""
+    kernel.data.copy_(processed)
+    if (
+        processed is not kernel
+        and processed.shape == kernel.shape
+        and processed.dtype == kernel.dtype
+    ):
+        processed.data = kernel.data
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -464,6 +739,10 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     parameters, buffers = info.kernel_tensors
     non_persistent = info.kernel_non_persistent_buffers
     for name, param in parameters.items():
+        # tensors kept live while staged (registered after the metadata was
+        # recorded) had their loaders wrapped
+        if _get_weight_loader(param).__name__ == "online_process_loader":
+            param.weight_loader = _get_original_loader(param)
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
         layer.register_buffer(name, buffer, persistent=name not in non_persistent)

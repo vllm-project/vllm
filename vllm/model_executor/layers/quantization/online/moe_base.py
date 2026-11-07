@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
+from vllm.model_executor.layers.quantization.online.arrival import OnlineArrivalMixin
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
@@ -23,7 +24,9 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.utils import set_weight_attrs
 
 
-class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
+class OnlineMoEMethodBase(
+    OnlineArrivalMixin, OnlineRequantizationMixin, FusedMoEMethodBase
+):
     """Base for MoE methods that load full-precision weights on meta device
     and quantize them after loading via the QeRL layerwise processing system.
     """
@@ -115,10 +118,45 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
+        # Round-up padding is never loaded: count only the checkpoint elements,
+        # so the layer is processed as soon as they are loaded. Only the base
+        # loader is known to copy the unpadded rows alone (gpt-oss's copies
+        # the padded width); others count padding and complete at finish.
+        loader = extra_weight_attrs.get("weight_loader")
+        if getattr(loader, "__func__", None) is RoutedExperts.weight_loader:
+            hidden = self.moe.hidden_dim_unpadded
+            intermediate = self.moe.intermediate_size_per_partition_unpadded
+            assert hidden is not None and intermediate is not None
+            w13_up = self.moe.w13_num_shards * intermediate
+            w13_weight.weight_loader_numel = num_experts * w13_up * hidden
+            w2_weight.weight_loader_numel = num_experts * hidden * intermediate
+            if self.moe.has_bias:
+                w13_bias.weight_loader_numel = num_experts * w13_up
+                w2_bias.weight_loader_numel = num_experts * hidden
+
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
         initialize_online_processing(layer)
+
+    def _row_local(self, layer: torch.nn.Module, name: str, group: int) -> int | None:
+        """``group`` if parameter ``name`` can be quantized on arrival: its
+        loads copy only checkpoint rows (the base loader, which also leaves
+        padding zero) at ``group``-aligned row offsets."""
+        param = getattr(layer, name, None)
+        if name not in ("w13_weight", "w2_weight") or not hasattr(
+            param, "weight_loader_numel"
+        ):
+            return None
+        # w13 rows are the (2 shards of the) intermediate dim, w2 rows hidden
+        if name == "w13_weight":
+            unpadded = self.moe.intermediate_size_per_partition_unpadded
+            padded = layer.w2_weight.shape[-1]
+        else:
+            unpadded, padded = self.moe.hidden_dim_unpadded, layer.w2_weight.shape[-2]
+        if unpadded % group and unpadded != padded:
+            return None
+        return group
 
     def get_weights_for_quantization(
         self, layer: torch.nn.Module

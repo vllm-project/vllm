@@ -1278,10 +1278,6 @@ class VllmConfig:
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":
             return
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
-
         offload = self.offload_config
         if (
             offload.offload_backend != "auto"
@@ -1296,12 +1292,6 @@ class VllmConfig:
             # its load_weights runs a layerwise reload, and its post-load
             # processing replaces the weight parameter
             raise ValueError("Direct reload does not support torchao quantization.")
-        if isinstance(self.quant_config, OnlineQuantizationConfig) or (
-            getattr(self.quant_config, "online_quantization_config", None) is not None
-        ):
-            # `finish` clears the guard that keeps online quantization from
-            # quantizing its already-quantized bytes again
-            raise ValueError("Direct reload does not support online quantization.")
         if self.lora_config is not None:
             # LoRA wraps layers after cold start; their wrappers forward
             # `quant_method`, so a rerun would process each base layer twice

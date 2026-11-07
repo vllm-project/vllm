@@ -9,6 +9,9 @@ which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
+Online-quantized modules (``uses_meta_device``) cannot hold BF16 checkpoint
+bytes: they reload as they cold start, staged layerwise and quantized in place.
+
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
 of every ``padding_fill_params()`` parameter, which ``begin`` zero-fills whole.
@@ -27,9 +30,17 @@ from vllm.model_executor.utils import (
     storage_view,
 )
 
+from .layerwise import (
+    finalize_layerwise_processing,
+    stage_layer_for_reload,
+    unstage_layer,
+)
+from .utils import stages_online_quant
+
 logger = init_logger(__name__)
 
 __all__ = [
+    "abort_direct_reload",
     "begin_direct_reload",
     "direct_reload_active",
     "direct_reload_enabled",
@@ -98,14 +109,27 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
 
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
-        # also without an online config (experts_int8); fused shared experts
-        # quantize staging parameters that post-load processing deletes
-        if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
-            getattr(module, "shared_expert_online_loader", None) is not None
+        moe_config = getattr(module, "moe_config", None)
+        if (
+            stages_online_quant(module)
+            and moe_config is not None
+            and moe_config.moe_parallel_config.enable_eplb
         ):
+            # not validated: elastic EP swaps in a quant method that is not staged
             raise RuntimeError(
-                f"direct reload: online quantization is not supported "
-                f"({name}: {type(method).__name__})"
+                f"direct reload: online quantization with EPLB is not supported "
+                f"({name})"
+            )
+        # requantization releases the checkpoint parameters it dequantizes;
+        # fused shared experts quantize staging parameters that post-load
+        # processing deletes
+        if (
+            isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase))
+            and not method.uses_meta_device
+        ) or getattr(module, "shared_expert_online_loader", None) is not None:
+            raise RuntimeError(
+                f"direct reload: online requantization and fused shared experts "
+                f"are not supported ({name}: {type(method).__name__})"
             )
         if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
@@ -211,10 +235,13 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    # Unstage what an aborted update left staged: this only restores the
+    # cold-start state, so the checks below still see the committed model.
+    online = abort_direct_reload(model)
     _check_params_kept(model)
     views = _checkpoint_views(model)
 
-    # nothing above modified the model
+    # nothing above modified the model beyond restoring it
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
@@ -224,6 +251,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+    for module in online:  # before the padding fill, which skips meta params
+        stage_layer_for_reload(module)
     # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
     for module, name in model._ckpt_padding_fill:
         t = module._parameters.get(name)
@@ -232,6 +261,20 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
+
+
+def abort_direct_reload(model: torch.nn.Module) -> list[torch.nn.Module]:
+    """Unstage the online-quantized modules of an aborted update: they get
+    their kernel tensors back and drop the checkpoint tensors they buffered.
+    The model stays pending; only a new full update repairs it. Returns the
+    online-quantized modules."""
+    online = [m for m in model.modules() if stages_online_quant(m)]
+    for module in online:
+        unstage_layer(module)
+        # its kernel tensors are processed: restore the guard the abort may
+        # have cleared, or finish would quantize them again if it is unsent
+        module._already_called_process_weights_after_loading = True
+    return online
 
 
 @torch.no_grad()
@@ -250,11 +293,18 @@ def finish_direct_reload(
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
 
+    # Staged online-quantized modules the loaders did not complete (padding)
+    # quantize now; one the update left out gets its kernel tensors back.
+    # Before the rerun: parents read them (MLA dequantizes kv_b_proj).
+    finalize_layerwise_processing(model, model_config)
+
     # One-shot "already processed" guards would make the rerun below a no-op
     # and leave the freshly written checkpoint layout in place. Only quant
-    # methods' guards: other modules set it for other reasons.
+    # methods' guards: other modules set it for other reasons. Online
+    # quantization keeps its guard: it would quantize its kernel bytes again.
     for module in model.modules():
-        if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
+        method = getattr(module, "quant_method", None)
+        if isinstance(method, QuantizeMethodBase) and not method.uses_meta_device:
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
     process_weights_after_loading(model, model_config, device)

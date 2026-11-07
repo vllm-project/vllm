@@ -31,6 +31,7 @@ class _RecordingEngine:
         self.closed = False
         self.reset_count = 0
         self.supports_draft_weight_update = False
+        self.model = nn.Module()
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
 
@@ -61,15 +62,19 @@ class _RecordingEngine:
 
 
 class _RecordingModelRunner:
-    def __init__(self) -> None:
+    def __init__(self, raise_on_reload: bool = False) -> None:
         self.seen_config: VllmConfig | None = None
         self.reset_lora_calls = 0
+        self.raise_on_reload = raise_on_reload
+        self.model = nn.Module()
 
     def reload_weights(self, *args) -> None:
         self.seen_config = get_current_vllm_config()
+        if self.raise_on_reload:
+            raise ValueError("boom")
 
     def get_model(self) -> nn.Module:
-        return nn.Module()
+        return self.model
 
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
@@ -319,6 +324,50 @@ def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     direct = mode == "direct"
     assert worker._weight_update_active is not direct
     assert engine.reset_count == int(direct)
+
+
+def _failing_abort(events: list):
+    def abort(model: nn.Module) -> None:
+        events.append(("abort", model))
+        raise RuntimeError("abort failed")  # must not replace the error
+
+    return abort
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+@pytest.mark.parametrize("fail", ["update", "finish"])
+def test_aborted_update_unstages_before_the_kv_cache_returns(mode, fail, monkeypatch):
+    # an aborted direct update frees its staged tensors on the target model
+    # before the lent KV cache is recommitted, and keeps the original error
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    events: list = []
+    monkeypatch.setattr(gpu_worker, "abort_direct_reload", _failing_abort(events))
+    engine = _RecordingEngine(
+        raise_on_update=fail == "update", raise_on_finish=fail == "finish"
+    )
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    worker._weight_update_kv_cache_loan.callback(events.append, "loan closed")
+    with pytest.raises(ValueError, match="boom"):
+        if fail == "update":
+            Worker.update_weights(worker, {"names": ["w"]})
+        else:
+            Worker.finish_weight_update(worker)
+    aborted = [("abort", engine.model)] if mode == "direct" else []
+    assert events == [*aborted, "loan closed"]
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_failed_reload_weights_unstages_in_direct_mode(mode, monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    events: list = []
+    monkeypatch.setattr(gpu_worker, "abort_direct_reload", _failing_abort(events))
+    worker = _make_worker(None)
+    worker.model_runner = _RecordingModelRunner(raise_on_reload=True)
+    with pytest.raises(ValueError, match="boom"):
+        Worker.reload_weights(worker)
+    model = worker.model_runner.model
+    assert events == ([("abort", model)] if mode == "direct" else [])
 
 
 def test_missing_engine_raises():
