@@ -16,6 +16,7 @@ from vllm.model_executor.kernels.linear.cute_dsl import (
 )
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
+    shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.utils import maybe_use_skinny_gemm
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
@@ -1067,6 +1068,40 @@ def test_skinny_gemm_plans_are_valid(
 
 
 @pytest.mark.parametrize(
+    "n,k,num_tokens,config",
+    [
+        pytest.param(n, k, num_tokens, config, id=f"{n}x{k}-m{num_tokens}")
+        for (n, k), shape_plans in skinny_plans.SM90_SKINNY_GEMM_PLANS.items()
+        for num_tokens, config in shape_plans.items()
+    ],
+)
+def test_sm90_skinny_gemm_plans_match_linear(
+    n: int, k: int, num_tokens: int, config: SkinnyGemmConfig
+) -> None:
+    """Every SM90 plan matches F.linear, eagerly and under CUDA graph replay."""
+    _require_capability_and_cute((9, 0))
+    torch.manual_seed(42)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = (torch.randn(n, k, device="cuda") * k**-0.5).to(torch.bfloat16)
+
+    def check(output: torch.Tensor) -> None:
+        # Rounding the exact result to BF16 costs at most 2^-8 relative.
+        reference = torch.nn.functional.linear(x.double(), weight.double())
+        torch.testing.assert_close(output.double(), reference, rtol=2**-8, atol=1e-5)
+
+    check(shape_dynamic_skinny_gemm(x, weight, config))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = shape_dynamic_skinny_gemm(x, weight, config)
+    x.normal_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    check(output)
+
+
+@pytest.mark.parametrize("capability", [(9, 0), (12, 1)])
+@pytest.mark.parametrize(
     "dtype,bias,k,ndim,batch_invariant,expected",
     [
         pytest.param(torch.bfloat16, False, 1024, 2, False, True, id="planned"),
@@ -1081,6 +1116,7 @@ def test_skinny_gemm_plans_are_valid(
 )
 def test_maybe_use_skinny_gemm(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
     dtype: torch.dtype,
     bias: bool,
     k: int,
@@ -1089,11 +1125,12 @@ def test_maybe_use_skinny_gemm(
     expected: bool,
 ) -> None:
     """Only eligible layers are marked; CPU tensors suffice for selection."""
-    assert (4096, 1024) in skinny_plans.SM121_SKINNY_GEMM_PLANS
-    assert (4096, 128) not in skinny_plans.SM121_SKINNY_GEMM_PLANS
+    plans = skinny_plans.SKINNY_GEMM_PLANS_BY_CAPABILITY[capability]
+    assert (4096, 1024) in plans
+    assert (4096, 128) not in plans
     # Isolate hardware/dependency detection, keeping the real plan lookup.
     monkeypatch.setattr(
-        skinny_plans.current_platform, "get_device_capability", lambda: (12, 1)
+        skinny_plans.current_platform, "get_device_capability", lambda: capability
     )
     monkeypatch.setattr(
         skinny_plans.shape_dynamic_skinny_gemm, "is_available", lambda: True

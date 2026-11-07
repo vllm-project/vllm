@@ -156,6 +156,23 @@ steps:
       commands:
       - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
 
+# The SM90 skinny GEMM plan tests skip on the B200 Miscellaneous Kernels step.
+- label: ":nvidia: (H100) SM90 Skinny GEMM Plans"
+  key: skinny-gemm-plans-test-h100
+  timeout_in_minutes: 30
+  device: h100
+  source_file_dependencies:
+  - vllm/model_executor/kernels/linear/cute_dsl/skinny_gemm_plans.py
+  - vllm/model_executor/kernels/linear/cute_dsl/skinny_gemm.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_skinny_gemm.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - tests/kernels/test_bf16_skinny_gemm.py
+  commands:
+    - pytest -v -s kernels/test_bf16_skinny_gemm.py
+        -k 'sm90_skinny_gemm_plans_match_linear or skinny_gemm_plans_are_valid or maybe_use_skinny_gemm'
+
 - label: ":nvidia: (H100) BF16x3 Router GEMM Kernels"
   key: kernels-bf16x3-router-gemm-h100
   automatic_shard: true
