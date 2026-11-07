@@ -68,6 +68,22 @@ class BlockHashToBlockMap:
         block_id = self._cache.get(key)
         return None if block_id is None else self._blocks[block_id]
 
+    def get_prefix_blocks(
+        self, block_hashes: Iterable[BlockHash], group_id: int
+    ) -> list[KVCacheBlock]:
+        """Gets one block per hash for the longest cached prefix of
+        `block_hashes` in `group_id`, stopping at the first miss."""
+        group_suffix = group_id.to_bytes(4, "big", signed=False)
+        cache_get = self._cache.get
+        blocks = self._blocks
+        prefix: list[KVCacheBlock] = []
+        for block_hash in block_hashes:
+            block_id = cache_get(block_hash + group_suffix)
+            if block_id is None:
+                break
+            prefix.append(blocks[block_id])
+        return prefix
+
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
         """Checks whether the key maps to the given block ID."""
         dup_ids = self._dup_ids.get(key)
