@@ -150,7 +150,8 @@ class ShardedStateLoader(BaseModelLoader):
                 same_storage_groups[tensor.device, ptr].append((key, tensor))
 
         def get_end_ptr(tensor: torch.Tensor) -> int:
-            return tensor.view(-1)[-1].data_ptr() + tensor.element_size()
+            last = sum((s - 1) * st for s, st in zip(tensor.shape, tensor.stride()))
+            return tensor.data_ptr() + (last + 1) * tensor.element_size()
 
         result: dict[str, torch.Tensor] = {}
         for group in same_storage_groups.values():
@@ -291,7 +292,7 @@ class ShardedStateLoader(BaseModelLoader):
                 part_idx += 1
                 total_size = 0
                 state_dict_part = {}
-            state_dict_part[key] = tensor
+            state_dict_part[key] = tensor.contiguous()
             total_size += param_size
         if len(state_dict_part) > 0:
             filename = ShardedStateLoader._render_default_pattern(
