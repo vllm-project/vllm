@@ -31,7 +31,19 @@ deployment methods:
 
 ## Dashboard Contents
 
-Both platforms provide equivalent monitoring capabilities:
+### Grafana
+
+| Dashboard | Description |
+| --------- | ----------- |
+| **vLLM / Service Status** | Simple status board for end users: availability, response time, output speed, success rate and load per model, readable from a distance |
+| **vLLM / Overview** | Service health and latency SLOs: traffic, errors, latency, throughput, saturation and caching |
+| **vLLM / Instances** | Per-instance and per-engine drill-down: load balance, latency outliers, scheduler, process and configuration |
+| **vLLM / KV Cache** | KV cache pressure, prefix caching, KV block residency, and KV transfer and offloading |
+| **vLLM / Speculative Decoding** | Draft acceptance rate, acceptance length and draft token flow |
+| **Performance Statistics** | Tracks latency, throughput, and performance metrics |
+| **Query Statistics** | Monitors request volume, query performance, and KPIs |
+
+### Perses
 
 | Dashboard | Description |
 | --------- | ----------- |
@@ -51,9 +63,10 @@ cd examples/observability/dashboards
 Import the JSON directly into the Grafana UI, or use the API:
 
 ```bash
-curl -X POST http://grafana/api/dashboards/db \
-  -H "Content-Type: application/json" \
-  -d @grafana/performance_statistics.json
+jq '{dashboard: ., overwrite: true}' grafana/vllm_overview.json |
+  curl -X POST http://grafana/api/dashboards/db \
+    -H "Content-Type: application/json" \
+    --data @-
 ```
 
 ### Perses
