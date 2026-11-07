@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import ParallelConfig, get_current_vllm_config
+from vllm.config import LoRAConfig, ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_pcp_group,
@@ -377,7 +377,11 @@ def FusedMoEFactory(
         max_num_tokens=max_num_batched_tokens,
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
-        is_lora_enabled=vllm_config.lora_config is not None,
+        is_lora_enabled=_is_moe_lora_target(
+            vllm_config.lora_config,
+            layer_name,
+            quant_config.packed_modules_mapping if quant_config is not None else None,
+        ),
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
@@ -473,6 +477,27 @@ def FusedMoEFactory(
     )
 
     return runner
+
+
+def _is_moe_lora_target(
+    lora_config: LoRAConfig | None,
+    layer_name: str,
+    packed_modules_mapping: dict[str, list[str]] | None,
+) -> bool:
+    """Whether LoRA can target this MoE layer at model construction."""
+    if lora_config is None:
+        return False
+
+    from vllm.lora.utils import is_in_target_modules
+
+    return is_in_target_modules(
+        layer_name, lora_config.target_modules, packed_modules_mapping
+    ) or any(
+        # Dynamic expert mappings are expanded from the instantiated model
+        # later, so retain the opt-in for targets that may reach them.
+        target.startswith("experts.")
+        for target in lora_config.target_modules or ()
+    )
 
 
 def fused_moe_make_expert_params_mapping(
