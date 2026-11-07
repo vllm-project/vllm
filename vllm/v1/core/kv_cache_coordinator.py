@@ -63,7 +63,10 @@ def _validate_prefix_cache_retention_interval(
 
 
 def replay_boundaries(
-    num_prompt_tokens: int, scheduler_block_size: int, use_eagle: bool
+    num_prompt_tokens: int,
+    scheduler_block_size: int,
+    use_eagle: bool,
+    num_hash_lookahead_tokens: int = 0,
 ) -> tuple[int, ...]:
     """Positions a later request replaying a prompt can resume at.
 
@@ -77,9 +80,12 @@ def replay_boundaries(
     block-aligned prompt, where retaining just the higher one collapses the
     resend's hit to 0. The alignment is the scheduler block size, not the
     finer hash granularity, which would over-estimate the reach.
+
+    A lookahead hash exists only once the tokens after its block are known, so
+    a resend reaches at most ``num_tokens - num_hash_lookahead_tokens``.
     """
     if not use_eagle:
-        return (num_prompt_tokens - 1,)
+        return (num_prompt_tokens - max(1, num_hash_lookahead_tokens),)
     block = scheduler_block_size
     resend = (num_prompt_tokens - 1) // block * block
     extension = num_prompt_tokens // block * block
@@ -369,6 +375,7 @@ class KVCacheCoordinator(ABC):
             request.num_prompt_tokens,
             self.scheduler_block_size,
             use_eagle=bool(self.drop_eagle_group_ids),
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
         )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
@@ -800,6 +807,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 num_finalized_computed_tokens,
                 self._align_cacheable(num_finalized_computed_tokens)
                 + manager.block_size,
+            )
+        if kv_cache_group_id in self.eagle_group_ids:
+            # Multi-module MTP re-prefills the drafter's KV of the last
+            # num_reprefillable_tokens tokens, so only finalized KV is cacheable.
+            return self._align_cacheable(
+                max(0, num_computed_tokens - self.num_reprefillable_tokens)
             )
         return cached_num_computed_tokens
 

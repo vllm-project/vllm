@@ -329,6 +329,7 @@ class MooncakeStoreCoordinator:
                 num_prompt_tokens,
                 self.lcm_block_size,
                 use_eagle=bool(self.eagle_group_ids),
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
         masks: list[list[bool] | None] = []
