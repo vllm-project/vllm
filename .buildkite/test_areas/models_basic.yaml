@@ -424,6 +424,20 @@ steps:
   - tests/models/qwen4_exp/test_hc_ops.py
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      dind: false
+      device: mi355_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/models/qwen4_exp/amd/hyperconnection.py
+      - vllm/models/qwen4_exp/amd/ops/hc.py
+      - tests/models/qwen4_exp/test_hc_ops_amd.py
+      commands:
+      - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
