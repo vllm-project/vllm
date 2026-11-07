@@ -768,25 +768,6 @@ class TritonPointerInputVariant:
         return TritonWarmupTensor(dtype, aligned=self.is_aligned(name), shape=shape)
 
 
-def _triton_constexpr_arg_names(
-    kernel: Callable[..., Any],
-    function_def: ast.FunctionDef,
-    arg_names: tuple[str, ...],
-) -> frozenset[str]:
-    constexprs = getattr(kernel, "constexprs", None)
-    if constexprs is not None:
-        return frozenset(arg_names[index] for index in constexprs)
-
-    names: set[str] = set()
-    for arg in function_def.args.args + function_def.args.kwonlyargs:
-        if arg.annotation is None:
-            continue
-        annotation = get_ast_full_name(arg.annotation)
-        if annotation in ("tl.constexpr", "triton.language.constexpr", "constexpr"):
-            names.add(arg.arg)
-    return frozenset(names)
-
-
 def _leftmost_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
