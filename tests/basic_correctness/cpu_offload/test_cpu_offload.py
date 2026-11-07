@@ -41,6 +41,16 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
     )
 
 
+def test_cpu_offload_online_quantization():
+    """Online quantization creates its weights on the meta device, which the
+    offloader must leave for the online method to materialize."""
+    compare_two_settings(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        arg1=["--quantization", "fp8_per_tensor"],
+        arg2=["--quantization", "fp8_per_tensor", "--cpu-offload-gb", "1"],
+    )
+
+
 @pytest.mark.parametrize(
     ("offload_kwargs", "offloader_type"),
     [

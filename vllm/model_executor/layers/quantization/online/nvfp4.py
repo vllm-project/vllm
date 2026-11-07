@@ -31,6 +31,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
     weight_amax,
 )
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.offloader import NoopOffloader, get_offloader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -47,12 +49,20 @@ def _quantize_moe_weight_to_nvfp4(
     matching the ModelOpt NVFP4 checkpoint layout. Returns packed FP4 weights
     ``(E, N, K // 2)``, block scales ``(E, N, K // 16)``, and the per-expert
     global scale ``(E,)`` stored as ``amax / (fp4_max * fp8_max)``.
+
+    ``weight`` may be staged on the CPU: experts then move to the accelerator
+    one at a time, where all outputs are returned.
     """
     assert weight.dim() == 3, f"expected 3D expert weights, got {weight.shape}"
-    k = weight.shape[-1]
+    num_experts, n, k = weight.shape
     assert k % 16 == 0, f"last dim must be a multiple of 16, got {k}"
+    device = (
+        torch.accelerator.current_accelerator()
+        if weight.device.type == "cpu"
+        else weight.device
+    )
 
-    amax = weight_amax(weight.flatten(1), dim=-1).to(torch.float32)
+    amax = weight_amax(weight.flatten(1), dim=-1).to(device, torch.float32)
     amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
     global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
     weight_scale_2 = (1.0 / global_scale).to(torch.float32)
@@ -60,21 +70,16 @@ def _quantize_moe_weight_to_nvfp4(
     # Keep the original BF16/FP16 values as the quantizer input. Folding each
     # expert's FP32 global scale into the weight would add a BF16/FP16 rounding
     # before the group-16 scale and E2M1 values are selected.
-    weight = weight.contiguous()
-    quantized_experts = [
-        scaled_fp4_quant(
-            expert_weight,
+    qweight = torch.empty((num_experts, n, k // 2), dtype=torch.uint8, device=device)
+    block_scale = torch.empty(
+        (num_experts, n, k // 16), dtype=torch.float8_e4m3fn, device=device
+    )
+    for expert, expert_scale in enumerate(global_scale):
+        qweight[expert], block_scale[expert] = scaled_fp4_quant(
+            weight[expert].to(device).contiguous(),
             expert_scale,
             is_sf_swizzled_layout=False,
         )
-        for expert_weight, expert_scale in zip(
-            weight,
-            global_scale,
-            strict=True,
-        )
-    ]
-    qweight = torch.stack([quantized for quantized, _ in quantized_experts])
-    block_scale = torch.stack([block_scale for _, block_scale in quantized_experts])
     return (
         qweight,
         block_scale,
@@ -111,6 +116,31 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     @property
     def per_token_activation(self) -> bool:
         return self.activation_quant_key == kNvfp4DynamicToken
+
+    def create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        # CPU weight offloading means device memory is short: stage the
+        # full-precision experts on the CPU and quantize one at a time on the
+        # device.
+        if self.requantization_source is None and not isinstance(
+            get_offloader(), NoopOffloader
+        ):
+            get_layerwise_info(layer).restore_device = torch.device("cpu")
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

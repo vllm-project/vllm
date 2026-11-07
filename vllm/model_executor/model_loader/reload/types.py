@@ -16,7 +16,7 @@ class LayerReloadingInfo:
     # model format metadata, recorded by `record_metadata_for_reloading`
     restore_metadata: LayerTensors
 
-    # device to materialize layers with, recorded by `record_metadata_for_reloading`
+    # device to materialize layers with; online quantization may stage on the CPU
     restore_device: torch.device
 
     # track how many elements are ready for loading, used by `online_process_loader`
