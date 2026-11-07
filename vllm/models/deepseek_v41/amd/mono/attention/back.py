@@ -32,6 +32,8 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
+from ..common.arch import GFX942
+from ..common.gfx942 import fp8x2_f32, ocp_to_fnuz
 from .device import (
     BLOCKS,
     CM_DEV,
@@ -65,6 +67,7 @@ from .device import (
 )
 from .gemv import RED, gemv_loads, gemv_mfmas, lds_row, row_sum, rows_loads, rows_store
 from .plan import (
+    COPIES,
     DATA,
     HALF,
     HEAD_DIM,
@@ -75,9 +78,13 @@ from .plan import (
     ROWS,
     WOA_ROWS,
     Dims,
+    ardy_tiles,
     back_scratch,
     cdiv,
+    flag_copy,
+    flag_stride,
     front_end,
+    on_copy,
     tile_rows,
     token_tiles,
 )
@@ -102,6 +109,7 @@ class BackBuild:
     tp: int
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
+    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
 
 
 def plus(t0, v):
@@ -112,11 +120,22 @@ def head_groups(d: Dims, s: int) -> int:
     """Wave groups a split unit's head tiles are spread over: two (a tile each,
     64-key chunks, twice the units) while the units fit the grid, else one (a
     wave's keys loaded and dequantized once for every head tile)."""
+    if GFX942:
+        return 1
     return 2 if d.head_tiles == 2 and s * cdiv(KEYS, 64) <= BLOCKS else 1
+
+
+# gfx942 has 64 KB of LDS a workgroup: a split unit keeps 64 keys' raw records
+# (37 KB) instead of 128 (75 KB). Its first 4 waves load and score a 16-key
+# tile each. The other 4 compute the same scores and store nothing, and all 8
+# share the PV.
+SPLIT_KEYS_942 = 64
 
 
 def chunk_keys(d: Dims, s: int) -> int:
     """A split unit's keys: a 16-key tile a wave of a head group."""
+    if GFX942:
+        return SPLIT_KEYS_942
     return 16 * (WAVES // head_groups(d, s))
 
 
@@ -126,11 +145,16 @@ def p_row(d: Dims, s: int) -> int:
 
 
 @traced
-def publish(c, region, i):
-    """This CTA's stores visible device-wide, then the flag pair (region, i)."""
+def publish(c, region, i, stride=0):
+    """This CTA's stores visible device-wide, then the flag pair (region, i);
+    a tuned build with ``stride``: each of its copies, ``stride`` pairs apart
+    (``plan.COPIES``; thread j stores copy j)."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
-    if c["tid"] == 0:
+    if const_expr(c["tuned"] and stride):
+        if c["tid"] < COPIES:
+            c["mb"].put(region, c["tid"] * stride + i, fx.Int32(1))
+    elif c["tid"] == 0:
         c["mb"].put(region, i, fx.Int32(1))
 
 
@@ -156,6 +180,7 @@ def key_rec(c, t, k):
     val = ld_i32(a["kt"], t * KEYS + fx.min(fx.max(k, 0), KEYS - 1), cm)
     ok = val != fx.Int32(-1)
     slot = ok.select(val & fx.Int32(0x7FFFFFFF), fx.Int32(0))
+    is_c = None
     if const_expr(ratio > 0):
         is_c = ok & (val < 0)
         blk = is_c.select(a["comp_block"], a["swa_block"])
@@ -169,7 +194,30 @@ def key_rec(c, t, k):
     z = a["zrec"]
     data = ok.select(page + fx.Int64(off * DATA), z)
     sc = ok.select(page + fx.Int64(blk * DATA + off * 8), z + fx.Int64(DATA))
+    if const_expr(GFX942):
+        return data, sc, ok, is_c
     return data, sc, ok
+
+
+def records_to_fnuz(nope, scw, is_c):
+    """gfx942: a key's loaded record as FNUZ. vLLM's gfx942 window cache holds
+    FNUZ records (maximum 224), its compressed cache OCP records (Triton's
+    compressor). An OCP record becomes FNUZ by turning -0 bytes (0x80, the
+    FNUZ NaN) into 0 and raising each scale code by one (FNUZ bytes stand for
+    half the OCP value). ``is_c`` None: a layer without compressed keys."""
+    if const_expr(is_c is None):
+        return nope, scw
+    fixed = [
+        fx.Vector.from_elements(
+            [is_c.select(ocp_to_fnuz(v[e]), v[e]) for e in range(4)], fx.Int32
+        )
+        for v in nope
+    ]
+    # Bytes 0 .. 6 hold the 7 codes of 64 dims, byte 7 is padding. A code is
+    # at most 254, so + 1 never carries into the next byte.
+    sc0 = is_c.select(scw[0] + fx.Int32(0x01010101), scw[0])
+    sc1 = is_c.select(scw[1] + fx.Int32(0x00010101), scw[1])
+    return fixed, fx.Vector.from_elements([sc0, sc1], fx.Int32)
 
 
 def _scale_byte(scw, blk64):
@@ -177,6 +225,9 @@ def _scale_byte(scw, blk64):
 
 
 def _fp8_pair_f32(word, scale, hi):
+    if const_expr(GFX942):
+        a, b = fp8x2_f32(word, hi)
+        return [a * scale, b * scale]
     v = rocdl.cvt_scalef32_pk_f32_fp8(
         fx.Vector.make_type(2, fx.Float32),
         as_ir_value(fx.Int32(word)),
@@ -188,6 +239,12 @@ def _fp8_pair_f32(word, scale, hi):
 
 
 # ---------------------------------------------------------------- split
+
+
+def owned(cond, owner):
+    """``cond``, and on gfx942 also whether this wave owns its key tile's
+    stores (``owner``, None when every wave does)."""
+    return cond if owner is None else cond & owner
 
 
 @traced
@@ -204,7 +261,7 @@ def stage_split(c, unit):
     ch = unit % nchunk
     ck = chunk_keys(d, s)
     ngrp = head_groups(d, s)
-    nkt = WAVES // ngrp  # 16-key tiles a chunk
+    nkt = ck // 16  # 16-key tiles a chunk
     nht = d.head_tiles // ngrp  # head tiles a wave
     hgi = wave // nkt
     kt = wave % nkt
@@ -217,7 +274,15 @@ def stage_split(c, unit):
     # (the key table holds -1 past a token's keys)
     kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     key = k0 + kt * 16 + r16
-    data, sc, okv = key_rec(c, t, key)
+    if const_expr(GFX942):
+        data, sc, okv, is_c = key_rec(c, t, key)
+        # Waves past the chunk's key tiles redo a tile's scores and store
+        # nothing (``SPLIT_KEYS_942``). The head tile is not wave dependent.
+        owner = hgi == 0
+        hgi = 0
+    else:
+        data, sc, okv = key_rec(c, t, key)
+        owner = None
     qrow = d.heads * HEAD_DIM // 8
     qv = []
     for i in range_constexpr(cdiv(qrow, THREADS)):
@@ -244,6 +309,8 @@ def stage_split(c, unit):
             gload(data + fx.Int64(NOPE + (cc * 32 + 8 * g) * 2), words=4)
             for cc in range(ROPE // 32)
         ]
+        if const_expr(GFX942):
+            nope, scw = records_to_fnuz(nope, scw, is_c)
         # q of every head into LDS (bf16 rows of 512 + pad), 16 B a thread
         for i in range_constexpr(cdiv(qrow, THREADS)):
             u = fresh(tid) + THREADS * i
@@ -255,7 +322,7 @@ def stage_split(c, unit):
                     + (u % (HEAD_DIM // 8)) * 4,
                 )
         # the raw rows to LDS for the PV (head group 0's waves)
-        if hgi == 0:
+        if hgi == 0 if owner is None else owner:
             rawb = sl["raw"] + (kt * 16 + r16) * (REC // 4)
             for c4 in range_constexpr(NOPE // 64):
                 fx.ptr_store(nope[c4], rawb + (64 * c4 + 16 * g) // 4)
@@ -310,11 +377,11 @@ def stage_split(c, unit):
             mw = butterfly(
                 fx.max(fx.max(sv[0], sv[1]), fx.max(sv[2], sv[3])), (32, 16), fx.max
             )
-            if g == 0:
+            if owned(g == 0, owner):
                 fx.ptr_store(mw, st + ((hgi * nht + ht) * nkt + kt) * HEAD_TILE + r16)
             svs.append(sv)
         gpu.barrier()
-        lst = st + d.heads * nkt
+        lst = st + d.heads_pad * nkt
         for ht in range_constexpr(nht):
             hti = hgi * nht + ht
             m = fx.ptr_load(st + (hti * nkt) * HEAD_TILE + r16)
@@ -334,8 +401,13 @@ def stage_split(c, unit):
             pbase = (
                 sl["p"] + (hti * HEAD_TILE + r16) * p_row(d, s) + (kt * 16 + 4 * g) // 2
             )
-            fx.ptr_store(fx.Vector.from_elements([pw[0], pw[1]], fx.Int32), pbase)
-            if g == 0:
+            pw2 = fx.Vector.from_elements([pw[0], pw[1]], fx.Int32)
+            if const_expr(owner is None):
+                fx.ptr_store(pw2, pbase)
+            else:
+                if owner:
+                    fx.ptr_store(pw2, pbase)
+            if owned(g == 0, owner):
                 fx.ptr_store(lw, lst + (hti * nkt + kt) * HEAD_TILE + r16)
         gpu.barrier()
         # chunk stats: (max, sum) per head
@@ -417,7 +489,11 @@ def stage_split(c, unit):
         stamp(c, 6)
         # partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
         # dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
-        # bytes, two 16 B stores (4 lanes fill a 128 B line)
+        # bytes, two 16 B stores (4 lanes fill a 128 B line). Tuned, whole
+        # 64 B sectors: store j of lane g takes dims 32 j + 8 g .. from lane
+        # 2 j + g // 2 of its row (its words 4 (g % 2) ..)
+        if const_expr(c["tuned"]):
+            odd = (g % 2) == 1
         for ht2 in range_constexpr(d.head_tiles):
             hh = ht2 * HEAD_TILE + r16
             words = []
@@ -427,14 +503,40 @@ def stage_split(c, unit):
                 )
                 w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
                 words += [w2[0], w2[1]]
+            if const_expr(c["tuned"]):
+                row = ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase
+                for j in range_constexpr(2):
+                    src = r16 + 16 * (2 * j + g // 2)
+                    out = [
+                        odd.select(
+                            lane_gather(words[4 + e], src), lane_gather(words[e], src)
+                        )
+                        for e in range(4)
+                    ]
+                    bo.buffer_store(
+                        fx.Vector.from_elements(out, fx.Int32),
+                        rsrc(c["part"]),
+                        (row + 32 * j + 8 * g) // 2,
+                        cache_modifier=CM_DEV,
+                    )
+                continue
             off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
-            for hlf in range_constexpr(2):
-                bo.buffer_store(
-                    fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
-                    rsrc(c["part"]),
-                    off + 4 * hlf,
-                    cache_modifier=CM_DEV,
-                )
+
+            def store_part(off=off, words=words):
+                for hlf in range_constexpr(2):
+                    bo.buffer_store(
+                        fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
+                        rsrc(c["part"]),
+                        off + 4 * hlf,
+                        cache_modifier=CM_DEV,
+                    )
+
+            if const_expr(d.heads < d.heads_pad):
+                # TP8: the padded columns of the head tile are not stored
+                if hh < d.heads:
+                    store_part()
+            else:
+                store_part()
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
@@ -457,7 +559,9 @@ def stage_combine(c, unit):
     h = hg * COMB_HEADS + wave
     nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
-    kv_len = ld_i32(a["klen"], t)
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     nlive = (kv_len + ck - 1) // ck
     pos = ld_i32(a["pos"], 2 * t)
     sink = ld_f32(a["sink"], h) * fx.Float32(LOG2E)
@@ -538,18 +642,22 @@ def stage_combine(c, unit):
             t * (d.q_rows // 32) + (h * HEAD_DIM + d0) // 32,
             cache_modifier=CM_DEV,
         )
-    publish(c, c["crdy"], t * hg_n + hg)
+    publish(c, c["crdy"], t * hg_n + hg, flag_stride(s * hg_n))
 
 
 # ---------------------------------------------------------------- wo_a / wo_b
 
 
 @traced
-def stage_woa(c, task, ops, t0, n):
-    """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B."""
+def stage_woa(c, task, ops, t0, n, settle=False):
+    """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B
+    (``settle``: the next token tile's rows, in flight, landed first, so this
+    tile's LDS stores do not wait behind them)."""
     tid, red, d, lane = c["tid"], c["red"], c["d"], c["lane"]
     split = WOA_SPLIT_K
     gemv_mfmas(c, d.group_k, c["xl"], c["xsl"], red, ops, split, tiled=True, rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     mine = tid < WOA_ROWS * n
     tl = fx.min(tid // WOA_ROWS, n - 1)
@@ -583,19 +691,6 @@ def stage_woa(c, task, ops, t0, n):
     gpu.barrier()
 
 
-def woa_loads(c, task):
-    a = c["args"]
-    return gemv_loads(
-        c,
-        a["woa"],
-        a["woa_s"],
-        c["d"].group_k,
-        task * WOA_ROWS,
-        WOA_SPLIT_K,
-        tiled=True,
-    )
-
-
 def wob_loads(c, task, pred=None):
     a = c["args"]
     return gemv_loads(c, a["wob"], a["wob_s"], c["d"].o_rows, task * ROWS, pred=pred)
@@ -611,14 +706,17 @@ def _wob_store(a, t, col, v0, v1):
 
 
 @traced
-def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
+def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False, settle=False):
     """Rows 16 task .. (and 16 task2 .., ``has2``) of wo_b -> bf16 -> out, or
-    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair."""
+    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair
+    (``settle``: as ``stage_woa``'s)."""
     tid, red = c["tid"], c["red"]
     o_rows = c["d"].o_rows
     a = c["args"]
     gemv_mfmas(c, o_rows, c["xl"], c["xsl"], red, ops, rows=n)
     gemv_mfmas(c, o_rows, c["xl"], c["xsl"], red + RED, ops2, rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if const_expr(mark):
         stamp(c, 15)
@@ -670,10 +768,10 @@ def back_lds_members(s: int, d: Dims) -> dict:
 
     @fx.struct
     class SplitLds:
-        q: fx.Array[fx.Int32, d.heads * Q_ROW, 16]
+        q: fx.Array[fx.Int32, d.heads_pad * Q_ROW, 16]
         raw: fx.Array[fx.Int32, ck * REC // 4, 16]
-        p: fx.Array[fx.Int32, d.heads * p_row(d, s), 16]
-        st: fx.Array[fx.Float32, 2 * d.heads * (WAVES // head_groups(d, s)), 16]
+        p: fx.Array[fx.Int32, d.heads_pad * p_row(d, s), 16]
+        st: fx.Array[fx.Float32, 2 * d.heads_pad * (WAVES // head_groups(d, s)), 16]
 
     @fx.struct
     class GemvLds:
@@ -682,19 +780,6 @@ def back_lds_members(s: int, d: Dims) -> dict:
         xsl: fx.Array[fx.Int32, rows * lds_row(d.group_k // 32), 16]
 
     return {"split": SplitLds, "gemv": GemvLds}
-
-
-def back_lds(s: int, d: Dims):
-    """K2's attention LDS: the union of ``back_lds_members``."""
-    m = back_lds_members(s, d)
-    SplitLds, GemvLds = m["split"], m["gemv"]
-
-    @fx.union
-    class BackLds:
-        split: SplitLds  # type: ignore[valid-type]
-        gemv: GemvLds  # type: ignore[valid-type]
-
-    return BackLds
 
 
 def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
@@ -718,6 +803,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "xsl": gml.xsl.ptr,
         "d": d,
         "ratio": key.ratio,
+        "tuned": key.tuned,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},
@@ -823,10 +909,18 @@ def run_back(c, key, bid):
         rocdl.s_waitcnt(vmcnt=0)
         gpu.barrier()
     stamp(c, 8)
-    # wo_a: every token tile of its group's XO rows, the next tile's in flight
+    # wo_a: every token tile of its group's XO rows, the next tile's in flight;
+    # tuned at some widths (``plan.ardy_tiles``) a tile once its own tokens' XO
+    # is in, its flags published at its end, wo_b taking it once every task did
+    ntiles = ardy_tiles(s, c["tuned"])
+    per_tile = ntiles > 1
+    hpc = heads // COMB_HEADS
+    ccopy = flag_copy(c, bid, flag_stride(s * hpc))
+    acopy = flag_copy(c, bid, woa_tasks * ntiles)
     if has_woa:
         grp = woa_t // (woa_tasks // groups)
-        await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
+        n0 = tiles[0][1] if per_tile else s
+        await_flags(c, c["crdy"], n0, lambda u: on_copy(ccopy, u * hpc) + grp)
         stamp(c, 9)
         xo = (
             c["xo"],
@@ -841,18 +935,30 @@ def run_back(c, key, bid):
         regs = rows_loads(c, *xo, *tiles[0])
         for ti in range_constexpr(len(tiles)):
             t0, n = tiles[ti]
+            if const_expr(per_tile and ti > 0):
+                await_flags(
+                    c,
+                    c["crdy"],
+                    n,
+                    lambda u, t0=t0: on_copy(ccopy, (t0 + u) * hpc) + grp,
+                )
+                regs = rows_loads(c, *xo, t0, n)
             rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
-            if const_expr(ti + 1 < len(tiles)):
+            ahead = ti + 1 < len(tiles) and not per_tile
+            if const_expr(ahead):
                 regs = rows_loads(c, *xo, *tiles[ti + 1])
-            stage_woa(c, woa_t, ops, t0, n)
+            stage_woa(c, woa_t, ops, t0, n, settle=c["tuned"] and ahead)
+            if const_expr(per_tile):
+                publish(c, c["ardy"], ti * woa_tasks + woa_t, woa_tasks * ntiles)
         stamp(c, 10)
-        publish(c, c["ardy"], woa_t)
+        if const_expr(not per_tile):
+            publish(c, c["ardy"], woa_t, woa_tasks)
     stamp(c, 3)
     # wo_b
     if const_expr(not early_wob):
         ops1, ops2 = wob_weights()
     stamp(c, 11)
-    await_flags(c, c["ardy"], woa_tasks, lambda u: u)
+    await_flags(c, c["ardy"], woa_tasks, lambda u: on_copy(acopy, u))
     stamp(c, 12)
     x8b = (
         c["x8b"],
@@ -867,10 +973,19 @@ def run_back(c, key, bid):
     regs = rows_loads(c, *x8b, *tiles[0])
     for ti in range_constexpr(len(tiles)):
         t0, n = tiles[ti]
+        if const_expr(per_tile and ti > 0):
+            await_flags(
+                c,
+                c["ardy"],
+                woa_tasks,
+                lambda u, ti=ti: on_copy(acopy, ti * woa_tasks + u),
+            )
+            regs = rows_loads(c, *x8b, t0, n)
         rows_store(c, regs, o_rows // 4, o_rows // 32, c["xl"], c["xsl"], n)
         if const_expr(ti == 0):
             stamp(c, 14)
-        if const_expr(ti + 1 < len(tiles)):
+        ahead = ti + 1 < len(tiles) and not per_tile
+        if const_expr(ahead):
             regs = rows_loads(c, *x8b, *tiles[ti + 1])
         stage_wob(
             c,
@@ -882,6 +997,7 @@ def run_back(c, key, bid):
             t0,
             n,
             mark=ti == 0,
+            settle=c["tuned"] and ahead,
         )
         if const_expr(ti == 0):
             stamp(c, 13)

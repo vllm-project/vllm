@@ -56,7 +56,7 @@ _NUM_BLOCKS = 8
 DEVICE_TYPE = current_platform.device_type
 
 _requires_accelerator = pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="exercises real accelerator stream/event coordination in ECCPUWorker",
 )
 
@@ -849,7 +849,7 @@ def test_init_pins_memory_when_available(pin_available, expected_pinned):
         region.cleanup()
 
 
-def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
+def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm, monkeypatch):
     """``shutdown`` must always call ``region.cleanup`` — and must never
     raise."""
     worker = object.__new__(ECCPUWorker)
@@ -862,10 +862,11 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     worker._inflight_loads = deque()
     worker._stream_pool = []
     worker._event_pool = []
-    worker._shutdown_transfer_backend = MagicMock()
+    shutdown_backend = MagicMock()
+    monkeypatch.setattr(worker, "_shutdown_transfer_backend", shutdown_backend)
 
     worker.shutdown()
-    worker._shutdown_transfer_backend.assert_called_once()
+    shutdown_backend.assert_called_once()
     mock_region.cleanup.assert_called_once()
 
     mock_region.cleanup.side_effect = RuntimeError("boom")

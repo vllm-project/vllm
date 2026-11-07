@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from copy import copy
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -37,11 +38,14 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
     "internlm2",
     "step3_vl",
     "step3p7",
+    "step5",
+    "step5_vl",
     "unlimited-ocr",
     "unlimited_ocr",
 }
 
 _VLLM_TOKENIZERS = {
+    "alpamayo2_super": ("alpamayo2_super", "Alpamayo2SuperTokenizer"),
     # ``cohere`` mode uses the standard cached HF tokenizer; only the
     # renderer (template stage) is replaced with a melody-based one.
     "cohere": ("hf", "CachedHfTokenizer"),
@@ -49,6 +53,7 @@ _VLLM_TOKENIZERS = {
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
     "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
+    "glm5_next": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
@@ -174,6 +179,10 @@ def resolve_tokenizer_args(
                 token=kwargs.get("token"),
             )
 
+    if tokenizer_mode == "mistral":
+        # MistralCommonBackend rejects HF-only keyword arguments, even None.
+        kwargs.pop("code_revision", None)
+
     return tokenizer_mode, tokenizer_name, args, kwargs
 
 
@@ -181,6 +190,10 @@ cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
+    if config.tokenizer == config.model:
+        code_revision = getattr(config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
     return cached_resolve_tokenizer_args(
         config.tokenizer,
         runner_type=config.runner_type,
@@ -241,6 +254,7 @@ def get_tokenizer(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            code_revision=kwargs.get("code_revision"),
             config_format=config_format,
             token=kwargs.get("token"),
         )
@@ -258,6 +272,10 @@ def get_tokenizer(
         tokenizer_cls_ = TokenizersBackend
 
     if config is not None and tokenizer_cls_ is CachedHfTokenizer:
+        if not envs.VLLM_USE_MODELSCOPE and str(tokenizer_name) != requested_name:
+            # AutoTokenizer selects some tokenizer classes by Hub ID
+            config = copy(config)
+            config._name_or_path = requested_name
         # AutoTokenizer otherwise reloads config.json internally. Reuse the
         # config that get_config just loaded successfully so a concurrent Hub
         # cache refresh cannot invalidate the file between the two reads.
@@ -288,6 +306,10 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
+    if model_config.tokenizer == model_config.model:
+        code_revision = getattr(model_config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
 
     return cached_get_tokenizer(
         model_config.tokenizer,

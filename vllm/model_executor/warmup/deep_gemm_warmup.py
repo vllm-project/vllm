@@ -14,7 +14,6 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.distributed.parallel_state import (
     get_dp_group,
-    get_ep_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, override_forward_context
@@ -44,13 +43,17 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MoE
     from vllm.models.kimi_k3.nvidia.model import KimiMoE
+    from vllm.models.minimax_m3.nvidia.model import MiniMaxM3MoE
 
 
 def _generate_optimal_warmup_m_values(
     max_tokens: int, n: int, device: torch.device
 ) -> list[int]:
     """Generate M values that cover all possible DeepGEMM kernel configurations.
-    Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
+
+    The block sizes must mirror the layout candidates of the vendored DeepGEMM
+    heuristic (csrc/jit_kernels/heuristics/sm100.hpp); a stale set here lets
+    serving-time M values select kernel configs the warmup never compiled.
 
     Args:
         max_tokens: Maximum number of tokens to warmup for
@@ -59,7 +62,7 @@ def _generate_optimal_warmup_m_values(
 
     """
     # DeepGEMM's possible block sizes
-    block_ms = [64, 128, 256]
+    block_ms = list(range(16, 257, 16))
     block_ns = list(range(16, min(257, n + 1), 16))
     num_sms = num_compute_units(device.index)
 
@@ -159,18 +162,22 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 # Model construction already imports the model modules. Avoid importing them here.
 def _mega_moe_uses_mega_gate(module: torch.nn.Module) -> "TypeGuard[DeepseekV4MoE]":
-    # DeepSeek-V4 routes with bf16_mega_gate, Kimi K3 with its GateLinear.
+    # DeepSeek-V4 routes with bf16_mega_gate, Kimi K3 and MiniMax M3 with GateLinear.
     dsv4 = sys.modules.get("vllm.models.deepseek_v4.nvidia.model")
     return dsv4 is not None and isinstance(module, dsv4.DeepseekV4MoE)
 
 
 def _mega_moe_may_use_deep_gemm(
     module: torch.nn.Module,
-) -> "TypeGuard[DeepseekV4MoE | KimiMoE]":
+) -> "TypeGuard[DeepseekV4MoE | KimiMoE | MiniMaxM3MoE]":
     if _mega_moe_uses_mega_gate(module):
         return module.use_native_mega_moe
     kimi = sys.modules.get("vllm.models.kimi_k3.nvidia.model")
-    return kimi is not None and isinstance(module, kimi.KimiMoE) and module.use_mega_moe
+    minimax = sys.modules.get("vllm.models.minimax_m3.nvidia.model")
+    return (
+        (kimi is not None and isinstance(module, kimi.KimiMoE))
+        or (minimax is not None and isinstance(module, minimax.MiniMaxM3MoE))
+    ) and module.use_mega_moe
 
 
 FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
@@ -337,26 +344,28 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
 FP8_FP4_MEGA_MOE_WARMUP_CACHE: set[tuple] = set()
 
 
-def _get_fp8_fp4_mega_moe_warmup_key(module: "DeepseekV4MoE | KimiMoE") -> tuple:
+def _get_fp8_fp4_mega_moe_warmup_key(
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE",
+) -> tuple:
     gate = module.gate
     return (
         gate.output_size,
         getattr(gate, "tid2eid", None) is not None,
-        gate.e_score_correction_bias is not None,
+        # MiniMax M3 keeps its routing bias on the MoE, outside the gate.
+        getattr(gate, "e_score_correction_bias", None) is not None,
         getattr(module, "image_sentinel_lo", 0),
         module.experts.has_fused_shared_experts,
     )
 
 
 def _get_fp8_fp4_mega_moe_m_values(
-    module: "DeepseekV4MoE | KimiMoE", max_tokens: int
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE", max_tokens: int
 ) -> list[int]:
-    """Get the largest M per distinct fp8_fp4_mega_moe config and, where used,
+    """Get the M values that reach every MegaMoE kernel and, where used,
     bf16_mega_gate config."""
     dg = _import_deep_gemm()
     gate, experts = module.gate, module.experts
     uses_mega_gate = _mega_moe_uses_mega_gate(module)
-    num_max_tokens_per_rank = experts.get_symm_buffer().num_max_tokens_per_rank
     if module.use_sequence_parallel:
         max_tokens = cdiv(max_tokens, module.tp_size)
 
@@ -369,29 +378,22 @@ def _get_fp8_fp4_mega_moe_m_values(
             if uses_mega_gate and hasattr(dg, "get_bf16_mega_gate_config")
             else {}
         )
-        block_m = dg.get_block_m_for_mega_moe(
-            get_ep_group().world_size,
-            experts.num_experts,
-            num_max_tokens_per_rank,
-            num_tokens,
-            experts.top_k,
-            "fp8xfp4",
-        )
+        key = (tuple(gate_config.items()), experts.get_block_m(num_tokens))
         # Keep the largest M: DeepSeek-V4 only calls bf16_mega_gate above a
         # small token threshold, and a config's largest M is always above it.
-        m_values[(tuple(gate_config.items()), block_m)] = num_tokens
-    return sorted(m_values.values())
+        m_values[key] = num_tokens
+        # One NVFP4 BLOCK_M spans two kernels: decode-shaped launches at small
+        # M and bulk launches at large M. DeepGEMM does not expose the switch.
+        if experts.weight_format.uses_nvfp4_api:
+            m_values.setdefault(("smallest", *key), num_tokens)
+    return sorted(set(m_values.values()))
 
 
 def _deepgemm_fp8_fp4_mega_moe_warmup(
-    module: "DeepseekV4MoE | KimiMoE",
+    module: "DeepseekV4MoE | KimiMoE | MiniMaxM3MoE",
     max_tokens: int,
     pbar: tqdm | None = None,
 ):
-    from vllm.models.deepseek_v4.nvidia.model import (
-        prepare_mega_gate_routing_metadata,
-    )
-
     key = _get_fp8_fp4_mega_moe_warmup_key(module)
     if key in FP8_FP4_MEGA_MOE_WARMUP_CACHE:
         return
@@ -414,6 +416,10 @@ def _deepgemm_fp8_fp4_mega_moe_warmup(
     for num_tokens in m_values:
         inputs: tuple = (hidden_states[:num_tokens],)
         if _mega_moe_uses_mega_gate(module):
+            from vllm.models.deepseek_v4.nvidia.model import (
+                prepare_mega_gate_routing_metadata,
+            )
+
             ids = input_ids[:num_tokens]
             inputs += (
                 ids,
