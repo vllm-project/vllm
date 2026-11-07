@@ -10,6 +10,7 @@ steps:
   - zen-cpu-image-build
   allow_dependency_failure: true
   soft_fail: true
+  optional: true
   device: zen5
   no_plugin: true
   source_file_dependencies:
@@ -63,6 +64,7 @@ steps:
   - zen-cpu-image-build
   allow_dependency_failure: true
   soft_fail: true
+  optional: true
   device: zen5
   no_plugin: true
   source_file_dependencies:
