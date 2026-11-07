@@ -62,6 +62,15 @@ def _verify_num_sequences(value: int, parameter_name: str) -> None:
         )
 
 
+def _verify_structured_outputs(value: object) -> None:
+    if value is not None and not isinstance(value, StructuredOutputsParams):
+        raise VLLMValidationError(
+            "structured_outputs must be a StructuredOutputsParams, got "
+            f"{type(value).__name__}.",
+            parameter="structured_outputs",
+        )
+
+
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
     """Validate ``thinking_token_budget``; return ``None`` if unset."""
     if value is None:
@@ -749,6 +758,7 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+        _verify_structured_outputs(self.structured_outputs)
 
     def _verify_extra_args(self) -> None:
         # JSON accepts arbitrary integers, but the engine's MessagePack
@@ -1520,6 +1530,7 @@ class BeamSearchParams(
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        _verify_structured_outputs(self.structured_outputs)
 
     def configure_logprobs(
         self, sampling_params: SamplingParams, config: "VllmConfig"
