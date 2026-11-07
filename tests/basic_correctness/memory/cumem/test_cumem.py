@@ -693,12 +693,11 @@ def test_cudagraph_pool_sleep(level):
     assert torch.equal(held[1], torch.full_like(x, 5.0))
 
 
-@pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Uses the CuMem allocator")
-def test_model_runner_buffers_survive_sleep(level):
+def test_model_runner_buffers_survive_sleep():
     """Buffers the model runner allocates while it is built (e.g. the MTP
-    drafter's hidden states) are runtime state: offloaded at both levels and
+    drafter's hidden states) are runtime state: offloaded on sleep and
     restored by any wake."""
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -724,16 +723,14 @@ def test_model_runner_buffers_survive_sleep(level):
         _make_model_runner=make_runner,
     )
     worker._maybe_get_memory_pool_context = (
-        lambda tag, **kwargs: gpu_worker.Worker._maybe_get_memory_pool_context(
-            worker, tag, **kwargs
-        )
+        lambda tag: gpu_worker.Worker._maybe_get_memory_pool_context(worker, tag)
     )
     with patch.object(gpu_worker, "init_workspace_manager"):
         gpu_worker.Worker._init_workspace_and_model_runner(worker)
 
     allocator = get_mem_allocator_instance()
     assert {d.tag for d in allocator.pointer_to_data.values()} == {"runtime"}
-    CuMemBackend().suspend(level=level)
+    CuMemBackend().suspend()
     assert mapped_usage(allocator) == 0
     CuMemBackend().resume(tags=["kv_cache"])
     assert torch.equal(built["buffer"], torch.arange(1 << 20, device=DEVICE_TYPE))

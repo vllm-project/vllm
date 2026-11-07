@@ -400,9 +400,7 @@ class Worker(WorkerBase):
     def reset_weights(self) -> None:
         zero_weights(self.model_runner.get_model())
 
-    def _maybe_get_memory_pool_context(
-        self, tag: str, first_use: bool = False
-    ) -> AbstractContextManager:
+    def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
@@ -418,12 +416,7 @@ class Worker(WorkerBase):
         if current_platform.is_cpu():
             return nullcontext()
 
-        allocator = get_mem_allocator_instance()
-        if first_use:
-            assert allocator.get_current_usage() == 0, (
-                "CuMem allocator can only be used for one instance per process."
-            )
-        return allocator.use_memory_pool(tag=tag)
+        return get_mem_allocator_instance().use_memory_pool(tag=tag)
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
@@ -581,7 +574,7 @@ class Worker(WorkerBase):
         )
         # Buffers the runner allocates at construction (e.g. the MTP drafter's
         # hidden states) are runtime state: offload them on sleep.
-        with self._maybe_get_memory_pool_context(tag="runtime", first_use=True):
+        with self._maybe_get_memory_pool_context(tag="runtime"):
             self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
