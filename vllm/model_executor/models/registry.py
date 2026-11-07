@@ -357,7 +357,6 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Alpamayo2Super": ("alpamayo2_super", "Alpamayo2SuperForConditionalGeneration"),
-    "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "AudioFlamingo3ForConditionalGeneration": (
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
@@ -489,6 +488,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "KimiK31ForConditionalGeneration": (
+        "vllm.models.kimi_k3",
+        "KimiK3ForConditionalGeneration",
+    ),
     "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
     "MossTranscribeDiarizeForConditionalGeneration": (
         "moss_transcribe_diarize",
@@ -499,6 +502,11 @@ _MULTIMODAL_MODELS = {
         "LightOnOCRForConditionalGeneration",
     ),
     "Lfm2VlForConditionalGeneration": ("lfm2_vl", "Lfm2VLForConditionalGeneration"),
+    "Lfm3AudioForConditionalGeneration": (
+        "lfm3_audio",
+        "Lfm3AudioForConditionalGeneration",
+    ),
+    "Lfm3VlForConditionalGeneration": ("lfm3_vl", "Lfm3VlForConditionalGeneration"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
@@ -792,6 +800,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
+    "AriaForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalMoEForCausalLM",
+    ),
     "Emu3ForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",

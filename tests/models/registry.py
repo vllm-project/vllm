@@ -839,7 +839,13 @@ _AUTOMATIC_CONVERTED_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "Alpamayo2Super": _HfExamplesInfo("nvidia/Alpamayo2-Super", max_model_len=8192),
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
+    "AriaForConditionalGeneration": _HfExamplesInfo(
+        "rhymes-ai/Aria",
+        min_transformers_version="5.18.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/48907"
+        },
+    ),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf"
     ),
@@ -1067,6 +1073,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-K3",
         trust_remote_code=True,
     ),
+    "KimiK31ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K3.1",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
@@ -1086,6 +1097,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Lfm2VlForConditionalGeneration": _HfExamplesInfo(
         "LiquidAI/LFM2-VL-450M",
     ),
+    "Lfm3AudioForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-Audio-2B"),
+    "Lfm3VlForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-VL-2B"),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         max_model_len=10240,
