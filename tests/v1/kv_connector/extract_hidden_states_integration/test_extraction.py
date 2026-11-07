@@ -73,6 +73,10 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
     "tests.v1.kv_connector.extract_hidden_states_integration"
     ".predictable_llama:PredictableLlamaForCausalLM"
 )
+POSITIONAL_PREDICTABLE_LLAMA_MODEL_CLS = (
+    "tests.v1.kv_connector.extract_hidden_states_integration"
+    ".predictable_llama:PositionalPredictableLlamaForCausalLM"
+)
 
 
 @create_new_process_for_each_test()
@@ -252,6 +256,73 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             atol=1e-5,
         )
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("decode_drafts", [True, False])
+def test_decode_drafts_option_saves_all_positions(
+    predictable_llama_config_path, tmp_path, monkeypatch, decode_drafts
+):
+    """Without decode drafts, every input position still saves its own state."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+    layer_ids = [2, 5]
+
+    llm = LLM(
+        model=predictable_llama_config_path,
+        model_class_overrides={
+            "PredictableLlamaForCausalLM": POSITIONAL_PREDICTABLE_LLAMA_MODEL_CLS,
+        },
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "disable_extract_hidden_states_decode_drafts": not decode_drafts,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": tmp_path},
+        },
+        max_model_len=1024,
+        max_num_batched_tokens=128,
+        enforce_eager=True,
+        trust_remote_code=True,
+        load_format="dummy",
+        per_request_spec_decode_metrics="summary",
+    )
+    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+
+    outputs = llm.generate(
+        ["Short", "A somewhat longer prompt"],
+        SamplingParams(
+            max_tokens=20,
+            temperature=0.0,
+            ignore_eos=True,
+            extra_args={"kv_transfer_params": {"include_output_tokens": True}},
+        ),
+    )
+
+    for output in outputs:
+        num_draft_tokens = output.outputs[0].spec_decode_metrics.num_draft_tokens
+        assert (num_draft_tokens > 0) == decode_drafts
+        output_token_ids = output.outputs[0].token_ids
+        assert len(output_token_ids) == 20
+        obj = example_hidden_states_connector.load_hidden_states(
+            output.kv_transfer_params["hidden_states_path"]
+        )
+        # The final output token was never an input to the model.
+        expected_ids = [*output.prompt_token_ids, *output_token_ids[:-1]]
+        assert obj["token_ids"].tolist() == expected_ids
+        hidden_states = obj["hidden_states"]
+        assert hidden_states.shape == (len(expected_ids), len(layer_ids), hidden_size)
+        expected_states = 32 * torch.tensor(layer_ids).reshape(1, -1, 1) + torch.arange(
+            len(expected_ids)
+        ).reshape(-1, 1, 1)
+        assert torch.equal(
+            hidden_states, expected_states.expand_as(hidden_states).to(hidden_states)
+        )
 
 
 @create_new_process_for_each_test()

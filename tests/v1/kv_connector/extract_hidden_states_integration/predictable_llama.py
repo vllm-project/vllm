@@ -101,6 +101,36 @@ class PredictableLlamaModel(nn.Module, EagleModelMixin):
         return set()
 
 
+class PositionalPredictableLlamaModel(PredictableLlamaModel):
+    """Layer i outputs (32 * i + position), so a misplaced state is detectable.
+
+    The values stay exact in float16 and bfloat16 up to 256.
+    """
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        output = super().forward(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            **extra_layer_kwargs,
+        )
+        if not isinstance(output, tuple):
+            return output
+        hidden_states, aux_hidden_states = output
+        position_values = positions.flatten().unsqueeze(-1)
+        return hidden_states, [
+            32 * layer_hidden + position_values for layer_hidden in aux_hidden_states
+        ]
+
+
 class PredictableLlamaForCausalLM(LlamaForCausalLM):
     """Predictable Llama model for testing.
 
@@ -119,3 +149,15 @@ class PredictableLlamaForCausalLM(LlamaForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Skip weight loading for dummy model."""
         return set()
+
+
+class PositionalPredictableLlamaForCausalLM(PredictableLlamaForCausalLM):
+    """Predictable Llama model whose hidden states also encode the position."""
+
+    def _init_model(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] | None = None,
+    ):
+        return PositionalPredictableLlamaModel(vllm_config=vllm_config, prefix=prefix)

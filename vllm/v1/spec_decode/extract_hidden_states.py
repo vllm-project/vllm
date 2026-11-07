@@ -102,8 +102,8 @@ class ExtractHiddenStatesProposer:
         extract and store hidden states for later use (e.g., KV transfer).
 
         This proposer doesn't actually perform speculation - it returns the
-        sampled tokens as "draft" tokens, ensuring they always verify (match).
-        The main purpose is to cache hidden states, not to speculate.
+        sampled tokens as "draft" tokens, which verify only if the model repeats
+        the token. The main purpose is to cache hidden states, not to speculate.
 
         Args:
             num_speculative_tokens: Number of draft tokens to return per request
