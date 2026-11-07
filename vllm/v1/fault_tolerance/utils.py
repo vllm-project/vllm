@@ -7,7 +7,7 @@ import msgspec
 # Instructions accepted from external callers. The API router and the engine
 # both validate against this; keep it the single source of truth so a new
 # instruction cannot be allowed at one layer and rejected at the other.
-ALLOWED_FT_INSTRUCTIONS = frozenset({"retry", "scale_down"})
+ALLOWED_FT_INSTRUCTIONS = frozenset({"pause", "retry", "scale_down"})
 
 
 class FaultToleranceResult(msgspec.Struct):

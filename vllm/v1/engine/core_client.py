@@ -1493,7 +1493,8 @@ class AsyncMPClient(MPClient):
                 reason="another recovery is in progress",
             )
 
-        status["ft_state"] = "recovering"
+        if ft_request.instruction != "pause":
+            status["ft_state"] = "recovering"
         status["last_ft_request_id"] = ft_request.request_id
         status.pop("ft_error", None)
 

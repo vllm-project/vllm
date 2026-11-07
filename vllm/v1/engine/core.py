@@ -103,6 +103,7 @@ from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FT_UTILITY_METHOD,
     EngineCoreSentinel,
+    FaultTolerancePause,
     fault_tolerant_wrapper,
 )
 from vllm.v1.kv_cache_interface import (
@@ -1957,6 +1958,13 @@ class EngineCoreProc(EngineCore):
             self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.FT_PAUSE:
+            if self.ft_sentinel.pause_requested:
+                self.model_executor.collective_rpc(
+                    "synchronize_device",
+                    timeout=self.ft_sentinel.engine_recovery_timeout_sec,
+                )
+                raise FaultTolerancePause
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type

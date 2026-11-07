@@ -376,6 +376,8 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b"\x04"
     # Sentinel to wake up input_queue.get() during shutdown.
     WAKEUP = b"\x05"
+    # Enter fault recovery at a busy-loop step boundary.
+    FT_PAUSE = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -399,5 +401,5 @@ class EngineStatusType(enum.IntEnum):
     HEALTHY = 0
     DEAD = 1
     UNHEALTHY = 2
-    # Faulted; querying the workers' all2all mask before going UNHEALTHY.
+    # Stopping or faulted; not yet ready for recovery commands.
     DIAGNOSING = 3

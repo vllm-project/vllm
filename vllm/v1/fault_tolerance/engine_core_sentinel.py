@@ -26,6 +26,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
+    EngineCoreRequestType,
     EngineStatusType,
     UtilityOutput,
 )
@@ -51,6 +52,10 @@ FT_UTILITY_METHOD = "handle_fault_tolerance"
 _ROUND_CHECKIN_TIMEOUT_SEC = 10
 
 
+class FaultTolerancePause(Exception):
+    """Controller-requested pause for fault recovery."""
+
+
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
 
@@ -65,6 +70,7 @@ class EngineCoreSentinel:
         self.resumed.set()
         self.status_type = EngineStatusType.HEALTHY
         self.fault_info: str | None = None
+        self.pause_requested = False
         self._initial_dp_size = parallel_config.data_parallel_size
         self._dead_dp_ranks: set[int] = set()
         self._recovery_store: TCPStore | None = None
@@ -112,6 +118,8 @@ class EngineCoreSentinel:
                 success=False,
                 reason=reason,
             )
+        elif ft_request.instruction == "pause":
+            result = self.pause(ft_request)
         elif self.status_type != EngineStatusType.UNHEALTHY:
             reason = (
                 f"[FT] Rejecting {ft_request.instruction} on engine "
@@ -167,6 +175,7 @@ class EngineCoreSentinel:
             # on_executor_failed may have set DEAD concurrently.
             if self.status_type == EngineStatusType.DIAGNOSING:
                 self.status_type = EngineStatusType.UNHEALTHY
+        self.pause_requested = False
         self.fault_info = f"{type(exc).__name__}"
         logger.info(
             "[FT] Engine %d status -> %s:",
@@ -260,6 +269,18 @@ class EngineCoreSentinel:
             timeout=self.engine_recovery_timeout_sec,
         )
         return [max(bits) for bits in zip(*(r["mask"] for r in results))]
+
+    def pause(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        if self.status_type == EngineStatusType.HEALTHY:
+            self.pause_requested = True
+            # Close admission before waiting for the busy loop or device.
+            self.status_type = EngineStatusType.DIAGNOSING
+            self._push_status()
+            self.engine.input_queue.put_nowait((EngineCoreRequestType.FT_PAUSE, None))
+        return FaultToleranceResult(
+            request_id=ft_request.request_id,
+            success=self.status_type != EngineStatusType.DEAD,
+        )
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         # Workers replay masks for the cumulative dead set.
