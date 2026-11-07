@@ -22,6 +22,10 @@ static const char* PYARGS_PARSE = "KKKK";
 static const unsigned long long DEFAULT_MEMCREATE_CHUNK_SIZE =
     (256ULL * 1024ULL * 1024ULL);
 
+// Back new allocations on this thread by one exportable physical allocation
+// instead of chunks, so they can be registered for RDMA as one dmabuf.
+static thread_local bool g_single_allocation = false;
+
 static unsigned long long get_memcreate_chunk_size() {
   const char* env = getenv("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE");
   if (!env) return DEFAULT_MEMCREATE_CHUNK_SIZE;
@@ -121,7 +125,8 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
                     CUmemGenericAllocationHandle* p_memHandle) {
 #else
                     CUmemGenericAllocationHandle** p_memHandle,
-                    unsigned long long* chunk_sizes, size_t num_chunks) {
+                    unsigned long long* chunk_sizes, size_t num_chunks,
+                    bool exportable) {
 #endif
   ensure_context(device);
   // Define memory allocation properties
@@ -147,6 +152,9 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
       fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
+#else
+  prop.requestedHandleType =
+      exportable ? hipMemHandleTypePosixFileDescriptor : hipMemHandleTypeNone;
 #endif
 
 #ifndef USE_ROCM
@@ -300,11 +308,12 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
   return tuple;  // Return the created tuple
 }
 
+// Each chunk is (handle, size[, True if exportable]).
 PyObject* create_tuple_from_c_mixed(unsigned long long a, unsigned long long b,
                                     unsigned long long c,
                                     CUmemGenericAllocationHandle** vec,
                                     unsigned long long* chunk_sizes,
-                                    size_t num_chunks) {
+                                    size_t num_chunks, bool exportable) {
   PyObject* tuple = PyTuple_New(4);
   if (!tuple) {
     return NULL;
@@ -313,12 +322,15 @@ PyObject* create_tuple_from_c_mixed(unsigned long long a, unsigned long long b,
   // PyObject* list = PyList_New(vec.size());
   PyObject* list = PyList_New(num_chunks);
   for (auto i = 0; i < num_chunks; ++i) {
-    PyObject* addr_size_pair = PyTuple_New(2);
+    PyObject* addr_size_pair = PyTuple_New(exportable ? 3 : 2);
     PyObject* addr = PyLong_FromUnsignedLongLong((unsigned long long)(vec[i]));
     PyObject* size =
         PyLong_FromUnsignedLongLong((unsigned long long)(chunk_sizes[i]));
     PyTuple_SetItem(addr_size_pair, 0, addr);
     PyTuple_SetItem(addr_size_pair, 1, size);
+    if (exportable) {
+      PyTuple_SetItem(addr_size_pair, 2, PyBool_FromLong(1));
+    }
     PyList_SetItem(list, i, addr_size_pair);
   }
 
@@ -380,8 +392,10 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   // ``VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE``; otherwise
   // DEFAULT_MEMCREATE_CHUNK_SIZE is used.
   size_t base_chunk = (size_t)get_memcreate_chunk_size();
+  bool exportable = g_single_allocation;
   size_t aligned_chunk_size =
-      ((base_chunk + granularity - 1) / granularity) * granularity;
+      exportable ? alignedSize
+                 : ((base_chunk + granularity - 1) / granularity) * granularity;
   size_t num_chunks =
       (alignedSize + aligned_chunk_size - 1) / aligned_chunk_size;
   CUmemGenericAllocationHandle** p_memHandle =
@@ -422,7 +436,8 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 #else
   PyObject* arg_tuple = create_tuple_from_c_mixed(
       (unsigned long long)device, (unsigned long long)alignedSize,
-      (unsigned long long)d_mem, p_memHandle, chunk_sizes, num_chunks);
+      (unsigned long long)d_mem, p_memHandle, chunk_sizes, num_chunks,
+      exportable);
 #endif
 
   // Call g_python_malloc_callback
@@ -443,7 +458,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   create_and_map(device, alignedSize, d_mem, p_memHandle);
 #else
   create_and_map(device, alignedSize, d_mem, p_memHandle, chunk_sizes,
-                 num_chunks);
+                 num_chunks, exportable);
   free(chunk_sizes);
 #endif
 
@@ -662,7 +677,7 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   }
   for (Py_ssize_t i = 0; i < num_chunks; ++i) {
     PyObject* item = PyList_GetItem(recv_p_memHandle, i);
-    if (item == nullptr || !PyTuple_Check(item) || PyTuple_Size(item) != 2) {
+    if (item == nullptr || !PyTuple_Check(item) || PyTuple_Size(item) < 2) {
       free(p_memHandle);
       free(chunk_sizes);
       PyErr_SetString(
@@ -758,6 +773,7 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
 
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
 #else
+  bool exportable = false;
   Py_ssize_t num_chunks = PyList_Size(recv_p_memHandle);
   CUmemGenericAllocationHandle** p_memHandle =
       (CUmemGenericAllocationHandle**)malloc(
@@ -780,11 +796,14 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
     p_memHandle[i] =
         (CUmemGenericAllocationHandle*)PyLong_AsUnsignedLongLong(addr_py);
     chunk_sizes[i] = PyLong_AsUnsignedLongLong(size_py);
+    if (PyTuple_Size(item) > 2 && PyObject_IsTrue(PyTuple_GetItem(item, 2))) {
+      exportable = true;
+    }
   }
 
   // Address already reserved as a placeholder by sleep(); just remap chunks.
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
-                 num_chunks);
+                 num_chunks, exportable);
 
   free(p_memHandle);
   free(chunk_sizes);
@@ -799,9 +818,23 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+static PyObject* python_set_single_allocation(PyObject* self, PyObject* args) {
+  int enabled = 0;
+  if (!PyArg_ParseTuple(args, "p", &enabled)) {
+    return nullptr;
+  }
+  bool previous = g_single_allocation;
+  g_single_allocation = enabled != 0;
+  return PyBool_FromLong(previous);
+}
+
 static PyMethodDef module_methods[] = {
     {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
+    {"python_set_single_allocation", (PyCFunction)python_set_single_allocation,
+     METH_VARARGS,
+     "Back new allocations by one physical allocation (ROCm only); returns "
+     "the previous setting."},
     {"python_create_and_map", (PyCFunction)python_create_and_map, METH_VARARGS,
      "Create and map memory on the device."},
     {"python_unmap_and_release", (PyCFunction)python_unmap_and_release,

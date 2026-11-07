@@ -44,6 +44,7 @@ try:
     from vllm.cumem_allocator import (
         init_module,
         python_create_and_map,
+        python_set_single_allocation,
         python_unmap_and_release,
     )
     from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
@@ -55,6 +56,7 @@ except ModuleNotFoundError:
     # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
+    python_set_single_allocation = None
     python_unmap_and_release = None
     lib_name = None
 
@@ -391,7 +393,7 @@ class CuMemAllocator:
                     torch.accelerator.synchronize()
 
     @contextmanager
-    def use_memory_pool(self, tag: str | None = None):
+    def use_memory_pool(self, tag: str | None = None, single_allocation: bool = False):
         """A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
@@ -399,6 +401,8 @@ class CuMemAllocator:
         Args:
             tag: The tag of the memory allocation. If None, the default tag
                 will be used.
+            single_allocation: On ROCm, back each allocation by one exportable
+                physical allocation instead of chunks, e.g. for RDMA.
 
         """
         if tag is None:
@@ -422,6 +426,7 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
+        prev_single = python_set_single_allocation(single_allocation)
         try:
             if tag != old_tag:
                 # Older pools of this tag are never reused, so trim them.
@@ -450,6 +455,7 @@ class CuMemAllocator:
                 # TODO: ask for help from PyTorch team to expose this method.
                 self._trim(data[0])
         finally:
+            python_set_single_allocation(prev_single)
             self.current_tag = old_tag
             if expandable_was_enabled:
                 set_alloc_conf(prev_conf)
