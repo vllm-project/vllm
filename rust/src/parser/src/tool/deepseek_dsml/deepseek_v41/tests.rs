@@ -10,9 +10,9 @@ use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
 };
 
-use super::super::test_utils::{collect_stream, tokenizer};
+use super::super::test_utils::{collect_stream, decode, dedicated, ordinary, tokenizer};
 use super::DeepSeekV41ToolParser;
-use crate::tool::{Tool, ToolParser};
+use crate::tool::{Tool, ToolParser, ToolParserError, ToolParserOutput};
 
 fn tools() -> Vec<Tool> {
     vec![Tool {
@@ -140,5 +140,83 @@ fn structural_tag_respects_parameter_schemas_and_strict() {
                 assert!(tag.to_json_string().unwrap().contains("deepseek_v4_1_xml"));
             }
         }
+    }
+}
+
+/// Feed the structural encoding of the concatenated `chunks`, split at the
+/// chunk boundaries, then return the parsed output and the `finish()` result.
+fn parse_then_finish(
+    parser: &mut dyn ToolParser,
+    chunks: &[&str],
+) -> (ToolParserOutput, crate::tool::Result<ToolParserOutput>) {
+    let mut rest = decode(&dedicated(&chunks.concat()));
+    let mut output = ToolParserOutput::default();
+    for chunk in chunks {
+        parser.parse_into(rest.drain_prefix(chunk.len()), &mut output).unwrap();
+    }
+    let finished = parser.finish();
+    (output.coalesce(), finished)
+}
+
+#[test]
+fn spaced_dsml_reports_tool_call_cut_at_finish() {
+    // Cut right after the `｜DSML｜` token and after ` calls`, before `>`.
+    for wire in ["Checking.\n\n<｜DSML｜", "Checking.\n\n<｜DSML｜ calls"] {
+        for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
+            let mut parser =
+                DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+            let (output, finished) =
+                parse_then_finish(parser.as_mut(), &[&wire[..split], &wire[split..]]);
+            assert_eq!(output.normal_text(), "Checking.", "{wire:?} split {split}");
+            assert!(output.calls().is_empty(), "{wire:?} split {split}");
+            assert!(
+                matches!(finished, Err(ToolParserError::IncompleteToolCall { .. })),
+                "{wire:?} split {split}"
+            );
+            let unfinished = parser.reset();
+            assert!(
+                unfinished.contains("<｜"),
+                "{wire:?} split {split}: {unfinished:?}"
+            );
+            assert!(
+                !unfinished.contains("Checking"),
+                "{wire:?} split {split}: {unfinished:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn spaced_dsml_finish_keeps_ordinary_trailing_text() {
+    // A partial `｜DSML｜` spelling cannot come from the dedicated token, which
+    // is emitted whole, so it is text.
+    for wire in [
+        "Done.\n\n",
+        "a < b",
+        "Use <｜User｜> tags",
+        "Checking.\n\n<｜DS",
+    ] {
+        let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+        let output = collect_stream(parser.as_mut(), &[wire]);
+        assert_eq!(output.normal_text(), wire);
+        assert!(output.calls().is_empty());
+    }
+}
+
+#[test]
+fn spaced_dsml_finish_keeps_ordinary_token_opener_as_text() {
+    // An opener spelled with ordinary tokens is text, even when it is cut.
+    for wire in [
+        "Checking.\n\n<｜",
+        "Checking.\n\n<｜DSML｜ calls",
+        "Checking.\n\n<｜DSML｜ calls>\n<｜DSML｜ invo",
+    ] {
+        let mut parser = DeepSeekV41ToolParser::create(&tools(), Arc::new(tokenizer())).unwrap();
+        let mut output = ToolParserOutput::default();
+        parser.parse_into(decode(&ordinary(wire)), &mut output).unwrap();
+        output.append(parser.finish().unwrap());
+        let output = output.coalesce();
+        assert_eq!(output.normal_text(), wire);
+        assert!(output.calls().is_empty());
     }
 }
