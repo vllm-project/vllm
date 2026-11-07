@@ -1339,6 +1339,8 @@ def runai_safetensors_weights_iterator(
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    *,
+    nogds_override: bool | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library.
@@ -1347,20 +1349,28 @@ def fastsafetensors_weights_iterator(
     prepares metadata for the next shard while the consumer yields
     tensors from the current shard.
     """
-    from fastsafetensors.parallel_loader import ParallelLoader
+    if nogds_override is not None and type(nogds_override) is not bool:
+        raise ValueError("nogds_override must be a bool or None")
 
     if torch.distributed.is_initialized():
         pg = torch.distributed.group.WORLD
     else:
         pg = SingleGroup()
 
-    device = torch.device(f"cuda:{current_platform.current_device()}")
-    hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
+    if nogds_override is False and pg.size() > 1:
+        raise ValueError(
+            "fastsafetensors_nogds=False requires a single-rank process group"
+        )
 
-    # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
+    # Use nogds=True for multi-rank groups to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1
+    nogds = pg.size() > 1 if nogds_override is None else nogds_override
+
+    from fastsafetensors.parallel_loader import ParallelLoader
+
+    device = torch.device(f"cuda:{current_platform.current_device()}")
+    hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)

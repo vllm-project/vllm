@@ -106,6 +106,7 @@ class DefaultModelLoader(BaseModelLoader):
             "enable_multithread_load",
             "num_threads",
             "enable_weights_track",
+            "fastsafetensors_nogds",
         }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
@@ -115,6 +116,12 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{load_config.load_format}: "
                 f"{unexpected_keys}"
             )
+
+        if "fastsafetensors_nogds" in extra_config:
+            if load_config.load_format != "fastsafetensors":
+                raise ValueError("fastsafetensors_nogds requires fastsafetensors")
+            if type(extra_config["fastsafetensors_nogds"]) is not bool:
+                raise ValueError("fastsafetensors_nogds must be a bool")
 
         enable_multithread_load = extra_config.get("enable_multithread_load", False)
         if not isinstance(enable_multithread_load, bool):
@@ -315,6 +322,7 @@ class DefaultModelLoader(BaseModelLoader):
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    nogds_override=extra_config.get("fastsafetensors_nogds"),
                 )
             elif self.load_config.load_format == "instanttensor":
                 vllm_config = get_current_vllm_config_or_none()
