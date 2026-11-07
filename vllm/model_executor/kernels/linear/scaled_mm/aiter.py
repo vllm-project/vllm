@@ -346,6 +346,12 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "requires per token activation scales and per channel weight scales.",
             )
 
+        # gfx1250 runs aiter's Gluon per-token Gemm, which has its own configs.
+        from vllm.platforms.rocm import on_gfx1250
+
+        if on_gfx1250():
+            return True, None
+
         # Aiter's per-token Gemm performs better than torch oonly when its
         # tuned.
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
