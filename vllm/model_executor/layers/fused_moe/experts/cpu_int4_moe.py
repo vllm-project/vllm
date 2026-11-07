@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm._cpu_ops  # noqa: F401
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
