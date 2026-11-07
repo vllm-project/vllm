@@ -745,6 +745,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "FLASHMLA_SPARSE_DSV41",
                 "FLASHMLA_MEGA_ATTN_DSV41",
                 "ROCM_FLASHMLA_SPARSE_DSV41",
+                "ROCM_FLASHMLA_MEGA_ATTN_DSV41",
             ):
                 from vllm.models.deepseek_v41.common.ops.cache_utils import (
                     _COMBINE_TOPK_SWA_INDICES_KERNEL,
@@ -1172,10 +1173,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         swa_metadata = cast(
-            "DeepseekSparseSWAMetadata | None",
-            attn_metadata.get(self.swa_cache_layer.prefix),
+            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
         # The fused insert ops require int64 position_ids; the runner's positions

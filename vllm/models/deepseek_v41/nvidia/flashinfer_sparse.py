@@ -305,10 +305,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             else None,
         )
         swa_metadata = cast(
-            "DeepseekSparseSWAMetadata | None",
-            attn_metadata.get(self.swa_cache_layer.prefix),
+            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        assert swa_metadata is not None
 
         swa_only = self.compress_ratio == 0
         # SWA-only layers have no compressed KV cache; consumers read the kv
@@ -713,10 +711,8 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             else None,
         )
         swa_metadata = cast(
-            "DeepseekSparseSWAMetadata | None",
-            attn_metadata.get(self.swa_cache_layer.prefix),
+            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        assert swa_metadata is not None
 
         swa_only = self.compress_ratio == 0
         # SWA-only layers have no compressed KV cache; consumers read the kv
