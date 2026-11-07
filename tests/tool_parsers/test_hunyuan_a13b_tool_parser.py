@@ -82,6 +82,13 @@ def make_tool_call(name, arguments):
             ],
             None,
         ),
+        # Argument literally named "name" must not be mistaken for a
+        # second tool call's name field.
+        (
+            '<tool_calls>[{"name": "create_user", "arguments": {"name": "Alice", "age": 30}}]</tool_calls>',  # noqa: E501
+            [make_tool_call("create_user", {"name": "Alice", "age": 30})],
+            None,
+        ),
     ],
 )
 def test_hunyuan_a13b_tool_parser_extract(
@@ -159,6 +166,17 @@ def test_hunyuan_a13b_tool_parser_extract(
             marks=pytest.mark.xfail(
                 reason="stream parsing not support nested json yet."
             ),
+        ),
+        # Argument literally named "name" must not spawn a phantom tool
+        # call or drop the real call's arguments (regression test).
+        (
+            [
+                '<tool_calls>[{"name": "create_user", ',
+                '"arguments": {"name": "Alice", ',
+                '"age": 30}}]',
+                "</tool_calls>",
+            ],
+            [make_tool_call("create_user", {"name": "Alice", "age": 30})],
         ),
     ],
 )
