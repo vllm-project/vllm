@@ -18,6 +18,16 @@ if not on_gfx950():
     pytest.skip("gfx950 instructions", allow_module_level=True)
 
 from tests.kernels.attention.minimax_m3_nvfp4_ref import dequant  # noqa: E402
+from tests.kernels.attention.test_minimax_m3_index_topk_decode import (  # noqa: E402
+    KINDS,
+    _scores,
+    _topk_out,
+    _width,
+)
+from vllm.models.minimax_m3.amd import indexer_nvfp4  # noqa: E402
+from vllm.models.minimax_m3.amd.ops.index_topk_decode.host import (  # noqa: E402
+    minimax_m3_index_topk_decode_indices,
+)
 from vllm.models.minimax_m3.amd.ops.nvfp4_index_decode import (  # noqa: E402
     host as decode_host,
 )
@@ -502,3 +512,142 @@ def test_index_prefill_matches_reference(
             sl = seen[:, r0:r1]
             _assert_scores(got[sl], want[sl], (q_len, s))
         q_start += q_len
+
+
+@pytest.mark.parametrize(
+    ("num_decodes", "query_len", "scores_with_cp"),
+    [
+        (indexer_nvfp4.CP_MIN_REQS - 1, 8, False),  # DSpark 7 below the gate
+        (indexer_nvfp4.CP_MIN_REQS, 8, True),
+        (1, 4, True),  # DSpark 3 keeps CP at any batch size
+    ],
+)
+def test_decode_cp_gate(monkeypatch, num_decodes, query_len, scores_with_cp):
+    """DSpark 7 steps with fewer than ``CP_MIN_REQS`` requests score locally."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.amd.ops.index_cp import host as index_cp
+
+    cp = SimpleNamespace(max_rows=1024)
+    monkeypatch.setattr(index_cp, "get", lambda: cp)
+    impl = object.__new__(indexer_nvfp4.MiniMaxM3IndexerRocmNvfp4Impl)
+    impl.num_index_heads = 1
+    expected = cp if scores_with_cp else None
+    assert impl._decode_cp(num_decodes, query_len) is expected
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize(
+    "heads,reqs,query_len,max_seq_len",
+    [
+        (1, 16, 1, 1 << 20),
+        (1, 17, 1, 1 << 20),
+        (2, 2, 4, 1 << 20),
+        (2, 3, 4, 1 << 20),
+        (1, 2, 8, 1 << 20),
+        (1, 3, 8, 1 << 20),
+        (1, 2, 8, 0),
+        (1, 5, 4, 65536),
+    ],
+)
+def test_parallel_decode_matches_flydsl(
+    monkeypatch, kind, heads, reqs, query_len, max_seq_len
+):
+    """Both merge paths preserve FlyDSL ordering, causal masks and output guards."""
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.parallel_kernel import (
+        parallel_decode_topk,
+    )
+
+    rows = reqs * query_len
+    lengths = [1024 * BLOCK + query_len // 2, max_seq_len, 0, 1, 128, 65536]
+    seq = torch.tensor((lengths * reqs)[:reqs], dtype=torch.int32)
+    tok = torch.arange(rows) % query_len
+    live = (seq.repeat_interleave(query_len) - query_len + tok + 1).clamp(min=0)
+    gen = torch.Generator().manual_seed(4671)
+    scores = _scores(
+        kind, heads, rows, _width(max_seq_len), (live + BLOCK - 1) // BLOCK, gen
+    )
+    storage = torch.empty(heads, rows + 7, scores.shape[-1], device="cuda")
+    score = storage[:, 3 : 3 + rows]
+    score.copy_(scores)
+    seq = seq.cuda()
+    results = []
+    for enabled in ("0", "1"):
+        monkeypatch.setenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", enabled)
+        output, compared = _topk_out(heads, rows, pad=True)
+        minimax_m3_index_topk_decode_indices(
+            score, output, seq, max_seq_len=max_seq_len, query_len=query_len
+        )
+        results.append(compared)
+    torch.testing.assert_close(results[1], results[0], rtol=0, atol=0)
+    output, compared = _topk_out(heads, rows, pad=True)
+    cols = 64 if max_seq_len == 0 else _width(max_seq_len)
+    parallel_decode_topk(score, output, seq, query_len, cols)
+    torch.testing.assert_close(compared, results[0], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_len", [1, 4, 8])
+@pytest.mark.parametrize("fused", [True, False])
+def test_parallel_decode_graph_replay_resets_counters(monkeypatch, query_len, fused):
+    """Two streams change the same rows between direct selection and merge."""
+    from vllm.models.minimax_m3.amd.ops.index_topk_decode.parallel_kernel import (
+        _buffers,
+        parallel_decode_topk,
+    )
+
+    reqs = 2 if fused else 16 // query_len + 1
+    rows, cols = reqs * query_len, 8192
+    gen = torch.Generator().manual_seed(65032)
+    score = _scores("nan", 1, rows, cols, torch.full((rows,), cols), gen).cuda()
+    # The first length crosses the adaptive boundary within one verify request.
+    # Subsequent replays cross it in both directions and change active CTA count.
+    cases = [
+        [1024 * BLOCK + query_len // 2, cols * BLOCK],
+        [0, 1],
+        [cols * BLOCK, 512 * BLOCK],
+        [128 * BLOCK, 2049 * BLOCK],
+    ]
+    lengths = [
+        torch.tensor((case * reqs)[:reqs], dtype=torch.int32, device="cuda")
+        for case in cases
+    ]
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    graphs, inputs, outputs, counters = [], [], [], []
+    monkeypatch.setenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0")
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            seq = lengths[0].clone()
+            output, compared = _topk_out(1, rows, pad=True)
+            parallel_decode_topk(score, output, seq, query_len, cols)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            parallel_decode_topk(score, output, seq, query_len, cols)
+        graphs.append(graph)
+        inputs.append(seq)
+        outputs.append(compared)
+        counters.append(
+            _buffers(1, rows, cols, score.device.index, stream.cuda_stream)[1]
+        )
+    assert counters[0].data_ptr() != counters[1].data_ptr()
+    snapshots = []
+    for step in range(12):
+        for i, stream in enumerate(streams):
+            case = (step + i) % len(lengths)
+            with torch.cuda.stream(stream):
+                inputs[i].copy_(lengths[case])
+                graphs[i].replay()
+                snapshots.append((case, outputs[i].clone(), counters[i].clone()))
+    for stream in streams:
+        torch.cuda.current_stream().wait_stream(stream)
+    references = []
+    for seq in lengths:
+        output, compared = _topk_out(1, rows, pad=True)
+        minimax_m3_index_topk_decode_indices(
+            score, output, seq, max_seq_len=cols * BLOCK, query_len=query_len
+        )
+        references.append(compared)
+    for case, output, counter in snapshots:
+        torch.testing.assert_close(output, references[case], rtol=0, atol=0)
+        assert torch.count_nonzero(counter).item() == 0

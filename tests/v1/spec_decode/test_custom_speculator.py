@@ -16,6 +16,7 @@ import torch
 import vllm.envs as envs
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config.utils import hash_config
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode import speculator_config as speculator_config_module
@@ -137,7 +138,7 @@ def test_speculator_options(register):
     spec_config = _custom_spec_config("with_options", speculator_options={"seed": 1})
     assert spec_config.speculator_options == {"seed": 1}
     other_seed = _custom_spec_config("with_options", speculator_options={"seed": 2})
-    assert spec_config.compute_hash() != other_seed.compute_hash()
+    assert hash_config(spec_config) != hash_config(other_seed)
 
     with pytest.raises(ValueError, match="unknown option"):
         _custom_spec_config("with_options", speculator_options={"nope": 1})
