@@ -60,6 +60,51 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+## MoE Top-k Kernel Benchmark
+
+The default mode of `benchmarks/kernels/benchmark_fused_topk.py` compares
+standalone Torch, vLLM, and available AITER top-k implementations:
+
+```bash
+mkdir -p ./configs/fused_topk/
+.venv/bin/python benchmarks/kernels/benchmark_fused_topk.py --dtype bfloat16
+```
+
+On NVIDIA CUDA GPUs, `--mode chain` measures a synthetic router GEMM → fused
+top-k → weight accumulation chain, both eagerly and with CUDA Graph replay:
+
+```bash
+.venv/bin/python benchmarks/kernels/benchmark_fused_topk.py \
+  --mode chain --num-tokens 1 16 48 --num-experts 256 --topk 8 \
+  --hidden-size 4096 --num-layers 48 \
+  --gemm-dtype bfloat16 --dtype float32 \
+  --repeats 5 --replays 200 --eager-iters 50 --warmup-ms 2000 \
+  --label candidate --round 0 --output-json topk-chain.jsonl
+```
+
+Inputs are seeded and fixed across layers and replays; router weights differ
+by layer. Buffers are allocated and outputs checked against a Torch reference
+before timing. Each layer uses the same hidden states, renormalizes its top-k
+weights, and adds the weights to an accumulator. A cast from `--gemm-dtype` to
+`--dtype` is included when these differ. This workload excludes expert compute,
+attention, and model loading; its timings are not model throughput results.
+
+Chain mode uses CUDA events around multiple chain invocations and reuses
+buffers without flushing L2. `us_per_chain` includes graph scheduling and
+dependency gaps; eager samples can also include GPU idle time waiting for
+Python launches. `host_us_per_chain` measures the host submission loop and
+excludes the final synchronization, so it is not end-to-end latency. The graph
+always runs before eager within each repeat. `us_per_layer` is the full chain
+interval divided by `--num-layers`, not an isolated top-k kernel time.
+
+Raw samples are appended as JSONL, defaulting to
+`--save-path/topk_chain.jsonl`. Each sample includes shapes, dtypes, iteration
+counts, execution mode, build label, comparison round, run ID, GPU, library
+versions, and the loaded MoE shared library's path and SHA-256. Compare builds
+in separate processes with the same arguments, use distinct `--label` values,
+and alternate their order over multiple `--round` values. Do not load two
+builds into one process. Use `--help` for the full option list.
+
 ## Dataset Overview
 
 <style>
