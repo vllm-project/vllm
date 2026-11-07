@@ -754,8 +754,7 @@ async fn completion_sse_stream(
 fn to_sse_event(chunk: &CompletionSseChunk) -> Event {
     trace!(?chunk, "completion emitting chunk");
     Event::default()
-        .json_data(chunk)
-        .expect("completion chunk must serialize to JSON")
+        .data(serde_json::to_string(chunk).expect("completion chunk must serialize to JSON"))
 }
 
 /// Serialize one OpenAI error payload into one SSE `data:` event.
@@ -763,8 +762,7 @@ fn to_error_sse_event(error: &ApiError) -> Event {
     let response = error.to_error_response();
     trace!(?response, "completion emitting error");
     Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
+        .data(serde_json::to_string(&response).expect("ErrorResponse must serialize to JSON"))
 }
 
 /// Build the terminal OpenAI SSE sentinel event.
