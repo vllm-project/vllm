@@ -1487,10 +1487,31 @@ class KnowLineStrategy(ReadStrategy):
         self.question_types = knowline.knowline_question_types(self.labels)
         model_config = context.engine_client.model_config
         hf_config = getattr(model_config, "hf_config", None)
-        config = getattr(hf_config, "knowline_config", None) or {}
-        self.twice_max_tokens = int(
-            config.get("twice_max_tokens", self.TWICE_MAX_TOKENS)
-        )
+        # init_decisions_state drops the ValueError message when it disables
+        # the decisions endpoints, so a malformed marker logs its reason.
+        config = getattr(hf_config, "knowline_config", None)
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            logger.error(
+                "KnowLine strategy: knowline_config must be a dict, got %r", config
+            )
+            raise ValueError(f"knowline_config must be a dict, got {config!r}")
+        cut = config.get("twice_max_tokens", self.TWICE_MAX_TOKENS)
+        if isinstance(cut, bool) or not isinstance(cut, int) or cut < 0:
+            logger.error(
+                "KnowLine strategy: twice_max_tokens must be a non-negative "
+                "int, got %r",
+                cut,
+            )
+            raise ValueError(
+                "knowline_config.twice_max_tokens must be a non-negative "
+                f"int, got {cut!r}"
+            )
+        # The marker can arrive via --hf-overrides, so the effective cut is
+        # only visible here: log it so serving shows the active layout.
+        self.twice_max_tokens = cut
+        logger.info("KnowLine strategy: twice_max_tokens=%d", cut)
         self.max_model_len = model_config.max_model_len
         self.max_logprobs = model_config.max_logprobs
         self.logprobs_mode = model_config.logprobs_mode

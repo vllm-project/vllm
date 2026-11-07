@@ -1579,6 +1579,7 @@ def knowline_strategy(
     max_model_len=4096,
     max_logprobs=255,
     logprobs_mode="processed_logprobs",
+    knowline_config=None,
 ):
     engine = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -1588,7 +1589,9 @@ def knowline_strategy(
             max_logprobs=max_logprobs,
             is_hybrid=False,
             supports_multimodal_inputs=False,
-            hf_config=SimpleNamespace(knowline_config={}),
+            hf_config=SimpleNamespace(
+                knowline_config={} if knowline_config is None else knowline_config
+            ),
         ),
         vllm_config=SimpleNamespace(
             cache_config=SimpleNamespace(enable_prefix_caching=False)
@@ -1832,9 +1835,57 @@ def test_knowline_reads_twice_under_the_token_bound():
         [q],
         template_kwargs=KNOWLINE_KW,
         twice_max_tokens=0,
+    )["q"]
+    assert over[0].count(ask) == 1 and knowline.READ_AGAIN not in over[0]
+    assert over[0].endswith(f"{ask}\n<assistant>{knowline.ANSWER}")
+    # At exactly the bound the request still doubles.
+    at = knowline.render_prompts(
+        KnowLineMockTok(),
+        "short state",
+        [q],
+        template_kwargs=KNOWLINE_KW,
+        twice_max_tokens=len(over[1]),
     )["q"][0]
-    assert over.count(ask) == 1 and knowline.READ_AGAIN not in over
-    assert over.endswith(f"{ask}\n<assistant>{knowline.ANSWER}")
+    assert at.count(ask) == 2 and knowline.READ_AGAIN in at
+
+
+@pytest.mark.asyncio
+async def test_knowline_marker_disables_read_twice():
+    tokenizer = KnowLineMockTok()
+    # A marker bound of 0 serves the single-pass layout through a read.
+    strategy, engine = knowline_strategy(
+        tokenizer, knowline_config={"twice_max_tokens": 0}
+    )
+    assert strategy.twice_max_tokens == 0
+    q = build_question(
+        "q",
+        "noul",
+        "Offer a refund today?",
+        {"true": "should refund", "false": "should not"},
+        strategy.limits().max_options,
+        labeled=True,
+        question_types=strategy.question_types,
+    )
+    reads = await strategy.read(
+        [q],
+        None,
+        "The parcel is late.",
+        request_id="decision-r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    ((prompt, params, request_id),) = engine.generated
+    text = tokenizer.decode(prompt["prompt_token_ids"])
+    assert knowline.READ_AGAIN not in text and text.count("Offer a refund") == 1
+    (read,) = reads
+    assert read.input_tokens == len(prompt["prompt_token_ids"])
+    # A malformed marker or bound fails loudly instead of drifting.
+    with pytest.raises(ValueError, match="knowline_config must be a dict"):
+        knowline_strategy(tokenizer, knowline_config=False)
+    for bad in (-1, True, "3k", 3000.5):
+        with pytest.raises(ValueError, match="non-negative int"):
+            knowline_strategy(tokenizer, knowline_config={"twice_max_tokens": bad})
 
 
 def test_knowline_discovers_labels_the_reply_starts_with():

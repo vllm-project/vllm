@@ -445,7 +445,18 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   `--max-logprobs 255` (or higher).
 - A request reads the state and the question a second time when the
   single-pass request fits the marker's `twice_max_tokens` bound, 3000 by
-  default, as the checkpoint was trained.
+  default, as the checkpoint was trained. The bound is on the read-once
+  size, which counts the state once, and a request at exactly the bound
+  still doubles; the doubled prompt meters both copies, so
+  `usage.input_tokens` is about twice the logical size under the bound.
+  Setting the bound to 0 serves every request single-pass:
+  `--hf-overrides '{"knowline_config": {"twice_max_tokens": 0}}'`. That
+  layout is out of distribution for a checkpoint trained with re-reading,
+  so answers and probabilities shift. A marker that is not a dict, or a
+  bound that is negative, boolean or not an integer, disables the
+  decisions endpoints, with the reason logged. `--hf-overrides` replaces
+  the whole `knowline_config` field; it does not merge with one the
+  checkpoint already ships.
 - Answers keep the trained shapes: a `noul` answers the probability of true
   alone, with no probabilities or confidence; a `choice`'s and `score`'s
   `confidence` is a certainty proxy, one minus the normalized entropy of
