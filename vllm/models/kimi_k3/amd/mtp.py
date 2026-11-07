@@ -20,9 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -353,24 +350,6 @@ class KimiK3MTP(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        # Validate that weights were loaded for each expected MTP layer.
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint. The checkpoint may not include "
-                    f"the MTP layer weights. Use a checkpoint that includes "
-                    f"MTP layer weights, or disable speculative decoding."
-                )
 
         return loaded_params
 

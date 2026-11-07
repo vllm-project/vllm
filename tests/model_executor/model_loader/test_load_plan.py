@@ -27,6 +27,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finish_reload,
+    lifecycle,
     load_planned,
     plan_loads,
     start_reload,
@@ -46,6 +47,8 @@ BF16 = torch.bfloat16
 @pytest.fixture(autouse=True)
 def _direct_mode(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    # several tests start a reload they never finish; restore the flag after each
+    monkeypatch.setattr(lifecycle, "_weight_update_active", False)
 
 
 def _param(*shape, dtype=BF16, loader=None) -> torch.nn.Parameter:

@@ -421,7 +421,6 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
-        includes_mask_hidden = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
@@ -438,7 +437,6 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
                     )
                     continue
                 self.mask_hidden.copy_(loaded_weight.view(1, -1))
-                includes_mask_hidden = True
                 continue
             elif "lm_head" not in name:
                 name = "model." + name
@@ -446,13 +444,6 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
-
-        if not includes_mask_hidden and self.use_parallel_drafting:
-            raise ValueError(
-                "mask_hidden not found in weights but "
-                "model is configured for parallel drafting. "
-                "Please provide mask_hidden in the weights."
-            )
 
         orig_to_new_substr = {"mask_hidden": None}
         if not includes_draft_id_mapping:

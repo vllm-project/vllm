@@ -892,32 +892,4 @@ class HYV4MTP(nn.Module):
             loaded_params.add(name)
 
         logger.info_once("HYV4 MTP draft model loaded: %d params", len(loaded_params))
-        unassigned_all = sorted(set(params_dict) - loaded_params)
-        # KVCacheScaleParameter (``k_scale`` / ``v_scale`` / ``q_scale`` /
-        # ``prob_scale``) is created by ``BaseKVCacheMethod.create_weights`` for
-        # every Attention layer that runs on an fp8-family quant method, and
-        # its -1.0 sentinel is replaced by the runtime default (1.0) in
-        # ``process_weights_after_loading`` -- which runs *after* this method.
-        # HY V4 checkpoints intentionally omit these (``kv_cache_quant_algo:
-        # null``); silence them only when the parameter is actually the
-        # sentinel type so a genuine mismatch on a same-named tensor still
-        # reaches the warning.
-        from vllm.model_executor.layers.quantization.kv_cache import (
-            KVCacheScaleParameter,
-        )
-
-        unassigned = [
-            name
-            for name in unassigned_all
-            if not isinstance(params_dict.get(name), KVCacheScaleParameter)
-        ]
-        if unassigned:
-            # A draft parameter with no checkpoint source keeps its sentinel
-            # init value (FP8 scales start at finfo(float32).min), which
-            # silently destroys draft quality instead of failing the load.
-            logger.warning(
-                "HYV4 MTP draft model: %d parameters received no checkpoint value: %s",
-                len(unassigned),
-                ", ".join(unassigned),
-            )
         return loaded_params

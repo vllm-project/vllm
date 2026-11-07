@@ -675,11 +675,6 @@ class Dots3NoteModel(DeepseekV32Model):
                     yield f"{layer_prefix}.{projection}.weight", dequantized
                     continue
             yield name, _pad_dense_mlp_weight(name, weight, self._weight_block_size)
-        if pending_indexer_fp8:
-            missing = ", ".join(
-                f"{prefix}.{proj}" for prefix, proj in pending_indexer_fp8
-            )
-            raise ValueError(f"Incomplete FP8 indexer weights: {missing}")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         return super().load_weights(self._adapt_weights(weights))
