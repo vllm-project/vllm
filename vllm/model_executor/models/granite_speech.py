@@ -319,6 +319,19 @@ class GraniteSpeechConformerFeedForward(nn.Module):
         return hidden_states
 
 
+def _shaw_remainder_mask(pos_attn: torch.Tensor, remainder: int) -> torch.Tensor:
+    """Float additive mask. Invalid pairs are ``-finfo.max``, not ``-inf``."""
+    mask_value = -torch.finfo(pos_attn.dtype).max
+    mask = torch.full(
+        (pos_attn.size(-2), pos_attn.size(-1)),
+        mask_value,
+        dtype=pos_attn.dtype,
+        device=pos_attn.device,
+    )
+    mask[:remainder, :remainder] = 0
+    return torch.where(mask == 0, pos_attn, mask)
+
+
 class GraniteSpeechConformerAttention(nn.Module):
     """Attention for conformer blocks using Shaw's relative positional
     embeddings. See the following [paper](https://arxiv.org/pdf/1803.02155)
@@ -376,35 +389,31 @@ class GraniteSpeechConformerAttention(nn.Module):
             bsz, num_blocks, self.context_size, self.num_heads, -1
         ).transpose(2, 3)
 
-        # shaw's relative positional embedding
+        # Per-block Shaw bias. MATH only; FLASH_ATTENTION is not a match for
+        # this additive float mask, and one unblocked SDPA is a different pattern.
         dist = attention_dists.to(hidden_states.device)
         rel_pos_emb = self.rel_pos_emb(dist)
-        pos_attn = (
-            torch.einsum("bnhid,ijd->bnhij", query_states, rel_pos_emb) * self.scale
-        )
-
-        if remainder > 0:
-            # masked attention in the extended block
-            mask = torch.ones(
-                self.context_size,
-                self.context_size,
-                dtype=bool,
-                device=hidden_states.device,
-            )
-            mask[:remainder, :remainder] = 0
-            mask_value = -torch.finfo(pos_attn.dtype).max
-            pos_attn[:, -1, :].masked_fill_(mask, mask_value)
-
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-            out = F.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=pos_attn,
-                scale=self.scale,
-            )
-        out = out.transpose(2, 3).reshape(bsz, hidden_states.shape[1], -1)
-        return self.to_out(out[:, :num_features, :])
+        block_outs: list[torch.Tensor] = []
+        for block_idx in range(num_blocks):
+            query = query_states[:, block_idx]
+            key = key_states[:, block_idx]
+            value = value_states[:, block_idx]
+            pos_attn = torch.einsum("bhid,ijd->bhij", query, rel_pos_emb) * self.scale
+            if remainder > 0 and block_idx == num_blocks - 1:
+                pos_attn = _shaw_remainder_mask(pos_attn, remainder)
+            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+                block_out = F.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=pos_attn,
+                    scale=self.scale,
+                )
+            del pos_attn
+            block_outs.append(block_out)
+        out = torch.cat(block_outs, dim=2)
+        out = out.transpose(1, 2).reshape(bsz, -1, self.num_heads * self.dim_head)
+        return self.to_out(out[:, :num_features])
 
 
 class GraniteSpeechConformerDepthWiseConv1d(nn.Module):

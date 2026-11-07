@@ -55,6 +55,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -83,6 +84,151 @@ def sequence_mask(lengths, maxlen=None, dtype=torch.float32, device=None):
     mask = mask.detach()
 
     return mask.type(dtype).to(device) if device is not None else mask.type(dtype)
+
+
+_SANM_QUERY_CHUNK = 128
+
+
+def _as_lengths(lengths: torch.Tensor | Sequence[int] | int) -> list[int]:
+    if isinstance(lengths, torch.Tensor):
+        with gpu_sync_allowed():
+            return [int(value) for value in lengths.detach().reshape(-1).tolist()]
+    if isinstance(lengths, (list, tuple)):
+        values: list[int] = []
+        for item in lengths:
+            if isinstance(item, torch.Tensor):
+                with gpu_sync_allowed():
+                    values.extend(
+                        int(value) for value in item.detach().reshape(-1).tolist()
+                    )
+            else:
+                values.append(int(item))
+        return values
+    return [int(lengths)]
+
+
+def clip_fake_token_prefixes(
+    hidden_states: torch.Tensor,
+    olens: torch.Tensor | Sequence[int],
+    fake_token_lengths: torch.Tensor | Sequence[int] | None = None,
+) -> list[torch.Tensor]:
+    """Per-clip prefixes merged into the LLM, not a ``B * T_max`` rectangle."""
+    olen_list = _as_lengths(olens)
+    token_lengths = (
+        olen_list if fake_token_lengths is None else _as_lengths(fake_token_lengths)
+    )
+    width = hidden_states.size(1)
+    clips: list[torch.Tensor] = []
+    for index, olen in enumerate(olen_list):
+        limit = token_lengths[index] if index < len(token_lengths) else olen
+        count = max(0, min(int(limit), int(olen), width))
+        clips.append(hidden_states[index, :count])
+    return clips
+
+
+def _mask_is_full_pattern(mask: torch.Tensor | None, query_len: int) -> bool:
+    return bool(
+        mask is not None
+        and mask.dim() >= 2
+        and query_len > 1
+        and mask.size(-2) == query_len
+        and mask.size(-1) > 1
+    )
+
+
+def _slice_query_mask(
+    mask: torch.Tensor | None,
+    row_start: int,
+    row_end: int,
+    query_len: int,
+) -> torch.Tensor | None:
+    if mask is None or not _mask_is_full_pattern(mask, query_len):
+        return mask
+    selector = [slice(None)] * mask.dim()
+    selector[-2] = slice(row_start, row_end)
+    return mask[tuple(selector)]
+
+
+def sanm_masked_context(
+    value: torch.Tensor,
+    scores: torch.Tensor,
+    mask: torch.Tensor | None,
+) -> torch.Tensor:
+    """Masked softmax. A fully masked row is finite zeros after the zero-fill."""
+    if mask is not None:
+        invalid = mask.unsqueeze(1).eq(0)
+        scores = scores.masked_fill(invalid, float("-inf"))
+        probs = torch.softmax(scores, dim=-1).masked_fill(invalid, 0.0)
+    else:
+        probs = torch.softmax(scores, dim=-1)
+    return torch.matmul(probs, value)
+
+
+def _load_flash_varlen():
+    cached = getattr(_load_flash_varlen, "fn", None)
+    if cached is False:
+        return None
+    if cached is not None:
+        return cached
+    try:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+    except Exception:
+        _load_flash_varlen.fn = False
+        return None
+    _load_flash_varlen.fn = flash_attn_varlen_func
+    return flash_attn_varlen_func
+
+
+def pack_olens(
+    hidden_states: torch.Tensor, olens: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+    """Pack valid ``olens`` prefixes into one sequence.
+
+    Do not pass ``olens`` as ``cu_seqlens`` on the padded rectangle.
+    """
+    length_list = _as_lengths(olens)
+    pieces = [
+        hidden_states[index, :length]
+        for index, length in enumerate(length_list)
+        if length > 0
+    ]
+    if not pieces:
+        empty = hidden_states.new_zeros(1, 0, hidden_states.size(-1))
+        cu = torch.zeros(1, dtype=torch.int32, device=hidden_states.device)
+        max_seqlen = torch.zeros((), dtype=torch.int32, device=hidden_states.device)
+        return empty, cu, max_seqlen, length_list
+    packed = torch.cat(pieces, dim=0).unsqueeze(0)
+    kept = [length for length in length_list if length > 0]
+    offsets = [0]
+    for length in kept:
+        offsets.append(offsets[-1] + length)
+    # Host lengths become a CUDA tensor. Keep that copy inside the sync window.
+    with gpu_sync_allowed():
+        cu = torch.tensor(offsets, dtype=torch.int32, device=hidden_states.device)
+        max_seqlen = torch.tensor(
+            max(kept), dtype=torch.int32, device=hidden_states.device
+        )
+    return packed, cu, max_seqlen, length_list
+
+
+def unpack_olens(
+    packed: torch.Tensor,
+    length_list: list[int],
+    max_len: int,
+    like: torch.Tensor,
+) -> torch.Tensor:
+    out = like.new_zeros(len(length_list), max_len, like.size(-1))
+    kept = [length for length in length_list if length > 0]
+    if not kept or packed.numel() == 0:
+        return out
+    pieces = torch.split(packed.squeeze(0), kept, dim=0)
+    slot = 0
+    for index, length in enumerate(length_list):
+        if length <= 0:
+            continue
+        out[index, :length] = pieces[slot]
+        slot += 1
+    return out
 
 
 class LayerNorm(torch.nn.LayerNorm):
@@ -224,24 +370,84 @@ class MultiHeadedAttentionSANM(nn.Module):
         mask_att_chunk_encoder: torch.Tensor = None,
     ):
         n_batch = value.size(0)
-        if mask is not None:
-            if mask_att_chunk_encoder is not None:
-                mask = mask * mask_att_chunk_encoder
-
-            mask = mask.unsqueeze(1).eq(0)
-
-            min_value = -float("inf")
-            scores = scores.masked_fill(mask, min_value)
-            attn = torch.softmax(scores, dim=-1).masked_fill(mask, 0.0)
-        else:
-            attn = torch.softmax(scores, dim=-1)
-
-        p_attn = attn
-        x = torch.matmul(p_attn, value)
-        x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
+        if mask is not None and mask_att_chunk_encoder is not None:
+            mask = mask * mask_att_chunk_encoder
+        context = sanm_masked_context(value, scores, mask)
+        x = context.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
 
         out, _ = self.out_proj(x)
         return out
+
+    def _varlen_key_context(
+        self,
+        q_h: torch.Tensor,
+        k_h: torch.Tensor,
+        v_h: torch.Tensor,
+        mask: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor | None:
+        flash = _load_flash_varlen()
+        if flash is None:
+            return None
+        batch, _, query_len, _ = q_h.shape
+        flat = mask.reshape(mask.shape[0], -1)
+        if flat.size(0) == 1 and batch > 1:
+            flat = flat.expand(batch, -1)
+        lengths = flat.to(dtype=torch.float32).sum(-1).to(dtype=torch.int32)
+        with gpu_sync_allowed():
+            length_list = [int(value) for value in lengths.tolist()]
+        if any(length > query_len for length in length_list):
+            return None
+        q_pieces = []
+        k_pieces = []
+        v_pieces = []
+        for index, length in enumerate(length_list):
+            if length <= 0:
+                continue
+            q_pieces.append(q_h[index, :, :length].transpose(0, 1).contiguous())
+            k_pieces.append(k_h[index, :, :length].transpose(0, 1).contiguous())
+            v_pieces.append(v_h[index, :, :length].transpose(0, 1).contiguous())
+        if not q_pieces:
+            context = q_h.new_zeros(q_h.shape)
+        else:
+            # Zero-length rows are absent from the packed tokens, so they are
+            # absent from cu_seqlens as well.
+            kept = [length for length in length_list if length > 0]
+            offsets = [0]
+            for length in kept:
+                offsets.append(offsets[-1] + length)
+            with gpu_sync_allowed():
+                cu = torch.tensor(offsets, dtype=torch.int32, device=q_h.device)
+            max_seqlen = max(kept)
+            try:
+                # Q stays unscaled; the kernel applies softmax_scale once.
+                packed = flash(
+                    torch.cat(q_pieces, dim=0),
+                    torch.cat(k_pieces, dim=0),
+                    torch.cat(v_pieces, dim=0),
+                    max_seqlen,
+                    cu,
+                    max_seqlen,
+                    cu,
+                    softmax_scale=scale,
+                    causal=False,
+                )
+            except Exception:
+                return None
+            if packed is None:
+                return None
+            context = q_h.new_zeros(q_h.shape)
+            offset = 0
+            for index, length in enumerate(length_list):
+                if length <= 0:
+                    continue
+                context[index, :, :length] = packed[offset : offset + length].transpose(
+                    0, 1
+                )
+                offset += length
+        merged = context.transpose(1, 2).contiguous().view(batch, query_len, -1)
+        projected, _ = self.out_proj(merged)
+        return projected
 
     def forward(
         self,
@@ -252,9 +458,35 @@ class MultiHeadedAttentionSANM(nn.Module):
     ):
         q_h, k_h, v_h, v = self.forward_qkv(hidden_states)
         fsmn_memory = self.forward_fsmn(v, mask, mask_shift_chunk)
-        q_h = q_h * self.d_k ** (-0.5)
-        scores = torch.matmul(q_h, k_h.transpose(-2, -1))
-        att_outs = self.forward_attention(v_h, scores, mask, mask_att_chunk_encoder)
+        # Scale the scores once. A softmax_scale kernel leaves Q unscaled.
+        scale = self.d_k**-0.5
+        query_len = q_h.size(-2)
+        full_pattern = _mask_is_full_pattern(mask, query_len) or _mask_is_full_pattern(
+            mask_att_chunk_encoder, query_len
+        )
+        if mask is not None and mask_att_chunk_encoder is None and not full_pattern:
+            flashed = self._varlen_key_context(q_h, k_h, v_h, mask, scale)
+            if flashed is not None:
+                return flashed + fsmn_memory
+        parts: list[torch.Tensor] = []
+        for row_start in range(0, query_len, _SANM_QUERY_CHUNK):
+            row_end = min(row_start + _SANM_QUERY_CHUNK, query_len)
+            scores = torch.matmul(q_h[:, :, row_start:row_end], k_h.transpose(-2, -1))
+            scores = scores * scale
+            parts.append(
+                self.forward_attention(
+                    v_h,
+                    scores,
+                    _slice_query_mask(mask, row_start, row_end, query_len),
+                    _slice_query_mask(
+                        mask_att_chunk_encoder, row_start, row_end, query_len
+                    ),
+                )
+            )
+        if not parts:
+            att_outs = hidden_states.new_zeros(hidden_states.shape)
+        else:
+            att_outs = torch.cat(parts, dim=1)
         return att_outs + fsmn_memory
 
 
@@ -449,10 +681,15 @@ class EncoderLayer(nn.Module):
         self.norm1 = LayerNorm(size)
         self.norm2 = LayerNorm(size)
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ):
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states = residual + self.self_attn(hidden_states, None, None)
+        hidden_states = residual + self.self_attn(hidden_states, cu_seqlens, max_seqlen)
         residual = hidden_states
         hidden_states = self.norm2(hidden_states)
         hidden_states = residual + self.feed_forward(hidden_states)
@@ -591,12 +828,18 @@ class Transformer(nn.Module):
         hidden_states = self.relu(hidden_states)
         hidden_states, _ = self.linear2(hidden_states)
 
-        olens = None
         olens = (ilens - 1) // self.k + 1
 
         if self.blocks is not None:
-            for layer, block in enumerate(self.blocks):
-                hidden_states = block(hidden_states)
+            packed, cu_seqlens, max_seqlen, length_list = pack_olens(
+                hidden_states, olens
+            )
+            if packed.size(1) > 0:
+                for block in self.blocks:
+                    packed = block(packed, cu_seqlens, max_seqlen)
+                hidden_states = unpack_olens(
+                    packed, length_list, hidden_states.size(1), hidden_states
+                )
         return hidden_states, olens
 
 
@@ -680,7 +923,8 @@ class FunASRModel(nn.Module):
         self,
         speech: torch.Tensor | list[torch.Tensor] | None,
         speech_lengths: torch.Tensor | list[torch.Tensor] | None,
-    ) -> torch.Tensor | None:
+        fake_token_lengths: torch.Tensor | Sequence[int] | None = None,
+    ) -> list[torch.Tensor] | None:
         self.feat_permute = False
 
         if self.feat_permute:
@@ -697,7 +941,11 @@ class FunASRModel(nn.Module):
         encoder_out, encoder_out_lens = self.encoder.audio_adaptor(
             encoder_out, encoder_out_lens
         )
-        return encoder_out
+        if not isinstance(encoder_out, torch.Tensor):
+            return encoder_out
+        return clip_fake_token_prefixes(
+            encoder_out, encoder_out_lens, fake_token_lengths
+        )
 
 
 class FunASRProcessingInfo(BaseProcessingInfo):
@@ -964,8 +1212,11 @@ class FunASRForConditionalGeneration(
 
         speech = audio_input["input_features"]
         speech_lengths = audio_input["speech_lengths"]
+        fake_token_lengths = audio_input["fake_token_lengths"]
         enc_output = self.model.get_encoder_outputs(
-            speech=speech, speech_lengths=speech_lengths
+            speech=speech,
+            speech_lengths=speech_lengths,
+            fake_token_lengths=fake_token_lengths,
         )
 
         return enc_output

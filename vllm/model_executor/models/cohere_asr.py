@@ -76,6 +76,83 @@ from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
 logger = init_logger(__name__)
 
+# Query tiles stay at this length so a conformer block never materializes T×T.
+_REL_POS_QUERY_CHUNK = 128
+
+
+def cohere_chunk_attention_mask(
+    row_start: int,
+    row_end: int,
+    key_len: int,
+    padding_length: torch.Tensor,
+    att_context_size: list[int],
+    att_context_style: str,
+) -> torch.Tensor:
+    """Bool mask for absolute rows ``[row_start, row_end)``. True means fill.
+
+    Same pairs as ``_create_masks`` (regular or chunked_limited, then the
+    query-and-key padding AND) without allocating ``(B, T, T)``.
+    """
+    device = padding_length.device
+    rows = row_end - row_start
+    query_index = torch.arange(row_start, row_end, device=device).view(rows, 1)
+    key_index = torch.arange(key_len, device=device).view(1, key_len)
+    allowed = torch.ones(rows, key_len, dtype=torch.bool, device=device)
+    left, right = int(att_context_size[0]), int(att_context_size[1])
+    if att_context_style == "regular":
+        if left >= 0:
+            allowed = allowed & (key_index >= query_index - left)
+        if right >= 0:
+            allowed = allowed & (key_index <= query_index + right)
+    elif att_context_style == "chunked_limited":
+        if right == -1:
+            if left >= 0:
+                allowed = allowed & (key_index >= query_index - left)
+        else:
+            chunk_size = right + 1
+            left_chunks = left // chunk_size if left >= 0 else 10000
+            query_chunk = torch.div(query_index, chunk_size, rounding_mode="trunc")
+            key_chunk = torch.div(key_index, chunk_size, rounding_mode="trunc")
+            diff = query_chunk - key_chunk
+            allowed = allowed & (diff <= left_chunks) & (diff >= 0)
+    batch = padding_length.shape[0]
+    allowed = allowed.unsqueeze(0).expand(batch, rows, key_len)
+    valid_query = query_index.view(1, rows, 1) < padding_length.view(batch, 1, 1)
+    valid_key = key_index.view(1, 1, key_len) < padding_length.view(batch, 1, 1)
+    return ~(allowed & valid_query & valid_key)
+
+
+def rel_pos_chunk_scores(
+    q_with_bias_u: torch.Tensor,
+    q_with_bias_v: torch.Tensor,
+    key: torch.Tensor,
+    pos: torch.Tensor,
+    scale: float,
+    row_start: int,
+    row_end: int,
+) -> torch.Tensor:
+    """Relative scores for absolute query rows ``[row_start, row_end)``.
+
+    ``bd[r, j] = raw[r, pos_len - key_len - i + j]`` with ``i = row_start + r``.
+    Scale is applied once to ``ac + bd``.
+    """
+    chunk = row_end - row_start
+    if chunk > _REL_POS_QUERY_CHUNK:
+        raise RuntimeError(f"relative score tile has {chunk} queries")
+    ac = torch.matmul(q_with_bias_u[:, :, row_start:row_end], key.transpose(-2, -1))
+    raw = torch.matmul(q_with_bias_v[:, :, row_start:row_end], pos.transpose(-2, -1))
+    key_len = key.size(-2)
+    rows = torch.arange(row_start, row_end, device=raw.device)
+    cols = torch.arange(key_len, device=raw.device)
+    # Absolute row i. Columns j >= key_len are outside this gather.
+    index = (raw.size(-1) - key_len - rows).view(chunk, 1) + cols.view(1, key_len)
+    index = index.view(1, 1, chunk, key_len).expand(
+        raw.shape[0], raw.shape[1], chunk, key_len
+    )
+    bd = raw.gather(-1, index)
+    return (ac + bd) * scale
+
+
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
 
 ISO639_1_SUPPORTED_LANGS = {
@@ -1122,6 +1199,8 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         pos_bias_u: nn.Parameter | torch.Tensor | None,
         pos_bias_v: nn.Parameter | torch.Tensor | None,
         use_bias: bool = True,
+        att_context_size: list[int] | None = None,
+        att_context_style: str = "regular",
     ) -> None:
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(
@@ -1143,6 +1222,10 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         else:
             self.pos_bias_u = pos_bias_u
             self.pos_bias_v = pos_bias_v
+        if att_context_size is None:
+            att_context_size = [-1, -1]
+        self.att_context_size = [int(att_context_size[0]), int(att_context_size[1])]
+        self.att_context_style = att_context_style
 
     def rel_shift(self, x: torch.Tensor) -> torch.Tensor:
         """Compute relative positional encoding.
@@ -1160,6 +1243,34 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         x = x[:, :, 1:].view(b, h, qlen, pos_len)  # (b, h, t1, t2)
         return x
 
+    def _chunk_mask(
+        self,
+        mask: torch.Tensor | None,
+        padding_length: torch.Tensor | None,
+        row_start: int,
+        row_end: int,
+        key_len: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if mask is not None:
+            if mask.dim() >= 2 and mask.size(-2) > 1:
+                selector = [slice(None)] * mask.dim()
+                selector[-2] = slice(row_start, row_end)
+                return mask[tuple(selector)]
+            return mask
+        if padding_length is None:
+            return None
+        if padding_length.device != device:
+            padding_length = padding_length.to(device)
+        return cohere_chunk_attention_mask(
+            row_start,
+            row_end,
+            key_len,
+            padding_length,
+            self.att_context_size,
+            self.att_context_style,
+        )
+
     def forward(
         self,
         query: torch.Tensor,
@@ -1167,15 +1278,21 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         value: torch.Tensor,
         mask: torch.Tensor | None,
         pos_emb: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        padding_length: torch.Tensor | None = None,
+        need_weights: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
 
         Args:
             query (torch.Tensor): (batch, time1, size)
             key (torch.Tensor): (batch, time2, size)
             value(torch.Tensor): (batch, time2, size)
-            mask (torch.Tensor): (batch, time1, time2)
+            mask (torch.Tensor): (batch, time1, time2). Prefer
+                ``padding_length`` so the ``(B, T, T)`` mask is not built.
             pos_emb (torch.Tensor): (batch, time1, size)
+            padding_length: valid frames per batch row. Combined with
+                ``att_context_size`` inside each query chunk.
+            need_weights: concatenate per-chunk probabilities when True.
 
         Returns:
             output (torch.Tensor): transformed `value`
@@ -1196,29 +1313,56 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         # (batch, head, time1, d_k)
         q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
 
-        # compute attention score
-        # first compute matrix a and matrix c
-        # as described in https://arxiv.org/abs/1901.02860 Section 3.3
-        # (batch, head, time1, time2)
-
-        # compute matrix b and matrix d
-        # (batch, head, time1, time2)
-        matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
-        matrix_bd = self.rel_shift(matrix_bd)
-
-        # drops extra elements in matrix_bd to match the key sequence length
-        matrix_bd = matrix_bd[:, :, :, : k.size(-2)]
-        batch, heads, query_len, key_len = matrix_bd.shape
+        query_len = q_with_bias_u.size(-2)
+        key_len = k.size(-2)
         scale = 1.0 / self.s_d_k
-        scores = torch.baddbmm(
-            matrix_bd.flatten(0, 1),
-            q_with_bias_u.flatten(0, 1),
-            k.transpose(-2, -1).flatten(0, 1),
-            beta=scale,
-            alpha=scale,
-        ).view(batch, heads, query_len, key_len)
+        contexts: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        for row_start in range(0, query_len, _REL_POS_QUERY_CHUNK):
+            row_end = min(row_start + _REL_POS_QUERY_CHUNK, query_len)
+            scores = rel_pos_chunk_scores(
+                q_with_bias_u,
+                q_with_bias_v,
+                k,
+                p,
+                scale,
+                row_start,
+                row_end,
+            )
+            chunk_mask = self._chunk_mask(
+                mask,
+                padding_length,
+                row_start,
+                row_end,
+                key_len,
+                scores.device,
+            )
+            if chunk_mask is not None:
+                # -10000, then softmax, then zero. -inf here makes a
+                # fully masked row NaN once the zero-fill is dropped.
+                chunk_mask = chunk_mask.unsqueeze(1)
+                scores = scores.masked_fill(chunk_mask, -INF_VAL)
+                probs = torch.softmax(scores, dim=-1).masked_fill(chunk_mask, 0.0)
+            else:
+                probs = torch.softmax(scores, dim=-1)
+            contexts.append(torch.matmul(probs, v))
+            if need_weights:
+                weights.append(probs)
 
-        return self.forward_attention(v, scores, mask)
+        if contexts:
+            context = torch.cat(contexts, dim=2)
+        else:
+            context = v.new_zeros(v.shape[0], v.shape[1], 0, v.shape[-1])
+        n_batch = value.size(0)
+        merged = context.transpose(1, 2).reshape(n_batch, -1, self.h * self.d_k)
+        output = self.linear_out(merged)
+        if need_weights:
+            if not weights:
+                return output, context.new_zeros(
+                    context.shape[0], context.shape[1], 0, key_len
+                )
+            return output, torch.cat(weights, dim=2)
+        return output
 
 
 class ConformerLayer(torch.nn.Module):
@@ -1255,6 +1399,7 @@ class ConformerLayer(torch.nn.Module):
         pos_bias_u: nn.Parameter | torch.Tensor | None = None,
         pos_bias_v: nn.Parameter | torch.Tensor | None = None,
         att_context_size: list[int] | None = None,
+        att_context_style: str = "regular",
         use_bias: bool = True,
     ) -> None:
         super().__init__()
@@ -1262,6 +1407,7 @@ class ConformerLayer(torch.nn.Module):
             att_context_size = [-1, -1]
 
         self.self_attention_model = self_attention_model
+        self.att_context_style = att_context_style
         self.fc_factor = 0.5
 
         # first feed forward module
@@ -1291,6 +1437,8 @@ class ConformerLayer(torch.nn.Module):
             pos_bias_u=pos_bias_u,
             pos_bias_v=pos_bias_v,
             use_bias=use_bias,
+            att_context_size=att_context_size,
+            att_context_style=att_context_style,
         )
 
         # second feed forward module
@@ -1307,12 +1455,14 @@ class ConformerLayer(torch.nn.Module):
         att_mask: torch.Tensor | None = None,
         pos_emb: torch.Tensor | None = None,
         pad_mask: torch.Tensor | None = None,
+        padding_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Args:
             x (torch.Tensor): input signals (B, T, d_model)
             att_mask (torch.Tensor): attention masks(B, T, T)
             pos_emb (torch.Tensor): (L, 1, d_model)
             pad_mask (torch.tensor): padding mask
+            padding_length: valid frames per row, applied inside each query chunk
         Returns:
             x (torch.Tensor): (B, T, d_model)
 
@@ -1330,6 +1480,7 @@ class ConformerLayer(torch.nn.Module):
                 value=x,
                 mask=att_mask,
                 pos_emb=pos_emb,
+                padding_length=padding_length,
             )
         elif self.self_attention_model == "rel_pos_local_attn":
             x = self.self_attn(
@@ -1482,6 +1633,7 @@ class ConformerEncoder(nn.Module):
                 pos_bias_u=pos_bias_u,
                 pos_bias_v=pos_bias_v,
                 att_context_size=self.att_context_size,
+                att_context_style=self.att_context_style,
                 use_bias=use_bias,
             )
             self.layers.append(layer)
@@ -1566,9 +1718,10 @@ class ConformerEncoder(nn.Module):
         for lth, layer in enumerate(self.layers):
             audio_signal = layer(
                 x=audio_signal,
-                att_mask=att_mask,
+                att_mask=None,
                 pos_emb=pos_emb,
                 pad_mask=pad_mask,
+                padding_length=padding_length,
             )
 
         if self.out_proj is not None:
@@ -1587,47 +1740,10 @@ class ConformerEncoder(nn.Module):
         offset: torch.Tensor | None,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.self_attention_model != "rel_pos_local_attn":
-            att_mask = torch.ones(
-                1, max_audio_length, max_audio_length, dtype=torch.bool, device=device
-            )
-
-            if self.att_context_style == "regular":
-                if att_context_size[0] >= 0:
-                    att_mask = att_mask.triu(diagonal=-att_context_size[0])
-                if att_context_size[1] >= 0:
-                    att_mask = att_mask.tril(diagonal=att_context_size[1])
-            elif self.att_context_style == "chunked_limited":
-                # When right context is unlimited, just the
-                # left side of masking needs to get updated
-                if att_context_size[1] == -1:
-                    if att_context_size[0] >= 0:
-                        att_mask = att_mask.triu(diagonal=-att_context_size[0])
-                else:
-                    chunk_size = att_context_size[1] + 1
-                    # left_chunks_num specifies the number
-                    # of chunks to be visible by each chunk
-                    # on the left side
-                    if att_context_size[0] >= 0:
-                        left_chunks_num = att_context_size[0] // chunk_size
-                    else:
-                        left_chunks_num = 10000
-
-                    chunk_idx = torch.arange(
-                        0, max_audio_length, dtype=torch.int, device=att_mask.device
-                    )
-                    chunk_idx = torch.div(chunk_idx, chunk_size, rounding_mode="trunc")
-                    diff_chunks = chunk_idx.unsqueeze(1) - chunk_idx.unsqueeze(0)
-                    chunked_limited_mask = torch.logical_and(
-                        torch.le(diff_chunks, left_chunks_num), torch.ge(diff_chunks, 0)
-                    )
-                    att_mask = torch.logical_and(
-                        att_mask, chunked_limited_mask.unsqueeze(0)
-                    )
-        else:
-            att_mask = None
-
-        # pad_mask is the masking to be used to ignore paddings
+        # Attention pairs are applied per query chunk in
+        # ``cohere_chunk_attention_mask``. Only the conv padding mask is
+        # materialized here, so this does not allocate ``(B, T, T)``.
+        del att_context_size
         pad_mask = torch.arange(0, max_audio_length, device=device).expand(
             padding_length.size(0), -1
         ) < padding_length.unsqueeze(-1)
@@ -1638,28 +1754,8 @@ class ConformerEncoder(nn.Module):
             ) >= offset.unsqueeze(-1)
             pad_mask = pad_mask_off.logical_and(pad_mask)
 
-        if att_mask is not None:
-            # pad_mask_for_att_mask is the mask which helps to ignore paddings
-            pad_mask_for_att_mask = pad_mask.unsqueeze(1).repeat(
-                [1, max_audio_length, 1]
-            )
-            pad_mask_for_att_mask = torch.logical_and(
-                pad_mask_for_att_mask, pad_mask_for_att_mask.transpose(1, 2)
-            )
-            # att_mask is the masking to be used by MHA
-            # layers to ignore tokens not supposed to be
-            # visible
-            att_mask = att_mask[:, :max_audio_length, :max_audio_length]
-            # paddings should also get ignored, so
-            # pad_mask_for_att_mask is used to ignore their
-            # corresponding scores
-            att_mask = torch.logical_and(
-                pad_mask_for_att_mask, att_mask.to(pad_mask_for_att_mask.device)
-            )
-            att_mask = ~att_mask
-
         pad_mask = ~pad_mask
-        return pad_mask, att_mask
+        return pad_mask, None
 
     def _calc_context_sizes(
         self,
