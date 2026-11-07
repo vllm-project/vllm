@@ -516,6 +516,18 @@ def test_trust_request_mm_kwargs_cli():
     assert args.trust_request_mm_kwargs
 
 
+def test_enable_prompt_token_ids_cli():
+    from vllm.entrypoints.common.cli_args import FrontendArgs
+
+    parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    assert args.enable_prompt_token_ids is False
+
+    args = parser.parse_args(["--enable-prompt-token-ids"])
+    assert args.enable_prompt_token_ids is True
+
+
 def test_attention_config():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

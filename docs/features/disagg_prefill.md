@@ -52,14 +52,14 @@ Now supports 9 types of connectors:
 ## Reusing prefill token ids on decode
 
 !!! note
-    This applies to disaggregated prefill and decode serving on the `/v1/chat/completions` endpoint, using a KV connector configured as in the Usage example above. It is experimental and subject to change.
+    This applies to disaggregated prefill and decode serving on the `/v1/chat/completions` endpoint, using a KV connector configured as in the Usage example above. It is experimental and subject to change. Aggregated servers without a connector ignore forwarded ids by default; `--enable-prompt-token-ids` explicitly opts into direct reuse.
 
 In disaggregated serving, the prefill and decode stages both render the chat prompt from `messages` and tokenize it. Because the prefill stage has already produced the token ids, the decode stage can reuse them and skip its own templating and tokenization. The output is otherwise identical to a normal chat completion: it is detokenized to text, and tool and reasoning parsing, streaming, and structured output constraints all still apply.
 
 The token ids are passed to the decode stage through `kv_transfer_params`, the dict already attached to the decode request to coordinate the transfer:
 
 1. Send the prefill request with `return_token_ids` enabled, and read `prompt_token_ids` from the response.
-2. Set `kv_transfer_params["prompt_token_ids"]` to those ids on the decode request. `messages` is still required, but its content is not tokenized when the ids are present.
+2. Set `kv_transfer_params["prompt_token_ids"]` to those ids on the decode request. `messages` is still required, but its content is not tokenized when reuse is enabled.
 
 ```python
 prefill = client.chat.completions.create(
@@ -77,7 +77,7 @@ decode = client.chat.completions.create(
 )
 ```
 
-If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
+If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. On a server without a KV connector, the ids and any accompanying `prompt_features` are also ignored by default and `messages` is rendered. Set the frontend flag `--enable-prompt-token-ids` to honor the ids without a connector only when callers are trusted to supply ids matching the model tokenizer and rendered prompt. When reuse is enabled, `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
 ## Generate API output modes
 
