@@ -1095,8 +1095,7 @@ DEFAULT_BLOCK_SIZE = [128, 128]
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def per_block_cast_to_fp8(
+def _per_block_cast_to_fp8(
     x: torch.Tensor, block_size: list[int] = DEFAULT_BLOCK_SIZE, use_ue8m0: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     fp8_dtype = current_platform.fp8_dtype()
@@ -1116,6 +1115,26 @@ def per_block_cast_to_fp8(
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
         x_view.size(0), x_view.size(2)
     )
+
+
+@functools.cache
+def _compiled_per_block_cast_to_fp8() -> Callable[
+    ..., tuple[torch.Tensor, torch.Tensor]
+]:
+    # Compiled on first use: a module-level `torch.compile` imports
+    # torch._inductor in every process that imports this module.
+    return torch.compile(
+        _per_block_cast_to_fp8,
+        dynamic=True,
+        backend=current_platform.simple_compile_backend,
+    )
+
+
+@functools.wraps(_per_block_cast_to_fp8, assigned=())
+def per_block_cast_to_fp8(
+    x: torch.Tensor, block_size: list[int] = DEFAULT_BLOCK_SIZE, use_ue8m0: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _compiled_per_block_cast_to_fp8()(x, block_size, use_ue8m0)
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
