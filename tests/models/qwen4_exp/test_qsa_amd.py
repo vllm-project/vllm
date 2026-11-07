@@ -27,6 +27,7 @@ from vllm.models.qwen4_exp.amd.qsa_indexer import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv, round_up
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -396,6 +397,422 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     assert topk_call["num_rows"] == rows
     assert topk_call["strides"] == (logits.stride(0), logits.stride(1))
     assert topk_call["topk_tokens"] == block_topk
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    "num_rows,table_width",
+    [
+        pytest.param(1, 64, id="one_row"),
+        pytest.param(32, 64, id="decode32"),
+        pytest.param(128, 168, id="decode128_wide_table"),
+        pytest.param(1024, 8, id="prefill_chunk"),
+    ],
+)
+def test_qsa_mqa_paged_scores_visible_columns(num_rows: int, table_width: int) -> None:
+    """The scores of each row's visible columns (the ones the top-k reads)
+    match a reference whatever the page table's width; a padding row and
+    unmapped pages are handled."""
+    torch.manual_seed(3)
+    heads, head_dim, page_size, compress_ratio = 4, 128, 64, 4
+    num_requests = 3
+    pages = num_requests * table_width + 1
+    k_cache = torch.randn(
+        pages, page_size, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    page_table = (
+        torch.randperm(pages - 1, device="cuda")[: num_requests * table_width] + 1
+    ).to(torch.int32)
+    page_table = page_table.view(num_requests, table_width).contiguous()
+    page_table[2, table_width // 2 :] = -1  # a request whose late pages are unmapped
+    q = torch.randn(num_rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    token_to_req = torch.arange(num_rows, device="cuda", dtype=torch.int32) % 3
+    token_to_req[-1] = -1  # a padding row
+    capacity = table_width * page_size * compress_ratio
+    sequence_lengths = torch.tensor(
+        [capacity, capacity // 3, capacity], device="cuda", dtype=torch.int32
+    )
+    query_positions = torch.randint(
+        0, capacity, (num_rows,), device="cuda", dtype=torch.int32
+    )
+
+    logits, visible = qsa_ops.qsa_mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+    )
+
+    request = token_to_req.clamp_min(0).long()
+    expected_visible = torch.minimum(
+        (query_positions + 1) // compress_ratio,
+        sequence_lengths[request] // compress_ratio,
+    )
+    expected_visible = torch.where(token_to_req >= 0, expected_visible, 0)
+    torch.testing.assert_close(visible, expected_visible.to(torch.int32))
+    table = page_table[request].long()
+    keys = k_cache[table.clamp_min(0), :, 0, :].flatten(1, 2).float()
+    mapped = (table >= 0).repeat_interleave(page_size, dim=1)
+    scores = torch.einsum("rhd,rnd->rnh", q.float(), keys).relu().sum(-1)
+    reference = torch.where(mapped, scores / math.sqrt(head_dim), -torch.inf)
+    for row in range(num_rows):
+        n = int(visible[row])
+        torch.testing.assert_close(
+            logits[row, :n], reference[row, :n], rtol=1e-4, atol=1e-4
+        )
+
+
+# Qwen3.8-Flash-Next's indexer as served: 4 heads x 128, compressed pages of
+# 1568 // 4 = 392 keys, a block top-k of 2048 // 4 = 512.
+_INDEXER_HEADS, _INDEXER_DIM, _COMPRESSED_PAGE, _RATIO = 4, 128, 392, 4
+_TOKEN_TOPK = 2048
+
+
+def _served_scoring_inputs(
+    requests: list[tuple[int, int]], table_width: int, device: str = "cuda"
+) -> SimpleNamespace:
+    """Scorer inputs in a served step's layout. ``requests`` lists (rows,
+    sequence length) in batch order, and a request's rows are its last
+    positions. Each request maps ``table_width`` shuffled pages except one
+    (-1), the third, fourth or fifth by request; a padding row (request -1,
+    position -1) ends the batch."""
+    generator = torch.Generator(device=device).manual_seed(len(requests))
+    num_pages = len(requests) * table_width + 1
+    pages = torch.randperm(num_pages, generator=generator, device=device)
+    page_table = pages[: len(requests) * table_width].view(-1, table_width)
+    page_table = page_table.to(torch.int32)
+    request_ids = torch.arange(len(requests), device=device)
+    page_table[request_ids, 2 + request_ids % 3] = -1
+    token_to_req = torch.cat(
+        [torch.full((rows,), r) for r, (rows, _) in enumerate(requests)]
+        + [torch.tensor([-1])]
+    )
+    positions = torch.cat(
+        [torch.arange(length - rows, length) for rows, length in requests]
+        + [torch.tensor([-1])]
+    )
+
+    def randn(*shape: int) -> torch.Tensor:
+        return torch.randn(*shape, generator=generator, device=device).to(
+            torch.bfloat16
+        )
+
+    return SimpleNamespace(
+        q=randn(token_to_req.numel(), _INDEXER_HEADS, _INDEXER_DIM),
+        k_cache=randn(num_pages, _COMPRESSED_PAGE, 1, _INDEXER_DIM),
+        page_table=page_table,
+        token_to_req=token_to_req.to(device=device, dtype=torch.int32),
+        positions=positions.to(device),
+        seq_lens=torch.tensor(
+            [length for _, length in requests], dtype=torch.int32, device=device
+        ),
+    )
+
+
+def _served_scores_fp64(
+    inputs: SimpleNamespace, columns: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``visible`` per row from its definition, the fp64 scores [rows,
+    columns] (-inf at unmapped pages, NaN past ``visible``), and the error
+    bound of an fp32 kernel.
+
+    A kernel that forms the bf16 products exactly in fp32 and sums each
+    head's dot product in any order is within gamma(head_dim - 1) *
+    sum_d |q k| of the exact dot (Higham, Accuracy and Stability, 3.1);
+    the ReLU is exact, and summing the heads and dividing by an fp32
+    sqrt(head_dim) add four roundings. Hence |score - fp64| <=
+    (head_dim + 8) * 2**-24 * sum_h sum_d |q k| / sqrt(head_dim), whatever
+    the summation order: the bound holds for the per-row kernel and the MFMA
+    kernel alike, and an error from a wrong key, row, head or page exceeds it
+    by orders of magnitude."""
+    request = inputs.token_to_req.long()
+    valid_request = request >= 0
+    safe_request = request.clamp_min(0)
+    visible = torch.minimum(
+        (inputs.positions + 1) // _RATIO,
+        torch.where(valid_request, inputs.seq_lens[safe_request], 0) // _RATIO,
+    )
+    rows = request.numel()
+    scores = torch.full(
+        (rows, columns), torch.nan, dtype=torch.float64, device=request.device
+    )
+    bound = torch.zeros_like(scores)
+    column = torch.arange(columns, device=request.device)
+    page = inputs.page_table.long()[:, column // _COMPRESSED_PAGE]
+    for r in request[valid_request].unique().tolist():
+        selected = (request == r).nonzero().flatten()
+        keys = inputs.k_cache[
+            page[r].clamp_min(0), column % _COMPRESSED_PAGE, 0
+        ].double()
+        q = inputs.q[selected].double()
+        row_scores = sum((q[:, h] @ keys.T).relu() for h in range(q.shape[1]))
+        row_scores /= math.sqrt(_INDEXER_DIM)
+        magnitude = q.abs().sum(1) @ keys.abs().T
+        row_scores[:, page[r] < 0] = -torch.inf
+        seen = column[None, :] < visible[selected, None]
+        scores[selected] = torch.where(seen, row_scores, torch.nan)
+        bound[selected] = (
+            (_INDEXER_DIM + 8) * 2.0**-24 * magnitude / math.sqrt(_INDEXER_DIM)
+        )
+    return visible.to(torch.int32), scores, bound
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    "requests,table_width",
+    [
+        # the smallest call the MFMA kernel takes
+        pytest.param([(767, 8192)], 6, id="gate768"),
+        # a 128K prompt's last chunk in the sub-chunks a 128 MiB logits
+        # workspace holds at 32832 columns; visible up to 32800 blocks
+        pytest.param([(1021, 131200)], 84, id="chunk1022_128k"),
+        # two prompts in one 16384-row step; a tile straddles them
+        pytest.param([(8100, 8100), (8283, 8283)], 6, id="chunk16384"),
+        # decode rows in the same call: a tile spans many requests
+        pytest.param(
+            [(1, 9000 - i) for i in range(40)] + [(800, 9000)], 6, id="decode40"
+        ),
+    ],
+)
+def test_qsa_mfma_scorer_matches_fp64(
+    requests: list[tuple[int, int]],
+    table_width: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prefill calls of ``qsa_mqa_paged`` take the MFMA kernel, and its scores
+    and the per-row kernel's stay within the fp32 rounding bound of fp64 on
+    every visible column. The top-512 block sets the MFMA scores select equal
+    the fp64 sets on >= 99.9 % of the blocks, and every block they differ in
+    scores within twice the row's bound of the 512th fp64 score (a tie that
+    rounding may break either way)."""
+    inputs = _served_scoring_inputs(requests, table_width)
+    max_seq_len = max(length for _, length in requests)
+    columns = min(
+        round_up(cdiv(max_seq_len, _RATIO), 64), table_width * _COMPRESSED_PAGE
+    )
+    visible, reference, bound = _served_scores_fp64(inputs, columns)
+    launches: list[int] = []
+    launch = qsa_ops.launch_qsa_mqa_paged_mfma
+
+    def recorded(q: torch.Tensor, *args: Any) -> None:
+        launches.append(q.shape[0])
+        launch(q, *args)
+
+    monkeypatch.setattr(qsa_ops, "launch_qsa_mqa_paged_mfma", recorded)
+    seen = ~reference.isnan()
+    finite = reference.isfinite()
+    scored = {}
+    for allow_mfma in (False, True):
+        logits, kernel_visible = qsa_ops.qsa_mqa_paged(
+            inputs.q,
+            inputs.k_cache,
+            inputs.page_table,
+            inputs.token_to_req,
+            inputs.positions,
+            inputs.seq_lens,
+            _RATIO,
+            num_columns=columns,
+            allow_mfma=allow_mfma,
+        )
+        torch.testing.assert_close(kernel_visible, visible, rtol=0, atol=0)
+        logits = logits.double().where(seen, torch.nan)
+        assert torch.equal(logits.isneginf(), reference.isneginf())
+        error = (logits - reference).abs()[finite]
+        assert bool((error <= bound[finite]).all()), (allow_mfma, error.max())
+        scored[allow_mfma] = logits
+    assert launches == [inputs.q.shape[0]]
+
+    block_topk = _TOKEN_TOPK // _RATIO
+    full = visible > block_topk
+    reference = reference[full].masked_fill(~seen[full], -torch.inf)
+    mfma = scored[True][full].masked_fill(~seen[full], -torch.inf)
+    reference_sets = torch.zeros_like(reference, dtype=torch.bool).scatter_(
+        1, reference.topk(block_topk).indices, True
+    )
+    mfma_sets = torch.zeros_like(reference_sets).scatter_(
+        1, mfma.topk(block_topk).indices, True
+    )
+    assert int(full.sum()) > 0
+    agreement = (reference_sets & mfma_sets).sum() / (full.sum() * block_topk)
+    assert agreement >= 0.999, float(agreement)
+    boundary = reference.topk(block_topk).values[:, -1:]
+    band = 2 * bound[full].amax(dim=1, keepdim=True)
+    differing = reference_sets ^ mfma_sets
+    assert not bool((differing & ((reference - boundary).abs() > band)).any())
+
+
+def test_mfma_scorer_gate() -> None:
+    """Only bf16 or fp16 calls of at least 768 rows, cache and query alike."""
+
+    def applies(rows: int, q_dtype: torch.dtype, k_dtype: torch.dtype) -> bool:
+        q = torch.empty((rows, 4, 128), dtype=q_dtype, device="meta")
+        k_cache = torch.empty((1, 392, 1, 128), dtype=k_dtype, device="meta")
+        return qsa_ops.mfma_scorer_applies(q, k_cache)
+
+    bf16, fp16, fp8 = torch.bfloat16, torch.float16, current_platform.fp8_dtype()
+    assert applies(768, bf16, bf16) and applies(16384, fp16, fp16)
+    assert not applies(767, bf16, bf16)
+    assert not applies(768, fp8, fp8) and not applies(768, bf16, fp16)
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+def test_qsa_selection_trims_width_and_splits_decode_rows(
+    monkeypatch: pytest.MonkeyPatch, capturing: bool
+) -> None:
+    """Eager steps score at the width ``max_seq_len`` bounds, captured ones at
+    the page table's; decode rows and prefill rows never share a chunk, and
+    only prefill chunks may take the MFMA kernel."""
+    table_width, compress_ratio, token_topk = 168, 4, 2048
+    capacity = table_width * _COMPRESSED_PAGE
+    calls: list[tuple[int, int, int | None, bool]] = []
+
+    def qsa_mqa_paged(q, *args, num_columns=None, allow_mfma=False, **kwargs):
+        calls.append((args[2].data_ptr(), q.shape[0], num_columns, allow_mfma))
+        rows = q.shape[0]
+        return torch.empty(rows, num_columns), torch.empty(rows, dtype=torch.int32)
+
+    monkeypatch.setattr(qsa_ops, "qsa_mqa_paged", qsa_mqa_paged)
+    monkeypatch.setattr(qsa_ops.current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(qsa_ops.ops, "top_k_per_row_decode", lambda *args: None)
+    monkeypatch.setattr(qsa_ops, "expand_qsa_block_indices_cuda", lambda *a: None)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+
+    rows, num_decode_tokens = 3000, 60
+    token_to_req = torch.zeros(rows, dtype=torch.int32)
+
+    def select(**kwargs: Any) -> list[tuple[int, int, int | None, bool]]:
+        calls.clear()
+        qsa_ops.qsa_select_paged_tokens(
+            torch.empty((rows, 1, 1)),
+            torch.empty((1, _COMPRESSED_PAGE, 1, 1)),
+            torch.empty((1, table_width), dtype=torch.int32),
+            token_to_req,
+            torch.zeros(rows, dtype=torch.int64),
+            torch.zeros(1, dtype=torch.int32),
+            token_topk,
+            compress_ratio,
+            **kwargs,
+        )
+        return [(start - base, n, w, mfma) for start, n, w, mfma in calls]
+
+    base = token_to_req.data_ptr()
+    # 128 MiB of fp32 logits: 509 rows of 65856 columns, 1022 of 32832
+    width, chunk = (capacity, 509) if capturing else (32832, 1022)
+    expected = [(0, 60, width, False)] + [
+        (start * token_to_req.element_size(), min(chunk, rows - start), width, True)
+        for start in range(60, rows, chunk)
+    ]
+    assert select(max_seq_len=131200, num_decode_tokens=num_decode_tokens) == expected
+    # without the decode count every row keeps the per-row kernel
+    assert not any(mfma for *_, mfma in select(max_seq_len=131200))
+    # without max_seq_len the full width, as before
+    assert {w for _, _, w, _ in select()} == {capacity}
+
+
+@requires_qsa_kernels
+def test_qsa_selection_scores_prefill_chunks_with_mfma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 128K mixed step (8 decode rows, a 1500-row chunk) through the real
+    selection: the trimmed width selects what the full width selects, the
+    decode rows and the last 479 rows (below the gate) select exactly
+    what the per-row kernel selects, and the 1022 rows of the MFMA chunk
+    select >= 99.9 % of the same tokens."""
+    requests = [(1, 131200 - i) for i in range(8)] + [(1500, 131200)]
+    inputs = _served_scoring_inputs(requests, table_width=84)
+    launches: list[tuple[int, int]] = []
+    launch = qsa_ops.launch_qsa_mqa_paged_mfma
+    base = inputs.token_to_req.data_ptr()
+
+    def recorded(q, k_cache, page_table, token_to_req, *args: Any) -> None:
+        launches.append((q.shape[0], (token_to_req.data_ptr() - base) // 4))
+        launch(q, k_cache, page_table, token_to_req, *args)
+
+    monkeypatch.setattr(qsa_ops, "launch_qsa_mqa_paged_mfma", recorded)
+
+    def select(**kwargs: Any) -> torch.Tensor:
+        out = qsa_ops.qsa_select_paged_tokens(
+            inputs.q,
+            inputs.k_cache,
+            inputs.page_table,
+            inputs.token_to_req,
+            inputs.positions,
+            inputs.seq_lens,
+            _TOKEN_TOPK,
+            _RATIO,
+            **kwargs,
+        )
+        return out.sort(dim=1).values
+
+    full_width = select()
+    per_row = select(max_seq_len=131200)
+    assert not launches
+    mixed = select(max_seq_len=131200, num_decode_tokens=8)
+    assert launches == [(1022, 8)]
+    assert torch.equal(full_width, per_row)
+    mfma_rows = slice(8, 8 + 1022)
+    outside = torch.ones(mixed.shape[0], dtype=torch.bool, device=mixed.device)
+    outside[mfma_rows] = False
+    assert torch.equal(mixed[outside], per_row[outside])
+
+    def tokens(rows: torch.Tensor) -> torch.Tensor:
+        # column 0 collects the -1 padding
+        selected = rows.new_zeros((rows.shape[0], 131200 + 1), dtype=torch.bool)
+        return selected.scatter_(1, rows.long() + 1, True)[:, 1:]
+
+    reference_tokens = tokens(per_row[mfma_rows])
+    same = (tokens(mixed[mfma_rows]) & reference_tokens).sum()
+    assert same >= 0.999 * reference_tokens.sum()
+
+
+@requires_qsa_kernels
+def test_qsa_mfma_scorer_warmup_covers_served_launches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the warmup, MFMA launches at every decode-prefix offset and at
+    both score widths compile nothing: the selection slices the request map
+    and positions at the decode count, so their alignment varies by step."""
+    from triton import knobs
+
+    from vllm.models.qwen4_exp.amd.ops import qsa_mfma_scorer
+
+    # A page-table width no other test uses: its kernel variant is new here.
+    table_width = 13
+    inputs = _served_scoring_inputs([(3, 4000), (2, 4100), (900, 4200)], table_width)
+    compiles: list[object] = []
+    monkeypatch.setattr(
+        knobs.runtime,
+        "jit_post_compile_hook",
+        lambda *args, **kwargs: compiles.append(kwargs.get("fn")),
+    )
+    widths = qsa_mfma_scorer.warmup_qsa_mqa_paged_mfma(
+        inputs.k_cache,
+        inputs.page_table,
+        num_heads=_INDEXER_HEADS,
+        head_dim=_INDEXER_DIM,
+        compress_ratio=_RATIO,
+        max_num_batched_tokens=8192,
+    )
+    capacity = table_width * _COMPRESSED_PAGE
+    assert widths == (64, capacity) and compiles
+    compiles.clear()
+    for offset in range(4):
+        for columns in (1088, capacity):
+            qsa_ops.qsa_mqa_paged(
+                inputs.q[offset:],
+                inputs.k_cache,
+                inputs.page_table,
+                inputs.token_to_req[offset:],
+                inputs.positions[offset:],
+                inputs.seq_lens,
+                _RATIO,
+                num_columns=columns,
+                allow_mfma=True,
+            )
+    assert compiles == []
 
 
 @requires_qsa_kernels
