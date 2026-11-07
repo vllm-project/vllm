@@ -7,7 +7,8 @@ stock kernel of the stock layer otherwise. Every Hopper kernel reads the
 tensors the stock layer reads, in place (Humming W8A16 dense weights, Humming
 W4A8 experts, the FlashMLA KV and index caches), so every step outside the
 executor and every prefill keeps running the stock forward on a single copy of
-the weights.
+the weights; the small-batch MLA chain's ``wo_a``, which the stock SM90 layer
+keeps only as BF16, is the one exception (``dense.fp8_wo_a``).
 
 Each layer's low-batch kernels are providers (``DenseProvider``), one per layer
 and seam, built with the executor: today ``dense.DenseFp8Linear`` up to
@@ -32,7 +33,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention, DeepseekV4Indexer
 
 from ...ops.o_proj import dsv41_o_proj
-from .dense import DenseFp8Linear
+from .dense import DenseFp8Linear, fp8_wo_a
 from .moe import HopperLowBatchMoE
 
 if TYPE_CHECKING:
@@ -66,6 +67,7 @@ class AttentionLinears:
     wqa_wkv: DenseProvider | None
     wq_b: DenseProvider | None
     index_wq_b: DenseProvider | None
+    wo_a: DenseProvider | None
     wo_b: DenseProvider | None
 
     @classmethod
@@ -79,11 +81,12 @@ class AttentionLinears:
                 if indexer is None
                 else DenseFp8Linear.of("index_wq_b", indexer.wq_b)
             ),
+            wo_a=fp8_wo_a(attn.wo_a, attn.n_local_groups),
             wo_b=DenseFp8Linear.of("wo_b", attn.wo_b),
         )
 
     def all(self) -> list[DenseProvider]:
-        linears = (self.wqa_wkv, self.wq_b, self.index_wq_b, self.wo_b)
+        linears = (self.wqa_wkv, self.wq_b, self.index_wq_b, self.wo_a, self.wo_b)
         return [linear for linear in linears if linear is not None]
 
 

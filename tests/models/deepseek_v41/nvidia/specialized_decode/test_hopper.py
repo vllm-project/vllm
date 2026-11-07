@@ -235,7 +235,9 @@ def test_shared_plans_and_tables_match_the_stock_decode(monkeypatch, graph):
     monkeypatch.setattr(
         sparse_mla, "compute_global_topk_indices_and_lens", counted_compute
     )
-    decode = sparse_mla.FlashMlaDecode(sparse_mla.FlashMlaTables(step.layers))
+    decode = sparse_mla.FlashMlaDecode(
+        sparse_mla.FlashMlaTables(step.layers, small=False)
+    )
 
     expected = step.forward(None)
     assert len({id(plan) for plan in stock_plans}) == 3 * GROUPS
@@ -254,6 +256,209 @@ def test_shared_plans_and_tables_match_the_stock_decode(monkeypatch, graph):
     assert len(builds) == (2 if graph else 1) * len(step.sources)
     assert torch.isfinite(expected).all()
     assert torch.equal(actual, expected)
+
+
+def _assert_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    """Each layer's output within one BF16 ulp of its largest magnitude, and
+    within the relative error of one ulp: the kernels sum in another order
+    than FlashMLA, so elements near zero differ by more of their own ulps."""
+    for layer, (a, e) in enumerate(zip(actual.float(), expected.float())):
+        largest = e.abs().max()
+        ulp = torch.exp2(torch.floor(torch.log2(largest)) - 7)
+        error = (a - e).abs().max()
+        assert error <= ulp, (layer, error.item(), ulp.item())
+        assert (a - e).norm() / e.norm() < 2**-8, layer
+
+
+def _rope_cache(positions: int = 4096) -> torch.Tensor:
+    g = torch.Generator(device=DEVICE).manual_seed(7)
+    angles = torch.rand(positions, 32, generator=g, device=DEVICE) * 6.28
+    return torch.cat([angles.cos(), angles.sin()], -1).contiguous()
+
+
+class ChainStep:
+    """One uniform verify step of ``requests`` 6-row requests at ``context``
+    tokens on one compressed (ratio 2) layer, with SWA windows and slots as
+    the stock metadata derives them (a per-request ring of 256 slots)."""
+
+    def __init__(self, requests: int, context: int, seed: int = 0):
+        g = torch.Generator(device=DEVICE).manual_seed(seed)
+        self.rows = rows = requests * ROWS
+        lens = [context - 37 * b for b in range(requests)]
+        positions = torch.cat([torch.arange(n - ROWS, n, device=DEVICE) for n in lens])
+        request = torch.arange(rows, device=DEVICE) // ROWS
+        ring = 4 * PAGE
+        self.positions = positions
+        self.slots = (request * ring + positions % ring).long()
+        swa = torch.full((rows, WINDOW), -1, dtype=torch.int32, device=DEVICE)
+        columns = torch.arange(WINDOW, device=DEVICE)
+        first = (positions - WINDOW + 1).clamp(min=0)
+        window = first[:, None] + columns
+        swa = torch.where(
+            window <= positions[:, None],
+            (request[:, None] * ring + window % ring).int(),
+            swa,
+        )
+        self.swa_cache = _v4_cache(requests * 4, PAGE, g)
+        pages = -(-context // 2 // PAGE)
+        self.compressed_cache = _v4_cache(requests * pages, PAGE, g)
+        table = torch.randperm(requests * pages, generator=g, device=DEVICE)
+        self.metadata = SimpleNamespace(
+            block_size=PAGE * 2,
+            block_table=table.view(requests, pages).int(),
+        )
+        self.swa_metadata = SimpleNamespace(
+            num_decodes=requests,
+            num_prefills=0,
+            num_decode_tokens=rows,
+            max_decode_query_len=ROWS,
+            is_valid_token=torch.ones(rows, dtype=torch.bool, device=DEVICE),
+            token_to_req_indices=request.int(),
+            decode_swa_indices=swa.unsqueeze(1),
+            decode_swa_lens=(positions + 1).clamp(max=WINDOW).int(),
+            slot_mapping=self.slots,
+            block_size=PAGE,
+        )
+        # Each row's top-k: 70% of a per-request base set, the rest its own.
+        topk = torch.empty(rows, TOP_K, dtype=torch.int32, device=DEVICE)
+        for b, n in enumerate(lens):
+            base = torch.randperm(n // 2, generator=g, device=DEVICE)[:TOP_K]
+            for r in range(ROWS):
+                own = torch.randperm(n // 2, generator=g, device=DEVICE)
+                picks = torch.cat([base[: TOP_K * 7 // 10], own])
+                picks = torch.unique(picks, sorted=False)[:TOP_K]
+                order = torch.randperm(TOP_K, generator=g, device=DEVICE)
+                topk[b * ROWS + r] = picks[order]
+        cos_sin = _rope_cache(context + 1)
+        layer = object.__new__(DeepseekV4FlashMLAAttention)
+        layer.compress_ratio = 2
+        layer.n_local_heads, layer.padded_heads = LOCAL_HEADS, HEADS
+        layer.n_local_groups = 2
+        layer.index_source_layer_id = 2
+        layer.compressed_cache_prefix = "layers.2"
+        layer.topk_indices_buffer = topk
+        layer.scale = HEAD_DIM**-0.5
+        layer.attn_sink = torch.randn(HEADS, generator=g, device=DEVICE)
+        layer.eps = 1e-6
+        layer.q_norm = SimpleNamespace(
+            weight=(1 + 0.1 * torch.randn(1280, generator=g, device=DEVICE)).bfloat16()
+        )
+        layer.kv_norm = SimpleNamespace(
+            weight=(1 + 0.1 * torch.randn(512, generator=g, device=DEVICE)).bfloat16()
+        )
+        layer.rotary_emb = SimpleNamespace(cos_sin_cache=cos_sin)
+        layer.swa_cache_layer = SimpleNamespace(
+            prefix="layers.2.swa_cache", kv_cache=self.swa_cache
+        )
+        layer._compressed_kv_cache = lambda: self.compressed_cache  # type: ignore[method-assign]
+        self.layer = layer
+        self.by_layer = {
+            "layers.2.swa_cache": self.swa_metadata,
+            "layers.2": self.metadata,
+        }
+        self.qr_kv = (
+            torch.randn(rows, 1792, generator=g, device=DEVICE) * 3
+        ).bfloat16()
+        self.q = torch.randn(rows, LOCAL_HEADS, HEAD_DIM, generator=g, device=DEVICE)
+        self.q = self.q.bfloat16()
+
+    def context(self) -> ForwardContext:
+        return ForwardContext(
+            {}, self.by_layer, {}, cudagraph_runtime_mode=CUDAGraphMode.FULL
+        )
+
+
+@pytest.mark.parametrize("context", [8192, 32768])
+@pytest.mark.parametrize("requests", [1, 2, 4, 8])
+def test_chain_decode_matches_flashmla(requests, context):
+    """The ``attn_chain`` steps' MLA (6 to 48 rows): the q/kv norm writing the
+    step's keys into the SWA tile images and the cluster decode on the tile
+    images (query RoPE as it stages the ``wq_b`` output, splits merged in the
+    cluster, inverse RoPE) against ``fused_q_kv_rmsnorm``, the stock q RoPE
+    and KV insert, FlashMLA and ``fused_inv_rope_fp8_quant``: the normalized
+    query and the whole SWA cache bit for bit, the ``wo_a`` input within one
+    BF16 ulp of FlashMLA's; a CUDA graph replay equals the eager step bit for
+    bit."""
+    import vllm._custom_ops  # noqa: F401
+    from vllm.models.common.ops.fused_qk_rmsnorm import fused_q_kv_rmsnorm
+    from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+        fused_inv_rope_fp8_quant,
+    )
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import mla_small
+
+    step = ChainStep(requests, context)
+    layer, rows = step.layer, step.rows
+    cache0 = step.swa_cache.clone()
+    small = mla_small.SmallMlaDecode([layer], DEVICE)
+    small.warm_up()
+
+    def rotate(out: torch.Tensor) -> torch.Tensor:
+        return fused_inv_rope_fp8_quant(
+            out[:, :LOCAL_HEADS],
+            step.positions,
+            layer.rotary_emb.cos_sin_cache,
+            n_groups=2,
+            heads_per_group=LOCAL_HEADS // 2,
+            quantize=False,
+        )[0]
+
+    with override_forward_context(step.context()):
+        # The stock ops.
+        qr_in, kv_in = step.qr_kv.split([1280, 512], -1)
+        qr, kv = fused_q_kv_rmsnorm(
+            qr_in,
+            kv_in,
+            layer.q_norm.weight,
+            layer.kv_norm.weight,
+            layer.eps,
+        )
+        q = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            step.q,
+            kv,
+            step.swa_cache.view(step.swa_cache.shape[0], -1),
+            step.slots,
+            step.positions,
+            layer.rotary_emb.cos_sin_cache,
+            64,
+            layer.eps,
+            PAGE,
+            False,
+            False,
+            True,
+            False,
+        )
+        stock_cache = step.swa_cache.clone()
+        decode = sparse_mla.FlashMlaDecode(sparse_mla.FlashMlaTables([layer], False))
+        decode.tables.reset()
+        flash = torch.zeros(rows, HEADS, HEAD_DIM, dtype=torch.bfloat16, device=DEVICE)
+        decode.run(layer, q, flash)
+        want = rotate(flash)
+
+        def chain() -> tuple[torch.Tensor, torch.Tensor]:
+            small.start()
+            qr = small.chain_norm(layer, step.qr_kv, step.positions, step.swa_metadata)
+            return qr, small.run_chain(
+                layer, step.q, step.swa_metadata, step.metadata, step.positions
+            )
+
+        step.swa_cache.copy_(cache0)
+        qr_chain, rotated = chain()
+        torch.accelerator.synchronize()
+        assert torch.equal(qr_chain, qr)
+        assert torch.equal(step.swa_cache, stock_cache)
+        rotated = rotated.clone()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            qr_graph, rotated_graph = chain()
+        step.swa_cache.copy_(cache0)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(qr_graph, qr)
+        assert torch.equal(step.swa_cache, stock_cache)
+        assert torch.equal(rotated_graph, rotated)
+    torch.accelerator.synchronize()
+    _assert_within_one_ulp(rotated[None], want[None])
 
 
 # ------------------------------------------------------------- dense FP8 GEMMs
@@ -374,6 +579,36 @@ def test_dense_calls_match_the_stock_linear(seam):
         assert _rel(got, stock) < 8e-3, (m, _rel(got, stock))
         if isinstance(dense.choice(seam, m), dense.Cute):
             assert torch.equal(linear(x), got), m
+
+
+def test_fp8_wo_a_matches_the_stock_bmm():
+    """The FP8 copy of the stock BF16 ``wo_a`` (dequantized at load) is exact,
+    and its grouped call on the inverse RoPE's group-major output matches the
+    stock BF16 bmm at every row count; a weight that is not an MXFP8 dequant
+    keeps the bmm."""
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import dense
+
+    groups, rank, k = 2, 1024, 4096
+    w, scales = _mxfp8_weight(groups * rank, k, seed=1)
+    bf16 = _dequant(w, scales).bfloat16()
+    linear = dense.fp8_wo_a(SimpleNamespace(weight=bf16), groups)
+    assert linear is not None
+    not_mxfp8 = SimpleNamespace(weight=bf16 + 2.0**-7 * bf16.abs().max())
+    assert dense.fp8_wo_a(not_mxfp8, groups) is None
+    grouped = bf16.view(groups, rank, k)
+    g = torch.Generator(device=DEVICE).manual_seed(0)
+    served = max(dense.DISPATCH["wo_a"])
+    assert not linear.serves(served + 1)
+    for m in range(1, served + 1):
+        assert linear.serves(m)
+        # The inverse RoPE writes [groups, tokens, k] and returns its transpose.
+        rotated = torch.randn(groups, m, k, generator=g, device=DEVICE).bfloat16()
+        x = rotated.transpose(0, 1)
+        want = torch.einsum("tgk,gnk->tgn", x.float(), grouped.float()).flatten(1)
+        stock = torch.bmm(rotated, grouped.transpose(1, 2)).transpose(0, 1)
+        got = linear(x)
+        assert _rel(got, want) < 5e-3, (m, _rel(got, want))
+        assert _rel(got, stock.flatten(1)) < 8e-3, m
 
 
 # ---------------------------------------------------------------- low-batch MoE

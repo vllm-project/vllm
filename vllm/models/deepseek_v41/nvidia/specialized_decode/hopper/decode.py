@@ -14,10 +14,12 @@ stock layers:
   its own side stream (``HopperBoundaries``). No DeepGEMM kernel runs.
 - ``DeepseekV4FlashMLAAttention`` layers run ``HopperAttentionStep``, whose
   sparse MLA shares one FlashMLA plan per layer type and one global top-k
-  table per index source (``sparse_mla``).
+  table per index source (``sparse_mla``), or up to ``mla_small.MAX_ROWS``
+  uniform rows runs the small-batch chain (``mla_small``, ``attn_chain``).
 - The dense FP8 linears (``fused_wqa_wkv``, ``wq_b``, the indexer's ``wq_b``,
-  ``wo_b`` and the shared expert's) run on the low-batch CuTe DSL or tuned
-  Humming calls up to ``dense.MAX_ROWS`` rows (``dense``, ``kernels``).
+  ``wo_b`` and the shared expert's, and on the chain ``wo_a`` on an FP8 copy)
+  run on the low-batch CuTe DSL or tuned Humming calls up to
+  ``dense.MAX_ROWS`` rows (``dense``, ``kernels``).
 - The MoE runs the low-batch kernel (``moe``) up to ``moe.MAX_ROWS`` rows,
   whose top-k reduction the next boundary's fused all-reduce finalizes.
 """
@@ -43,7 +45,7 @@ from ..runtime.decode import (
     SpecializedDecode,
     captures_pure_decode,
 )
-from . import kernels
+from . import attn_chain, kernels
 from .dense import MAX_ROWS as DENSE_MAX_ROWS
 from .mhc import SeamPre
 from .sparse_mla import FlashMlaDecode, FlashMlaTables
@@ -117,6 +119,7 @@ class HopperSpecializedDecode(SpecializedDecode):
         self.all_gather = None
         self.candidates = None
         self.mla_tables = tables = FlashMlaTables(attns)
+        self.small_mla = tables.small
         mla = FlashMlaDecode(tables)
         self.layer_plans = [
             LayerPlan(
@@ -211,6 +214,7 @@ class HopperSpecializedDecode(SpecializedDecode):
         return self._head(residual, state.pre, aux)
 
     def _join_side_work(self, error: bool = False) -> None:
+        self.mla_tables.join()
         if error:
             assert self.mhc_stream is not None
             torch.cuda.current_stream().wait_stream(self.mhc_stream)
@@ -243,6 +247,11 @@ class HopperSpecializedDecode(SpecializedDecode):
                     moe_layers += 1
             # The mHC pre's kernels are the same in every layer.
             self.boundaries.warm_up(self.layer_plans[0].layer, rows)
+            if self.small_mla is not None:
+                self.small_mla.warm_up()
+            chained = [p.attention for p in self.layer_plans if p.attention.chain]
+            for eps in {attention.attn.eps for attention in chained}:
+                attn_chain.warm_up(eps)
             for linear, shape_rows in by_shape.values():
                 for m in sorted(shape_rows):
                     linear.warm_up(m)

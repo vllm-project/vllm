@@ -18,6 +18,10 @@ in shared memory, which bounds it to 48 rows. Every kernel here
 uses programmatic dependent launch. CuTe kernels compile, and Humming kernels
 JIT-compile, on first use: the executor warms both up before CUDA graph
 capture (``warm_up``).
+
+``wo_a`` is the exception to reading in place: the stock SM90 layer keeps it
+only as BF16, dequantized at load. ``fp8_wo_a`` rebuilds the exact FP8 weight
+and its scales in the Humming layout, a second copy of the weight.
 """
 
 from functools import cache
@@ -109,6 +113,8 @@ _WQA_F16 = Cute(2, 8, 5, 2, 2, 8, 0)
 _WQA_BF16 = Cute(1, 16, 3, 2, 4, 4, 1)
 _WQB = Cute(1, 16, 5, 2, 4, 1, 0)
 _IWQB = Cute(1, 16, 4, 2, 4, 2, 0)
+_WOA_F16 = Cute(1, 16, 4, 2, 4, 4, 0)
+_WOA_BF16 = Cute(1, 16, 3, 2, 4, 3, 1)
 _WOB_F16 = Cute(1, 16, 4, 2, 4, 2, 0)
 _WOB_F16N = Cute(1, 16, 4, 1, 2, 2, 0)
 _WOB_BF16 = Cute(1, 16, 4, 1, 2, 1, 1)
@@ -148,6 +154,15 @@ DISPATCH: dict[str, dict[int, Cute | dict]] = {
         96: _wgmma(96, 64, 3, True, 2),
         144: _wgmma(144, 64, 3, True, 2),
     },
+    "wo_a": {
+        **dict.fromkeys((1, 2, 3, 4, 6, 8), _WOA_F16),
+        5: Cute(1, 16, 4, 1, 2, 4, 0),
+        7: Cute(2, 8, 4, 2, 2, 8, 0),
+        **dict.fromkeys((9, 10), Cute(1, 16, 3, 2, 4, 4, 1)),
+        **dict.fromkeys((11, 12, 14, 15, 16), _WOA_BF16),
+        **dict.fromkeys((13, 24), Cute(1, 16, 4, 1, 2, 3, 1)),
+        48: Cute(1, 8, 4, 1, 2, 3, 1),
+    },
     "wo_b": {
         **dict.fromkeys((1, 2, 3, 4, 7, 8), _WOB_F16),
         **dict.fromkeys((5, 6), _WOB_F16N),
@@ -184,7 +199,7 @@ DISPATCH: dict[str, dict[int, Cute | dict]] = {
 # From 6 rows, the CTAs of a K slice share X by cluster multicast: 4 per
 # cluster where the K split allows (measured -0.7 to -1.2 us per layer at 6-16
 # rows in the decode-layer chain; no gain at 1 row).
-for _seam in ("wq_b", "wo_b"):
+for _seam in ("wq_b", "wo_b", "wo_a"):
     for _rows, _c in DISPATCH[_seam].items():
         if isinstance(_c, Cute) and 6 <= _rows <= 16:
             DISPATCH[_seam][_rows] = _c._replace(cn=min(4, 8 // _c.sk))
@@ -250,16 +265,18 @@ def _compiled(nt: int, c: Cute, xr: int):
 
 
 class DenseFp8Linear:
-    """A low-batch call of one Humming W8A16 linear.
+    """A low-batch call of one Humming W8A16 linear (or the grouped ``wo_a``).
 
     Args:
         seam: the ``DISPATCH`` key.
         weight: Humming int32 ``[Kp / 16, Np * 4]``.
         weight_scale: Humming UE8M0 ``[Kp / 32, Np]``.
         n: output columns.
-        k: input columns.
+        k: input columns (per group).
         humming: the linear's Humming kernel (``layer_config``,
             ``compute_config``, ``locks``), or None for CuTe only.
+        n_group: grouped mode: output columns ``[g * n_group, (g + 1) *
+            n_group)`` read input columns ``[g * k, (g + 1) * k)``.
 
     """
 
@@ -271,9 +288,10 @@ class DenseFp8Linear:
         n: int,
         k: int,
         humming=None,
+        n_group: int | None = None,
     ) -> None:
         assert n % 64 == 0 and k % 32 == 0
-        self.seam, self.n, self.k = seam, n, k
+        self.seam, self.n, self.k, self.n_group = seam, n, k, n_group
         self.weight, self.weight_scale = weight, weight_scale
         self._w = weight.view(torch.int32).reshape(-1)
         self._s = weight_scale.view(torch.uint8).reshape(-1)
@@ -363,7 +381,13 @@ class DenseFp8Linear:
 
         rows = x.shape[0]
         assert x.stride(-1) == 1 and out.stride(-1) == 1
-        span = x.shape[1]
+        if x.dim() == 3:
+            assert self.n_group is not None and x.shape[1] * self.n_group == self.n
+            group_stride = x.stride(1)
+            span = (x.shape[1] - 1) * group_stride + x.shape[2]
+        else:
+            group_stride = self.k if self.n_group else 0
+            span = x.shape[1]
         fn = _compiled((rows + 7) // 8, c, _staged_rows(self.k, c.sk))
         ldx, ldy = x.stride(0), out.stride(0)
         fn(
@@ -377,7 +401,79 @@ class DenseFp8Linear:
             self._np,
             ldx,
             ldy,
-            self.n,
-            0,
+            self.n_group or self.n,
+            group_stride,
             current_cu_stream(),
         )
+
+
+def fp8_wo_a(wo_a: nn.Module, n_groups: int) -> DenseFp8Linear | None:
+    """The grouped FP8 call of the stock SM90 BF16 ``wo_a`` (``[n_groups *
+    o_lora_rank, k]``), or None when the weight is not an exact MXFP8 dequant.
+
+    Each 1 x 32 group's scale is the smallest power of two that keeps it within
+    the e4m3 range; any exact split gives the same products, since the kernel
+    applies the scale exactly. The FP8 weight and scales are converted to the
+    Humming layout as the stock Humming linears' are.
+    """
+    w = wo_a.weight
+    if w.dtype != torch.bfloat16 or w.dim() != 2 or w.shape[0] % n_groups:
+        return None
+    n, k = w.shape
+    if n % 64 or k % 32:
+        return None
+    groups = w.float().view(n, k // 32, 32)
+    amax = groups.abs().amax(-1).clamp_min(2.0**-126)
+    exponent = torch.ceil(torch.log2(amax / 448.0)).clamp(-127, 127)
+    fp8 = (groups / torch.exp2(exponent).unsqueeze(-1)).to(torch.float8_e4m3fn)
+    back = fp8.float() * torch.exp2(exponent).unsqueeze(-1)
+    if not torch.equal(back.view(n, k).to(w.dtype), w):
+        logger.warning_once(
+            "The Hopper executor keeps wo_a on the BF16 bmm: its weight is not "
+            "an exact MXFP8 dequant."
+        )
+        return None
+    weight, scale = _humming_layout(
+        fp8.view(n, k), (exponent + 127).to(torch.uint8), n, k
+    )
+    return DenseFp8Linear("wo_a", weight, scale, n, k, n_group=n // n_groups)
+
+
+def _humming_layout(
+    fp8: torch.Tensor, scale: torch.Tensor, n: int, k: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``fp8`` [n, k] and UE8M0 ``scale`` [n, k / 32] in the Humming W8A16
+    layout, converted as ``HummingMxfp8LinearKernel`` converts a linear."""
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        convert_linear_layer_to_humming_standard,
+        prepare_humming_linear_layer_config,
+        quant_key_to_input_schema,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    layer = nn.Module()
+    layer.input_size_per_partition = layer.input_size = k
+    layer.output_partition_sizes = [n]
+    layer.params_dtype = torch.bfloat16
+    layer.has_bias = False
+    layer.weight = nn.Parameter(fp8, requires_grad=False)
+    layer.weight_scale = nn.Parameter(
+        scale.view(torch.float8_e8m0fnu), requires_grad=False
+    )
+    convert_linear_layer_to_humming_standard(
+        layer=layer, name_map={"weight": "weight", "weight_scale": "weight_scale"}
+    )
+    prepare_humming_linear_layer_config(
+        layer,
+        {
+            "quant_method": "humming",
+            "dtype": "float8e4m3",
+            "scale_dtype": "float8e8m0",
+            "group_size": 32,
+            "weight_scale_type": "group",
+        },
+        input_schema=quant_key_to_input_schema(kMxfp8Dynamic),
+    )
+    return layer.weight.data, layer.weight_scale.data

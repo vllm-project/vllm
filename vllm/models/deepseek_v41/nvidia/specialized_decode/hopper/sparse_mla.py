@@ -17,7 +17,9 @@ per-step tables that the layers share (``FlashMlaTables``):
   map also reads a SWA group's token-to-request map and token validity, which
   every group derives alike from the batch.
 
-Both are built on the forward stream and issue no collective.
+Both are built on the forward stream and issue no collective. Steps of up to
+``mla_small.MAX_ROWS`` uniform rows on layers ``attn_chain`` serves run the
+small-batch chain kernels instead (``mla_small``), which need neither.
 """
 
 from typing import TYPE_CHECKING, cast
@@ -35,6 +37,7 @@ from vllm.v1.attention.ops.flashmla import (
 
 from ...flashmla import DeepseekV4FlashMLAAttention
 from ..attention.sparse_mla import sparse_index_key
+from .mla_small import SmallMlaDecode
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -43,15 +46,27 @@ if TYPE_CHECKING:
 class FlashMlaTables:
     """The tile-scheduler plans and global top-k tables of one decode step."""
 
-    def __init__(self, attns: list[DeepseekV4FlashMLAAttention]) -> None:
+    def __init__(
+        self, attns: list[DeepseekV4FlashMLAAttention], small: bool = True
+    ) -> None:
         self.keys = {attn: sparse_index_key(attn) for attn in attns}
         self._plans: dict[int, FlashMLASchedMeta] = {}
         self._tables: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.small = SmallMlaDecode(attns, attns[0].attn_sink.device) if small else None
 
     def reset(self) -> None:
-        """Forget the previous step's plans and tables."""
+        """Forget the previous step's plans and tables, and choose the step's
+        path."""
         self._plans.clear()
         self._tables.clear()
+        if self.small is not None:
+            self.small.start()
+
+    def join(self) -> None:
+        """Wait for the small path's SWA unions; the FlashMLA tables are built
+        on the forward stream."""
+        if self.small is not None:
+            self.small.join()
 
     def plan(self, attn: DeepseekV4FlashMLAAttention) -> FlashMLASchedMeta:
         """The step's plan of ``attn``'s layer type, planned by the first
@@ -94,6 +109,54 @@ class FlashMlaDecode:
     def __init__(self, tables: FlashMlaTables) -> None:
         self.tables = tables
 
+    def chain_step(self, rows: int) -> bool:
+        """Whether this step's MLA can run the small-batch chain, which takes
+        the query before its RoPE and applies the inverse RoPE (``chain_norm``,
+        ``run_rotated``)."""
+        small = self.tables.small
+        return small is not None and small.query_len > 0
+
+    def chain_norm(
+        self,
+        attn: DeepseekV4FlashMLAAttention,
+        qr_kv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """The q/kv norm and KV insert of a ``chain_step``
+        (``SmallMlaDecode.chain_norm``): the normalized query."""
+        by_layer = get_forward_context().attn_metadata
+        assert isinstance(by_layer, dict)
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata", by_layer[attn.swa_cache_layer.prefix]
+        )
+        small = self.tables.small
+        assert small is not None
+        return small.chain_norm(attn, qr_kv, positions, swa_metadata)
+
+    def run_rotated(
+        self,
+        attn: DeepseekV4FlashMLAAttention,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """``attn``'s sparse MLA of the ``wq_b`` output ``q`` after
+        ``chain_norm``, on the small path, inverse-rotated: the ``wo_a`` input
+        [rows, groups, heads per group * 512]."""
+        by_layer = get_forward_context().attn_metadata
+        assert isinstance(by_layer, dict)
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata", by_layer[attn.swa_cache_layer.prefix]
+        )
+        attn_metadata = None
+        if attn.compress_ratio != 0:
+            assert attn.compressed_cache_prefix is not None
+            attn_metadata = cast(
+                DeepseekV4FlashMLAMetadata, by_layer[attn.compressed_cache_prefix]
+            )
+        small = self.tables.small
+        assert small is not None
+        return small.run_chain(attn, q, swa_metadata, attn_metadata, positions)
+
     def run(
         self, attn: DeepseekV4FlashMLAAttention, q: torch.Tensor, out: torch.Tensor
     ) -> None:
@@ -113,6 +176,8 @@ class FlashMlaDecode:
             attn_metadata = cast(
                 DeepseekV4FlashMLAMetadata, by_layer[attn.compressed_cache_prefix]
             )
+        # The chain's SWA unions, forked at the start of the step.
+        self.tables.join()
         kv_cache = indices = lens = None
         if attn_metadata is not None:
             global_indices, lens = self.tables.global_topk(

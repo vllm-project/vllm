@@ -13,11 +13,12 @@ from vllm.model_executor.kernels.mhc.tilelang import mhc_post_tilelang
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
 
 from ..attention.indexer import rope_quant_q
 from ..boundary.boundary import Boundaries, BoundaryState
 from ..moe.step import MoEStep
-from . import kernels
+from . import attn_chain, kernels
 from .all_reduce import HopperBoundaryAllReduce
 from .mhc import SeamPre
 from .moe import HopperLowBatchMoE
@@ -35,7 +36,12 @@ class HopperAttentionStep:
     projections join their side streams at their first reader, the indexer
     query is built on aux stream 2 once ``qr`` is ready and the compressor
     and index key on aux stream 0; on the Hopper projections (``linears``).
-    The layer input is BF16 (the dense linears are weight-only W8A16)."""
+    The layer input is BF16 (the dense linears are weight-only W8A16).
+
+    Steps on the small-batch MLA (``mla_small``) run the early-trigger chain
+    (``attn_chain``): the q/kv RMSNorm with the KV insert, then the cluster
+    decode taking ``wq_b``'s output before its RoPE and writing the
+    inverse-rotated ``wo_a`` input; other steps run FlashMLA."""
 
     def __init__(
         self,
@@ -47,6 +53,7 @@ class HopperAttentionStep:
         self.tables = tables
         self.mla = mla
         self.linears = kernels.AttentionLinears.of(attn)
+        self.chain = attn_chain.applies(attn)
         # start, latent ready, index key done, index query done.
         self._events = [torch.cuda.Event() for _ in range(4)]
 
@@ -55,17 +62,32 @@ class HopperAttentionStep:
     ) -> torch.Tensor:
         """The layer's TP-partial output for input ``x``."""
         attn, mla = self.attn, self.mla
+        rows = x.shape[0]
+        wo_a = self.linears.wo_a
+        chain = (
+            self.chain
+            and mla.chain_step(rows)
+            and wo_a is not None
+            and wo_a.serves(rows)
+        )
         qr_kv, kv_score, indexer_weights = self._input_projections(x, step)
-        qr, qr_scale, kv = attn._split_qkv_and_norm(qr_kv)
-        assert qr_scale is None
+        if chain:
+            qr = mla.chain_norm(attn, qr_kv, positions)
+            kv = None
+        else:
+            qr, qr_scale, kv = attn._split_qkv_and_norm(qr_kv)
+            assert qr_scale is None
         q, index_q, index_q_scale, index_weights = self._prepare(
-            qr, kv, kv_score, indexer_weights, positions
+            qr, kv, kv_score, indexer_weights, positions, chain
         )
         if attn.indexer is not None and index_q is not None:
             assert index_weights is not None
-            q_quant = index_q if index_q_scale is None else (index_q, index_q_scale)
-            attn.indexer.indexer_op(x, q_quant, None, index_weights)
-        out = attn._alloc_attn_out(x.shape[0], x)
+            self._indexer(attn.indexer, x, index_q, index_q_scale, index_weights)
+        if chain:
+            assert wo_a is not None
+            rotated = mla.run_rotated(attn, q, positions)
+            return kernels.wo_b(attn, self.linears, wo_a(rotated))
+        out = attn._alloc_attn_out(rows, x)
         assert isinstance(out, torch.Tensor)
         mla.run(attn, q, out)
         return kernels.o_proj(attn, self.linears, out, positions)
@@ -104,16 +126,17 @@ class HopperAttentionStep:
     def _prepare(
         self,
         qr: torch.Tensor,
-        kv: torch.Tensor,
+        kv: torch.Tensor | None,
         kv_score: torch.Tensor | None,
         indexer_weights: torch.Tensor | None,
         positions: torch.Tensor,
+        chain: bool,
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        """The query (normalized, rotated, with the KV inserted) and the
-        indexer query, its scale and weights, with the indexer inputs,
-        compressor and index key on side streams."""
+        """The query (on the chain, before its RoPE: the decode rotates it as
+        it stages it) and the indexer query, its scale and weights, with the
+        indexer inputs, compressor and index key on side streams."""
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor
         streams = attn.aux_stream_list
@@ -147,9 +170,10 @@ class HopperAttentionStep:
                 index_k_done.record()
         q = kernels.wq_b(attn, self.linears, qr)
         q = q.view(-1, attn.n_local_heads, attn.head_dim)
-        q = attn._fused_qnorm_rope_kv_insert(
-            q, kv, positions, get_forward_context().attn_metadata
-        )
+        if not chain:
+            q = attn._fused_qnorm_rope_kv_insert(
+                q, kv, positions, get_forward_context().attn_metadata
+            )
         if compressor is not None:
             latent_ready.wait()
             compressor.insert_cache(latent, positions, attn.rotary_emb)
@@ -157,6 +181,21 @@ class HopperAttentionStep:
         if indexer is not None:
             index_q_done.wait()
         return q, index_q, index_q_scale, index_weights
+
+    def _indexer(
+        self,
+        indexer: DeepseekV4Indexer,
+        x: torch.Tensor,
+        index_q: torch.Tensor,
+        index_q_scale: torch.Tensor | None,
+        index_weights: torch.Tensor,
+    ) -> None:
+        """The layer's top-k indices (and on the candidate source, its
+        candidate blocks), on the stock indexer."""
+        # The side-stream table builds read the top-k indices this overwrites.
+        self.tables.join()
+        q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
+        indexer.indexer_op(x, q_quant, None, index_weights)
 
 
 class HopperMoEStep(MoEStep):
