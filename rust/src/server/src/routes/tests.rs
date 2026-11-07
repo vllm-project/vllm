@@ -12105,12 +12105,13 @@ mod beam_search {
     }
 
     /// The step requests the engine received, as `(prompt suffix, max_tokens,
-    /// logprobs, beam index in the request ID)`.
+    /// logprobs, beam index in the request ID)`, by step and then by suffix,
+    /// since the requests of a step race to the engine.
     fn step_requests(
         events: &mut mpsc::UnboundedReceiver<EngineEvent>,
         prompt_len: usize,
     ) -> Vec<(String, u32, Option<i32>, String)> {
-        std::iter::from_fn(|| events.try_recv().ok())
+        let mut requests: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
                 EngineEvent::Add(request) => Some(request),
                 EngineEvent::Abort(_) => None,
@@ -12130,7 +12131,9 @@ mod beam_search {
                         .to_string(),
                 )
             })
-            .collect()
+            .collect();
+        requests.sort_by(|a, b| (a.0.len(), &a.0).cmp(&(b.0.len(), &b.0)));
+        requests
     }
 
     /// Beams come back best first: length-capped "bz", then "b" stopped at EOS.
