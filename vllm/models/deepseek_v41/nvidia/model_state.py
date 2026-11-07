@@ -360,17 +360,9 @@ class DeepseekV41ModelState(DefaultModelState):
                     device=self.device,
                 )
             self._warm_up_replay_kernels(input_batch, slot_mappings)
-        if (
-            self.pcp_size > 1
-            and self.decoder_replay_layers is not None
-            and self._replay_attn_groups is None
-        ):
-            # Initialize replay builders even for untrimmed warmup batches.
-            layers = self.decoder_replay_layers
-            self._replay_attn_groups = (
-                self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
-                self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
-            )
+        if self.decoder_replay_layers is not None and self._replay_attn_groups is None:
+            # Builder init uploads to the device: build on the first (warmup) batch.
+            self._init_replay_attn_groups(attn_groups)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
         if window or self.decoder_replay_layers is not None:
@@ -591,11 +583,7 @@ class DeepseekV41ModelState(DefaultModelState):
         kept_batch, kept_slot_mappings = self._kept_input_batch(
             input_batch, slot_mappings, kept_replay_start, kept_lens, num_padded
         )
-        if self._replay_attn_groups is None:
-            self._replay_attn_groups = (
-                self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
-                self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
-            )
+        assert self._replay_attn_groups is not None
         replay_groups, first_swa_groups = self._replay_attn_groups
         attn_metadata = super().prepare_attn(
             kept_batch,
@@ -669,9 +657,10 @@ class DeepseekV41ModelState(DefaultModelState):
                 capture_desc=desc,
             )
 
+        if self.decoder_replay_layers is not None:
+            # profile_only captures use pre-KV-cache groups: rebuild the copies.
+            self._init_replay_attn_groups(attn_groups)
         if self.replay_cudagraphs is not None:
-            # profile_only captures use pre-KV-cache groups: drop the cache.
-            self._replay_attn_groups = None
             self.replay_cudagraphs.capture_replay_graphs(prepare, stream)
 
     def _kept_input_batch(
@@ -763,6 +752,14 @@ class DeepseekV41ModelState(DefaultModelState):
         if not agreed[0].any():
             return False, None
         return True, agreed[1]
+
+    def _init_replay_attn_groups(self, attn_groups: list[list[AttentionGroup]]) -> None:
+        layers = self.decoder_replay_layers
+        assert layers is not None
+        self._replay_attn_groups = (
+            self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
+            self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
+        )
 
     def _copy_attn_groups(
         self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
