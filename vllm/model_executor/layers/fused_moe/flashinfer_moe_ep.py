@@ -18,6 +18,9 @@ from vllm.config.kernel import (
 )
 from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequant_mxfp4_experts,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -45,26 +48,6 @@ def supports_current_device() -> bool:
     return capability is not None and (
         (capability.major, capability.minor) in _SUPPORTED_CAPABILITIES
     )
-
-
-_E2M1_LUT = (
-    0.0,
-    0.5,
-    1.0,
-    1.5,
-    2.0,
-    3.0,
-    4.0,
-    6.0,
-    -0.0,
-    -0.5,
-    -1.0,
-    -1.5,
-    -2.0,
-    -3.0,
-    -4.0,
-    -6.0,
-)
 
 
 @dataclass(frozen=True)
@@ -181,48 +164,6 @@ def apply_topk_in_fc1(
     )
 
 
-def _dequant_mxfp4_ue8m0_gran32(
-    packed: torch.Tensor,
-    scale: torch.Tensor,
-) -> torch.Tensor:
-    raw = packed.view(torch.uint8)
-    lut = torch.tensor(_E2M1_LUT, dtype=torch.float32, device=raw.device)
-    values = torch.empty(
-        raw.shape[0],
-        raw.shape[1] * 2,
-        dtype=torch.float32,
-        device=raw.device,
-    )
-    values[:, ::2] = lut[(raw & 0x0F).to(torch.int64)]
-    values[:, 1::2] = lut[(raw >> 4).to(torch.int64)]
-    encoded_scale = (
-        scale
-        if scale.dtype == torch.float8_e8m0fnu
-        else scale.view(torch.float8_e8m0fnu)
-    )
-    decoded_scale = encoded_scale.float()
-    return (values * decoded_scale.repeat_interleave(32, dim=-1)).to(torch.bfloat16)
-
-
-def _dequant_mxfp4_experts(
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-) -> torch.Tensor:
-    num_experts, output_size, packed_input_size = weight.shape
-    result = torch.empty(
-        num_experts,
-        output_size,
-        packed_input_size * 2,
-        dtype=torch.bfloat16,
-        device=weight.device,
-    )
-    for expert_id in range(num_experts):
-        result[expert_id] = _dequant_mxfp4_ue8m0_gran32(
-            weight[expert_id], scale[expert_id]
-        )
-    return result
-
-
 def mxfp4_moe_ep_weights(
     moe_backend: str,
     w13: torch.Tensor,
@@ -234,8 +175,8 @@ def mxfp4_moe_ep_weights(
     if spec.kernel == "deep_gemm":
         return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
     return FlashInferMoeEpWeights(
-        w13=_dequant_mxfp4_experts(w13, w13_scale),
-        w2=_dequant_mxfp4_experts(w2, w2_scale),
+        w13=dequant_mxfp4_experts(w13, w13_scale),
+        w2=dequant_mxfp4_experts(w2, w2_scale),
     )
 
 
