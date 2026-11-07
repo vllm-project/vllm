@@ -63,3 +63,30 @@ async def test_nonlora_adapter(adapter_cache, pa_files):
 
     pa_request = await fs_resolver.resolve_lora(MODEL_NAME, PA_NAME)
     assert pa_request is None
+
+
+@pytest.mark.asyncio
+async def test_path_traversal(adapter_cache, tmp_path):
+    outside_adapter = tmp_path / "private_adapter"
+    outside_adapter.mkdir()
+    (outside_adapter / "adapter_config.json").write_text(
+        '{"peft_type": "LORA", "base_model_name_or_path": "Qwen/Qwen3-0.6B"}'
+    )
+
+    fs_resolver = FilesystemResolver(str(adapter_cache))
+    assert await fs_resolver.resolve_lora(MODEL_NAME, "../private_adapter") is None
+    assert await fs_resolver.resolve_lora(MODEL_NAME, str(outside_adapter)) is None
+    assert await fs_resolver.resolve_lora(MODEL_NAME, ".") is None
+
+    # Operator-created symlink inside cache pointing to external adapter remains valid
+    symlink_adapter = os.path.join(str(adapter_cache), "symlink_adapter")
+    try:
+        os.symlink(str(outside_adapter), symlink_adapter)
+        res = await fs_resolver.resolve_lora(MODEL_NAME, "symlink_adapter")
+        assert res is not None
+        assert res.lora_name == "symlink_adapter"
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+
+
+
