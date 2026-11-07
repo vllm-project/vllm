@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
 
 import numpy as np
@@ -33,23 +35,23 @@ def decode_opencv(
     *,
     frame_recovery: bool = False,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
-    cap = OpenCVVideoBackendMixin.open_video_capture(data)
-    check_frame_pixel_limit(
-        int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-    )
-    source = loader_cls._prepare_source(
-        OpenCVVideoBackendMixin.get_video_metadata(data)
-    )
-    frame_idx = loader_cls.compute_frames_index_to_sample(
-        source=source, target=target, **sampling_kwargs
-    )
-    frames, valid = loader_cls.read_frames(
-        cap,
-        frame_idx,
-        total_frames_num=source.total_frames_num,
-        frame_recovery=frame_recovery,
-    )
+    with OpenCVVideoBackendMixin.open_video_capture(data) as cap:
+        check_frame_pixel_limit(
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
+        source = loader_cls._prepare_source(
+            OpenCVVideoBackendMixin.get_video_metadata(data)
+        )
+        frame_idx = loader_cls.compute_frames_index_to_sample(
+            source=source, target=target, **sampling_kwargs
+        )
+        frames, valid = loader_cls.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num=source.total_frames_num,
+            frame_recovery=frame_recovery,
+        )
     return frames, source, frame_idx, valid
 
 
@@ -69,12 +71,18 @@ class OpenCVVideoBackendMixin:
         return api_pref
 
     @classmethod
-    def open_video_capture(cls, data: bytes) -> "cv2.VideoCapture":
+    @contextmanager
+    def open_video_capture(cls, data: bytes) -> Iterator["cv2.VideoCapture"]:
         backend = cls.get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
-        if not cap.isOpened():
-            raise ValueError("Could not open video stream")
-        return cap
+        # OpenCV's stream binding borrows the Python object until release().
+        with BytesIO(data) as stream:
+            cap = cv2.VideoCapture(stream, backend, [])
+            try:
+                if not cap.isOpened():
+                    raise ValueError("Could not open video stream")
+                yield cap
+            finally:
+                cap.release()
 
     @classmethod
     def demux_count_frames(cls, data: bytes) -> int:
@@ -86,16 +94,25 @@ class OpenCVVideoBackendMixin:
             buf, cls.get_cv2_video_api(), [cv2.CAP_PROP_FORMAT, -1]
         )
         count = 0
-        while demux_cap.grab():
-            count += 1
-        demux_cap.release()
+        try:
+            while demux_cap.grab():
+                count += 1
+        finally:
+            demux_cap.release()
+            buf.close()
         if count == 0:
             raise ValueError("Could not determine the number of video frames")
         return count
 
     @staticmethod
     def get_video_metadata(data: bytes) -> VideoSourceMetadata:
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+        with OpenCVVideoBackendMixin.open_video_capture(data) as cap:
+            return OpenCVVideoBackendMixin._get_video_metadata(cap, data)
+
+    @staticmethod
+    def _get_video_metadata(
+        cap: "cv2.VideoCapture", data: bytes
+    ) -> VideoSourceMetadata:
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         if total_frames_num <= 0:
