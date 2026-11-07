@@ -2232,6 +2232,8 @@ class Scheduler(SchedulerInterface):
                 if self.encoder_cache_manager.check_and_update_cache(request, i):
                     # The encoder input is already computed and cached from a
                     # previous step.
+                    if self.ec_connector is not None:
+                        self.ec_connector.update_state_after_cache_hit(request, i)
                     continue
 
             if not self.encoder_cache_manager.can_allocate(

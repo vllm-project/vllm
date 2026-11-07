@@ -27,6 +27,9 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
 )
+from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECCPUWorkerMetadata
+from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
@@ -8882,6 +8885,79 @@ def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
     )
     scheduler.add_request(request)
     return request
+
+
+@pytest.mark.parametrize("ec_role", ["ec_producer", "ec_both"])
+def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
+    """A runner hit reserves a new CPU save without encoding or loading again."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role=ec_role,
+    )
+    config = scheduler.vllm_config
+    ec_config = config.ec_transfer_config
+    width = config.model_config.get_inputs_embeds_size()
+    ec_config.ec_connector = "ECCPUConnector"
+    ec_config.mm_encoder_output_widths = {"image": width}
+    ec_config.ec_connector_extra_config = {
+        "ec_cpu_bytes": 2 * width * config.model_config.dtype.itemsize,
+    }
+    connector = ECCPUConnector(config, ECConnectorRole.SCHEDULER)
+    scheduler.ec_connector = connector
+    request, replacement = create_requests(
+        num_requests=2,
+        num_tokens=8,
+        mm_hashes_list=[["cached-image"], ["replacement-image"]],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=1)],
+            [PlaceholderRange(offset=0, length=2)],
+        ],
+    )
+
+    def save_completed(req):
+        connector.update_state_after_alloc(req, 0)
+        metadata = connector.build_connector_meta(None)
+        mm_hash = req.mm_features[0].identifier
+        assert mm_hash in metadata.saves
+        connector.update_connector_output(
+            ECConnectorOutput(
+                ec_connector_worker_meta=ECCPUWorkerMetadata(completed_saves=[mm_hash])
+            )
+        )
+
+    try:
+        manager = scheduler.encoder_cache_manager
+        manager.allocate(request, 0)
+        manager.free(request)
+        save_completed(request)
+        save_completed(replacement)
+        assert connector.connector_scheduler._cache.get("cached-image") is None
+        assert manager.get_cached_num_encoder_embeds(request, 0) == 1
+
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[request.request_id] == 8
+        assert output.scheduled_encoder_inputs == {}
+        assert "cached-image" in output.ec_connector_metadata.saves
+        assert output.ec_connector_metadata.loads == {}
+        entry = connector.connector_scheduler._cache.get("cached-image")
+        assert entry is not None and not entry.ready
+
+        connector.update_connector_output(
+            ECConnectorOutput(
+                ec_connector_worker_meta=ECCPUWorkerMetadata(
+                    completed_saves=["cached-image"]
+                )
+            )
+        )
+        assert entry.ready
+        connector.update_state_after_cache_hit(request, 0)
+        metadata = connector.build_connector_meta(None)
+        assert metadata.saves == {}
+        assert metadata.loads == {}
+    finally:
+        connector.shutdown()
 
 
 def test_encoder_instance_defers_stop_until_prompt_is_consumed():

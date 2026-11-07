@@ -292,6 +292,10 @@ class ECConnectorBase(ABC):
         """Notify the connector that an encoder cache entry was released."""
         return
 
+    def update_state_after_cache_hit(self, request: "Request", index: int) -> None:
+        """Prepare connector state for an encoder output already in the runner."""
+        return
+
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):
         """Update ECConnector state to decide allocate cache for requests.
