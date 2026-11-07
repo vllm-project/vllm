@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 import torch
 from torch import nn
@@ -105,6 +105,7 @@ from .multimodal import (
     Glm5NextProcessingInfo,
     Glm5NextVisionTransformer,
 )
+from .specialized_decode import requested
 
 logger = init_logger(__name__)
 
@@ -116,6 +117,26 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     kpool = config.index_kpool
     assert kpool is not None
     return round_up(topk + kpool - 1, 128)
+
+
+def _specialized_decode_config(vllm_config: VllmConfig):
+    """The specialized decode's config, None unless it is requested. Only ROCm has
+    one today, so only ROCm imports a vendor runtime; elsewhere a request is refused
+    at startup and a stock deployment never reaches vendor code. A ROCm GPU other
+    than gfx950 is refused by the runtime's own checks (``spec.refusal_reasons``)."""
+    if not requested(vllm_config):
+        return None
+    if not current_platform.is_rocm():
+        raise ValueError(
+            "GLM-5.3-Flash has a specialized decode only on ROCm CDNA4 (gfx950); drop "
+            "--monokernel / decode_backend=latency_specialized on "
+            f"{current_platform.device_name}"
+        )
+    from vllm.models.glm5next.amd.specialized_decode.runtime import (
+        specialized_decode_config,
+    )
+
+    return specialized_decode_config(vllm_config)
 
 
 _MHC_TAU = 0.05
@@ -865,6 +886,22 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self.vllm_config = vllm_config
+        self.specialized_decode_config = _specialized_decode_config(vllm_config)
+        self.specialized_decode: Any = None
+
+    def build_specialized_decode(self) -> None:
+        """Called by ``Glm5NextModelState`` once the weights are loaded."""
+        from vllm.models.glm5next.amd.specialized_decode.runtime.decode import (
+            SpecializedDecode,
+        )
+
+        assert self.specialized_decode_config is not None
+        if self.specialized_decode is not None:
+            raise ValueError("--monokernel: reloading weights is not supported")
+        self.specialized_decode = SpecializedDecode(
+            self, self.specialized_decode_config
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -918,6 +955,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self._active_layers, start=self.start_layer):
             if idx in self.aux_hidden_state_layers:
@@ -927,7 +966,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if self.is_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual, post, comb = layer(
+            kernel = step.layer(idx) if step is not None else None
+            hidden_states, residual, post, comb = (kernel or layer)(
                 positions, hidden_states, residual, post, comb
             )
 
@@ -1246,8 +1286,21 @@ class Glm5NextForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self.model.specialized_decode is not None:
+            self.model.specialized_decode.after_step()
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def get_model_state_cls(self) -> type:
+        if self.model.specialized_decode_config is None:
+            from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
+                MambaHybridModelState,
+            )
+
+            return MambaHybridModelState
+        from vllm.models.glm5next.amd.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1357,6 +1410,9 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def get_model_state_cls(self) -> type:
+        return self.language_model.get_model_state_cls()
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
