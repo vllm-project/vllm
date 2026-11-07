@@ -589,6 +589,62 @@ def test_reader_timeout_caps_indefinite_waits(should_warn):
         assert timeout.timeout_ms() == 7
 
 
+@pytest.mark.parametrize("timeout", [None, -0.01, 0.0, 1e-10, 1e-9, 0.01, 0.05, 0.2])
+def test_writer_spinloop_respects_remaining_timeout(monkeypatch, timeout):
+    """A full ring must not turn a short writer deadline into a 100 ms spin."""
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=1
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    now = 0.0
+    spin_timeouts = []
+    native_spinloop = (
+        shm_broadcast.spinloop if shm_broadcast.SPINLOOP_EXT_ENABLED else None
+    )
+
+    def spinloop(buffer, check, *, timeout):
+        nonlocal now
+        assert not check()
+        assert timeout > 1e-9
+        assert timeout <= shm_broadcast.SPINLOOP_TIMEOUT_SECONDS
+        if deadline is not None:
+            assert timeout <= deadline - now
+        else:
+            assert reader.dequeue() == "first"
+        spin_timeouts.append(timeout)
+        if native_spinloop is not None:
+            native_spinloop(buffer, check, timeout=timeout)
+        now += timeout
+
+    def sched_yield():
+        nonlocal now
+        now += 1e-6
+
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue("first")
+        deadline = None if timeout is None else now + timeout
+        with monkeypatch.context() as m:
+            m.setattr(shm_broadcast, "SPINLOOP_EXT_ENABLED", True)
+            m.setattr(shm_broadcast, "spinloop", spinloop, raising=False)
+            m.setattr(shm_broadcast, "time", SimpleNamespace(monotonic=lambda: now))
+            m.setattr(shm_broadcast, "sched_yield", sched_yield)
+            if timeout is None:
+                writer.enqueue("second")
+                assert spin_timeouts == [shm_broadcast.SPINLOOP_TIMEOUT_SECONDS]
+            else:
+                with pytest.raises(TimeoutError):
+                    writer.enqueue("second", timeout=timeout)
+                assert max(0.0, timeout) < now < max(0.0, timeout) + 1e-5
+                assert bool(spin_timeouts) == (timeout > 1e-9)
+
+        assert reader.dequeue(timeout=1) == ("second" if timeout is None else "first")
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
+
 def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
     writer = MessageQueue(
         n_reader=1,
