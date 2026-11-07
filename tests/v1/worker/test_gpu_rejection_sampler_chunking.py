@@ -327,14 +327,20 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
     requests on the target's draw and greedy ones on the argmax."""
     import vllm.v1.worker.gpu.spec_decode.rejection_sampler as rs
 
+    # The path check after tree_accept is a Triton kernel, so the batch lives on
+    # the GPU when there is one.
+    has_gpu = current_platform.is_cuda() or current_platform.is_xpu()
+    device = torch.device(current_platform.device_type if has_gpu else "cpu")
     num_reqs, rows = 3, 3
     cu_num_logits_np = np.arange(0, num_reqs * rows + 1, rows, dtype=np.int32)
     input_batch = _make_input_batch(
-        cu_num_logits_np, np.arange(num_reqs, dtype=np.int32), torch.device("cpu")
+        cu_num_logits_np, np.arange(num_reqs, dtype=np.int32), device
     )
     input_batch.verify_plan = VerifyPlan(
-        parent=torch.tensor([[-1, 0, 0]] * num_reqs, dtype=torch.int32),
-        tokens=torch.randint(0, 100, (num_reqs, rows), dtype=torch.int32),
+        parent=torch.tensor([[-1, 0, 0]] * num_reqs, dtype=torch.int32, device=device),
+        tokens=torch.randint(
+            0, 100, (num_reqs, rows), dtype=torch.int32, device=device
+        ),
         rows=np.array([3, 2, 1], dtype=np.int32),
     )
     seen: list[VerifyPlan] = []
@@ -344,9 +350,9 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
         seen.append(plan)
         num = plan.parent.shape[0]
         return AcceptResult(
-            path=torch.zeros(num, rows, dtype=torch.int32),
-            path_len=torch.ones(num, dtype=torch.int32),
-            sampled=torch.zeros(num, width, dtype=torch.int64),
+            path=torch.zeros(num, rows, dtype=torch.int32, device=device),
+            path_len=torch.ones(num, dtype=torch.int32, device=device),
+            sampled=torch.zeros(num, width, dtype=torch.int64, device=device),
         )
 
     def gumbel_sample(logits, *args, **kwargs):
@@ -356,8 +362,12 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
     monkeypatch.setattr(rs, "gumbel_sample", gumbel_sample)
     temperature = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     states = SimpleNamespace(
-        temperature=SimpleNamespace(np=temperature, gpu=torch.from_numpy(temperature)),
-        seeds=SimpleNamespace(gpu=torch.zeros(num_reqs, dtype=torch.int64)),
+        temperature=SimpleNamespace(
+            np=temperature, gpu=torch.from_numpy(temperature).to(device)
+        ),
+        seeds=SimpleNamespace(
+            gpu=torch.zeros(num_reqs, dtype=torch.int64, device=device)
+        ),
     )
     rejection_sampler = _make_rejection_sampler(
         SimpleNamespace(
@@ -370,8 +380,8 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
         num_speculative_steps=rows - 1,
     )
     rejection_sampler.tree_accept = tree_accept
-    logits = torch.zeros(num_reqs * rows, 8)
-    pos = torch.arange(num_reqs * rows)
+    logits = torch.zeros(num_reqs * rows, 8, device=device)
+    pos = torch.arange(num_reqs * rows, device=device)
     for max_chunk_logits in (num_reqs * rows, rows):
         seen.clear()
         drawn.clear()
