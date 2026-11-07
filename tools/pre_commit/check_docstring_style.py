@@ -5,6 +5,7 @@
 - Code spans use single backticks: ``x`` is rewritten to `x` in place.
 - Python Sphinx roles become code spans of the text Sphinx would display, e.g.
   :class:`~vllm.LLM` is rewritten to `LLM`. Other roles must be fixed by hand.
+- Sections are Google style (`Args:`), not NumPy style (`Parameters` + `---`).
 - `[a][b]` is a reference link that mkdocs-autorefs tries to resolve, so shapes
   and indexing written outside code spans produce broken cross-references:
 
@@ -45,6 +46,11 @@ PY_ROLES = {
     for role in ("attr", "class", "const", "data", "exc", "func", "meth", "mod",
                  "obj", "type")
 }  # fmt: skip
+NUMPY_SECTION = re.compile(
+    r"^[ \t]*(Parameters|Other Parameters|Returns|Yields|Receives|Raises|Warns|"
+    r"Attributes|Notes)[ \t]*\n[ \t]*-{3,}[ \t]*$",
+    re.MULTILINE,
+)
 QUOTE = re.compile(r"""^[rRuU]?("{3}|'{3}|"|')""")
 # Fully qualified Python paths, e.g. `vllm.LLM` or `torch.Tensor`
 TARGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+")
@@ -311,6 +317,18 @@ def crossref_violations(filepath: str, source: str, tree: ast.Module) -> list[st
     return violations
 
 
+def numpy_violations(filepath: str, tree: ast.Module) -> list[str]:
+    violations = []
+    for node in docstrings(tree, rendered_only=True):
+        for match in NUMPY_SECTION.finditer(node.value):
+            lineno = node.lineno + node.value.count("\n", 0, match.start())
+            violations.append(
+                f"{filepath}:{lineno}: NumPy-style `{match.group(1)}` section in a "
+                "docstring; use Google style"
+            )
+    return violations
+
+
 def main() -> int:
     failures = []
     for filepath in sys.argv[1:]:
@@ -331,6 +349,7 @@ def main() -> int:
                 f.write(bom + new_source.encode("utf-8"))
             source, tree = new_source, ast.parse(new_source, filename=filepath)
         failures += fixes + unfixable + crossref_violations(filepath, source, tree)
+        failures += numpy_violations(filepath, tree)
     print("\n".join(failures), end="\n" if failures else "")
     return 1 if failures else 0
 

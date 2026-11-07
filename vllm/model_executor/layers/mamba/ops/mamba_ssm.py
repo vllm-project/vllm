@@ -768,10 +768,9 @@ def selective_scan_fn(
         The pointer into cache_indices, where the cache block
         containing the initial state is located.
 
-    Returns
-    -------
-        output: (dim, total_length) for varlen or (batch, dim, seqlen)
-                supports inplace replacement
+    Returns:
+        Output of shape (dim, total_length) for varlen or (batch, dim, seqlen);
+        supports inplace replacement.
 
     """
     if u.stride(-1) != 1:

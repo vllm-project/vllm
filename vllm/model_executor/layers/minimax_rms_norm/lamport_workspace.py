@@ -170,20 +170,15 @@ def _lamport_fill_neg_zero(device_ptr: int, size_bytes: int):
 class LamportWorkspace:
     """Self-contained workspace for Lamport-based cross-GPU AllReduce.
 
-    Parameters
-    ----------
-    rank : int
-        Local rank (0-based).
-    world_size : int
-        Total number of ranks in the TP group.
-    comm_size : int
-        Size in bytes of *one* Lamport buffer slot. The total IPC allocation
-        per rank is `3 * comm_size` (triple-buffering). Must be large enough
-        to hold the per-slot data written by the kernel.  Use
-        `compute_comm_size_for_minimax()` for a safe default.
-    process_group : optional
-        `torch.distributed` process group for IPC handle exchange.
-        `None` uses the default group.
+    Args:
+        rank: Local rank (0-based).
+        world_size: Total number of ranks in the TP group.
+        comm_size: Size in bytes of *one* Lamport buffer slot. The total IPC
+            allocation per rank is `3 * comm_size` (triple-buffering). Must be large
+            enough to hold the per-slot data written by the kernel. Use
+            `compute_comm_size_for_minimax()` for a safe default.
+        process_group: `torch.distributed` process group for IPC handle exchange.
+            `None` uses the default group.
 
     """
 
@@ -290,17 +285,14 @@ def get_allreduce_workspace(
     On first call the workspace is allocated and IPC handles are exchanged;
     subsequent calls with the same arguments return the cached tensor.
 
-    Parameters
-    ----------
-    rank, world_size : int
-        TP rank and TP size.
-    comm_size : int, optional
-        Explicit slot size in bytes.  If `None`, computed automatically
-        from `max_tokens` and `world_size` (fused Q+K path).
-    max_tokens : int
-        Maximum number of tokens per batch (used when `comm_size is None`).
-    process_group : optional
-        `torch.distributed` process group.
+    Args:
+        rank: TP rank.
+        world_size: TP size.
+        comm_size: Explicit slot size in bytes. If `None`, computed automatically
+            from `max_tokens` and `world_size` (fused Q+K path).
+        max_tokens: Maximum number of tokens per batch (used when
+            `comm_size is None`).
+        process_group: `torch.distributed` process group.
 
     """
     if comm_size is None:
