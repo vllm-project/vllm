@@ -21,9 +21,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor import hw_agnostic
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
@@ -45,6 +44,9 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         tie_word_embeddings = self._get_tie_word_embeddings()
 
         if self.pp_group.is_last_rank:
+            ParallelLMHead = hw_agnostic.resolve(
+                "vocab_parallel_embedding", "ParallelLMHead"
+            )
             self.lm_head = ParallelLMHead(
                 self.text_config.vocab_size,
                 self.text_config.hidden_size,
@@ -52,11 +54,20 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if tie_word_embeddings:
+                # Embeddings that subclass `nn.Embedding` are rebased on the
+                # in-tree class even on the hw-agnostic path, so accept both
+                embedding_classes = (
+                    hw_agnostic.resolve(
+                        "vocab_parallel_embedding", "VocabParallelEmbedding"
+                    ),
+                    VocabParallelEmbedding,
+                )
                 for module in self.model.get_input_embeddings().modules():
-                    if isinstance(module, VocabParallelEmbedding):
+                    if isinstance(module, embedding_classes):
                         self.lm_head = self.lm_head.tie_weights(module)
                         break
 
+            LogitsProcessor = hw_agnostic.resolve("logits_processor", "LogitsProcessor")
             self.logits_processor = LogitsProcessor(
                 self.text_config.vocab_size,
                 scale=getattr(self.text_config, "logit_scale", 1.0),
