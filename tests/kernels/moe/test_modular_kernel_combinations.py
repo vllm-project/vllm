@@ -775,6 +775,82 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
     )
 
 
+def _channel_tkw1_ownership_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+    verbose: bool,
+    apply_router_weight_on_input: bool,
+):
+    # AiterFp8ChannelExperts.apply should own the topk=1/
+    # apply_router_weight_on_input dispatch to asm_moe_tkw1 itself, rather
+    # than it being hidden inside the generic AITER expert. See
+    # vllm-project/vllm#54966.
+    with (
+        mock.patch.object(
+            rocm_aiter_ops, "asm_moe_tkw1", wraps=rocm_aiter_ops.asm_moe_tkw1
+        ) as tkw1_mock,
+        mock.patch.object(
+            rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+        ) as fused_moe_mock,
+    ):
+        rank_worker(pgi, vllm_config, cpu_group, config, weights, verbose)
+
+    if apply_router_weight_on_input:
+        assert tkw1_mock.call_count > 0 and fused_moe_mock.call_count == 0, (
+            "AiterFp8ChannelExperts.apply() should dispatch topk=1/"
+            "apply_router_weight_on_input to rocm_aiter_ops.asm_moe_tkw1, "
+            "not rocm_aiter_ops.fused_moe."
+        )
+    else:
+        assert fused_moe_mock.call_count > 0 and tkw1_mock.call_count == 0, (
+            "AiterFp8ChannelExperts.apply() should dispatch the non-tkw1 "
+            "case to rocm_aiter_ops.fused_moe, not rocm_aiter_ops.asm_moe_tkw1."
+        )
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("topk", [1, 2])
+def test_aiter_fp8_channel_experts_owns_tkw1_dispatch(topk: int):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Split AITER
+    experts by weight quantization key").
+    """
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    config = Config(
+        Ms=[32],
+        K=2048,
+        N=1024,
+        E=32,
+        topks=[topk],
+        dtype=torch.bfloat16,
+        quant_config=MK_QUANT_CONFIGS[2],  # fp8 channel weights / per-token acts
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterFp8ChannelExperts,
+        world_size=1,
+    )
+    assert config.is_valid()[0]
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+    apply_router_weight_on_input = topk == 1 and config.supports_apply_weight_on_input()
+
+    parallel_launch_with_config(
+        config.world_size,
+        _channel_tkw1_ownership_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        apply_router_weight_on_input,
+    )
+
+
 # --- 3b: AITER_MOE_SORT_BACKEND (MXFP4 adaptive-vs-Opus aux sort) ------------
 #
 # Only matters when aiter's internal `output_aux` flag is set. aiter sets it
@@ -1430,12 +1506,12 @@ def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantCon
             _PADDING_N_UNPADDED_MXFP4 if pad_intermediate else None
         ),
     )
-    assert config.is_valid()[0]
     if not config.fe_supports_quant_scheme():
         pytest.skip(
             f"AiterMxfp4Experts does not support quant scheme {quant_config} "
             "on this GPU (gfx950-only, not gfx1250)."
         )
+    assert config.is_valid()[0]
 
     weights = _make_padding_matrix_weights(config)
     vllm_config, env_dict = config.make_env_data()
@@ -1682,12 +1758,12 @@ def test_aiter_moe_token_padding_garbage_rows_mxfp4(
         fused_experts_type=_padding_matrix_fe_cls(quant_config),
         world_size=1,
     )
-    assert config.is_valid()[0]
     if not config.fe_supports_quant_scheme():
         pytest.skip(
             f"AiterMxfp4Experts does not support quant scheme {quant_config} "
             "on this GPU (gfx950-only, not gfx1250)."
         )
+    assert config.is_valid()[0]
 
     weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()

@@ -72,7 +72,8 @@ __device__ __forceinline__ void find_threshold_exact(
 }
 
 // Build one radix digit when the coarse bin cannot bound the FP32 keys.
-__device__ void build_exact_histogram(const float* __restrict__ scores,
+template <typename InT>
+__device__ void build_exact_histogram(const InT* __restrict__ scores,
                                       uint32_t length, uint32_t prefix,
                                       uint32_t round, uint32_t* histogram) {
   const uint32_t shift = ExactRadix::shift(round);
@@ -88,9 +89,9 @@ __device__ void build_exact_histogram(const float* __restrict__ scores,
 }
 
 // Reuse resident TMA data when possible; otherwise rescan global memory.
-template <bool UseResident, typename SmemType, typename Visit>
+template <bool UseResident, typename InT, typename SmemType, typename Visit>
 __device__ __forceinline__ void for_each_partition_score(
-    const float* __restrict__ scores, uint32_t length, SmemType* smem,
+    const InT* __restrict__ scores, uint32_t length, SmemType* smem,
     Visit visit) {
   if constexpr (UseResident) {
     const uint32_t tx = threadIdx.x;
@@ -102,7 +103,8 @@ __device__ __forceinline__ void for_each_partition_score(
       for (uint32_t i = 0; i < kElemPerStage; ++i) {
         const uint32_t local = tx + i * hist4096::kBlockSize;
         if (local >= size) break;
-        visit(offset + local, smem->score_buffer[stage][local]);
+        visit(offset + local,
+              hist4096::to_float(smem->score_buffer[stage][local]));
       }
     }
   } else {
@@ -111,9 +113,9 @@ __device__ __forceinline__ void for_each_partition_score(
 }
 
 // Bounded non-subnormal coarse bins fit in two ordered-FP32 radix passes.
-template <bool UseResident, typename SmemType>
+template <bool UseResident, typename SmemType, typename InT>
 __device__ void build_coarse_refine_histogram(
-    const float* __restrict__ scores, uint32_t length, uint32_t coarse_bin,
+    const InT* __restrict__ scores, uint32_t length, uint32_t coarse_bin,
     uint32_t base_key, uint32_t prefix, uint32_t round, SmemType* smem,
     uint32_t* histogram) {
   const uint32_t shift = round == 0 ? 11 : 0;
@@ -129,9 +131,9 @@ __device__ void build_coarse_refine_histogram(
 }
 
 // Gather scores above the exact pivot and bounded equal-pivot candidates.
-template <bool UseResident, typename SmemType>
+template <bool UseResident, typename SmemType, typename InT>
 __device__ void collect_exact_candidates(
-    const float* __restrict__ scores, uint32_t length, uint32_t pivot,
+    const InT* __restrict__ scores, uint32_t length, uint32_t pivot,
     uint32_t equal_limit, SmemType* smem, uint32_t* above_count,
     uint32_t* equal_count, int32_t* above_indices, int32_t* equal_indices) {
   for_each_partition_score<UseResident>(
@@ -248,9 +250,10 @@ cluster_key_range(uint32_t lo, uint32_t hi, uint32_t* scratch) {
 }
 
 // Build the first exact FP32 radix digit for a bounded coarse bin.
-template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType,
+          typename InT>
 __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
-    const float* __restrict__ row_input, uint32_t my_start, uint32_t my_len,
+    const InT* __restrict__ row_input, uint32_t my_start, uint32_t my_len,
     uint32_t coarse_bin, uint32_t coarse_above, SmemType* smem,
     int32_t* scratch) {
   constexpr uint32_t kDigitBits = 11;
@@ -296,9 +299,9 @@ __device__ __noinline__ OverflowProbeStatus probe_arbitrary_fp32_overflow(
 // Emit candidates saved in the last radix pass if every CTA's staging fits.
 // `stage` holds above-window indices from the front and window candidates from
 // the back of `capacity` slots.
-template <uint32_t TopK, uint32_t CS, typename SmemType>
+template <uint32_t TopK, uint32_t CS, typename SmemType, typename InT>
 __device__ bool emit_staged_candidates(
-    const float* __restrict__ row_input, int32_t* __restrict__ row_output,
+    const InT* __restrict__ row_input, int32_t* __restrict__ row_output,
     uint32_t my_start, uint32_t pivot, uint32_t remaining,
     uint32_t staged_above, uint32_t staged_candidates, SmemType* smem,
     const int32_t* stage, uint32_t capacity) {
@@ -328,8 +331,8 @@ __device__ bool emit_staged_candidates(
   __syncthreads();
   for (uint32_t i = tx; i < staged_candidates; i += hist4096::kBlockSize) {
     const int32_t idx = stage[capacity - 1 - i];
-    const uint32_t ordered =
-        hist4096::convert_to_uint32_v2(row_input[my_start + idx]);
+    const uint32_t ordered = hist4096::convert_to_uint32_v2(
+        hist4096::to_float(row_input[my_start + idx]));
     if (ordered > pivot) {
       atomicAdd(&smem->counter_gt, 1);
     } else if (ordered == pivot) {
@@ -353,8 +356,8 @@ __device__ bool emit_staged_candidates(
   __syncthreads();
   for (uint32_t i = tx; i < staged_candidates; i += hist4096::kBlockSize) {
     const int32_t idx = stage[capacity - 1 - i];
-    const uint32_t ordered =
-        hist4096::convert_to_uint32_v2(row_input[my_start + idx]);
+    const uint32_t ordered = hist4096::convert_to_uint32_v2(
+        hist4096::to_float(row_input[my_start + idx]));
     if (ordered > pivot) {
       const uint32_t pos = atomicAdd(&smem->counter_gt, 1);
       row_output[offsets.above + staged_above + pos] = idx + my_start;
@@ -370,8 +373,8 @@ __device__ bool emit_staged_candidates(
 
 // Write every score above the exact pivot and the first `remaining` equal to
 // it.
-template <uint32_t CS, bool UseResident, typename SmemType>
-__device__ void emit_exact_candidates(const float* __restrict__ row_input,
+template <uint32_t CS, bool UseResident, typename SmemType, typename InT>
+__device__ void emit_exact_candidates(const InT* __restrict__ row_input,
                                       int32_t* __restrict__ row_output,
                                       uint32_t my_start, uint32_t my_len,
                                       uint32_t pivot, uint32_t remaining,
@@ -408,9 +411,10 @@ __device__ void emit_exact_candidates(const float* __restrict__ row_input,
 // round-0 histogram and, when every score in the bin shares one key (e.g. many
 // 0.0 or -inf), emits the result directly. Kept out of line so the common
 // rescan keeps its register budget.
-template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType,
+          typename InT>
 __device__ __noinline__ bool unbounded_round0_single_key(
-    const float* __restrict__ row_input, int32_t* __restrict__ row_output,
+    const InT* __restrict__ row_input, int32_t* __restrict__ row_output,
     uint32_t my_start, uint32_t my_len, uint32_t coarse_bin,
     uint32_t coarse_above, SmemType* smem, int32_t* s_topk) {
   const uint32_t tx = threadIdx.x;
@@ -446,9 +450,10 @@ __device__ __noinline__ bool unbounded_round0_single_key(
 }
 
 // Resume exact radix selection from the probe state and write selected indices.
-template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType,
+          typename InT>
 __device__ __noinline__ void exact_topk_rescan_cluster(
-    const float* __restrict__ row_input, int32_t* __restrict__ row_output,
+    const InT* __restrict__ row_input, int32_t* __restrict__ row_output,
     uint32_t seq_len, uint32_t my_start, uint32_t my_len, uint32_t coarse_bin,
     uint32_t coarse_above, OverflowProbeState probe, SmemType* smem,
     int32_t* s_topk) {
@@ -566,9 +571,10 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
 // Recover exact TopK from an overflowing threshold bin.
 // Keep exceptional-path state behind this call boundary to preserve the
 // common kernel's live ranges.
-template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType>
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType,
+          typename InT>
 __device__ __noinline__ void recover_coarse_overflow(
-    const float* __restrict__ row_input, int32_t* __restrict__ row_output,
+    const InT* __restrict__ row_input, int32_t* __restrict__ row_output,
     uint32_t seq_len, uint32_t my_start, uint32_t my_len, SmemType* smem,
     int32_t* s_topk) {
   const uint32_t coarse_bin = smem->match.bin;

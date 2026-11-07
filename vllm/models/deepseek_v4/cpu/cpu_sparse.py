@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.models.deepseek_v4.attention import (
@@ -283,7 +283,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         self._wo_a_packed: torch.Tensor | None = None
         self._wrap_wo_a_process_weights_after_loading()
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Cache fp32-contiguous copies of tensors CPU kernels want that way
         but that arrive bf16 (rotary cos/sin table, compressor RMSNorm
         weights) -- cast once here instead of per forward call.

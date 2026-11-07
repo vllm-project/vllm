@@ -616,11 +616,10 @@ class RadioWithNeck(nn.Module):
             torch.cat(positioned_pages, dim=1), imgs_sizes=image_sizes
         )
         hidden = embeddings.patch_normalizer(hidden)
-        mask_meta = None
-        if len(image_sizes) > 1:
-            mask_meta = backbone._inter_image_mask_metadata(
-                image_sizes, device=hidden.device
-            )
+        # One image gives cu_seqlens [0, n], i.e. unmasked attention over one sequence.
+        mask_meta = backbone._inter_image_mask_metadata(
+            image_sizes, device=hidden.device
+        )
         hidden = backbone.encoder(inputs_embeds=hidden, mask_meta=mask_meta)
 
         cursor = 0
@@ -860,55 +859,13 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
 
         radio_loaded = self.encoder.model_encoder.load_weights(radio_weights)
 
-        # SO400M is constructed without LayerScale in the reference model, but
-        # the shared InternViT implementation materializes identity parameters.
-        # Account for them only after verifying both the architecture and value.
-        encoder_args = getattr(self.config.encoder, "args", {})
-        radio_model_name = (
-            encoder_args.get("model")
-            if isinstance(encoder_args, Mapping)
-            else getattr(encoder_args, "model", None)
-        )
-        identity_layerscale_models = {
-            "vit_so400m_patch16_224",
-        }
-        radio_source_names = {name for name, _ in radio_weights}
-        synthetic_layerscales = {
-            name: param
-            for name, param in self.encoder.model_encoder.named_parameters()
+        # The shared InternViT implementation materializes LayerScale parameters
+        # that checkpoints of encoders without LayerScale (SO400M) omit.
+        radio_loaded.update(
+            name
+            for name, _ in self.encoder.model_encoder.named_parameters()
             if name.endswith((".layer_scale1.lambda1", ".layer_scale2.lambda1"))
-            and name not in radio_loaded
-        }
-        if synthetic_layerscales:
-            layerscale_markers = (".ls1", ".ls2", ".layer_scale1", ".layer_scale2")
-            source_layerscales = {
-                name
-                for name in radio_source_names
-                if any(marker in name for marker in layerscale_markers)
-            }
-            if radio_model_name not in identity_layerscale_models:
-                raise RuntimeError(
-                    "RADIO LayerScale parameters were not loaded for unsupported "
-                    f"architecture {radio_model_name!r}: "
-                    f"{sorted(synthetic_layerscales)}"
-                )
-            if source_layerscales:
-                raise RuntimeError(
-                    "SO400M checkpoint unexpectedly contains LayerScale tensors "
-                    f"ignored by the RADIO loader: {sorted(source_layerscales)}"
-                )
-            non_identity = [
-                name
-                for name, param in synthetic_layerscales.items()
-                if not torch.equal(param.detach(), torch.ones_like(param.detach()))
-            ]
-            if non_identity:
-                raise RuntimeError(
-                    "Synthetic SO400M LayerScale parameters are not identity: "
-                    f"{non_identity}"
-                )
-            radio_loaded.update(synthetic_layerscales)
-
+        )
         loaded.update(f"encoder.model_encoder.{name}" for name in radio_loaded)
         decoder_loaded = self.decoder.load_weights(decoder_weights)
         loaded.update(f"decoder.{name}" for name in decoder_loaded)

@@ -650,6 +650,13 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        # Only non-x86 CPUs have a standalone no-Triton MRV2 runner.
+        from vllm.triton_utils import HAS_TRITON
+
+        return not HAS_TRITON and cls.get_cpu_architecture() != CpuArchEnum.X86
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.get_num_threads()
 
@@ -753,9 +760,9 @@ class CpuPlatform(Platform):
         indices: torch.Tensor,
     ) -> None:
         """Rewrite the kv cache shape for the current platform."""
-        # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
+        # Import lazily: cpu_attn pulls in _cpu_ops, which needs a fully
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
-        from vllm._custom_ops import cpu_attn_reshape_and_cache
+        from vllm._cpu_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
         # MLA uses a single latent cache of shape [N, block_size, head_size],

@@ -119,6 +119,7 @@ async def init_app_state(
         default_chat_template_kwargs=default_chat_template_kwargs,
         reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
 
     state.serving_tokenization = ServingTokenization(

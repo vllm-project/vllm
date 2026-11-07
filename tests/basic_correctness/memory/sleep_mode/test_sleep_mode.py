@@ -28,7 +28,7 @@ from ....utils import (
     "model",
     [
         # sleep mode with safetensors
-        "hmellor/tiny-random-LlamaForCausalLM",
+        "vllm-project/tiny-random-LlamaForCausalLM",
         # sleep mode with pytorch checkpoint
         "facebook/opt-125m",
     ],
@@ -89,9 +89,9 @@ def _model_state(worker) -> dict[str, list]:
 @pytest.mark.parametrize(
     "model",
     [
-        "hmellor/tiny-random-LlamaForCausalLM",
+        "vllm-project/tiny-random-LlamaForCausalLM",
         # Its MRV2 model state holds device tensors.
-        "yujiepan/mamba2-codestral-v0.1-tiny-random",
+        "vllm-project/mamba2-codestral-v0.1-tiny-random",
     ],
 )
 def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):
@@ -129,6 +129,27 @@ def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
+def _embed_tokens(worker) -> torch.Tensor:
+    weights = dict(worker.model_runner.get_model().named_parameters())
+    return weights["model.embed_tokens.weight"].detach().cpu().clone()
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_keeps_preserved_parameters(monkeypatch, gpu_memory_cleared):
+    """A preserved parameter comes back on wake, with no reload."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        sleep_preserve_parameter_names=["model.embed_tokens.weight"],
+    )
+    before = llm.collective_rpc(_embed_tokens)[0]
+    llm.sleep(level=2)
+    llm.wake_up(tags=["weights"])
+    assert torch.equal(llm.collective_rpc(_embed_tokens)[0], before)
+
+
 @create_new_process_for_each_test()
 def test_deep_sleep_lora(gpu_memory_cleared):
     """Level-2 sleep/wake/reload with enable_lora=True.
@@ -138,7 +159,7 @@ def test_deep_sleep_lora(gpu_memory_cleared):
     reload machinery — reload must forward checkpoint weights through
     the wrappers and reset the LoRA state afterwards.
     """
-    model = "hmellor/tiny-random-LlamaForCausalLM"
+    model = "vllm-project/tiny-random-LlamaForCausalLM"
     llm = LLM(
         model,
         enable_sleep_mode=True,
@@ -150,7 +171,7 @@ def test_deep_sleep_lora(gpu_memory_cleared):
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
 
-    # Level-2 sleep discards all GPU memory
+    # Level-2 sleep discards parameters and the KV cache
     llm.sleep(level=2)
 
     # Reload weights from checkpoint
@@ -185,10 +206,6 @@ def _lora_logits_mapping_correct(model) -> bool:
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="LoRA state is kept in the runtime pool only on CUDA/ROCm",
-)
 def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
@@ -200,7 +217,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     # Needed for apply_model to reach the multiproc TP workers below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    model = "hmellor/tiny-random-LlamaForCausalLM"
+    model = "vllm-project/tiny-random-LlamaForCausalLM"
     llm = LLM(
         model,
         enable_sleep_mode=True,
@@ -282,7 +299,7 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
     llm = LLM(
-        "hmellor/tiny-random-LlamaForCausalLM",
+        "vllm-project/tiny-random-LlamaForCausalLM",
         enable_sleep_mode=True,
         sleep_mode_offload_cudagraph=offload,
         tensor_parallel_size=tp,
@@ -350,7 +367,7 @@ def test_sleep_cudagraph_pool_aiter_fused_ar_group_quant(monkeypatch):
 @create_new_process_for_each_test()
 def test_deep_sleep_async(gpu_memory_cleared):
     async def test():
-        model = "hmellor/tiny-random-LlamaForCausalLM"
+        model = "vllm-project/tiny-random-LlamaForCausalLM"
         free, total = torch.accelerator.get_memory_info()
         used_bytes_baseline = total - free  # in case other process is running
         engine_args = AsyncEngineArgs(
@@ -362,7 +379,7 @@ def test_deep_sleep_async(gpu_memory_cleared):
         prompt = "How are you?"
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         outputs = llm.generate(prompt, sampling_params, request_id="test_request_id1")
-        async for output in outputs:
+        async for output in outputs:  # noqa: B007
             pass
 
         # Put the engine to deep sleep
@@ -377,7 +394,7 @@ def test_deep_sleep_async(gpu_memory_cleared):
         # now allocate kv cache and cuda graph memory
         await llm.wake_up(tags=["kv_cache"])
         outputs2 = llm.generate(prompt, sampling_params, request_id="test_request_id2")
-        async for output2 in outputs2:
+        async for output2 in outputs2:  # noqa: B007
             pass
 
         # cmp output

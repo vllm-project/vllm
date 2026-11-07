@@ -70,7 +70,10 @@ BACKENDS_TO_TEST = [
 ]
 
 if current_platform.is_rocm():
-    BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
+    BACKENDS_TO_TEST += [
+        AttentionBackendEnum.ROCM_AITER_MLA,
+        AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+    ]
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -353,8 +356,10 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
+    layer.dcp_manager = None
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.act_dtype = torch.float32
     layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
@@ -362,7 +367,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     )
 
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
         assert isinstance(layer.W_UV, torch.nn.Parameter)
         assert isinstance(layer.W_UK_T, torch.nn.Parameter)
         w_uv_ptr = layer.W_UV.data_ptr()
@@ -371,7 +376,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         old_w_uk_t = layer.W_UK_T.clone()
 
         layer.kv_b_proj.weight.add_(100)
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
 
     assert layer.W_UV.data_ptr() == w_uv_ptr
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
@@ -391,7 +396,12 @@ if current_platform.is_cuda():
         ]
     )
 elif current_platform.is_rocm():
-    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8,
+        ]
+    )
 elif current_platform.is_xpu():
     PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.FLASH_ATTN)
 
@@ -472,6 +482,13 @@ for backend in BACKENDS_TO_TEST:
 torch.manual_seed(42)
 
 
+@pytest.fixture(autouse=True)
+def _reseed_each_test():
+    # Inputs must not depend on which tests ran earlier in the process: CI
+    # shards this file, so the preceding tests differ per shard.
+    set_random_seed(42)
+
+
 def _convert_dtype_to_torch(dtype):
     """Convert ModelDType to torch.dtype."""
     if isinstance(dtype, str):
@@ -519,6 +536,11 @@ BATCH_SPECS = {
     "chunked_context_prefill": BatchSpec(
         seq_lens=[1568, 520, 8, 80, 96, 8],
         query_lens=[32, 8, 8, 16, 16, 8],
+    ),
+    # No request has context, so ROCM_AITER_MLA would take its ASM FP8 prefill
+    # unless the FlyDSL FP8 prefill backend is selected.
+    "context_free_prefill": BatchSpec(
+        seq_lens=[128, 300, 17], query_lens=[128, 300, 17]
     ),
 }
 
@@ -1765,7 +1787,10 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
-    if hf_config_override and current_platform.is_xpu():
+    # model_arch_config is resolved before the override reaches it, so the
+    # backends would otherwise see the full model's heads at every TP size.
+    # Not yet on CUDA, whose backends have head-count limits of their own.
+    if hf_config_override and (current_platform.is_xpu() or current_platform.is_rocm()):
         vllm_config.model_config.model_arch_config.total_num_attention_heads = (
             hf_config_override["num_attention_heads"]
         )
@@ -1838,7 +1863,7 @@ def _run_backend_correctness(
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    for i, backend in enumerate(backends_to_test):
+    for _ in backends_to_test:
         all_sdpa_outputs.append([])
 
     for i in range(batch_size):
@@ -1885,7 +1910,7 @@ def _run_backend_correctness(
         # pipeline (MHA-style). This ensures the reference implementation
         # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend in backends_to_test:
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
@@ -1990,7 +2015,7 @@ def _run_backend_correctness(
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend_idx in range(len(backends_to_test)):
             if is_decode[backend_idx]:
                 all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
@@ -2090,8 +2115,12 @@ def _run_backend_correctness(
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]
+    if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8:
+        # Per-tensor e4m3 Q/K/V (3 mantissa bits): a row attending to a few
+        # tokens is off by up to ~2**-4 of max|V| (~4 here).
+        rtol, atol = 2**-4, 3e-1
     failures = []
-    for backend_idx, backend_name in enumerate(backends_to_test):
+    for backend_name in backends_to_test:
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue
@@ -2245,6 +2274,9 @@ def test_backend_correctness(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm-gen", "cute-dsl"])
 @pytest.mark.parametrize("use_prefill_query_quantization", [False, True])
+@pytest.mark.parametrize(
+    "batch_spec_name", ["chunked_context_prefill", "context_free_prefill"]
+)
 def test_chunked_context_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -2255,6 +2287,7 @@ def test_chunked_context_backend_correctness(
     kv_cache_dtype: str,
     trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"],
     use_prefill_query_quantization: bool,
+    batch_spec_name: str,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
     if prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED and (
@@ -2273,11 +2306,19 @@ def test_chunked_context_backend_correctness(
             qk_nope_head_dim + 64, v_head_dim, query_dtype
         ):
             pytest.skip("Unsupported CuTe DSL prefill dimensions or query dtype")
+    if (
+        batch_spec_name == "context_free_prefill"
+        and prefill_backend != MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8
+    ):
+        pytest.skip(
+            "Covers ROCM_AITER_FLYDSL_FP8 taking over ROCM_AITER_MLA's "
+            "context-free FP8 prefill"
+        )
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
         workspace_init,
-        batch_spec_name="chunked_context_prefill",
+        batch_spec_name=batch_spec_name,
         model="deepseek-ai/DeepSeek-R1",
         tensor_parallel_size=16,
         kv_cache_dtype=kv_cache_dtype,

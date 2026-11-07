@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
+    get_kv_quant_mode,
 )
 
 if TYPE_CHECKING:
@@ -236,6 +237,15 @@ _DEFAULT_LAYOUT_PREFERENCE = (
 )
 
 
+def get_flashinfer_kv_cache_layouts() -> tuple[KVCacheLayout, ...]:
+    """The default preference, minus layouts FlashInfer has no name for."""
+    return tuple(
+        layout
+        for layout in _DEFAULT_LAYOUT_PREFERENCE
+        if layout.name in _FLASHINFER_LAYOUT_NAMES
+    )
+
+
 def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
     return [layout.name for layout in layouts]
 
@@ -375,6 +385,19 @@ def resolve_kv_cache_layout(
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
 
+    # An extensible KV cache commits one contiguous run per layer only under a
+    # block-compact layout, which KV connectors need to register its memory.
+    if (
+        cache_config.enable_extensible_kv_cache
+        and vllm_config.kv_transfer_config is not None
+    ):
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "KV connectors with the extensible KV cache need a block-compact "
+                f"layout, but none is in every supported set: {supported_layouts}."
+            )
+
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)
         if layout not in candidates:
@@ -445,6 +468,43 @@ def get_per_layer_parameters(
         )
 
     return per_layer_params
+
+
+def _kv_cache_read_encoding(cache_dtype: str | None) -> str | None:
+    # NVFP4 scale-search variants only differ in the store kernel.
+    if cache_dtype == "fp8":
+        return "fp8_e4m3"
+    if cache_dtype is not None and get_kv_quant_mode(cache_dtype).is_nvfp4:
+        return "nvfp4"
+    return cache_dtype
+
+
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Resolve the KV read encoding shared by an attention group.
+
+    Attention groups are split by spec, which separates quantization modes but
+    not encodings that share a storage layout (e.g. fp8_e4m3 vs fp8_e5m2).
+    Those must not be mixed within one group.
+    """
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    cache_dtypes = {
+        _kv_cache_read_encoding(getattr(layer, "kv_cache_dtype", None))
+        for layer in layers.values()
+    }
+    if not cache_dtypes:
+        return None
+    if len(cache_dtypes) != 1:
+        raise ValueError(
+            "All layers in one attention group must share the same KV cache "
+            f"dtype; got {cache_dtypes} for {layer_names}."
+        )
+    return cache_dtypes.pop()
 
 
 def get_num_attention_heads_from_layers(
@@ -762,9 +822,19 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     decode_max_query_len = common_attn_metadata.max_logits_per_req
     assert decode_max_query_len is not None
 
+    if decode_max_query_len == 1 and total_num_decode_tokens == num_reqs:
+        # One logit per request: the offsets are [0, 1, ..., num_reqs].
+        decode_query_start_loc_cpu = torch.arange(
+            num_reqs + 1, dtype=decode_query_start_loc.dtype, device="cpu"
+        )
+    else:
+        # TODO fix this sync
+        with gpu_sync_allowed():
+            decode_query_start_loc_cpu = decode_query_start_loc.cpu()
+
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
-        query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
+        query_start_loc_cpu=decode_query_start_loc_cpu,
         seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
@@ -1150,7 +1220,7 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
         offsetlist = []  # type: ignore
-        for idx, num in enumerate(nums):
+        for num in nums:
             offsetlist.extend(range(num))
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
