@@ -7,7 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from transformers import OPTConfig
 
+from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.model_executor.models.exaone4_5_mtp import Exaone4_5_MTP
@@ -20,7 +22,11 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
@@ -74,6 +80,79 @@ class _TextOnlyDraftModel(torch.nn.Module):
         is_multimodal=None,
     ):
         raise AssertionError("embed_input_ids should not be called during loading")
+
+
+def test_sliding_window_draft_disables_fa3_aot_for_prefill_and_chain(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        flash_attn_module, "get_flash_attn_version", lambda *args, **kwargs: 3
+    )
+    model_path = tmp_path / "model"
+    OPTConfig(
+        architectures=["OPTForCausalLM"],
+        hidden_size=64,
+        ffn_dim=128,
+        num_attention_heads=1,
+        num_hidden_layers=1,
+        vocab_size=128,
+        max_position_embeddings=128,
+    ).save_pretrained(model_path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            max_model_len=128,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    spec_kwargs = {
+        "block_size": 16,
+        "num_kv_heads": 1,
+        "head_size": 64,
+        "dtype": torch.float16,
+        "dcp_sharded": False,
+    }
+    sliding_spec = SlidingWindowSpec(**spec_kwargs, sliding_window=64)
+    full_spec = FullAttentionSpec(**spec_kwargs)
+
+    def make_group(layer_name, kv_cache_spec):
+        builder = flash_attn_module.FlashAttentionMetadataBuilder(
+            kv_cache_spec,
+            [layer_name],
+            vllm_config,
+            torch.device("cpu"),
+        )
+        return AttentionGroup(
+            flash_attn_module.FlashAttentionBackend,
+            [layer_name],
+            kv_cache_spec,
+            0,
+            metadata_builders=[builder],
+        )
+
+    target_sliding = make_group("target", sliding_spec)
+    prefill_draft_sliding = make_group("draft.sliding", sliding_spec)
+    chain_draft_sliding = make_group("draft.sliding", sliding_spec)
+    draft_full = make_group("draft.full", full_spec)
+    draft_layer_names = {"draft.sliding", "draft.full"}
+    groups = (target_sliding, prefill_draft_sliding, chain_draft_sliding, draft_full)
+    assert all(group.get_metadata_builder().aot_schedule for group in groups)
+
+    base_spec_module._disable_aot_schedule_for_sliding_window_drafts(
+        [[target_sliding, prefill_draft_sliding, draft_full]],
+        draft_layer_names,
+    )
+    base_spec_module._disable_aot_schedule_for_sliding_window_drafts(
+        [[chain_draft_sliding]],
+        draft_layer_names,
+    )
+
+    assert target_sliding.get_metadata_builder().aot_schedule
+    assert all(
+        not group.get_metadata_builder().aot_schedule
+        for group in (prefill_draft_sliding, chain_draft_sliding)
+    )
+    assert draft_full.get_metadata_builder().aot_schedule
 
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
