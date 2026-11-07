@@ -11,6 +11,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
@@ -19,6 +20,41 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+
+# The recurrence is sequential over chunks, so the grid (cdiv(V, BV), N * H)
+# is all the parallelism this kernel has. The autotune key cannot hold N, so
+# an autotuned BV is frozen by whichever launch tunes it first (the profile
+# warmup) and reused for every batch: a single-sequence prefill then launches
+# 64 programs at H=32 on a 256-CU MI355X. On ROCm, derive BV from N * H and
+# the CU count instead and autotune only num_warps/num_stages, once per BV.
+# BV only tiles V, so the K and T accumulation order is unchanged.
+_BV_FROM_OCCUPANCY = torch.version.hip is not None
+if _BV_FROM_OCCUPANCY:
+    _CHUNK_DELTA_H_CONFIGS = [
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
+    ]
+    _CHUNK_DELTA_H_KEY = ["H", "K", "V", "BT", "BV"]
+else:
+    _CHUNK_DELTA_H_CONFIGS = [
+        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
+        for BV in [32, 64]
+    ]
+    _CHUNK_DELTA_H_KEY = ["H", "K", "V", "BT"]
+
+
+def _chunk_delta_h_bv(V: int, num_seq_heads: int, num_cus: int) -> int:
+    """Widest power-of-two V tile whose grid still covers ``num_cus``.
+
+    ``num_seq_heads`` is N * H. The tile stays within [16, 64]: 16 is the
+    smallest tile tl.dot accepts, 64 the widest the CUDA autotune space has.
+    """
+    num_splits = max(num_cus // max(num_seq_heads, 1), 1)
+    num_splits = 1 << (num_splits.bit_length() - 1)
+    return min(max(triton.next_power_of_2(triton.cdiv(V, num_splits)), 16), 64)
 
 
 @triton.heuristics(
@@ -32,13 +68,8 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
-        for BV in [32, 64]
-    ],
-    key=["H", "K", "V", "BT"],
+    configs=_CHUNK_DELTA_H_CONFIGS,
+    key=_CHUNK_DELTA_H_KEY,
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
@@ -320,6 +351,12 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
+    launch_kwargs = {}
+    if _BV_FROM_OCCUPANCY:
+        launch_kwargs["BV"] = _chunk_delta_h_bv(
+            V, N * H, num_compute_units(k.device.index)
+        )
+
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
@@ -339,5 +376,6 @@ def chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
+        **launch_kwargs,
     )
     return h, v_new, final_state
