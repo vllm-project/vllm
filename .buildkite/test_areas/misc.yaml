@@ -802,6 +802,7 @@ steps:
   - image-build-cpu
   timeout_in_minutes: 35
   source_file_dependencies: &cpu-async-engine-deps
+  - examples/tool_chat_template_gemma4.jinja
   - vllm/assets/
   - vllm/config/
   - vllm/device_allocator/

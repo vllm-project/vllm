@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 import requests
@@ -24,6 +26,7 @@ def server():
         "--max-num-seqs",
         "128",
         "--enable-tokenizer-info-endpoint",
+        "--trust-request-chat-template",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -39,6 +42,49 @@ def tokenizer_name(model_name: str):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.mark.asyncio
+async def test_tokenize_gemma4_tool_content_order(server: RemoteOpenAIServer):
+    template = (
+        Path(__file__).resolve().parents[4] / "examples/tool_chat_template_gemma4.jinja"
+    ).read_text()
+    response = requests.post(
+        server.url_for("tokenize"),
+        json={
+            "model": MODEL_NAME,
+            "chat_template": template,
+            "add_generation_prompt": True,
+            "messages": [
+                {"role": "user", "content": "Weather?"},
+                {
+                    "role": "assistant",
+                    "content": "I'll check.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "London"}',
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+            ],
+        },
+    )
+    response.raise_for_status()
+    decoded = requests.post(
+        server.url_for("detokenize"),
+        json={"model": MODEL_NAME, "tokens": response.json()["tokens"]},
+    )
+    decoded.raise_for_status()
+    prompt = decoded.json()["prompt"]
+    assert prompt.index("I'll check.") < prompt.index("<|tool_call>")
+    assert prompt.index("<|tool_call>") < prompt.index("<|tool_response>")
+    assert prompt.endswith("<tool_response|>")
 
 
 @pytest.mark.asyncio
