@@ -1144,6 +1144,11 @@ class DiffusionGemmaModelState(ModelState):
 # "no penalty bookkeeping".
 _NO_PENALTIES_STATE = SimpleNamespace(output_bin_counts=None)
 
+# Decode steps between refreshes of the minimum free memory across ranks. The
+# all-reduce makes every rank wait for the slowest one, so running it on every
+# step costs throughput.
+_FREE_MEMORY_REFRESH_STEPS = 32
+
 
 class DiffusionSampler:
     """Batched accept/renoise sampler for DiffusionGemma.
@@ -1220,6 +1225,10 @@ class DiffusionSampler:
         # Populated after the post-sample kernel detects convergence; consumed
         # on the subsequent commit step when num_sampled=CANVAS_LEN.
         self._pending_logprobs: dict[int, LogprobsTensors] = {}
+
+        # Minimum free memory across ranks, and the decode steps run so far.
+        self._min_free = 0
+        self._num_decode_steps = 0
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
@@ -1492,6 +1501,21 @@ class DiffusionSampler:
         widths_np = states.canvas_width_np[decode_slots_np]
         order = np.argsort(widths_np, kind="stable")
         free = torch.accelerator.get_memory_info()[0] if num_decode > 0 else 0
+        # Use the minimum free memory across all ranks so every rank tiles the same.
+        # All ranks see the same decode requests, so they count the same decode
+        # steps and refresh on the same step.
+        tp_group = get_tp_group()
+        if num_decode > 0 and tp_group.world_size > 1:
+            if self._num_decode_steps % _FREE_MEMORY_REFRESH_STEPS == 0:
+                free_tensor = torch.tensor([free], dtype=torch.int64)
+                torch.distributed.all_reduce(
+                    free_tensor,
+                    op=torch.distributed.ReduceOp.MIN,
+                    group=tp_group.cpu_group,
+                )
+                self._min_free = int(free_tensor.item())
+            self._num_decode_steps += 1
+            free = self._min_free
         run_start = 0
         while run_start < num_decode:
             W = int(widths_np[order[run_start]])
