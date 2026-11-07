@@ -23,6 +23,8 @@ __all__ = [
     "BF16X3_TERMS",
     "MIN_TOKENS",
     "bf16x3_router_gemm",
+    "bf16x3_router_gemv",
+    "gemv_is_supported",
     "is_supported",
     "platform_supported",
     "split_bf16x3",
@@ -37,6 +39,16 @@ BF16X3_TERMS = 3
 MIN_TOKENS = 2048
 
 _MAX_INT32 = (1 << 31) - 1
+
+# (max_tokens, (BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K)), tuned on MI355 at
+# K=6144, E=128. At <= 32 tokens the fp32 router kernel is faster.
+_GEMV_MIN_TOKENS = 33
+_GEMV_CONFIGS = (
+    (64, (32, 16, 128, 16)),
+    (256, (64, 16, 128, 16)),
+    (512, (64, 64, 128, 16)),
+    (MIN_TOKENS - 1, (64, 64, 64, 8)),
+)
 
 
 def split_bf16x3(weight: torch.Tensor) -> torch.Tensor:
@@ -158,6 +170,127 @@ def bf16x3_router_gemm(
         TERMS=terms,
         BLOCK_M=block_m,
         BLOCK_N=triton.next_power_of_2(n),
+        num_warps=4,
+    )
+    return out
+
+
+def _gemv_config(m: int) -> tuple[int, int, int, int]:
+    for max_m, cfg in _GEMV_CONFIGS:
+        if m <= max_m:
+            return cfg
+    raise ValueError(f"no GEMV config for {m} tokens")
+
+
+def gemv_is_supported(x: torch.Tensor, weight_split: torch.Tensor) -> bool:
+    """Whether `bf16x3_router_gemv` can serve ``x`` with this weight split."""
+    if x.dim() != 2 or weight_split.dim() != 3:
+        return False
+    m, k = x.shape
+    if not _GEMV_MIN_TOKENS <= m < MIN_TOKENS:
+        return False
+    _, block_n, block_k, split_k = _gemv_config(m)
+    terms, n, k_w = weight_split.shape
+    return (
+        terms == BF16X3_TERMS
+        and k == k_w
+        and x.dtype == torch.bfloat16
+        and weight_split.dtype == torch.bfloat16
+        and weight_split.is_contiguous()
+        and x.device == weight_split.device
+        and x.stride(1) == 1
+        and n % block_n == 0
+        and k % block_k == 0
+        and split_k * m * n <= _MAX_INT32
+    )
+
+
+@triton.jit
+def _gemv_kernel(
+    x_ptr,
+    w_ptr,
+    partials_ptr,
+    M,
+    stride_xm,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    TERMS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    pid_k = tl.program_id(2)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_m = (offs_m < M)[:, None]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    for k0 in range(pid_k * BLOCK_K, K, BLOCK_K * SPLIT_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        xv = tl.load(
+            x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :],
+            mask=mask_m,
+            other=0.0,
+        )
+        for t in tl.static_range(TERMS):
+            wv = tl.load(w_ptr + t * N * K + offs_n[:, None] * K + offs_k[None, :])
+            acc += tl.dot(xv, tl.trans(wv))
+    tl.store(
+        partials_ptr + pid_k * M * N + offs_m[:, None] * N + offs_n[None, :],
+        acc,
+        mask=mask_m,
+    )
+
+
+@triton.jit
+def _reduce_splits_kernel(
+    partials_ptr,
+    out_ptr,
+    numel,
+    SPLIT_K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    total = tl.zeros((BLOCK,), tl.float32)
+    for s in tl.static_range(SPLIT_K):
+        total += tl.load(partials_ptr + s * numel + offs, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, total, mask=mask)
+
+
+def bf16x3_router_gemv(x: torch.Tensor, weight_split: torch.Tensor) -> torch.Tensor:
+    """Split-K variant for fewer than MIN_TOKENS tokens. Deterministic: splits
+    are summed in a fixed order, not with atomics."""
+    m, k = x.shape
+    terms, n, _ = weight_split.shape
+    block_m, block_n, block_k, split_k = _gemv_config(m)
+    out = torch.empty((m, n), dtype=torch.float32, device=x.device)
+    partials = torch.empty((split_k, m, n), dtype=torch.float32, device=x.device)
+    _gemv_kernel[(n // block_n, triton.cdiv(m, block_m), split_k)](
+        x,
+        weight_split,
+        partials,
+        m,
+        x.stride(0),
+        K=k,
+        N=n,
+        TERMS=terms,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        SPLIT_K=split_k,
+        num_warps=4,
+        num_stages=2,
+    )
+    reduce_block = 1024
+    _reduce_splits_kernel[(triton.cdiv(m * n, reduce_block),)](
+        partials,
+        out,
+        m * n,
+        SPLIT_K=split_k,
+        BLOCK=reduce_block,
         num_warps=4,
     )
     return out
