@@ -257,6 +257,7 @@ class ConsumerControlServer:
         peer_ports: list[int] | None = None,
         device: torch.device | None = None,
         drain_ready: Callable[[], list[str]] = lambda: [],
+        drain_abandoned: Callable[[], list[tuple[str, str]]] = lambda: [],
     ) -> None:
         self.host = host
         self.port = port
@@ -269,6 +270,7 @@ class ConsumerControlServer:
         self._cancel = cancel
         self._reap = reap
         self._drain_ready = drain_ready
+        self._drain_abandoned = drain_abandoned
         self._stop = threading.Event()
         self._started = threading.Event()
         self._thread: threading.Thread | None = None
@@ -415,6 +417,14 @@ class ConsumerControlServer:
                                     bool(request.get("refresh", False)),
                                 )
                             }
+                            for transfer_id, mm_hash in self._drain_abandoned():
+                                queue_event(
+                                    {
+                                        "transfer_id": transfer_id,
+                                        "mm_hash": mm_hash,
+                                        "abandoned": True,
+                                    }
+                                )
                         else:
                             raise ValueError(f"unknown control op: {op!r}")
                         socket.send_json({"ok": True, "result": result})

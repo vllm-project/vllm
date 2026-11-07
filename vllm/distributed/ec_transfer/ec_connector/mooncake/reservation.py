@@ -111,6 +111,7 @@ class ConsumerReservationManager:
         self._writers: dict[str, ConsumerReservation] = {}
         self._followers: dict[str, dict[str, None]] = {}
         self._ready: list[str] = []
+        self._abandoned: list[tuple[str, str]] = []
         self._condition = threading.Condition(memory.lock)
         self._shutting_down = False
 
@@ -278,6 +279,16 @@ class ConsumerReservationManager:
             ready, self._ready = self._ready, []
             return ready
 
+    def drain_abandoned(self) -> list[tuple[str, str]]:
+        """(transfer_id, mm_hash) of reservations no producer will write.
+
+        Covers reservations their producer abandoned and the followers of an
+        abandoned writer, whose own producers already finished.
+        """
+        with self._memory.lock:
+            abandoned, self._abandoned = self._abandoned, []
+            return abandoned
+
     def begin_shutdown(self) -> None:
         """Stop new reservations and cancel everything without a remote writer."""
         with self._condition:
@@ -347,6 +358,8 @@ class ConsumerReservationManager:
                 self._reap_tombstones(time.monotonic())
                 return True
             if record.writer_id:
+                if abandon:
+                    self._abandoned.append((transfer_id, record.mm_hash))
                 self._terminate(record, ConsumerReservationState.CANCELLED)
                 return True
             if record.state in _DEFERRED_STATES and not abandon:
@@ -356,6 +369,8 @@ class ConsumerReservationManager:
                 return True
             if record.state not in _ACTIVE_STATES:
                 return False
+            if abandon:
+                self._abandoned.append((transfer_id, record.mm_hash))
             self._terminate(record, ConsumerReservationState.CANCELLED)
             if self._shutting_down:
                 self._condition.notify_all()
@@ -430,9 +445,9 @@ class ConsumerReservationManager:
         if self._writers.get(record.mm_hash) is record:
             self._writers.pop(record.mm_hash)
         for transfer_id in list(self._followers.pop(record.transfer_id, {})):
-            self._terminate(
-                self._records[transfer_id], ConsumerReservationState.CANCELLED
-            )
+            follower = self._records[transfer_id]
+            self._abandoned.append((transfer_id, follower.mm_hash))
+            self._terminate(follower, ConsumerReservationState.CANCELLED)
         allocation = record.allocation
         if allocation is None:
             return
