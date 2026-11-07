@@ -26,24 +26,32 @@ class SkinnyGemmConfig:
     static_k: int | None = None
 
 
-def row_stride_ok(a: torch.Tensor, config: SkinnyGemmConfig) -> bool:
-    """Whether the vectorized A loads stay aligned for a row-major ``a``.
+def a_rows_aligned(a: torch.Tensor, vector_width: int) -> bool:
+    """Whether ``vector_width``-wide loads of every row of a row-major ``a``
+    stay aligned.
 
-    The kernel reads A through its layout, so column slices of a wider buffer
+    The kernels read A through its layout, so column slices of a wider buffer
     are supported without a copy.
     """
-    vector_bytes = config.vector_width * a.element_size()
+    vector_bytes = vector_width * a.element_size()
     return (
         a.stride(1) == 1
-        and a.stride(0) % config.vector_width == 0
+        and a.stride(0) % vector_width == 0
         and a.data_ptr() % vector_bytes == 0
     )
 
 
-class ShapeDynamicSkinnyGemm:
+def row_stride_ok(a: torch.Tensor, config: SkinnyGemmConfig) -> bool:
+    """Whether the vectorized A loads of ``config`` stay aligned for ``a``."""
+    return a_rows_aligned(a, config.vector_width)
+
+
+class CuteDslGemm:
+    """Compile cache, stream / PDL helpers and CuTe DSL warmup registration
+    shared by the shape-dynamic skinny GEMMs."""
+
     def __init__(self) -> None:
-        self._compiled: dict[tuple[torch.dtype, SkinnyGemmConfig, bool], Any] = {}
-        self._warmup_configs: set[tuple[torch.dtype, SkinnyGemmConfig, bool]] = set()
+        self._compiled: dict[Any, Any] = {}
         self._warmup_registered = False
 
     @staticmethod
@@ -54,12 +62,45 @@ class ShapeDynamicSkinnyGemm:
         try:
             import cutlass  # noqa: F401
             import cutlass.cute  # noqa: F401
+            import quack.compile_utils  # noqa: F401
+            from cuda.bindings.driver import CUstream  # noqa: F401
 
             _cutedsl_available = True
         except ImportError:
             _cutedsl_available = False
             logger.info("cuteDSL is not available; skinny GEMM is disabled")
         return _cutedsl_available
+
+    @staticmethod
+    def _stream():
+        from cuda.bindings.driver import CUstream
+
+        from vllm.utils.torch_utils import current_stream
+
+        return CUstream(current_stream().cuda_stream)
+
+    @staticmethod
+    def _use_pdl() -> bool:
+        from vllm.platforms import current_platform
+
+        return current_platform.is_arch_support_pdl()
+
+    def _register_warmup_provider(self) -> None:
+        if self._warmup_registered:
+            return
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            register_cutedsl_warmup_provider,
+        )
+
+        register_cutedsl_warmup_provider(self)
+        self._warmup_registered = True
+
+
+class ShapeDynamicSkinnyGemm(CuteDslGemm):
+    def __init__(self) -> None:
+        super().__init__()
+        self._compiled: dict[tuple[torch.dtype, SkinnyGemmConfig, bool], Any] = {}
+        self._warmup_configs: set[tuple[torch.dtype, SkinnyGemmConfig, bool]] = set()
 
     @staticmethod
     def _config(m: int, n: int, k: int) -> SkinnyGemmConfig:
@@ -100,26 +141,14 @@ class ShapeDynamicSkinnyGemm:
 
         return BFloat16 if dtype == torch.bfloat16 else Float16
 
-    @staticmethod
-    def _stream():
-        from cuda.bindings.driver import CUstream
-
-        from vllm.utils.torch_utils import current_stream
-
-        return CUstream(current_stream().cuda_stream)
-
-    @staticmethod
-    def _use_pdl() -> bool:
-        from vllm.platforms import current_platform
-
-        return current_platform.is_arch_support_pdl()
-
     def _compile(
         self,
         dtype: torch.dtype,
         config: SkinnyGemmConfig,
         has_residual: bool,
     ) -> None:
+        if (dtype, config, has_residual) in self._compiled:
+            return
         import cutlass.cute as cute
         from quack.compile_utils import make_fake_tensor
 
@@ -174,14 +203,7 @@ class ShapeDynamicSkinnyGemm:
     ) -> None:
         """Request compilation of explicit measured configs before capture."""
         self._warmup_configs.update((dtype, config, has_residual) for config in configs)
-        if self._warmup_registered:
-            return
-        from vllm.model_executor.warmup.cutedsl_warmup import (
-            register_cutedsl_warmup_provider,
-        )
-
-        register_cutedsl_warmup_provider(self)
-        self._warmup_registered = True
+        self._register_warmup_provider()
 
     def get_cutedsl_warmup_compile_units(self):
         from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLCompileUnit
