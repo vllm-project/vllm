@@ -80,8 +80,12 @@ Keep names that share a layer index (`model.layers.3.*`) contiguous in
 
 #### ModuleSource
 
-`ModuleSource(model)` covers `module.named_parameters()` when every rank holds
-the whole module. A plain tensor is owned by every rank. A `DTensor` (FSDP2, TP)
+`ModuleSource(model)` includes every parameter name, including tied aliases,
+when every rank holds the whole module. Inference workers may need these names
+on separate pipeline stages even when the trainer shares their storage. Each
+alias is transferred, and `iter_full()` may gather a tied `DTensor` more than once.
+
+A plain tensor is owned by every rank. A `DTensor` (FSDP2, TP)
 is owned by its device mesh's ranks, with the mesh's shape and placements;
 `iter_full()` yields `full_tensor()` and `iter_local()` yields `to_local()`.
 A `DTensor` with other placements (`Partial`, strided shards) is declared
