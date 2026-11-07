@@ -89,6 +89,8 @@ def kernel_unified_attention_diffkv(
     HEAD_SIZE_QK_PADDED: tl.constexpr,
     HEAD_SIZE_V: tl.constexpr,
     HEAD_SIZE_V_PADDED: tl.constexpr,
+    QK_SPLIT_A: tl.constexpr,  # > 0: Q.K^T as an A-wide plus a B-wide dot, no padding
+    QK_SPLIT_B: tl.constexpr,
     USE_ALIBI_SLOPES: tl.constexpr,
     USE_ALIBI_SQRT: tl.constexpr,
     USE_SOFTCAP: tl.constexpr,
@@ -159,12 +161,34 @@ def kernel_unified_attention_diffkv(
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
-    # Q : (BLOCK_M, HEAD_SIZE_QK_PADDED)
-    Q = tl.load(
-        query_ptr + query_offset,
-        mask=dim_mask_qk[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        other=0.0,
-    )
+    if QK_SPLIT_A > 0:
+        # Qa : (BLOCK_M, QK_SPLIT_A), Qb : (BLOCK_M, QK_SPLIT_B)
+        offs_qa = tl.arange(0, QK_SPLIT_A)
+        offs_qb = QK_SPLIT_A + tl.arange(0, QK_SPLIT_B)
+        q_base = (
+            query_offset_0[:, None] * query_stride_0
+            + query_offset_1[:, None] * query_stride_1
+        )
+        Qa = tl.load(
+            query_ptr + q_base + offs_qa[None, :],
+            mask=query_mask_0[:, None] & query_mask_1[:, None],
+            other=0.0,
+        )
+        Qb = tl.load(
+            query_ptr + q_base + offs_qb[None, :],
+            mask=(offs_qb < HEAD_SIZE_QK)[None, :]
+            & query_mask_0[:, None]
+            & query_mask_1[:, None],
+            other=0.0,
+        )
+        Q = Qa
+    else:
+        # Q : (BLOCK_M, HEAD_SIZE_QK_PADDED)
+        Q = tl.load(
+            query_ptr + query_offset,
+            mask=dim_mask_qk[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            other=0.0,
+        )
 
     if USE_Q_SCALE:
         scale *= tl.load(q_descale_ptr)
@@ -218,19 +242,37 @@ def kernel_unified_attention_diffkv(
             + offs_d_v[None, :] * stride_v_cache_3
             + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
         )
-        k_offset = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + offs_d_qk[:, None] * stride_k_cache_3
-            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-        )
-        # K : (HEAD_SIZE_QK_PADDED, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask_qk[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
-        K = K_load.to(Q.dtype)
+        if QK_SPLIT_A > 0:
+            k_base = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            # Ka : (QK_SPLIT_A, TILE_SIZE), Kb : (QK_SPLIT_B, TILE_SIZE)
+            Ka = tl.load(
+                key_cache_ptr + k_base + offs_qa[:, None] * stride_k_cache_3,
+                mask=tile_mask[None, :],
+                other=0.0,
+            ).to(Q.dtype)
+            Kb = tl.load(
+                key_cache_ptr + k_base + offs_qb[:, None] * stride_k_cache_3,
+                mask=(offs_qb < HEAD_SIZE_QK)[:, None] & tile_mask[None, :],
+                other=0.0,
+            ).to(Q.dtype)
+        else:
+            k_offset = (
+                physical_block_idx[None, :] * stride_k_cache_0
+                + kv_head_idx * stride_k_cache_2
+                + offs_d_qk[:, None] * stride_k_cache_3
+                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+            )
+            # K : (HEAD_SIZE_QK_PADDED, TILE_SIZE)
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask_qk[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
+            K = K_load.to(Q.dtype)
         # V : (TILE_SIZE, HEAD_SIZE_V_PADDED)
         V_load = tl.load(
             value_cache_ptr + v_offset,
@@ -253,7 +295,12 @@ def kernel_unified_attention_diffkv(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        S += scale * tl.dot(Q, K)
+        if QK_SPLIT_A > 0:
+            qk = tl.dot(Qa, Ka)
+            qk = tl.dot(Qb, Kb, qk)
+            S += scale * qk
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -499,6 +546,16 @@ def unified_attention_diffkv(
     if spec_tile is not None:
         tile_size = spec_tile
 
+    # A Q/K head size that is not a power of two (192 on MiMo-V2) would be padded to the
+    # next one (256) for the Q.K^T dot. In the 2D kernel, split it into its largest
+    # power-of-two part and the rest (192 = 128 + 64) so no padded lanes are loaded or
+    # multiplied. The split-KV decode kernel keeps one dot: there it measured neutral to
+    # slightly slower.
+    qk_split_a = qk_split_b = 0
+    if not use_3d and head_size_qk & (head_size_qk - 1):
+        qk_split_a = 1 << (head_size_qk.bit_length() - 1)
+        qk_split_b = triton.next_power_of_2(head_size_qk - qk_split_a)
+
     grid: tuple[Any, ...]
     if use_3d:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
@@ -545,6 +602,8 @@ def unified_attention_diffkv(
         HEAD_SIZE_QK_PADDED=triton.next_power_of_2(head_size_qk),
         HEAD_SIZE_V=head_size_v,
         HEAD_SIZE_V_PADDED=triton.next_power_of_2(head_size_v),
+        QK_SPLIT_A=qk_split_a,
+        QK_SPLIT_B=qk_split_b,
         USE_ALIBI_SLOPES=use_alibi_slopes,
         USE_ALIBI_SQRT=use_alibi_sqrt,
         USE_SOFTCAP=(softcap > 0),
