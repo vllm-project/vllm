@@ -356,7 +356,7 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
             default_weight_loader,
         )
 
-        validate_completeness = not weight_update_active(self)
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self)
         params_dict = dict(self.named_parameters())

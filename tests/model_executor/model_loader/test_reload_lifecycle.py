@@ -36,7 +36,7 @@ class _TinyModel(torch.nn.Module):
     def load_weights(self, weights):
         params = dict(self.named_parameters())
         for name, weight in weights:
-            self.observed.append(weight_update_active(self))
+            self.observed.append(weight_update_active())
             param = params[name]
             getattr(param, "weight_loader", default_weight_loader)(param, weight)
         return set(params)
@@ -58,14 +58,49 @@ def test_active_only_between_start_and_finish(monkeypatch, mode):
     model.load_weights(_checkpoint().items())
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     assert model.observed == [False, False]  # cold start keeps its checks
-    assert not weight_update_active(model)
+    assert not weight_update_active()
 
     model.observed.clear()
     start_reload(model)
-    assert weight_update_active(model)
+    assert weight_update_active()
     model.load_weights(_checkpoint(1.01).items())
     assert model.observed == [True, True]
     finish_reload(model, _MODEL_CONFIG, _DEVICE)
-    assert not weight_update_active(model)
+    assert not weight_update_active()
 
     torch.testing.assert_close(model.proj.weight, _checkpoint(1.01)["proj.weight"])
+
+
+class _Outer(torch.nn.Module):
+    """A wrapper like Step5ForConditionalGeneration around its language model."""
+
+    def __init__(self):
+        super().__init__()
+        self.language_model = _TinyModel()
+
+    def load_weights(self, weights):
+        return self.language_model.load_weights(
+            (name.removeprefix("language_model."), w) for name, w in weights
+        )
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
+def test_nested_module_sees_the_update(monkeypatch, mode):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _Outer()
+    record_metadata_for_reloading(model)
+    model.load_weights(
+        (f"language_model.{name}", w) for name, w in _checkpoint().items()
+    )
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    inner = model.language_model
+    inner.observed.clear()
+
+    start_reload(model)
+    # one weight per call, as a bucketed update sends them
+    for name, w in _checkpoint(1.01).items():
+        model.load_weights([(f"language_model.{name}", w)])
+    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+
+    assert inner.observed == [True, True]
+    assert not weight_update_active()

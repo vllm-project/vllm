@@ -308,7 +308,7 @@ class MiniMaxM3MTP(nn.Module):
         if self._tracks_own_embed:
             if "model.embed_tokens.weight" in loaded_params:
                 self.has_own_embed_tokens = True
-            elif not weight_update_active(self):
+            elif not weight_update_active():
                 # A complete checkpoint without embeddings borrows the target's.
                 self.has_own_embed_tokens = False
         return loaded_params

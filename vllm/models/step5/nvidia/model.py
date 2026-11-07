@@ -2428,7 +2428,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        validate_completeness = not weight_update_active(self)
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]
