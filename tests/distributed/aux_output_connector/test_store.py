@@ -1124,13 +1124,15 @@ def test_worker_emits_mid_block_chunked_prefill():
     worker.close()
 
 
-def test_worker_emits_published_block_and_mid_block_tail():
+@pytest.mark.parametrize("emit_start", [0, 5])
+@pytest.mark.parametrize("token_end", [7, 8, 10])
+def test_worker_emits_published_blocks_with_unkeyed_rows(token_end, emit_start):
     worker = _make_worker(1)
-    logical = np.arange(7 * 3 * 2, dtype=np.uint8).reshape(7, 3, 2)
+    logical = np.arange(token_end * 6, dtype=np.uint8).reshape(token_end, *_SHAPE)
 
     first = _metadata(
         0,
-        [_request_metadata("request", 0, 6, 0, [b"a" * 32])],
+        [_request_metadata("request", 0, 6, emit_start, [b"a" * 32])],
         {},
     )
     output = _process_output(
@@ -1145,12 +1147,12 @@ def test_worker_emits_published_block_and_mid_block_tail():
 
     second = _metadata(
         0,
-        [_request_metadata("request", 6, 1, 0, [])],
+        [_request_metadata("request", 6, token_end - 6, emit_start, [])],
         {},
     )
     output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
 
-    np.testing.assert_array_equal(output["request"].rows, logical)
+    np.testing.assert_array_equal(output["request"].rows, logical[emit_start:])
     worker.close()
 
 

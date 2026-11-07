@@ -41,7 +41,12 @@ from cutlass.utils import get_smem_capacity_in_bytes
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -984,7 +989,9 @@ class GemmRsAr:
         # supported but faster on the existing LL path.
         return x.shape[0] >= 128
 
-    def apply(self, x: torch.Tensor, linear: LinearBase) -> torch.Tensor:
+    def apply(
+        self, x: torch.Tensor | QuantizedActivation, linear: LinearBase
+    ) -> torch.Tensor:
         from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
             FlashInferCutedslMxfp8LinearKernel,
         )
@@ -998,16 +1005,23 @@ class GemmRsAr:
             w = w.t()
         w_sf = getattr(linear, "weight_scale", None)
 
+        # A pre-quantized activation carries F8_128x4-swizzled MXFP8 scales,
+        # the layout the in-kernel quantization below produces.
+        qa = as_quantized_activation(x, kMxfp8Dynamic)
+        if qa is not None:
+            assert qa.orig_dtype == torch.bfloat16
+            x, x_sf = qa.data, qa.scale
+        else:
+            assert isinstance(x, torch.Tensor) and x.dtype == torch.bfloat16
+            x_sf = None
         assert x.ndim == 2
         M, K = x.shape
         assert 0 < M <= self.max_M
-        assert x.dtype == torch.bfloat16
         assert x.device == self.device
         assert x.is_contiguous()
         assert w.device == self.device
         N = self.N
         dtype = "mxfp8" if w.dtype == torch.float8_e4m3fn else "bf16"
-        x_sf = None
         if dtype == "mxfp8":
             from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
                 mxfp8_e4m3_quantize,
@@ -1019,13 +1033,14 @@ class GemmRsAr:
             assert w_sf.numel() == N * (K // 32)
             assert w.shape == (N, K) and K % 128 == 0
             assert w.is_contiguous()
-            x, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
+            if x_sf is None:
+                x, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
             # The kernel declares the scales as E8M0; the stored/quantized
             # tensors carry the same bits as uint8.
             x_sf = x_sf.view(torch.float8_e8m0fnu)
             w_sf = w_sf.view(torch.float8_e8m0fnu)
         else:
-            assert w_sf is None
+            assert x_sf is None and w_sf is None
             assert w.shape == (N, K) and K % 64 == 0
             assert w.dtype == torch.bfloat16
             assert w.is_contiguous()
