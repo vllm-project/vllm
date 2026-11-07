@@ -28,38 +28,38 @@ steps:
     - cd tests
     - pytest -v -s v1/shutdown/test_forward_error.py
 
-    - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd"
-    key: debug-xccl-repro-pidfd
-    timeout_in_minutes: 60
-    device: intel_gpu_k8s
-    num_devices: 2
-    resource_claim_template: b70-2
-    working_dir: "/workspace/vllm/"
-    env:
-      REGISTRY: "public.ecr.aws/q9t5s3a7"
-      REPO: "vllm-ci-test-repo"
-      VLLM_TEST_DEVICE: "xpu"
-    source_file_dependencies:
-      - tests/xpu_debug/
-    commands:
-      - uname -r && cat /proc/cmdline
-      - pip install py-spy || true
-      - python tests/xpu_debug/xccl_repro.py 100 --dump
+- label: ":intel: (BMG) [DEBUG] xccl repro - pidfd"
+  key: debug-xccl-repro-pidfd
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/workspace/vllm/"
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - tests/xpu_debug/
+  commands:
+    - uname -r && cat /proc/cmdline
+    - pip install py-spy || true
+    - python tests/xpu_debug/xccl_repro.py 100 --dump
 
-  - label: ":intel: (BMG) [DEBUG] xccl repro - sockets"
-    key: debug-xccl-repro-sockets
-    timeout_in_minutes: 60
-    device: intel_gpu_k8s
-    num_devices: 2
-    resource_claim_template: b70-2
-    working_dir: "/workspace/vllm/"
-    env:
-      REGISTRY: "public.ecr.aws/q9t5s3a7"
-      REPO: "vllm-ci-test-repo"
-      VLLM_TEST_DEVICE: "xpu"
-      CCL_ZE_IPC_EXCHANGE: "sockets"
-    source_file_dependencies:
-      - tests/xpu_debug/
-    commands:
-      - uname -r && cat /proc/cmdline
-      - python tests/xpu_debug/xccl_repro.py 100
+- label: ":intel: (BMG) [DEBUG] xccl repro - sockets"
+  key: debug-xccl-repro-sockets
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/workspace/vllm/"
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+    CCL_ZE_IPC_EXCHANGE: "sockets"
+  source_file_dependencies:
+    - tests/xpu_debug/
+  commands:
+    - uname -r && cat /proc/cmdline
+    - python tests/xpu_debug/xccl_repro.py 100

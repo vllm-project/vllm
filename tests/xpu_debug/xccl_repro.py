@@ -1,7 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Standalone repro for an intermittent oneCCL hang on the first xccl all_reduce
+(TP=2 on XPU). Mirrors what vLLM's XPUWorker.init_device does: set the CCL env,
+init a 2-rank xccl process group with a file:// init method, then do one
+all_reduce. Each iteration spawns two fresh processes, like each vLLM startup.
+
+Usage:
+    python xccl_repro.py [iterations] [--timeout SEC] [--dump] [--keep]
+
+    --dump  on a hang, run `py-spy dump --native` on the stuck ranks before killing
+    --keep  on a hang, keep the processes alive for manual py-spy / gdb inspection
+
+Prints one line per iteration and a final SUMMARY line; exits 1 if any iteration
+hung or failed.
+"""
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -95,10 +110,8 @@ def main() -> None:
             else:
                 print(f"iter {i}: ok in {time.time() - t0:.1f}s", flush=True)
 
-        try:
+        with contextlib.suppress(OSError):
             os.remove(init_file)
-        except OSError:
-            pass
 
     print(
         f"SUMMARY: iterations={args.iterations} hangs={hangs} failures={fails}",
