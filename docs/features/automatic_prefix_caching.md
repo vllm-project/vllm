@@ -20,19 +20,22 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- EAGLE/MTP speculative decoding on the Mamba group
-- `--prefix-match-unit` smaller than the Mamba block size
+- EAGLE speculative decoding, or single-token prefill lookahead without EAGLE block drop, including DSpark/DFlash
+- compatible fine-grained prefix matching: `--prefix-match-unit` smaller than the Mamba block size, or equal under decode context parallelism (DCP)
 - the model does not use multi-module MTP
 
 ```bash
 vllm serve <hybrid-model> \
+    --enable-prefix-caching \
     --prefix-match-unit 64 \
     --enable-mamba-shared-prefix-checkpoint
 ```
 
-`--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
+`--prefix-match-unit` sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. Choose a smaller value to learn boundaries inside Mamba blocks. With DCP, the effective full-attention block can be larger than the replicated Mamba block, so equality with the Mamba block size is also supported.
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
+
+When enabled, full-attention blocks also index interior prefix hashes. A sibling can discover a junction and save the exact Mamba state there for later requests; the junction is bounded by every attention group's reusable hit. These indexes add CPU metadata proportional to the number of indexed hash boundaries. Their memory and registration cost should be considered when choosing the match unit. This option does not by itself guarantee external-store retention or restoration after L1 eviction.
 
 ### FlashInfer ReplaySSM
 

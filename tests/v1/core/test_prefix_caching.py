@@ -6769,3 +6769,161 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+@pytest.fixture
+def shared_checkpoint_manager():
+    def create(*, enabled=True, dspark=True, internal=False, dcp=8, lookahead=1):
+        groups = [
+            KVCacheGroupSpec(
+                [name],
+                FullAttentionSpec(
+                    block_size=2048,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    dcp_sharded=sharded,
+                ),
+                is_eagle_group=not dspark and name == "draft",
+            )
+            for name, sharded in [("target", True), ("draft", False)]
+        ]
+        groups.append(
+            KVCacheGroupSpec(
+                ["state"],
+                MambaSpec(
+                    block_size=2048,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=4,
+                    num_prefill_checkpoint_blocks=int(internal),
+                    prefill_checkpoint_alignment=64 if internal else None,
+                ),
+            )
+        )
+        return KVCacheManager(
+            KVCacheConfig(num_blocks=2048, kv_cache_tensors=[], kv_cache_groups=groups),
+            max_model_len=131072,
+            scheduler_block_size=2048 * dcp,
+            hash_block_size=64,
+            enable_caching=True,
+            use_eagle=not dspark,
+            num_prefill_lookahead=lookahead,
+            dcp_world_size=dcp,
+            enable_mamba_shared_prefix_checkpoint=enabled,
+        )
+
+    return create
+
+
+def _shared_checkpoint_request(name, suffix, *, salt=None):
+    return make_request(
+        name,
+        list(range(59008)) + [suffix] * (65536 - 59008),
+        64,
+        sha256,
+        cache_salt=salt,
+    )
+
+
+def _prefill_shared_checkpoint(manager, request):
+    """Exercise cache metadata at ordinary chunk ends and a learned junction."""
+    blocks, hit, boundary = manager.get_computed_blocks(request)
+    request.shared_prefix_boundary = boundary
+    ends = {32768, request.num_prompt_tokens}
+    if boundary and manager.mamba_shared_prefix_checkpoint:
+        ends.add(boundary)
+    first = True
+    for end in sorted(ends):
+        if end <= hit:
+            continue
+        manager.new_step_starts()
+        local_hit = hit if first else 0
+        count = end - request.num_computed_tokens - local_hit
+        assert (
+            manager.allocate_slots(request, count, local_hit, blocks if first else None)
+            is not None
+        )
+        request.num_computed_tokens = end
+        _, retained = manager.take_kv_cache_block_copies()
+        manager.block_pool.free_blocks(retained)
+        first = False
+    manager.free(request)
+    manager.new_step_starts()
+    return hit, boundary
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "dspark,internal,dcp",
+    [
+        (True, False, 8),
+        (True, True, 8),
+        (True, False, 1),
+        (False, False, 8),
+        (False, True, 8),
+    ],
+)
+def test_shared_checkpoint_sibling_reuse(
+    shared_checkpoint_manager, enabled, dspark, internal, dcp
+):
+    manager = shared_checkpoint_manager(
+        enabled=enabled, dspark=dspark, internal=internal, dcp=dcp
+    )
+    assert manager.mamba_shared_prefix_checkpoint == enabled
+    expected = 59008 if dspark else 58944
+    first = _prefill_shared_checkpoint(manager, _shared_checkpoint_request("a", 70001))
+    second = _prefill_shared_checkpoint(manager, _shared_checkpoint_request("b", 70002))
+    third = _prefill_shared_checkpoint(manager, _shared_checkpoint_request("c", 70003))
+    assert first[0] == 0
+    if enabled:
+        assert second[0] < expected
+        assert second[1] == expected
+        assert third == (expected, 0)
+    else:
+        assert third[0] == 32768
+
+
+@pytest.mark.parametrize("internal", [False, True])
+def test_shared_checkpoint_cow_and_salt_isolation(shared_checkpoint_manager, internal):
+    manager = shared_checkpoint_manager(internal=internal)
+    for name, suffix in [("a", 71001), ("b", 71002)]:
+        _prefill_shared_checkpoint(manager, _shared_checkpoint_request(name, suffix))
+    request = _shared_checkpoint_request("c", 71003)
+    blocks, hit, _ = manager.get_computed_blocks(request)
+    assert hit == 59008
+    source = blocks.blocks[2][-1]
+    assert manager.allocate_slots(request, 64, hit, blocks) is not None
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert any(copy.src_block_id == source.block_id for copy in copies)
+    assert source.ref_cnt > 0
+    manager.block_pool.free_blocks(retained)
+    manager.free(request)
+    manager.new_step_starts()
+    assert manager.get_computed_blocks(_shared_checkpoint_request("d", 71004))[1] == hit
+    isolated = _shared_checkpoint_request("isolated", 71005, salt="other-tenant")
+    assert manager.get_computed_blocks(isolated)[1:] == (0, 0)
+
+
+def test_shared_checkpoint_alias_eviction(shared_checkpoint_manager):
+    manager = shared_checkpoint_manager()
+    request = _shared_checkpoint_request("a", 72001)
+    _prefill_shared_checkpoint(manager, request)
+    pool = manager.block_pool
+    key = request.block_hashes[59008 // 64 - 1]
+    found = pool.get_cached_block(key, [0])
+    assert found is not None
+    block = found[0]
+    assert pool.cached_block_hashes_by_block[block.block_id]
+    pool.evict_blocks({block.block_id})
+    assert pool.get_cached_block(key, [0]) is None
+    assert block.block_id not in pool.cached_block_hashes_by_block
+
+
+@pytest.mark.parametrize("dspark", [False, True])
+def test_shared_checkpoint_multi_module_mtp_stays_disabled(
+    shared_checkpoint_manager, dspark
+):
+    manager = shared_checkpoint_manager(dspark=dspark, lookahead=3)
+    assert not manager.mamba_shared_prefix_checkpoint
