@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+    DecodeRowShard,
     native_decode,
     plan_gather_launches,
     plan_prefill_chunks,
@@ -169,19 +170,51 @@ def test_decode_launches_native_on_uniform_steps():
 
 
 @pytest.mark.parametrize(
-    "decode_rows, k, first_filled",
-    [(7, 512, 7), (128, 512, 0), (7, 2048, 0), (None, 512, 0)],
+    "decode_rows, k, first_filled, step_rows",
+    [
+        (7, 512, 7, None),
+        (128, 512, 0, None),
+        (7, 2048, 0, None),
+        (None, 512, 0, None),
+        (37, 512, 0, 147),
+    ],
 )
-def test_topk_fill_skips_the_rows_vllms_topk_writes(decode_rows, k, first_filled):
+def test_topk_fill_skips_the_rows_vllms_topk_writes(
+    decode_rows, k, first_filled, step_rows
+):
     num_tokens = 130
     buffer = torch.full((num_tokens + 1, k), 7, dtype=torch.int32)
-    metadata = types.SimpleNamespace(decode=None, decode_row_lens=None)
+    metadata = types.SimpleNamespace(
+        decode=None, decode_row_lens=None, decode_shard=None
+    )
     if decode_rows is not None:
         metadata.decode = object()
         metadata.decode_row_lens = torch.zeros(decode_rows, dtype=torch.int32)
+    if step_rows is not None:
+        metadata.decode_shard = DecodeRowShard.plan(step_rows, 1, 4, 0, 1 << 20)
     layer = types.SimpleNamespace(metadata=metadata, topk_buffer=buffer, topk_tokens=k)
 
     _fill_topk_rows(layer, num_tokens)
     assert bool((buffer[:first_filled] == 7).all())
     assert bool((buffer[first_filled:num_tokens] == -1).all())
     assert bool((buffer[num_tokens:] == 7).all())
+
+
+@pytest.mark.parametrize("world", [2, 4, 8])
+def test_decode_row_shard_gate_and_slices(world):
+    capacity = 1 << 20
+    assert DecodeRowShard.plan(1024, 1, 1, 0, capacity) is None
+    assert DecodeRowShard.plan(63, 1, world, 0, capacity) is None
+    for rows, unit in [(64, 1), (70, 7), (224, 1), (1792, 1)]:
+        spans: set[int] = set()
+        covered: list[int] = []
+        for rank in range(world):
+            shard = DecodeRowShard.plan(rows, unit, world, rank, capacity)
+            assert shard is not None and shard.num_rows == rows
+            assert shard.start % unit == 0
+            spans.add(shard.span)
+            covered += range(shard.start, shard.stop)
+        (span,) = spans
+        assert span % unit == 0 and (span - unit) * world < rows
+        assert covered == list(range(rows))
+        assert DecodeRowShard.plan(rows, unit, world, 0, rows + span - 1) is None

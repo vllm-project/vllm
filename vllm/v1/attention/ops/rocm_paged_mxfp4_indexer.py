@@ -14,7 +14,7 @@ them.
 
 import functools
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -22,6 +22,7 @@ import torch
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
@@ -294,7 +295,11 @@ def _vllm_topk(rows: int, k: int) -> bool:
 
 
 def _topk(
-    logits: torch.Tensor, lengths: torch.Tensor, out: torch.Tensor, k: int
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    out: torch.Tensor,
+    k: int,
+    step_rows: int | None = None,
 ) -> None:
     """Top-k over each row's [0, lengths[row]); -1 pads rows shorter than k.
 
@@ -305,7 +310,7 @@ def _topk(
     rows, width = logits.shape
     if rows == 0:
         return
-    if width >= k and not _vllm_topk(rows, k):
+    if width >= k and not _vllm_topk(step_rows or rows, k):
         _aiter_topk()(
             logits,
             1,
@@ -456,12 +461,10 @@ def _layer(
 def _fill_topk_rows(layer: _Layer, num_tokens: int) -> None:
     lengths = layer.metadata.decode_row_lens
     start = 0
-    if (
-        layer.metadata.decode is not None
-        and lengths is not None
-        and _vllm_topk(lengths.shape[0], layer.topk_tokens)
-    ):
-        start = lengths.shape[0]
+    if layer.metadata.decode is not None and lengths is not None:
+        rows = _decode_step_rows(layer.metadata) or lengths.shape[0]
+        if _vllm_topk(rows, layer.topk_tokens):
+            start = rows
     if start < num_tokens:
         layer.topk_buffer[start:num_tokens] = -1
 
@@ -522,6 +525,8 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
     lengths = metadata.decode_row_lens
     assert metadata.decode is not None and lengths is not None
     rows = lengths.shape[0]
+    if rows == 0:
+        return
     specs = [((rows, logits_width), torch.float32)]
     if candidate_write:
         specs.append(((rows, triton.cdiv(logits_width, layer.block)), torch.float32))
@@ -565,6 +570,7 @@ def _dense_decode(layer: _Layer, logits_width: int, candidate_write: bool) -> No
         lengths,
         layer.topk_buffer[:rows, : layer.topk_tokens],
         layer.topk_tokens,
+        _decode_step_rows(metadata),
     )
 
 
@@ -614,6 +620,8 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
     assert metadata.decode is not None and lengths is not None
     block_table = metadata.decode.block_table
     rows = lengths.shape[0]
+    if rows == 0:
+        return
     if metadata.decode_gather is None:
         metadata.decode_gather = pa.build_candidate_gather(
             layer.candidates[:rows],
@@ -644,8 +652,40 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
         candidates=gather,
     )
     out = layer.topk_buffer[:rows, : layer.topk_tokens]
-    _topk(compact, slot_ends, out, layer.topk_tokens)
+    _topk(compact, slot_ends, out, layer.topk_tokens, _decode_step_rows(metadata))
     _remap_compact_topk(out, gather["positions"], layer.block)
+
+
+def _decode_step_rows(metadata: "RocmMxfp4IndexerMetadata") -> int | None:
+    shard = metadata.decode_shard
+    return None if shard is None else shard.num_rows
+
+
+def _decode_rank_rows(layer: _Layer) -> _Layer:
+    shard = layer.metadata.decode_shard
+    if shard is None:
+        return layer
+    lo = shard.start
+    return replace(
+        layer,
+        q=layer.q[lo:],
+        q_scale=layer.q_scale[lo:],
+        weights=layer.weights[lo:],
+        topk_buffer=layer.topk_buffer[lo:],
+        candidates=None if layer.candidates is None else layer.candidates[lo:],
+    )
+
+
+def _exchange_decode_rows(layer: _Layer) -> None:
+    shard = layer.metadata.decode_shard
+    if shard is None:
+        return
+    width = layer.topk_tokens
+    local = layer.topk_buffer[shard.start : shard.start + shard.span, :width]
+    gathered = get_tp_group().all_gather(local.contiguous().view(torch.float32), 0)
+    layer.topk_buffer[: shard.num_rows, :width] = gathered.view(torch.int32)[
+        : shard.num_rows
+    ]
 
 
 @eager_break_during_capture
@@ -701,7 +741,8 @@ def rocm_mxfp4_sparse_attn_indexer(
         for chunk, plan in zip(metadata.prefill.chunks, metadata.prefill_plans):
             _dense_prefill(layer, chunk, plan, candidate_write)
     if metadata.decode is not None:
-        _dense_decode(layer, max_model_len, candidate_write)
+        _dense_decode(_decode_rank_rows(layer), max_model_len, candidate_write)
+        _exchange_decode_rows(layer)
     return topk_indices_buffer
 
 
@@ -754,10 +795,12 @@ def rocm_mxfp4_sparse_mqa_indexer(
         for launch in metadata.gather_launches:
             _gather_prefill(layer, launch, num_candidate_cols)
     if metadata.decode is not None:
+        decode = _decode_rank_rows(layer)
         # A FULL graph cannot follow the per-step gate; the gather is the side
         # that stays flat in the context length.
         if metadata.decode_use_gather or layer.full_graph:
-            _gather_decode(layer, num_candidate_cols)
+            _gather_decode(decode, num_candidate_cols)
         else:
-            _dense_decode(layer, max_model_len, candidate_write=False)
+            _dense_decode(decode, max_model_len, candidate_write=False)
+        _exchange_decode_rows(layer)
     return topk_indices_buffer
