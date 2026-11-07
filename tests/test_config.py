@@ -4777,6 +4777,90 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
             ModelConfig.verify_with_parallel_config(model, parallel)
 
 
+def _hc_sp_collective_flag_config(flag, **parallel_kwargs):
+    """`ParallelConfig` with the flag set and no backend auto-detection (these are
+    config-only tests)."""
+    return ParallelConfig(
+        **{flag: True}, **{"distributed_executor_backend": "mp", **parallel_kwargs}
+    )
+
+
+@pytest.mark.parametrize(
+    "flag", ["enable_hc_sp_quick_reduce", "enable_hc_sp_aiter_ipc"]
+)
+@pytest.mark.parametrize(
+    "rocm,tp_size,hc_sp,moe_sp,dbo,error",
+    [
+        (True, 2, True, False, False, None),
+        (True, 2, False, True, False, None),  # MoE SP turns HC SP on
+        (True, 2, False, False, False, "requires HC sequence parallelism"),
+        (False, 2, True, False, False, "requires ROCm"),
+        (True, 4, True, False, False, "supports TP=2 only"),
+        (True, 2, True, False, True, "does not support DBO"),
+        (False, 1, False, False, False, None),  # ignored with TP=1
+    ],
+)
+def test_hc_sp_collective_flag_validation(
+    monkeypatch, flag, rocm, tp_size, hc_sp, moe_sp, dbo, error
+):
+    """Both flags need ROCm, active HC SP, TP=2 and no DBO; they are ignored with
+    TP=1, like --enable-hc-sp."""
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4")
+    envs.disable_envs_cache()
+    parallel_kwargs = dict(
+        enable_hc_sp=hc_sp, enable_dbo=dbo, tensor_parallel_size=tp_size
+    )
+    if moe_sp:
+        parallel_kwargs.update(
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
+        )
+    with patch("vllm.config.parallel.current_platform.is_rocm", return_value=rocm):
+        if error:
+            # The message names the flag that was set.
+            with pytest.raises(
+                ValueError, match=rf"--{flag.replace('_', '-')} .*{error}"
+            ):
+                _hc_sp_collective_flag_config(flag, **parallel_kwargs)
+        else:
+            _hc_sp_collective_flag_config(flag, **parallel_kwargs)
+
+
+@pytest.mark.parametrize(
+    "flag, error",
+    [
+        ("enable_hc_sp_quick_reduce", "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4"),
+        ("enable_hc_sp_aiter_ipc", None),
+    ],
+)
+def test_hc_sp_collective_flag_int4_env(monkeypatch, flag, error):
+    """Only the INT4 flag needs `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`."""
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "FP")
+    envs.disable_envs_cache()
+    with patch("vllm.config.parallel.current_platform.is_rocm", return_value=True):
+        if error:
+            with pytest.raises(ValueError, match=error):
+                _hc_sp_collective_flag_config(
+                    flag, enable_hc_sp=True, tensor_parallel_size=2
+                )
+        else:
+            _hc_sp_collective_flag_config(
+                flag, enable_hc_sp=True, tensor_parallel_size=2
+            )
+
+
+@pytest.mark.parametrize(
+    "flag", ["enable_hc_sp_quick_reduce", "enable_hc_sp_aiter_ipc"]
+)
+def test_hc_sp_collective_flag_separates_the_compile_cache(flag):
+    """The flags choose the collective ops of the compiled graph, so they are
+    part of its cache key."""
+    assert (
+        ParallelConfig(**{flag: True}).compute_hash() != ParallelConfig().compute_hash()
+    )
+
+
 @pytest.mark.parametrize(
     ("layer_types", "expected_attention"),
     [

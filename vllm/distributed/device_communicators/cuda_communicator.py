@@ -484,6 +484,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return None
         return ca_comm.custom_reduce_scatter(input_.contiguous())
 
+    def quick_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        qr_comm = self.qr_comm
+        if qr_comm is None:
+            return None
+        return qr_comm.quick_reduce_scatter(input_)
+
+    def quick_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        qr_comm = self.qr_comm
+        if qr_comm is None:
+            return None
+        return qr_comm.quick_all_gather(input_)
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the
