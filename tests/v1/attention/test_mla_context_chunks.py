@@ -17,7 +17,6 @@ import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.layers.attention.mla_attention import (
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
-    reorg_kvcache,
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
@@ -52,17 +51,19 @@ def build_chunked_context(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_sparse_context_lengths_do_not_force_gpu_sync(monkeypatch):
-    """Sparse MLA must pin computed context lengths before the H2D copy."""
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_sparse_context_lengths_do_not_force_gpu_sync(monkeypatch, dcp_world_size):
+    """Sparse MLA must pin computed context lengths before the H2D copy, and
+    building the DCP context row indices must not sync either."""
     builder = SimpleNamespace(
         _context_lens_cpu=torch.empty(2, dtype=torch.int32, pin_memory=True),
         chunked_prefill_workspace=torch.empty((2048, 1)),
         chunked_prefill_workspace_size=1024,
         kv_cache_spec=SimpleNamespace(block_size=BLOCK_SIZE),
         device=torch.device("cuda"),
-        dcp_world_size=1,
+        dcp_world_size=dcp_world_size,
         dcp_local_block_size=1,
-        dcp_virtual_block_size=1,
+        dcp_virtual_block_size=dcp_world_size,
         dcp_manager=None,
     )
     common_metadata = SimpleNamespace(
@@ -241,8 +242,8 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
     """Under DCP each rank gathers its own shard, so the budget is 1/world.
 
     The local starts and lengths must tile the rank's padded context the same
-    way the global ones tile the real context, since `reorg_kvcache` unpads
-    using them.
+    way the global ones tile the real context, since the context row indices
+    unpad using them.
     """
     dcp_world_size, interleave, workspace_size = 2, 64, 1024
     context_lens = [3000, 200, 200]
@@ -280,59 +281,171 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
         assert local_cursor[request] == padded_local
 
 
-def test_dcp_reorg_uses_each_chunks_local_starts():
-    """Reorganization drops DCP padding at each request's own chunk offset."""
-    dcp_world_size, interleave, workspace_size = 2, 64, 1024
+@pytest.mark.parametrize(
+    "dcp_world_size,interleave,context_lens,workspace_size",
+    [
+        # The long request spans several chunks.
+        (2, 64, [3000, 200, 200], 1024),
+        # A single one-token context: one rank holds it, the other only padding.
+        (2, 1, [1], 1024),
+        # Empty contexts and contexts that leave ranks with fewer rows.
+        (4, 16, [1000, 0, 77, 5, 64, 300], 1024),
+        (8, 1, [129, 7, 8, 9, 63, 64, 65], 512),
+        # Lengths around the virtual block size.
+        (8, 64, [1, 511, 512, 513, 4000], 1024),
+        # Many requests in one chunk.
+        (16, 8, [5] * 40 + [2000], 2048),
+    ],
+)
+def test_dcp_context_row_indices_unshard_the_context(
+    dcp_world_size, interleave, context_lens, workspace_size
+):
+    """``context_row_indices`` picks each chunk's context rows out of the
+    all-gathered DCP workspace and skips the padding: request by request, each
+    rank's rows of the chunk in turn. They are the chunk's span of the
+    request's context, and the chunks cover every context row once."""
     metadata = build_chunked_context(
-        [3000, 200, 200],
-        [4, 4, 4],
+        context_lens,
+        [4] * len(context_lens),
         workspace_size,
-        block_size=128,
         dcp_world_size=dcp_world_size,
         dcp_local_block_size=interleave,
     )
     assert metadata is not None
 
+    # Token t of request i is i * 100_000 + t. Blocks of `interleave` tokens
+    # go to the ranks in turn, so each rank holds a shard in local order.
+    def local_tokens(request: int, rank: int) -> torch.Tensor:
+        tokens = torch.arange(context_lens[request])
+        shard = tokens[(tokens // interleave) % dcp_world_size == rank]
+        return request * 100_000 + shard
+
+    cursor = [0] * len(context_lens)
     for chunk in metadata.chunks:
         assert chunk.padded_local_seq_lens is not None
         assert chunk.local_context_lens_allranks is not None
         assert chunk.local_starts is not None
+        assert chunk.context_row_indices is not None
+        assert chunk.context_row_indices.dtype == torch.int64
 
-        toks = chunk.num_local_context_tokens
-        rank_buffers = [torch.full((toks, 1, 1), -1) for _ in range(dcp_world_size)]
-        expected = []
-        src_token_idx = 0
-        for request, (padded_len, local_lens, local_start) in enumerate(
-            zip(
+        # Each rank's local gather: every request's padded local rows from its
+        # local start on, -1 past the end of the rank's shard.
+        requests = range(chunk.request_slice.start, chunk.request_slice.stop)
+        rank_rows = []
+        for rank in range(dcp_world_size):
+            rows = []
+            for request, start, padded, local_lens in zip(
+                requests,
+                chunk.local_starts,
                 chunk.padded_local_seq_lens,
                 chunk.local_context_lens_allranks,
-                chunk.local_starts,
-            )
+            ):
+                shard = local_tokens(request, rank)
+                assert shard.numel() == local_lens[rank]
+                padded_rows = torch.full((padded,), -1)
+                kept = shard[start : start + padded]
+                padded_rows[: kept.numel()] = kept
+                rows.append(padded_rows)
+            rank_rows.append(torch.cat(rows))
+            assert rank_rows[-1].numel() == chunk.num_local_context_tokens
+        allgathered = torch.cat(rank_rows)
+
+        expected = []
+        for request, start, padded, length in zip(
+            requests,
+            chunk.local_starts,
+            chunk.padded_local_seq_lens,
+            chunk.seq_lens.tolist(),
         ):
-            for rank, local_len in enumerate(local_lens):
-                actual_len = min(max(0, local_len - local_start), padded_len)
-                values = (
-                    request * 100_000
-                    + rank * 10_000
-                    + torch.arange(local_start, local_start + actual_len)
-                ).view(-1, 1, 1)
-                rank_buffers[rank][src_token_idx : src_token_idx + actual_len] = values
-                expected.append(values)
-            src_token_idx += padded_len
+            tokens = torch.cat(
+                [
+                    local_tokens(request, rank)[start : start + padded]
+                    for rank in range(dcp_world_size)
+                ]
+            )
+            span = torch.arange(cursor[request], cursor[request] + length)
+            assert torch.equal(tokens.sort().values, request * 100_000 + span)
+            cursor[request] += length
+            expected.append(tokens)
 
-        allgathered = torch.cat(rank_buffers)
-        reorganized, _ = reorg_kvcache(
-            allgathered,
-            allgathered,
-            padded_local_chunk_seq_lens_lst=chunk.padded_local_seq_lens,
-            local_context_lens_allranks=chunk.local_context_lens_allranks,
-            local_starts=chunk.local_starts,
-            sum_seq_len=chunk.num_context_tokens,
-            max_seq_len=chunk.max_seq_len,
-            toks=toks,
+        assert torch.equal(allgathered[chunk.context_row_indices], torch.cat(expected))
+    assert cursor == context_lens
+
+
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    return t.contiguous().view(torch.uint8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dims", [(512, 64), (384, 48), (512, 0)])
+@pytest.mark.parametrize("num_rows", [0, 33, 1000])
+def test_gather_dcp_context_rows_copies_rows(num_rows, dims, dtype):
+    """The gather equals indexing the latent and rope parts of the rows, also
+    for NoPE MLA layers, which have no rope part."""
+    from vllm.v1.attention.ops.mla_dcp_context import gather_dcp_context_rows
+
+    kv_lora_rank, rope_dim = dims
+    generator = torch.Generator(device="cuda").manual_seed(num_rows)
+    gathered = torch.randn(
+        (1200, kv_lora_rank + rope_dim), device="cuda", generator=generator
+    ).to(dtype)
+    row_indices = torch.randint(
+        0, 1200, (num_rows,), device="cuda", generator=generator
+    )
+
+    latent, k_pe = gather_dcp_context_rows(gathered, row_indices, kv_lora_rank)
+
+    expected = gathered[row_indices].unsqueeze(1)
+    assert latent.shape == (num_rows, 1, kv_lora_rank)
+    assert k_pe.shape == (num_rows, 1, rope_dim)
+    assert latent.dtype == k_pe.dtype == dtype
+    assert latent.is_contiguous() and k_pe.is_contiguous()
+    assert torch.equal(_bits(latent), _bits(expected[..., :kv_lora_rank]))
+    assert torch.equal(_bits(k_pe), _bits(expected[..., kv_lora_rank:]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("rope_dim", [64, 0])
+def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, rope_dim):
+    """The JIT warmup compiles the variant that the context loop launches: rows
+    of the all-gather part of the workspace, int64 row indices taken at any
+    offset into the batch's indices, and any number of rows."""
+    from vllm.v1.attention.ops.mla_dcp_context import (
+        _gather_context_rows,
+        gather_dcp_context_rows,
+    )
+
+    kv_lora_rank = 512
+    kernel = _gather_context_rows.kernel
+
+    def compiled_variants() -> set:
+        return {key for caches in kernel.device_caches.values() for key in caches[0]}
+
+    kernel.device_caches.clear()
+    _gather_context_rows.warmup(
+        dtype=dtype, kv_lora_rank=kv_lora_rank, rope_dim=rope_dim
+    )
+    torch.accelerator.synchronize()
+    warmed = compiled_variants()
+    assert warmed
+
+    workspace_rows, dcp_world_size = 1024, 4
+    workspace = torch.zeros(
+        (workspace_rows + workspace_rows // dcp_world_size, kv_lora_rank + rope_dim),
+        dtype=dtype,
+        device="cuda",
+    )
+    gathered = workspace[workspace_rows // dcp_world_size :]
+    row_indices = torch.arange(workspace_rows, device="cuda")
+    for start, num_rows in ((0, 1), (1, 33), (3, 1000)):
+        gather_dcp_context_rows(
+            gathered, row_indices[start : start + num_rows], kv_lora_rank
         )
+    torch.accelerator.synchronize()
 
-        torch.testing.assert_close(reorganized, torch.cat(expected))
+    assert compiled_variants() == warmed
 
 
 def test_chunked_context_metadata_owns_context_lengths():

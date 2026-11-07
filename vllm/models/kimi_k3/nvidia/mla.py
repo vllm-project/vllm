@@ -828,7 +828,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         Decode context parallelism keeps using
         ``impl._context_parallel_compute_prefill_context`` for its allgather and
-        reorg, with this layer's ``_fused_mla_kv_concat`` as its per-chunk pack.
+        row gather, with this layer's ``_fused_mla_kv_concat`` as its per-chunk
+        pack.
         """
         prefill = attn_metadata.prefill
         assert prefill is not None

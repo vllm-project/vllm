@@ -323,8 +323,8 @@ def test_fused_context_rejects_an_unquantized_query() -> None:
 
 
 # --------------------------------------------------------------------------
-# Decode context parallelism: the generic impl keeps its loop (allgather +
-# reorg) and only the per-chunk K/V pack is handed to the layer's fused kernel.
+# Decode context parallelism: the generic impl keeps its loop (allgather + row
+# gather) and only the per-chunk K/V pack is handed to the layer's fused kernel.
 # --------------------------------------------------------------------------
 _DCP = 2
 _DCP_TOKENS = 48
@@ -332,7 +332,8 @@ _DCP_TOKENS = 48
 
 def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
     """Drive ``MLACommonImpl._context_parallel_compute_prefill_context`` on one
-    chunk with the collective pieces (gather, allgather, reorg) stubbed out."""
+    chunk with the collective pieces (gather, allgather) stubbed out; the
+    chunk's row indices keep the first ``_DCP_TOKENS`` gathered rows."""
     torch.manual_seed(0)
     device = torch.device("cuda")
     kv_b_proj = _KVBProj(device, weight_dtype=torch.bfloat16)
@@ -353,27 +354,18 @@ def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
 
     monkeypatch.setattr(mla_attention.ops, "cp_gather_cache", lambda **_: None)
     monkeypatch.setattr(mla_attention, "_get_kv_b_proj_input_dtype", lambda *_: None)
-    monkeypatch.setattr(
-        mla_attention,
-        "reorg_kvcache",
-        lambda kv_c, k_pe, **_: (kv_c[:_DCP_TOKENS].squeeze(1), k_pe[:_DCP_TOKENS]),
-    )
     chunk = SimpleNamespace(
         index=0,
-        padded_local_seq_lens=[_DCP_TOKENS],
-        local_context_lens_allranks=[[_DCP_TOKENS // _DCP] * _DCP],
         padded_local_cu_seq_lens=torch.tensor([0, _DCP_TOKENS], device=device),
         padded_local_token_to_seq=torch.zeros(
             _DCP_TOKENS, dtype=torch.int32, device=device
         ),
-        local_starts=[0],
         num_local_context_tokens=_DCP_TOKENS,
         request_slice=slice(0, 1),
         num_requests=1,
         starts=torch.tensor([0], device=device),
-        num_context_tokens=_DCP_TOKENS,
-        max_seq_len=_DCP_TOKENS,
         token_slice=slice(0, 4),
+        context_row_indices=torch.arange(_DCP_TOKENS, device=device),
     )
     backend = _RecordingPrefillBackend()
     attn_metadata = SimpleNamespace(
