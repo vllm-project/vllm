@@ -1286,8 +1286,8 @@ _MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 ViT attention
 def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     """Check if FP8 ViT attention is supported on this platform.
 
-    Requires Blackwell (SM 100) or newer, the FlashInfer cuDNN backend,
-    and cuDNN >= 9.17.1.
+    Requires data-center Blackwell (SM 100/103), the FlashInfer cuDNN
+    backend, and cuDNN >= 9.17.1.
 
     cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
     ``MMEncoderAttention._forward_flashinfer``) gates internally on
@@ -1300,6 +1300,10 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
     # cuDNN SDPA FP8 with bf16/fp16 output requires Blackwell (SM 100) or newer.
     if not current_platform.has_device_capability(100):
+        return False
+
+    # cuDNN has no FP8 SDPA engine for SM 12x (e.g. GB10).
+    if current_platform.is_device_capability_family(120):
         return False
 
     try:

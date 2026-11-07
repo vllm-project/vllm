@@ -20,7 +20,9 @@ FP8 before the attention call.
 
 ## Requirements
 
-- NVIDIA: FlashInfer cuDNN backend with cuDNN >= 9.17.1.
+- NVIDIA: data-center Blackwell (SM 100/103) with the FlashInfer cuDNN backend and
+  cuDNN >= 9.17.1. Not available on SM 12x (e.g. DGX Spark GB10), where cuDNN has
+  no FP8 SDPA engine.
 - AMD: AITER with `flash_attn_varlen_fp8_pertensor_func` support on gfx942
   (MI300 series) or gfx950 (MI350 series).
 
