@@ -20,7 +20,9 @@ import pytest
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
@@ -657,12 +659,61 @@ def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
             block_notify_list=[[10], [1, 2, 3]],
             host="127.0.0.2",
             port=7000,
+            num_skip_blocks=0,
         )
         sched._send_transfer_release.assert_not_called()
     else:
         sched.send_notify_block.assert_not_called()
         sched._send_transfer_release.assert_called_once_with("tx", "127.0.0.2", 7000)
     assert not req.kv_transfer_params["do_remote_prefill"]
+
+
+@pytest.mark.parametrize(
+    "num_cached,external_tokens",
+    [
+        (0, 40),
+        (1, 24),
+        # A load trimmed by whole blocks still skips only the cached blocks.
+        (1, 8),
+    ],
+)
+def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
+    num_cached, external_tokens
+):
+    sched = _FakeScheduler(
+        mode=MoRIIOMode.WRITE,
+        _has_mamba=False,
+        block_size=16,
+        tp_size=1,
+        _is_kv_master=True,
+        request_id_to_transfer_id={},
+        transfer_id_to_request_id={},
+    )
+    sched.send_notify_block = Mock()
+    req = _mk_request(
+        list(range(40)),
+        params={
+            "do_remote_prefill": True,
+            "transfer_id": "tx",
+            "remote_host": "127.0.0.2",
+            "remote_notify_port": 7000,
+        },
+    )
+    req.request_id = "req"
+    table = [KVCacheBlock(block_id) for block_id in (10, 11, 12)]
+    for block in table[:num_cached]:
+        block.set_block_hash(BlockHashWithGroupId(b"cached"))
+
+    sched.update_state_after_alloc(req, KVCacheBlocks((table,)), external_tokens)
+
+    sched.send_notify_block.assert_called_once_with(
+        req_id="req",
+        transfer_id="tx",
+        block_notify_list=[10, 11, 12],
+        host="127.0.0.2",
+        port=7000,
+        num_skip_blocks=num_cached,
+    )
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
