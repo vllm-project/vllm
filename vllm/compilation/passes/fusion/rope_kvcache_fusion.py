@@ -261,7 +261,10 @@ class RopeStaticQQuantKVCachePattern:
             pattern, replacement = self._mk_pattern_with_layer_name_closure(_ln)
 
         def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
-            gm = pm.fwd_only(*args, **kwargs)
+            try:
+                gm = pm.fwd_only(*args, **kwargs)
+            except ValueError as e:
+                raise RuntimeError(str(e)) from e
             view_to_reshape(gm)
             return gm
 
@@ -393,7 +396,10 @@ class RopeReshapeKVCachePattern:
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
         def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
-            gm = pm.fwd_only(*args, **kwargs)
+            try:
+                gm = pm.fwd_only(*args, **kwargs)
+            except ValueError as e:
+                raise RuntimeError(str(e)) from e
             view_to_reshape(gm)
             return gm
 
@@ -430,10 +436,18 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
-        # When _USE_LAYERNAME is enabled, layer_name is a wildcard so all
-        # layers produce the same pattern — register once then break.
+        seen_geometries: set[tuple[int, int, int, int]] = set()
         for _, layer in attn_layers.items():
             if layer.impl.fused_rope_kvcache_supported():
+                geometry = (
+                    layer.num_heads,
+                    layer.num_kv_heads,
+                    layer.head_size,
+                    layer.head_size_v,
+                )
+                if _USE_LAYERNAME and geometry in seen_geometries:
+                    continue
+                seen_geometries.add(geometry)
                 for is_neox in [True, False]:
                     if _supports_static_q_fp8_quant_fusion():
                         RopeStaticQQuantKVCachePattern(
@@ -444,8 +458,6 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
                         layer=layer,
                         is_neox=is_neox,
                     ).register(self.patterns)
-                if _USE_LAYERNAME:
-                    break
 
         self.dump_patterns(config, self.patterns)
 
