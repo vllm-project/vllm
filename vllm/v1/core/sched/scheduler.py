@@ -252,6 +252,10 @@ class Scheduler(SchedulerInterface):
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
 
+        # Cumulative number of request preemptions since engine start.
+        # Consumed by the internal DP load balancer.
+        self.total_preempted_reqs: int = 0
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -1912,6 +1916,7 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
+        self.total_preempted_reqs += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -3094,6 +3099,28 @@ class Scheduler(SchedulerInterface):
     def has_request(self, request_id: str) -> bool:
         return request_id in self.requests
 
+    def get_mean_queue_time(self) -> float:
+        """Average seconds the currently waiting requests have been queued.
+
+        Engine-side proxy for TTFT: the wait a queued request has already
+        accumulated adds directly to its time-to-first-token. Covers every
+        holding queue (waiting / kv_holding_waiting / async_kv_waiting),
+        mirroring get_request_counts.
+        """
+        queues = (self.waiting, self.kv_holding_waiting, self.async_kv_waiting)
+        num_waiting = sum(len(q) for q in queues)
+        if num_waiting == 0:
+            return 0.0
+        now = time.time()
+        total_wait = 0
+        for queue in queues:
+            total_wait += sum(now - req.arrival_time for req in queue)
+        return max(0.0, total_wait / num_waiting)
+
+    def get_preempted_count(self) -> int:
+        """Total number of request preemptions since engine start."""
+        return self.total_preempted_reqs
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
@@ -3464,6 +3491,8 @@ class Scheduler(SchedulerInterface):
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
+            mean_queue_time=self.get_mean_queue_time(),
+            preempted_total=self.get_preempted_count(),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
