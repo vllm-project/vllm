@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -98,6 +98,12 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
 
 class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Objects are whole blocks this cache layout stored; the namespace
+        # fingerprints every per-layer spec, so foreign bytes cannot match.
+        return True
 
     def __init__(
         self,
