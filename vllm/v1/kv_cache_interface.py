@@ -611,6 +611,19 @@ class AttentionSpec(KVCacheSpec):
         return cdiv(max_len, self.block_size * kv_shard_count)
 
 
+def _assert_uniform_attention_fields(
+    specs: Sequence[AttentionSpec], merged: AttentionSpec
+) -> None:
+    for spec in specs:
+        for f in fields(AttentionSpec):
+            if not f.compare:
+                continue
+            assert getattr(spec, f.name) == getattr(merged, f.name), (
+                "All attention layers in the same KV cache group must have "
+                "the same attention spec."
+            )
+
+
 @dataclass(frozen=True, kw_only=True)
 class FullAttentionSpec(AttentionSpec):
     """When hybrid allocator is disabled and the model contains both full
@@ -696,14 +709,7 @@ class FullAttentionSpec(AttentionSpec):
             # non-causal so the engine core disables incompatible scheduling.
             non_causal=any(spec.non_causal for spec in specs),
         )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
+        _assert_uniform_attention_fields(specs, merged_spec)
         assert (merged_spec.sliding_window is not None) + (
             merged_spec.attention_chunk_size is not None
         ) <= 1, (
@@ -792,14 +798,7 @@ class MLAAttentionSpec(FullAttentionSpec):
                 spec.non_causal_multi_token_decode for spec in specs
             ),
         )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
+        _assert_uniform_attention_fields(specs, merged_spec)
         return merged_spec
 
 
@@ -1066,7 +1065,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             "window size, retained token count, replay policy, KV quant mode "
             "and alignment."
         )
-        return cls(
+        merged_spec = cls(
             block_size=specs[0].block_size,
             block_stride_alignment=block_stride_alignment_set.pop(),
             num_kv_heads=specs[0].num_kv_heads,
@@ -1090,6 +1089,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
                 spec.non_causal_multi_token_decode for spec in specs
             ),
         )
+        _assert_uniform_attention_fields(specs, merged_spec)
+        return merged_spec
 
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
@@ -1290,14 +1291,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
         )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                if not f.compare:
-                    continue
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
+        _assert_uniform_attention_fields(specs, merged_spec)
         assert (merged_spec.sliding_window is not None) + (
             merged_spec.attention_chunk_size is not None
         ) <= 1, (
