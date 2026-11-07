@@ -454,6 +454,13 @@ lowers SM107 through LLVM's SM100 target and uses the final CUDA image's
 version-matched `ptxas` for SM107 assembly. This enables vLLM's default compiled
 mode on VR200 and R100.
 
+When extending this image, install additional Python packages with
+`uv pip install --system`. The image sets `UV_OVERRIDE=/etc/uv-overrides.txt`
+to preserve its custom Triton and NCCL versions when resolving dependencies.
+Include this file alongside any additional files supplied through `UV_OVERRIDE`
+or `--overrides`. A constraints file alone cannot override PyTorch's dependency
+on a different Triton version; `pip` does not read `UV_OVERRIDE`.
+
 BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.

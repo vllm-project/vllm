@@ -28,6 +28,10 @@ certificate removals when the image is rebuilt. This complements the Python
 The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
+It also records the installed Triton version in `/etc/uv-overrides.txt`, which
+the image's `UV_OVERRIDE` environment variable applies to downstream `uv pip`
+installs. This preserves the source-built version even when PyTorch requires
+a different Triton version.
 
 The AWS EFA images are built separately by `docker/Dockerfile.efa` on top of a
 `vllm-openai` image built with `INSTALL_KV_CONNECTORS=true`. It adds a minimal
