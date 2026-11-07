@@ -388,7 +388,7 @@ vllm:cache_config_info{block_size="16",cache_dtype="auto",cpu_offload_gb="0",ena
 
 However, `prometheus_client` has
 [never supported Info metrics in multiprocessing mode](https://github.com/prometheus/client_python/pull/300) -
-for [unclear reasons](gh-pr:7279#discussion_r1710417152). We
+for [unclear reasons](https://github.com/vllm-project/vllm/pull/7279#discussion_r1710417152). We
 simply use a `Gauge` metric set to 1 and
 `multiprocess_mode="mostrecent"` instead.
 
