@@ -298,6 +298,7 @@ if TYPE_CHECKING:
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK: int = 128
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_MORI_EP_V2: bool | None = None
     VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD: int = 256
@@ -2125,6 +2126,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
         os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")
+    ),
+    # Fixed DeepEP low-latency buffer capacity. Prefill batches larger than
+    # this value are staged; this is deliberately independent from the
+    # scheduler's max_num_batched_tokens.
+    "VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": lambda: int(
+        os.getenv("VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "128")
     ),
     # Force DeepEP to use intranode kernel for inter-node communication in
     # high throughput mode. This is useful archive higher prefill throughput
