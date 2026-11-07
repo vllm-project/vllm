@@ -43,6 +43,17 @@ def update_admission_stats_worker(listen_address, sock, args, client_config):
     args.results.put(stats.get_num_requests())
 
 
+def update_queued_tokens_worker(listen_address, sock, args, client_config):
+    stats = SharedAdmissionStats(
+        client_config,
+        client_config["client_count"],
+        client_config["client_index"],
+    )
+    stats.set_num_queued_tokens((client_config["client_index"] + 1) * 100)
+    args.barrier.wait()
+    args.results.put(stats.get_num_queued_tokens())
+
+
 def _adopt_zmq_listener_worker(listen_address, sock, args, client_config):
     ctx = zmq.Context()
     router = make_zmq_socket(
@@ -222,6 +233,32 @@ def test_api_server_processes_share_admission_stats(api_server_args):
             assert process.exitcode == 0
 
         assert [worker_args.results.get(timeout=5) for _ in range(3)] == [6] * 3
+    finally:
+        manager.shutdown()
+        worker_args.results.close()
+        worker_args.results.join_thread()
+
+
+@pytest.mark.skip_global_cleanup
+def test_api_server_processes_share_queued_tokens(api_server_args):
+    """The counters are shared when only max_num_queued_tokens is set."""
+    args = api_server_args.copy()
+    spawn_context = multiprocessing.get_context("spawn")
+    worker_args = SimpleNamespace(
+        barrier=spawn_context.Barrier(args["num_servers"]),
+        results=spawn_context.Queue(),
+        max_num_queued_tokens=1000,
+    )
+    args["args"] = worker_args
+    args["target_server_fn"] = update_queued_tokens_worker
+    manager = APIServerProcessManager(**args)
+
+    try:
+        for process in manager.processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+
+        assert [worker_args.results.get(timeout=5) for _ in range(3)] == [600] * 3
     finally:
         manager.shutdown()
         worker_args.results.close()

@@ -332,8 +332,11 @@ class AsyncLLM(EngineClient):
         - ``max_num_queued_reqs``: approximate global cap on the number of
           unfinished requests (waiting + running). A request with ``n > 1``
           counts as ``n`` slots.
-        - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
-          tokens of requests still in prefill.
+        - ``max_num_queued_tokens``: TTFT QoS — approximate global cap on the
+          total prompt tokens of requests still in prefill.
+
+        With several API server processes, both limits read the totals the
+        processes share (``SharedAdmissionStats``).
 
         Note: ``get_num_queued_tokens`` uses ``prompt_len`` for all prefilling requests.
         Chunked prefill progress and prefix-cache hits are not subtracted because the
@@ -384,7 +387,11 @@ class AsyncLLM(EngineClient):
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
-            current_tokens = self.get_num_queued_tokens()
+            current_tokens = (
+                self.admission_stats.get_num_queued_tokens()
+                if self.admission_stats is not None
+                else self.get_num_queued_tokens()
+            )
             if current_tokens >= max_queued_tokens:
                 logger.debug(
                     "Max queued tokens reached - rejecting request %s "
