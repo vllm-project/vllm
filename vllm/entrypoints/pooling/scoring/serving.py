@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 
 from fastapi.responses import JSONResponse, Response
 
@@ -16,6 +17,7 @@ from vllm.v1.pool.late_interaction import (
 )
 
 from ..base.io_processor import PoolingIOProcessor
+from ..base.observability import TO_S
 from ..base.serving import PoolingServing
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
@@ -192,22 +194,42 @@ class ServingScores(PoolingServing):
     ### Can significantly improve late-interaction scoring performance.
 
     async def flash_late_interaction(self, *args, **kwargs) -> Response:
+        arrival_time_ns = time.time_ns()
+
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
-        await self._preprocessing(self.io_processor, ctx)
+        await self._preprocessing_async(self.io_processor, ctx)
+        ctx.arrival_time_ns = arrival_time_ns
 
-        try:
-            # stage 1: encode queries and cache token embeddings on workers.
-            await self._flash_late_interaction_encode_queries(ctx)
-            # stage 2: encode docs and return scalar scores from workers.
-            await self._flash_late_interaction_encode_docs(ctx)
-        except BaseException:
+        if self.is_tracing_request:
+            ctx.preprocessing_finished = time.time_ns()
+            assert ctx.engine_inputs is not None
+            for engine_input in ctx.engine_inputs:
+                engine_input["prompts"]["arrival_time"] = (
+                    ctx.preprocessing_finished / TO_S
+                )
+
+        async with self.maybe_tracing(ctx, self.io_processor):
             try:
-                await self._cleanup_flash_late_interaction(ctx)
-            except Exception:
-                logger.exception("Failed to clean up late-interaction query cache.")
-            raise
+                # stage 1: encode queries and cache token embeddings on workers.
+                await self._flash_late_interaction_encode_queries(ctx)
+                # stage 2: encode docs and return scalar scores from workers.
+                await self._flash_late_interaction_encode_docs(ctx)
+            except BaseException:
+                try:
+                    await self._cleanup_flash_late_interaction(ctx)
+                except Exception:
+                    logger.exception("Failed to clean up late-interaction query cache.")
+                raise
 
-        return await self._postprocessing_async(self.io_processor, ctx)
+            if self.is_tracing_request:
+                ctx.engine_call_finished = time.time_ns()
+
+            response = await self._postprocessing_async(self.io_processor, ctx)
+
+            if self.is_tracing_request:
+                ctx.postprocessing_finished = time.time_ns()
+
+            return response
 
     async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
         query_keys = ctx.late_interaction_query_keys

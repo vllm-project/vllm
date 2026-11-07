@@ -61,7 +61,7 @@ async def test_flash_late_interaction_cleans_up_queries_on_failure(
 
     context = _make_context()
     monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=context))
-    monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
+    monkeypatch.setattr(serving, "_preprocessing_async", AsyncMock())
 
     async def encode_queries(ctx):
         ctx.late_interaction_query_keys = ["query-key"]
