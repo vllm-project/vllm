@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -79,6 +79,92 @@ def test_silu_and_mul(
         ref_out.to(dtype=torch.float32), ops_out.to(dtype=torch.float32)
     )
     opcheck(torch.ops._C.silu_and_mul_quant, (ops_out, x, scale))
+
+
+GELU_FP8_SKIP = pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="GELU per-token FP8 fusion requires CUDA SM89+",
+)
+
+
+def gelu_per_token_ref(
+    x: torch.Tensor, scale_ub: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    activation = GeluAndMul(approximate="tanh").forward_cuda(x)
+    return ops.scaled_fp8_quant(
+        activation.reshape(-1, activation.shape[-1]),
+        scale_ub=scale_ub,
+        use_per_token_if_dynamic=True,
+    )
+
+
+@GELU_FP8_SKIP
+# 781: scalar path; 6912 and 21504: cached rows (256- and 512-thread blocks for
+# 300 tokens); 36864: row too wide to cache, recomputed in the second pass.
+# 17 tokens use 1024-thread blocks.
+@pytest.mark.parametrize("d", [781, 6912, 21504, 36864])
+@pytest.mark.parametrize("token_shape", [(17,), (300,), (2, 17)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("scale_ub_value", [None, 0.25])
+@torch.inference_mode()
+def test_gelu_tanh_and_mul_per_token_quant(
+    default_vllm_config,
+    d: int,
+    token_shape: tuple[int, ...],
+    dtype: torch.dtype,
+    scale_ub_value: float | None,
+) -> None:
+    """Bit-identical to the CUDA GELU-tanh activation + per-token quantizer."""
+    set_random_seed(0)
+    x = torch.randn((*token_shape, 2 * d), dtype=dtype, device="cuda")
+    x[0] = 0  # all-zero row: minimum scale
+    x[1] *= 20  # far above the FP8 range, still finite in FP16
+    scale_ub = (
+        None
+        if scale_ub_value is None
+        else torch.tensor([scale_ub_value], dtype=torch.float32, device="cuda")
+    )
+    expected, expected_scale = gelu_per_token_ref(x, scale_ub)
+    actual, scale = ops.gelu_tanh_and_mul_per_token_quant(x, scale_ub)
+
+    assert actual.shape == (*token_shape, d)
+    torch.testing.assert_close(scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual.reshape_as(expected).view(torch.uint8),
+        expected.view(torch.uint8),
+        rtol=0,
+        atol=0,
+    )
+    opcheck(
+        torch.ops._C.gelu_tanh_and_mul_per_token_quant,
+        (actual, x, scale, scale_ub),
+        cond=d == 6912,
+    )
+
+
+@GELU_FP8_SKIP
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_gelu_tanh_and_mul_per_token_quant_unaligned_and_empty(
+    default_vllm_config, dtype: torch.dtype
+) -> None:
+    set_random_seed(0)
+    d = 6912
+    # A contiguous view that starts one element into its storage cannot use
+    # 16-byte loads and takes the scalar path. The CUDA activation used as the
+    # reference assumes aligned rows, so it gets an aligned copy.
+    x = torch.randn(17 * 2 * d + 1, dtype=dtype, device="cuda")[1:].view(17, 2 * d)
+    expected, expected_scale = gelu_per_token_ref(x.clone(), None)
+    actual, scale = ops.gelu_tanh_and_mul_per_token_quant(x, None)
+    torch.testing.assert_close(scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0
+    )
+
+    empty = torch.empty((0, 2 * d), dtype=dtype, device="cuda")
+    actual, scale = ops.gelu_tanh_and_mul_per_token_quant(empty, None)
+    assert actual.shape == (0, d)
+    assert scale.shape == (0, 1)
 
 
 # ---------------------------------------------------------------------------
