@@ -283,6 +283,15 @@ def _resident_slot_mapping(
     rows into another request's slots.
     """
     by_layer = get_forward_context().slot_mapping
+    if isinstance(by_layer, list):
+        if not by_layer:
+            return None
+        from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+        ubatch_id = dbo_current_ubatch_id()
+        if ubatch_id < 0 or ubatch_id >= len(by_layer):
+            return None
+        by_layer = by_layer[ubatch_id]
     if isinstance(by_layer, dict):
         resident_slots = by_layer.get(f"{k_cache_prefix}{HISPARSE_RESIDENT_SUFFIX}")
         if resident_slots is not None:

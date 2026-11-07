@@ -215,10 +215,16 @@ def _lay_out_hisparse_groups(
                 "HiSparse hot-cache groups require one compression ratio, got "
                 f"{sorted(ratios)}."
             )
+        ratio = ratios.pop()
+        if not isinstance(ratio, int) or ratio <= 0:
+            raise ValueError(
+                "HiSparse hot-cache groups require a positive integer "
+                f"tokens_per_state, got {ratio!r}."
+            )
         page_size = hot_page_size
         # The hot cache holds one row per compressed state, so a ratio-r
         # source packs r states per logical token block.
-        storage_block_size = gpu_block_size // ratios.pop()
+        storage_block_size = gpu_block_size // ratio
         hot_blocks_per_request = cdiv(config.device_buffer_size, storage_block_size)
         names = [name for name, _ in layers]
         resident_groups.append(

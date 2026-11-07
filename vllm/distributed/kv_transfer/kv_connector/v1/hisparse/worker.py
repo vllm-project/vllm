@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import zlib
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -296,6 +297,11 @@ class HiSparseConnectorWorker:
         )
         self._dma_submitted = False
         self._per_layer_mirrored: set[int] = set()
+        self._in_step = False
+        self._needs_row_mirror = any(
+            getattr(cache.runtime, "row_value_bytes", None) is None
+            for cache in cache_handles
+        )
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
         self._forward_ready_event = torch.Event()
@@ -348,7 +354,12 @@ class HiSparseConnectorWorker:
         self._metrics_calls = 0
         self._metrics_event = torch.Event()
         self._metrics_pending = False
-        self._active_request_ids: set[str] = set()
+        self._state_row_request_hash = torch.full(
+            (max_num_reqs,),
+            -1,
+            dtype=torch.int64,
+            device=self.request_state_indices.device,
+        )
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
@@ -369,6 +380,19 @@ class HiSparseConnectorWorker:
                 and runtime_state is not self.request_state_indices
             ):
                 self.request_state_indices = runtime_state
+                self._invalidate_written_slots = HiSparseSlotInvalidator(
+                    runtime_state
+                )
+                self.residency = next(
+                    (
+                        cache.residency
+                        for cache in self.cache_handles
+                        if cache.residency is not None
+                    ),
+                    None,
+                )
+                if hasattr(self, "_state_row_request_hash"):
+                    self._state_row_request_hash.fill_(-1)
         if indices.numel() > self.request_state_indices.numel():
             raise ValueError(
                 "HiSparse request-state mapping exceeds max_num_seqs: "
@@ -395,24 +419,35 @@ class HiSparseConnectorWorker:
         """Reused state rows must not serve the previous request's hot rows."""
         if not request_ids:
             return
-        new_positions = [
-            position
-            for position, request_id in enumerate(request_ids)
-            if request_id not in self._active_request_ids
-        ]
-        self._active_request_ids = set(request_ids)
-        if not new_positions:
-            return
-        positions = torch.tensor(
-            new_positions, dtype=torch.long, device=request_state_indices.device
-        )
         runtime_state = self.cache_handles[0].runtime.request_state_indices
-        state_rows = runtime_state.index_select(0, positions).long()
-        state_rows = state_rows[state_rows >= 0]
+        if runtime_state is None:
+            return
+        num_reqs = min(len(request_ids), runtime_state.numel())
+        if num_reqs == 0:
+            return
+        hashes = torch.tensor(
+            [
+                zlib.crc32(str(request_id).encode())
+                for request_id in request_ids[:num_reqs]
+            ],
+            dtype=torch.int64,
+            device=runtime_state.device,
+        )
+        state_rows = runtime_state[:num_reqs].long()
+        valid = state_rows >= 0
+        state_rows = state_rows[valid]
+        hashes = hashes[valid]
+        if state_rows.numel() == 0:
+            return
+        previous = self._state_row_request_hash[state_rows]
+        new_rows = torch.unique(state_rows[previous != hashes])
+        self._state_row_request_hash[state_rows] = hashes
+        if new_rows.numel() == 0:
+            return
         if self.residency is not None:
-            self.residency[:, state_rows, :] = 0
+            self.residency[:, new_rows, :] = 0
         for runtime in self.leader_runtimes:
-            runtime.reset_hot_rows(state_rows)
+            runtime.reset_hot_rows(new_rows)
 
     def _init_dma(self) -> None:
         host_caches = tuple(cache.runtime.host_cache for cache in self.cache_handles)
@@ -427,7 +462,10 @@ class HiSparseConnectorWorker:
             self.cache_handles, resident_caches, host_caches
         ):
             row_bytes = resident_cache.shape[-1] * resident_cache.element_size()
-            page_rows = cache.runtime.storage_block_size or resident_cache.shape[1]
+            page_rows = (
+                getattr(cache.runtime, "storage_block_size", None)
+                or resident_cache.shape[1]
+            )
             if (
                 resident_cache.ndim != 3
                 or resident_cache.shape[1] != page_rows
@@ -471,6 +509,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._clear_forward_mirror_state()
+        self._in_step = True
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
         self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
@@ -520,7 +559,7 @@ class HiSparseConnectorWorker:
         time, so the rows are already staged by the time the forward launches.
         """
         state = self._slot_mapping_staging
-        if state is None or not num_tokens:
+        if state is None or not num_tokens or not self._needs_row_mirror:
             return
         handle = self.cache_handles[0]
         slots = handle.slot_mapping
@@ -586,7 +625,9 @@ class HiSparseConnectorWorker:
         blocks = staging.to(device, dtype=torch.int32, non_blocking=True)
         state_indices = request_state_indices.to(device=device, dtype=torch.long)
         for runtime in self.leader_runtimes:
-            page_rows = runtime.storage_block_size or self.kernel_block_size
+            page_rows = (
+                getattr(runtime, "storage_block_size", None) or self.kernel_block_size
+            )
             offsets = torch.arange(page_rows, dtype=torch.int32, device=device)
             slots = (blocks[:, None] * page_rows + offsets[None, :]).flatten()
             sorted_slots = torch.sort(slots).values
@@ -712,13 +753,15 @@ class HiSparseConnectorWorker:
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
             row_bytes = source.shape[-1] * source.element_size()
-            source_blocks, source_row_offsets = np.divmod(
-                source_rows, self.kernel_block_size
+            page_rows = (
+                getattr(cache.runtime, "storage_block_size", None)
+                or self.kernel_block_size
             )
+            source_blocks, source_row_offsets = np.divmod(source_rows, page_rows)
             source_out_of_range = (
                 np.any(source_blocks < 0)
                 or np.any(source_blocks >= source.shape[0])
-                or np.any(source_row_offsets + row_counts > self.kernel_block_size)
+                or np.any(source_row_offsets + row_counts > page_rows)
             )
             if source_out_of_range:
                 raise RuntimeError("HiSparse row DMA source is out of range.")
@@ -743,7 +786,7 @@ class HiSparseConnectorWorker:
 
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
-        if not handle.host_mirror_required:
+        if not self._in_step or not handle.host_mirror_required:
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
@@ -803,7 +846,10 @@ class HiSparseConnectorWorker:
             source_index = cache.runtime.resident_source_index
             source = self.host_caches[layer_index]
             destination = self.resident_caches[layer_index]
-            page_rows = cache.runtime.storage_block_size or self.kernel_block_size
+            page_rows = (
+                getattr(cache.runtime, "storage_block_size", None)
+                or self.kernel_block_size
+            )
             for transfer in transfers:
                 resident_block = transfer.resident_block_ids[source_index]
                 # Each import pays one H2D page copy and enqueue per layer/rank
@@ -856,7 +902,10 @@ class HiSparseConnectorWorker:
             source_index = cache.runtime.resident_source_index
             if source_index >= source_blocks_by_transfer.shape[1]:
                 raise RuntimeError("HiSparse spill DMA source index is out of range.")
-            page_rows = cache.runtime.storage_block_size or self.kernel_block_size
+            page_rows = (
+                getattr(cache.runtime, "storage_block_size", None)
+                or self.kernel_block_size
+            )
             source_blocks = source_blocks_by_transfer[:, source_index]
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
@@ -960,6 +1009,9 @@ class HiSparseConnectorWorker:
         )
 
     def _finish_mirror_phase(self, ready_event: torch.Event | None = None) -> None:
+        if not self._needs_row_mirror:
+            self._clear_forward_mirror_state()
+            return
         state = self._slot_mapping_staging
         if state is not None and state.num_tokens:
             # Measured free: blocking here costs no throughput (26.7 vs 27.6
@@ -973,6 +1025,7 @@ class HiSparseConnectorWorker:
         compute_stream = torch.accelerator.current_stream()
         self._forward_ready_event.record()
         self._finish_mirror_phase(self._forward_ready_event)
+        self._in_step = False
         if self.is_host_writer:
             if self._dma_submitted:
                 compute_stream.wait_event(self.host_write_event)

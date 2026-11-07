@@ -140,6 +140,30 @@ class PagedCacheView:
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
+def split_row_planes(
+    cache: torch.Tensor, row_value_bytes: int
+) -> tuple[torch.Tensor, ...]:
+    """Views of a paged cache's row planes: value bytes, then scale bytes."""
+    if not row_value_bytes:
+        return (cache,)
+    num_blocks, block_size, row_width = cache.shape
+    assert cache.element_size() == 1 and cache.stride()[1:] == (row_width, 1)
+    planes = []
+    for offset, width in (
+        (0, row_value_bytes),
+        (block_size * row_value_bytes, row_width - row_value_bytes),
+    ):
+        planes.append(
+            torch.as_strided(
+                cache,
+                (num_blocks, block_size, width),
+                (cache.stride(0), width, 1),
+                cache.storage_offset() + offset,
+            )
+        )
+    return tuple(planes)
+
+
 @dataclass(frozen=True)
 class ResolvedHiSparseConfig:
     top_k: int
@@ -932,9 +956,19 @@ class HiSparseRuntime:
             device=plan.block_table.device,
         )[:num_blocks]
         if plan.gpu_row_ids is not None and resident_cache is not None:
-            self.backend.gather_resident_rows(
-                resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
-            )
+            if self.row_value_bytes:
+                for source, destination in zip(
+                    split_row_planes(resident_cache, self.row_value_bytes),
+                    split_row_planes(staged, self.row_value_bytes),
+                    strict=True,
+                ):
+                    self.backend.gather_resident_rows(
+                        source, destination, plan.gpu_row_ids[0]
+                    )
+            else:
+                self.backend.gather_resident_rows(
+                    resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
+                )
         host_cache = (
             kv_cache
             if self.row_value_bytes is not None
@@ -999,7 +1033,8 @@ class HiSparseRuntime:
     ) -> None:
         """Drop hot copies of slots written outside the fused insert path."""
         request_state_indices = self.request_state_indices
-        assert request_state_indices is not None
+        if request_state_indices is None:
+            return
         invalidator = self._written_slot_invalidator
         if (
             invalidator is None

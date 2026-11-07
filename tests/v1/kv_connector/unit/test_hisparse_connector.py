@@ -165,6 +165,8 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     runtime = SimpleNamespace(
         is_group_leader=True,
         eager_host_mirror=True,
+        max_swap_rows=0,
+        row_value_bytes=None,
         begin_forward=MagicMock(),
     )
     handle = HiSparseCacheHandle(runtime)
@@ -261,6 +263,9 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         runtime = SimpleNamespace(
             is_group_leader=True,
             eager_host_mirror=True,
+            max_swap_rows=0,
+            row_value_bytes=None,
+            storage_block_size=block_size,
             resident_source_index=0,
             host_cache=torch.zeros(4 * block_size, width),
             request_state_indices=request_state_indices,

@@ -172,6 +172,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
+    worker._in_step = True
+    worker._needs_row_mirror = True
     worker._submitted_mirror_layers = set()
     worker._draft_layers = ()
     worker._draft_mirror_pending = False
@@ -665,6 +667,72 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
         invalidations[0][1], torch.tensor([3, 1], dtype=torch.int32)
     )
     assert worker._pending_invalid_block_ids == []
+
+
+def test_hisparse_skipped_request_keeps_residency():
+    worker = _make_hisparse_worker()
+    worker._state_row_request_hash = torch.full((4,), -1, dtype=torch.int64)
+    worker.residency = torch.ones((1, 4, 1), dtype=torch.int32)
+    runtime = SimpleNamespace(
+        request_state_indices=torch.tensor([0, 1], dtype=torch.int32)
+    )
+    worker.cache_handles = _as_cache_handles(SimpleNamespace(runtime=runtime))
+
+    worker._reset_new_request_hot_rows(["a", "b"], runtime.request_state_indices)
+    worker.residency.fill_(1)
+    worker._reset_new_request_hot_rows(["a"], runtime.request_state_indices)
+    worker._reset_new_request_hot_rows(["a", "b"], runtime.request_state_indices)
+
+    assert worker.residency.tolist() == [[[1], [1], [1], [1]]]
+
+
+def test_hisparse_split_row_plane_gather():
+    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
+    from vllm.v1.hisparse.runtime import split_row_planes
+
+    block_size, row_width, value_bytes, num_blocks = 4, 48, 32, 2
+    page_bytes = block_size * row_width + 16
+    resident = torch.as_strided(
+        torch.arange(num_blocks * page_bytes, dtype=torch.uint8),
+        (num_blocks, block_size, row_width),
+        (page_bytes, row_width, 1),
+    )
+    staged = torch.zeros((num_blocks, block_size, row_width), dtype=torch.uint8)
+    row_ids = torch.arange(num_blocks * block_size)
+    backend = CUDAHiSparseBackend()
+    for source, destination in zip(
+        split_row_planes(resident, value_bytes),
+        split_row_planes(staged, value_bytes),
+        strict=True,
+    ):
+        backend.gather_resident_rows(source, destination, row_ids)
+
+    for source, destination in zip(
+        split_row_planes(resident, value_bytes),
+        split_row_planes(staged, value_bytes),
+        strict=True,
+    ):
+        torch.testing.assert_close(destination, source)
+
+
+def test_hisparse_worker_rebind_refreshes_state_aliases(monkeypatch):
+    worker = _make_hisparse_worker()
+    old_state = torch.arange(4, dtype=torch.int32)
+    new_state = torch.arange(4, dtype=torch.int32)
+    residency = torch.zeros((1, 4, 1), dtype=torch.int32)
+    runtime = SimpleNamespace(request_state_indices=new_state)
+    worker.request_state_indices = old_state
+    worker._pending_invalid_block_ids = []
+    worker.cache_handles = _as_cache_handles(
+        SimpleNamespace(runtime=runtime, residency=residency)
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    worker.set_request_state_indices(torch.tensor([1, 2], dtype=torch.int32))
+
+    assert worker.request_state_indices is new_state
+    assert worker._invalidate_written_slots.request_state_indices is new_state
+    assert worker.residency is residency
 
 
 def test_hisparse_transfer_builds_page_descriptors(monkeypatch):

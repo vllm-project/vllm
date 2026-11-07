@@ -1107,7 +1107,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
       "                     Tensor miss_mask,"
-      "                     Tensor? request_state_indices,"
+      "                     Tensor? request_state_indices=None,"
       "                     Tensor(a!)? attention_indices=None,"
       "                     int attention_block_stride=0,"
       "                     int row_value_bytes=0) -> ()");
