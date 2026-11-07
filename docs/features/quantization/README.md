@@ -179,6 +179,8 @@ Your custom `QuantizationConfig` subclass must implement these abstract methods:
 | `from_config(config)` | Class method to create config from model's quantization config dict |
 | `get_quant_method(layer, prefix)` | Returns the quantization method for a given layer, or `None` to skip |
 
+With `--enable-mfu-metrics`, the attention and FFN estimates need the average bytes stored per weight. Override `get_weight_byte_size()` to return it, scales included (for example `0.5625` for 4-bit weights with a 16-bit scale and zero point per group of 64). Without it, these estimates are dropped for methods vLLM does not know.
+
 ### Implementing a Quantized Linear Method
 
 For linear layers, return a `QuantizeMethodBase` subclass from `get_quant_method`. You can extend `UnquantizedLinearMethod` as a starting point:

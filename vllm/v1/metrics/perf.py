@@ -70,6 +70,25 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
 }
 
 
+def _quant_weight_byte_size(vllm_config: VllmConfig, component: str) -> float | None:
+    """Weight byte size of the active quantization method, None if unquantized.
+
+    A config's own get_weight_byte_size() wins over the table, so methods
+    registered out of tree can report their layout.
+    """
+    cfg = vllm_config.quant_config
+    if cfg is None:
+        return None
+    size = cfg.get_weight_byte_size()
+    if size is None:
+        size = _QUANT_WEIGHT_BYTE_SIZE.get(cfg.get_name())
+    if size is None:
+        raise InvalidComponent(
+            f"Unsupported quantization method for {component} metrics: {cfg.get_name()}"
+        )
+    return size
+
+
 #### Basic Data Types ####
 
 
@@ -458,19 +477,9 @@ class AttentionQuantizationConfigParser(Parser):
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         """Override weight_byte_size based on the active quantization method."""
-        cfg = vllm_config.quant_config
-
-        if cfg is None:
-            return args
-
-        quant_method = cfg.get_name()
-        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
-            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
-        else:
-            raise InvalidComponent(
-                f"Unsupported quantization method for attention metrics: {quant_method}"
-            )
-
+        size = _quant_weight_byte_size(vllm_config, "attention")
+        if size is not None:
+            args.weight_byte_size = size
         return args
 
 
@@ -1115,19 +1124,9 @@ class FfnQuantizationConfigParser(Parser):
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         """Override weight_byte_size based on the active FFN quantization method."""
-        cfg = vllm_config.quant_config
-
-        if cfg is None:
-            return args
-
-        quant_method = cfg.get_name()
-        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
-            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
-        else:
-            raise InvalidComponent(
-                f"Unsupported quantization method for FFN metrics: {quant_method}"
-            )
-
+        size = _quant_weight_byte_size(vllm_config, "FFN")
+        if size is not None:
+            args.weight_byte_size = size
         return args
 
 
