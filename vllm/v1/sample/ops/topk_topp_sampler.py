@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from subprocess import CalledProcessError
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Lock
 
 import torch
 import torch.nn as nn
@@ -25,6 +27,65 @@ if HAS_TRITON:
     )
 
 logger = init_logger(__name__)
+
+_FLASHINFER_SAMPLING_MODULE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="vllm-flashinfer-sampling-jit"
+)
+_FLASHINFER_SAMPLING_MODULE_LOCK = Lock()
+_flashinfer_sampling_module_futures: dict[int, Future[None]] = {}
+_flashinfer_sampling_module_ready_devices: set[int] = set()
+
+
+def _build_flashinfer_sampling_module(device_index: int) -> None:
+    logger.info(
+        "Starting FlashInfer sampling JIT warmup on CUDA device %d.", device_index
+    )
+    torch.accelerator.set_device_index(device_index)
+    from flashinfer.sampling import get_sampling_module
+
+    get_sampling_module()
+    logger.info("FlashInfer sampling JIT warmup completed.")
+
+
+def start_flashinfer_sampling_module_warmup(device_index: int) -> None:
+    """Start FlashInfer's sampling JIT build while other startup work runs."""
+    with _FLASHINFER_SAMPLING_MODULE_LOCK:
+        if device_index in _flashinfer_sampling_module_ready_devices:
+            return
+        if device_index not in _flashinfer_sampling_module_futures:
+            _flashinfer_sampling_module_futures[device_index] = (
+                _FLASHINFER_SAMPLING_MODULE_EXECUTOR.submit(
+                    _build_flashinfer_sampling_module, device_index
+                )
+            )
+
+
+def wait_for_flashinfer_sampling_module_warmup(
+    device_index: int | None = None,
+) -> None:
+    """Join the startup JIT build before sampling or serving becomes ready."""
+    if device_index is None:
+        device_index = torch.accelerator.current_device_index()
+    if device_index is None:
+        return
+    with _FLASHINFER_SAMPLING_MODULE_LOCK:
+        if device_index in _flashinfer_sampling_module_ready_devices:
+            return
+        future = _flashinfer_sampling_module_futures.get(device_index)
+    if future is None:
+        return
+    try:
+        future.result()
+    except BaseException:
+        if future.done():
+            with _FLASHINFER_SAMPLING_MODULE_LOCK:
+                if _flashinfer_sampling_module_futures.get(device_index) is future:
+                    del _flashinfer_sampling_module_futures[device_index]
+        raise
+    with _FLASHINFER_SAMPLING_MODULE_LOCK:
+        if _flashinfer_sampling_module_futures.get(device_index) is future:
+            del _flashinfer_sampling_module_futures[device_index]
+            _flashinfer_sampling_module_ready_devices.add(device_index)
 
 
 def register_top_k_top_p_warmups() -> None:
@@ -249,6 +310,10 @@ class TopKTopPSampler(nn.Module):
                 logprobs_mode not in PROCESSED_LOGPROBS_MODES
                 and flashinfer_sampler_supported()
             )
+            if can_use_flashinfer:
+                start_flashinfer_sampling_module_warmup(
+                    torch.accelerator.current_device_index()
+                )
             self.forward = (
                 self.forward_cuda if can_use_flashinfer else self.forward_native
             )
@@ -647,6 +712,7 @@ def flashinfer_sample(
     the `random_sample` function. It only guarantees that the outputs are
     statistically equivalent.
     """
+    wait_for_flashinfer_sampling_module_warmup(logits.device.index)
     import flashinfer
 
     assert not (k is None and p is None)
