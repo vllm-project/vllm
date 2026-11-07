@@ -25,6 +25,7 @@ nav:
     - Models:
       - models/supported_models.md
       - models/generative_models.md
+      - models/ncp_olmo.md
       - Pooling Models: models/pooling_models
       - models/structured_decisions_models.md
       - models/extensions
