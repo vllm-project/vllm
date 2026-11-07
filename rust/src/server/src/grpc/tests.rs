@@ -496,7 +496,10 @@ async fn start_grpc_test_server(
                     .add_service(health_service)
                     .add_service(control_service)
                     .add_service(inference_service)
-                    .serve_with_incoming_shutdown(incoming, stop);
+                    .serve_with_incoming_shutdown(
+                        incoming.incoming_until(stop),
+                        std::future::pending(),
+                    );
                 async move {
                     let result = server.await;
                     server_shutdown.cancel();
@@ -2013,6 +2016,94 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
     );
 
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn shutdown_refuses_new_connections_while_streams_drain() {
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (inference_service, _control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-drain-refuses-new-connections".to_vec(),
+            default_ready_response(),
+            Arc::new(FakeTextBackend::default()),
+            None,
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    submitted_tx.send(()).expect("signal submitted request");
+                    release_rx.await.expect("release engine output");
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            vec![(vec![1, 2], Some(EngineCoreFinishReason::Length))],
+                        ),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (health_reporter, _health_service) = health_reporter();
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let server_task = tokio::spawn(health_monitor.serve(
+        shutdown.clone(),
+        std::future::pending(),
+        |stop| {
+            TonicServer::builder()
+                .add_service(inference_service)
+                .serve_with_incoming_shutdown(incoming.incoming_until(stop), std::future::pending())
+        },
+    ));
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    let mut stream = InferenceClient::new(channel)
+        .generate_stream(pb::GenerateRequest {
+            request_id: "test-drain-refuses-new-connections".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            ..Default::default()
+        })
+        .await
+        .expect("start generation")
+        .into_inner();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .expect("timed out waiting for engine submission")
+        .expect("engine submission signal");
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match TcpStream::connect(addr).await {
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => break,
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("new connections must be refused once shutdown starts");
+
+    release_tx.send(()).expect("release engine output");
+    while stream.message().await.expect("open stream must finish").is_some() {}
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server must stop once the open stream is done")
+        .expect("server task")
+        .expect("grpc server is never forced to abort")
+        .expect("grpc server");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

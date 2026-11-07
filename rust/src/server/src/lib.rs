@@ -386,7 +386,12 @@ where
                 None => MaybeTlsListener::plain(grpc_listener),
             };
             let server = health_monitor.serve(shutdown, force_shutdown.cancelled(), |stop| {
-                let server = svc.serve_with_incoming_shutdown(incoming, stop);
+                // The stream ending starts the drain; the signal never fires and only
+                // keeps tonic's graceful drain on.
+                let server = svc.serve_with_incoming_shutdown(
+                    incoming.incoming_until(stop),
+                    std::future::pending(),
+                );
                 async move {
                     let result = server.await.context("gRPC server failed");
                     server_shutdown.cancel();
