@@ -26,7 +26,7 @@ FILTER_LOG = "EP weight filter: ep_size=2, ep_rank=0, loading 37/72 experts"
 pytestmark = [
     *multi_gpu_marks(num_gpus=2),
     pytest.mark.skipif(
-        not current_platform.is_cuda(),
+        not current_platform.is_cuda_alike(),
         reason="Exact comparison needs VLLM_BATCH_INVARIANT, unsupported for MLA "
         "on this platform.",
     ),
