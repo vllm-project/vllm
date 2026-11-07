@@ -460,6 +460,17 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         # Tuned on H200: with an FP32 state BV=4 is fastest at every measured shape.
         # No BF16-state tile wins everywhere on SM90, so BF16 keeps 32.
         BV = 4
+    elif (
+        K == V == 128
+        and B * HV <= 64
+        and mixed_qkv.dtype == torch.bfloat16
+        and initial_state.dtype == torch.float32
+        and use_qk_l2norm_in_kernel
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(89, device_id=dev.index)
+    ):
+        # Cold-cache tuning on L20; larger shapes retain BV32.
+        BV = 4
     num_stages = 3
     num_warps = 1
 
