@@ -161,14 +161,24 @@ def _get_comb_run_path(base_path: Path, run_number: int | None):
     return base_path / f"run={run_number}.json"
 
 
+def _comb_has_pending_runs(base_path: Path, num_runs: int):
+    return not all(
+        _get_comb_run_path(base_path, run_number).exists()
+        for run_number in range(num_runs)
+    )
+
+
 def _comb_needs_server(
     serve_comb: ParameterSweepItem,
     bench_combs: ParameterSweep,
     experiment_dir: Path,
+    num_runs: int,
 ):
     for bench_comb in bench_combs:
         base_path = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
         if not _get_comb_run_path(base_path, run_number=None).exists():
+            return True
+        if _comb_has_pending_runs(base_path, num_runs):
             return True
 
     return False
@@ -182,10 +192,11 @@ def server_ctx(
     serve_comb: ParameterSweepItem,
     bench_params: ParameterSweep,
     experiment_dir: Path,
+    num_runs: int,
     dry_run: bool,
     server_ready_timeout: int = 300,
 ):
-    if not _comb_needs_server(serve_comb, bench_params, experiment_dir):
+    if not _comb_needs_server(serve_comb, bench_params, experiment_dir, num_runs):
         return contextlib.nullcontext()
 
     return run_server(
@@ -235,8 +246,9 @@ def run_comb(
         run_number: int,
         output_path: Path,
     ):
+        failure_path = output_path.with_name(output_path.stem + ".failure.json")
         try:
-            return run_benchmark(
+            run_data = run_benchmark(
                 server,
                 bench_cmd,
                 serve_overrides=serve_comb,
@@ -248,7 +260,6 @@ def run_comb(
         except Exception as exc:
             if not continue_on_error:
                 raise
-            failure_path = output_path.with_name(output_path.stem + ".failure.json")
             failure_path.parent.mkdir(parents=True, exist_ok=True)
             failure_path.write_text(
                 json.dumps(
@@ -271,12 +282,21 @@ def run_comb(
                     server.after_bench()
             return None
 
-    if warmup_num_prompts > 0:
+        if not dry_run:
+            failure_path.unlink(missing_ok=True)
+        return run_data
+
+    if warmup_num_prompts > 0 and _comb_has_pending_runs(base_path, num_runs):
+        warmup_path = base_path / "warmup.json"
+        if server is not None:
+            # A warmup from a previous invocation did not warm up this server
+            warmup_path.unlink(missing_ok=True)
+
         warmup_overrides = bench_comb | {"num_prompts": warmup_num_prompts}
         run_benchmark_with_error_handling(
             bench_overrides=warmup_overrides,
             run_number=-1,
-            output_path=base_path / "warmup.json",
+            output_path=warmup_path,
         )
 
     for run_number in range(num_runs):
@@ -327,6 +347,7 @@ def run_combs(
                 serve_comb=serve_comb,
                 bench_params=bench_params,
                 experiment_dir=experiment_dir,
+                num_runs=num_runs,
                 dry_run=dry_run,
                 server_ready_timeout=server_ready_timeout,
             ) as server:
