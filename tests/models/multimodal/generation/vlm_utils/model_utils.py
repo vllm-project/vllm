@@ -1039,27 +1039,9 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches the HfRunner to fix create_causal_mask API mismatch.
-
-    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
-    but transformers renamed this parameter to `input_embeds`.
-    """
-    import sys
-
-    model_module = sys.modules.get(type(hf_model.model.model).__module__)
-    if model_module is None:
-        return hf_model
-
-    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
-    if original_create_causal_mask is None:
-        return hf_model
-
-    def patched_create_causal_mask(*args, **kwargs):
-        if "inputs_embeds" in kwargs:
-            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
-        return original_create_causal_mask(*args, **kwargs)
-
-    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
+    # Match the original checkpoint's position embedding interpolation.
+    embeddings = hf_model.model.model.visual.vision_model.embeddings
+    embeddings.interpolation_align_corners = False
     return hf_model
 
 

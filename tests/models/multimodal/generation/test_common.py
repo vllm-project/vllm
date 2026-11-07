@@ -812,15 +812,10 @@ VLM_TEST_SETTINGS = {
         ),
         max_model_len=8192,
         max_num_seqs=2,
-        auto_cls=AutoModelForCausalLM,
+        auto_cls=AutoModelForImageTextToText,
+        hf_runner_kwargs={"trust_remote_code": False},
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
-        marks=[
-            pytest.mark.skip(
-                reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
-                "['default'] which was removed in transformers v5",
-            ),
-        ],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
