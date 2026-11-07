@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     warn_if_moe_use_td_ineffective,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import fp32_dot_precision, tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import get_device_name_as_file_name
@@ -353,6 +353,7 @@ def fused_moe_kernel(
     SWAP_AB: tl.constexpr,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
+    IN_PRECISION: tl.constexpr = None,
     USE_TMA_B: tl.constexpr = False,
     USE_TMA_A: tl.constexpr = False,
     C_IS_SORTED: tl.constexpr = False,
@@ -563,7 +564,9 @@ def fused_moe_kernel(
                 b = b.T
         # We accumulate along the K dimension.
         if use_int8_w8a16:
-            accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
+            accumulator = tl.dot(
+                a, b.to(compute_type), acc=accumulator, input_precision=IN_PRECISION
+            )
         elif use_fp8_w8a8 or use_int8_w8a8:
             if group_k > 0 and group_n > 0:
                 k_start = k * BLOCK_SIZE_K
@@ -586,7 +589,7 @@ def fused_moe_kernel(
                 else:
                     accumulator += tl.dot(a, b)
         else:
-            accumulator += tl.dot(a, b)
+            accumulator += tl.dot(a, b, input_precision=IN_PRECISION)
         if not USE_TD:
             # Advance the ptrs to the next K block.
             if not USE_TMA_A:
@@ -984,6 +987,7 @@ def invoke_fused_moe_triton_kernel(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
         USE_TD=use_td,
+        IN_PRECISION=fp32_dot_precision(A.dtype),
         USE_TMA_B=use_tma_b,
         USE_TMA_A=use_tma_a,
         C_IS_SORTED=C_is_sorted,
