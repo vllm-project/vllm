@@ -2391,9 +2391,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SHM_WAIT_BACKEND": env_with_choices(
         "VLLM_SHM_WAIT_BACKEND", "auto", ["auto", "stock", "futex"]
     ),
-    # Futex control bytes per local reader:16 or128. Captured in writer handles.
+    # Futex control bytes per local reader: 16 or 128. Captured in writer handles.
     "VLLM_SHM_READER_STRIDE": lambda: int(os.getenv("VLLM_SHM_READER_STRIDE", "128")),
-    # Futex busy-spin nanoseconds before parking:0..1000000. Writer-selected.
+    # Futex busy-spin nanoseconds before parking: 0..1000000. Writer-selected.
     "VLLM_SHM_SPIN_NS": lambda: int(os.getenv("VLLM_SHM_SPIN_NS", "0")),
     # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
     # Must be set together with VLLM_NIC_SELECTION_VARS.
