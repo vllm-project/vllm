@@ -60,6 +60,8 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         layer._already_called_process_weights_after_loading = True
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
+        if name == "w2_weight" and self.moe.tp_size > 1:
+            return None  # its scale is reduced over the ranks sharding it
         return self._row_local(layer, name, 1)
 
     def quantize_param(

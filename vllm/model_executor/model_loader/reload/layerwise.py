@@ -242,7 +242,8 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         if not quantized and (
             num_loaded or not get_tensor_load_numel(bound_args.arguments["param"])
         ):
-            info.loaded_weights.append((param_name, copies or bound_args))
+            buffered = bound_args if copies is None else copies
+            info.loaded_weights.append((param_name, buffered))
         info.load_numel += num_loaded
 
         logger.debug(

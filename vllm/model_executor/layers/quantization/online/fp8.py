@@ -514,7 +514,13 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         layer._already_called_process_weights_after_loading = True
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
-        return 1 if name == "weight" and self.requantization_source is None else None
+        if (
+            name != "weight"
+            or self.requantization_source is not None
+            or _is_tp_sharded(layer, reduces_output_dim=False)
+        ):
+            return None  # a row-parallel scale is reduced over the TP group
+        return 1
 
     def quantize_param(
         self, layer: Module, name: str, weight: torch.Tensor
@@ -874,6 +880,8 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
             )
 
     def arrival_row_group(self, layer: Module, name: str) -> int | None:
+        if name == "w2_weight" and self.moe.tp_size > 1:
+            return None  # its scale is reduced over the ranks sharding it
         return self._row_local(layer, name, 1)
 
     def quantize_param(
