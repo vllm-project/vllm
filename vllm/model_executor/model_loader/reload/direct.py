@@ -153,6 +153,10 @@ def check_direct_reload_support(
                     f"direct reload: {type(obj).__name__} is not supported "
                     f"({name or 'model'}): {reason or 'no reason given'}"
                 )
+    if not hasattr(model, "_ckpt_param_names"):
+        raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    _check_params_kept(model)
+    _checkpoint_views(model)  # for its refusals; begin builds its own views
     if not supports_direct_reload(type(model)):
         logger.warning_once(
             "direct reload: %s is not validated with direct reload (it does "
@@ -258,15 +262,12 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
-    if not hasattr(model, "_ckpt_param_names"):
-        raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    _check_params_kept(model)
-    views = _checkpoint_views(model)
     if not model.__dict__.get("_direct_reload_supported"):
         check_direct_reload_support(model)
         # cache a pass only (a refusal may clear: mono decode turned off), and
         # only one that checked the config
         model._direct_reload_supported = get_current_vllm_config_or_none() is not None
+    views = _checkpoint_views(model)
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
