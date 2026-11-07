@@ -48,7 +48,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.shardq import build_shardq_split
+from vllm.v1.attention.ops.shardq import ShardQEligibility, build_shardq_split
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -62,6 +62,28 @@ logger = init_logger(__name__)
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
 # and mxfp4 is the opt-in Blackwell and gfx950 path.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
+
+
+def _resolve_shardq_eligibility(
+    static_forward_context: dict[str, Any], layer_names: list[str]
+) -> ShardQEligibility | None:
+    """The model's split hook, if this indexer's layers expose one.
+
+    The indexer scores the same rows the attention reads, so a model that
+    rejects splits in its attention path must reject them here too.
+    """
+    hooks: dict[int, ShardQEligibility] = {}
+    for name in layer_names:
+        layer = static_forward_context.get(name)
+        if layer is None or not getattr(layer, "use_shardq", False):
+            continue
+        hook = getattr(layer, "shardq_eligibility", None)
+        if hook is not None:
+            implementation = getattr(hook, "__func__", hook)
+            hooks.setdefault(id(implementation), hook)
+    if len(hooks) > 1:
+        raise ValueError("ShardQ layers expose multiple eligibility callbacks")
+    return next(iter(hooks.values()), None)
 
 
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
@@ -1001,6 +1023,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_shardq = any(
             getattr(layers.get(name), "use_shardq", False) for name in self.layer_names
         )
+        # A model that owns the layout may reject splits its builders would
+        # read as decodes; the indexer must compact the same rows the
+        # attention reads.
+        self.shardq_eligibility = _resolve_shardq_eligibility(layers, self.layer_names)
         if self.use_shardq:
             self.shardq_gather_indices = CpuGpuBuffer(
                 scheduler_config.max_num_batched_tokens,
@@ -1534,6 +1560,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
+        split = (
+            build_shardq_split(
+                common_attn_metadata,
+                self.vllm_config,
+                eligibility=self.shardq_eligibility,
+            )
+            if self.use_shardq and num_prefills > 0
+            else None
+        )
+
         prefill_metadata = None
         if num_prefills > 0:
             compressed_seq_lens = (
@@ -1550,9 +1586,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 else seq_lens_cpu
             )
             positions = shardq_gather_indices = None
-            if self.use_shardq and (
-                split := build_shardq_split(common_attn_metadata, self.vllm_config)
-            ):
+            if split is not None:
                 # Tokens this builder counts as decodes stay in place there.
                 assert num_decode_tokens <= split.num_decode_tokens
                 # Every rank scores every decode token in place, then its own

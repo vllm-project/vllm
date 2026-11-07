@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_pcp_group
+from vllm.models.deepseek_v41.shardq import build_dsv41_shardq
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
@@ -75,6 +76,12 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         self._layer_types = {
             deepseek_v41_layer_type(int(ratio)) for ratio in compress_ratios
         }
+        layers = self.vllm_config.compilation_config.static_forward_context
+        # The attention layer carries the flag; scan the context values
+        # because V4.1's SWA/compressed cache layer names do not map to it.
+        self.use_shardq = any(
+            getattr(obj, "use_shardq", False) for obj in layers.values()
+        )
 
     def build(
         self,
@@ -87,11 +94,38 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         if self.pcp_size > 1:
             local_slots = cm.slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
             cm = cm.replace(slot_mapping=local_slots)
+        # Build the token-sharded metadata first: the builder reuses its
+        # token-index buffers, so the full-batch build must come last to keep
+        # the returned metadata's views valid.  The sharded views are cloned.
+        shardq = (
+            build_dsv41_shardq(common_attn_metadata, self.vllm_config, self.device)
+            if self.use_shardq
+            else None
+        )
+        sharded = None
+        if shardq is not None:
+            sharded = super().build(
+                common_prefix_len,
+                shardq.sharded_cm,
+                fast_build,
+                shardq.shard_replay_start(replay_start),
+            )
+            # The compact top-k layout starts with the step's decodes, whose
+            # rows the sharded metadata does not describe.
+            sharded.topk_start = shardq.exchange.num_decode_tokens
+            if sharded.token_to_req_indices is not None:
+                sharded.token_to_req_indices = sharded.token_to_req_indices.clone()
+            if sharded.is_valid_token is not None:
+                sharded.is_valid_token = sharded.is_valid_token.clone()
         metadata = super().build(common_prefix_len, cm, fast_build, replay_start)
         if self.pcp_size > 1:
             metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
             assert cm.positions is not None
             metadata.cache_positions = get_pcp_group().all_gather(cm.positions, dim=0)
+        if sharded is not None:
+            exchange = shardq.new_exchange()
+            exchange.attn_metadata = sharded
+            metadata.shardq = exchange
         return metadata
 
 
@@ -211,13 +245,12 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
 
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> DeepseekV4FlashMLAMetadata:
-        cm = common_attn_metadata
+        layers = vllm_config.compilation_config.static_forward_context
+        self.use_shardq = any(
+            getattr(obj, "use_shardq", False) for obj in layers.values()
+        )
+
+    def _build_impl(self, cm: CommonAttentionMetadata) -> "DeepseekV4FlashMLAMetadata":
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
 
         slot_mapping = cm.slot_mapping
@@ -252,6 +285,33 @@ class DeepseekV4SparseMLAMetadataBuilder(
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
         )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> DeepseekV4FlashMLAMetadata:
+        # Build the token-sharded metadata first and clone its view of the
+        # shared req-id buffer, then rebuild the full-batch metadata so its
+        # views stay valid for the decode path.
+        shardq = (
+            build_dsv41_shardq(common_attn_metadata, self.vllm_config, self.device)
+            if self.use_shardq
+            else None
+        )
+        sharded = None
+        if shardq is not None:
+            sharded = self._build_impl(shardq.sharded_cm)
+            sharded.req_id_per_token = sharded.req_id_per_token.clone()
+            # compress_ratio > 1 builds the slot mapping in a shared buffer.
+            sharded.slot_mapping = sharded.slot_mapping.clone()
+        metadata = self._build_impl(common_attn_metadata)
+        if sharded is not None:
+            exchange = shardq.new_exchange()
+            exchange.attn_metadata = sharded
+            metadata.shardq = exchange
+        return metadata
 
 
 class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):

@@ -16,6 +16,7 @@ one Triton kernel, or fall back to NCCL when the TP group has no symmetric
 memory.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -105,13 +106,22 @@ class ShardQSplit(NamedTuple):
         return self.token_ids[start : start + self.num_tokens_per_rank[rank]]
 
 
+ShardQEligibility = Callable[
+    ["CommonAttentionMetadata", "VllmConfig", ShardQSplit], bool
+]
+
+
 def build_shardq_split(
-    common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
+    common_attn_metadata: "CommonAttentionMetadata",
+    vllm_config: "VllmConfig",
+    *,
+    eligibility: ShardQEligibility | None = None,
 ) -> ShardQSplit | None:
     """This step's ``zigzag_split`` over the TP group of the tokens after the
     decodes (requests of at most 1 + num_speculative_tokens tokens). None when
     too few tokens follow the decodes, none of their requests is longer than
-    the top-k, or a rank would own no tokens.
+    the top-k, a rank would own no tokens, or ``eligibility`` rejects the
+    split.
     """
     spec_config = vllm_config.speculative_config
     num_spec = spec_config.num_speculative_tokens if spec_config else 0
@@ -140,7 +150,12 @@ def build_shardq_split(
     # virtually never look like that.
     if num_tokens_per_rank.min() == 0:
         return None
-    return ShardQSplit(num_decode_tokens, token_ids, num_tokens_per_rank)
+    split = ShardQSplit(num_decode_tokens, token_ids, num_tokens_per_rank)
+    if eligibility is not None and not eligibility(
+        common_attn_metadata, vllm_config, split
+    ):
+        return None
+    return split
 
 
 @triton.jit
