@@ -9,7 +9,7 @@ meta:
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
+  performance_headline: "MXFP4: TP8 on two GB300 trays, one B300 node, or one MI355X node; TP32 on a 4-host TPU slice; TP32/EP32 on two Zhenwu 810E nodes; TP8/DP4/EP32 on four Zhenwu M890 nodes"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -122,14 +122,10 @@ variants:
     supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
-      810e:
+      ppu:
         docker_image: "egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103"
         docker_serve_command: "vllm serve"
-        install: { pip: false }
-      m890:
-        docker_image: "egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103"
-        docker_serve_command: "vllm serve"
-        install: { pip: false }
+        install: { pip: false, docker: { vllm_version: "0.32.0" } }
       # The CUDA 13.4 build of this model's image; the Rubin stack needs CUDA 13.4.
       # This `install` also replaces the profile's note, which names its own
       # nightly image as the only one that runs on Rubin.
@@ -426,10 +422,6 @@ strategy_overrides:
         extra_env:
           VLLM_ENGINE_READY_TIMEOUT_S: "3600"
           DG_USE_MOE_DYNAMIC_TILE: "1"
-          PCCL_NET_PLUGIN_ENABLE: "1"
-          NCCL_SOCKET_IFNAME: "eth0"
-          NCCL_DEBUG: "WARN"
-          NCCL_IB_HCA: "fic2,vsolar"
       m890:
         extra_args:
           - "--tensor-parallel-size"
@@ -487,6 +479,11 @@ strategy_overrides:
       tp: 1
 
 notes:
+  - when: { hardware: [810e], strategies: [multi_node_tep] }
+    body: >-
+      On each host, export `NCCL_IB_HCA` with that host's RDMA HCAs (for example,
+      `fic2,vsolar`). Set `IFACE_NAME` to the host's socket interface for
+      `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`.
   # TPU serving is text-only: the command always carries --language-model-only
   # and zeroed mm limits, and the Text only feature toggle is gated off there.
   - title: "Text-only on TPU"
