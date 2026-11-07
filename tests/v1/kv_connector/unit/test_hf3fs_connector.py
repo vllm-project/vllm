@@ -6,13 +6,18 @@
 """
 
 import os
-from unittest.mock import MagicMock
+import threading
+from concurrent.futures import Future
+from contextlib import nullcontext
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    DEFAULT_MAX_IO_ENTRIES,
+    AsyncOperationManager,
     HF3FSKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
@@ -231,3 +236,252 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+@pytest.mark.cpu_test
+class TestHF3FSWriterCompletion:
+    @pytest.mark.parametrize(
+        "results, expected_count, bytes_per_page, succeeds",
+        [
+            ([16, 16], 2, 16, True),
+            ([], 1, 16, False),
+            ([16], 2, 16, False),
+            ([16, 16], 1, 16, False),
+            (None, 1, 16, False),
+            ([True], 1, 1, False),
+            ([15], 1, 16, False),
+            (RuntimeError("writer failed"), 1, 16, False),
+        ],
+    )
+    def test_only_exact_full_integer_results_authorize_publish(
+        self, results, expected_count: int, bytes_per_page: int, succeeds: bool
+    ):
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._bytes_per_page = bytes_per_page
+        writer: Future = Future()
+        if isinstance(results, Exception):
+            writer.set_exception(results)
+        else:
+            writer.set_result(results)
+        assert manager._drain_writers([(writer, expected_count)]) is succeeds
+
+    def test_cancelled_writer_does_not_block_drain(self):
+        """A cancelled queued writer fails without waiting for executor pickup."""
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._bytes_per_page = 16
+        writer: Future = Future()
+        assert writer.cancel()
+        outcome: Future[bool] = Future()
+
+        def drain():
+            outcome.set_result(manager._drain_writers([(writer, 1)]))
+
+        worker = threading.Thread(target=drain, daemon=True)
+        worker.start()
+        try:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+            assert outcome.result(timeout=1) is False
+        finally:
+            if worker.is_alive():
+                writer.set_running_or_notify_cancel()
+                worker.join(timeout=5)
+
+    @pytest.mark.parametrize(
+        "allocation_results",
+        [
+            {},
+            [],
+            [("wrong-hash", 0)],
+            [("hash-0", True)],
+            [("hash-0", "0")],
+            [("hash-0", -1)],
+            [("hash-0", 0), ("extra", 1)],
+        ],
+    )
+    def test_invalid_allocation_reply_fails_before_gather(self, allocation_results):
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._rank, manager._bytes_per_page = 0, 16
+        manager.hf3fs_stats = MagicMock()
+        manager._save_buffer_allocator = MagicMock()
+        manager._io_executor = MagicMock()
+        manager._connector = MagicMock()
+        allocate = manager._connector._metadata_client.allocate_pages_for_keys
+        allocate.return_value = allocation_results
+        save: Future[bool] = Future()
+
+        manager._handle_save_task(("request", [0], ["hash-0"], save, MagicMock()))
+
+        assert save.result() is False
+        manager._save_buffer_allocator.alloc_buffer.assert_not_called()
+        manager._connector._gather_or_scatter_kv_caches.assert_not_called()
+        manager._io_executor.submit.assert_not_called()
+        manager._connector._metadata_client.confirm_write_for_keys.assert_not_called()
+
+    def test_mismatched_block_and_key_counts_fail_before_allocation(self):
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._rank = 0
+        manager.hf3fs_stats = MagicMock()
+        manager._save_buffer_allocator = MagicMock()
+        manager._connector = MagicMock()
+        save: Future[bool] = Future()
+
+        manager._handle_save_task(("request", [0, 1], ["hash-0"], save, MagicMock()))
+
+        assert save.result() is False
+        manager._connector._metadata_client.allocate_pages_for_keys.assert_not_called()
+        manager._save_buffer_allocator.alloc_buffer.assert_not_called()
+
+    def test_duplicate_allocation_pages_fail_before_gather(self):
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._rank, manager._bytes_per_page = 0, 16
+        manager.hf3fs_stats = MagicMock()
+        manager._save_buffer_allocator = MagicMock()
+        manager._connector = MagicMock()
+        allocate = manager._connector._metadata_client.allocate_pages_for_keys
+        allocate.return_value = [("hash-0", 7), ("hash-1", 7)]
+        save: Future[bool] = Future()
+
+        manager._handle_save_task(
+            ("request", [0, 1], ["hash-0", "hash-1"], save, MagicMock())
+        )
+
+        assert save.result() is False
+        manager._save_buffer_allocator.alloc_buffer.assert_not_called()
+        manager._connector._gather_or_scatter_kv_caches.assert_not_called()
+        manager._connector._metadata_client.confirm_write_for_keys.assert_not_called()
+
+    @pytest.mark.parametrize("writer_results", [[], [16]])
+    def test_incomplete_writer_result_is_not_published(self, writer_results):
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._rank, manager._bytes_per_page = 0, 16
+        manager._save_stream = MagicMock()
+        manager._save_buffer_allocator = MagicMock()
+        manager._save_buffer_allocator.alloc_buffer.return_value = [object(), object()]
+        manager._io_executor = MagicMock()
+        manager.hf3fs_stats = MagicMock()
+        manager._connector = MagicMock()
+        manager._connector._metadata_client.allocate_pages_for_keys.return_value = [
+            ("hash-0", 0),
+            ("hash-1", 1),
+        ]
+        manager._connector._clients = [MagicMock()]
+        manager._connector._ac.next.return_value = 0
+        writer: Future[list[int]] = Future()
+        writer.set_result(writer_results)
+        manager._io_executor.submit.return_value = writer
+        save: Future[bool] = Future()
+
+        with (
+            patch.object(torch.cuda, "stream", return_value=nullcontext()),
+            patch.object(torch.cuda, "Event", return_value=MagicMock()),
+        ):
+            manager._handle_save_task(
+                (
+                    "request",
+                    [0, 1],
+                    ["hash-0", "hash-1"],
+                    save,
+                    MagicMock(),
+                )
+            )
+
+        assert save.result() is False
+        manager._connector._metadata_client.confirm_write_for_keys.assert_not_called()
+
+    def test_save_failure_drains_later_writer_before_cleanup(self):
+        block_count = DEFAULT_MAX_IO_ENTRIES + 1
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._rank, manager._bytes_per_page = 0, 16
+        manager._save_stream = MagicMock()
+        manager._save_buffer_allocator = MagicMock()
+        buffers = [object()] * block_count
+        manager._save_buffer_allocator.alloc_buffer.return_value = buffers
+        manager._io_executor = MagicMock()
+        manager.hf3fs_stats = MagicMock()
+        manager._connector = MagicMock()
+        manager._connector._metadata_client.allocate_pages_for_keys.return_value = [
+            (f"hash-{i}", i) for i in range(block_count)
+        ]
+        manager._connector._clients = [MagicMock(), MagicMock()]
+        manager._connector._ac.next.side_effect = [0, 1]
+        block_ids = list(range(block_count))
+        save: Future[bool] = Future()
+        task = (
+            "request",
+            block_ids,
+            [f"hash-{i}" for i in block_ids],
+            save,
+            MagicMock(),
+        )
+        first_writer: Future[list[int]] = Future()
+        second_writer: Future[list[int]] = Future()
+        first_writer.set_result([15] * DEFAULT_MAX_IO_ENTRIES)
+        submitted_second = threading.Event()
+
+        def submit_writer(*_args):
+            if manager._io_executor.submit.call_count == 1:
+                return first_writer
+            submitted_second.set()
+            return second_writer
+
+        manager._io_executor.submit.side_effect = submit_writer
+        with (
+            patch.object(torch.cuda, "stream", return_value=nullcontext()),
+            patch.object(torch.cuda, "Event", return_value=MagicMock()),
+        ):
+            worker = threading.Thread(target=manager._handle_save_task, args=(task,))
+            worker.start()
+            try:
+                assert submitted_second.wait(timeout=5)
+                worker.join(timeout=0.05)
+                manager._save_buffer_allocator.free_buffer.assert_not_called()
+            finally:
+                second_writer.set_result([16])
+                worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert save.result() is False
+        manager._save_buffer_allocator.free_buffer.assert_called_once_with(buffers)
+        manager._connector._metadata_client.confirm_write_for_keys.assert_not_called()
+
+    def test_submission_failure_drains_earlier_writer_before_buffer_reuse(self):
+        manager = AsyncOperationManager.__new__(AsyncOperationManager)
+        manager._bytes_per_page = 16
+        manager._io_executor = MagicMock()
+        manager._connector = MagicMock()
+        manager._connector._clients = [MagicMock(), MagicMock()]
+        manager._connector._ac.next.side_effect = [0, 1]
+        first_writer: Future[list[int]] = Future()
+        submitted_second = threading.Event()
+
+        def submit_writer(*_args):
+            if manager._io_executor.submit.call_count == 1:
+                return first_writer
+            submitted_second.set()
+            raise RuntimeError("executor rejected writer")
+
+        manager._io_executor.submit.side_effect = submit_writer
+        released = MagicMock()
+
+        def submit_then_free():
+            with pytest.raises(RuntimeError, match="executor rejected"):
+                manager._submit_and_drain_writers(
+                    list(range(DEFAULT_MAX_IO_ENTRIES + 1)),
+                    [MagicMock()] * (DEFAULT_MAX_IO_ENTRIES + 1),
+                    MagicMock(),
+                )
+            released()
+
+        worker = threading.Thread(target=submit_then_free)
+        worker.start()
+        try:
+            assert submitted_second.wait(timeout=5)
+            worker.join(timeout=0.05)
+            released.assert_not_called()
+        finally:
+            first_writer.set_result([16] * DEFAULT_MAX_IO_ENTRIES)
+            worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        released.assert_called_once()
