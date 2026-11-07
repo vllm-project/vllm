@@ -266,6 +266,15 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         n_predict = getattr(spec.draft_model_config.hf_config, "n_predict", None)
         if n_predict is None:
             return
+        if n_predict == 0:
+            # Checkpoints that lack `num_nextn_predict_layers`
+            # resolve to n_predict=0; fail loudly instead of
+            # crashing with ZeroDivisionError below.
+            raise ValueError(
+                "Draft model config reports n_predict=0 "
+                "(missing `num_nextn_predict_layers`); cannot "
+                "determine the number of speculative tokens."
+            )
         if spec.num_speculative_tokens is None:
             # Default to max value defined in draft model config.
             spec.num_speculative_tokens = n_predict
