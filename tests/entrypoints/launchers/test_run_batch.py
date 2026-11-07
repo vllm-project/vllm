@@ -28,6 +28,7 @@ from vllm.entrypoints.launchers.run_batch import (
     BatchRequestInput,
     BatchRequestOutput,
     BatchTranscriptionRequest,
+    EndpointConfig,
     batch_output_writer,
     dispatch_batch,
     download_bytes_from_url,
@@ -565,7 +566,8 @@ def test_completions():
             BatchRequestOutput.model_validate_json(line)
 
 
-def test_completions_endpoint():
+@pytest.mark.parametrize("completion_order", [False, True])
+def test_completions_endpoint(completion_order):
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -587,6 +589,7 @@ def test_completions_endpoint():
                 output_file.name,
                 "--model",
                 CHAT_MODEL_NAME,
+                *(["--output-order", "completion"] if completion_order else []),
             ],
         )
         proc.communicate()
@@ -678,7 +681,8 @@ async def test_batch_json_responses(response_factory, input_line, expected):
 
 
 @pytest.mark.asyncio
-async def test_batch_embedding_json_body_is_written_as_is():
+@pytest.mark.parametrize("output_order", ["input", "completion"])
+async def test_batch_embedding_json_body_is_written_as_is(tmp_path, output_order):
     # Built the way EmbeddingServing builds it for encoding_format=float.
     item = EmbeddingResponseData(index=0, embedding=[]).model_dump()
     item["embedding"] = np.array([7.177709e-6, np.nan], dtype=np.float32)
@@ -694,11 +698,28 @@ async def test_batch_embedding_json_body_is_written_as_is():
     async def handler(request):
         return response
 
-    request = run_batch_module.BatchRequestInput.model_validate_json(
-        INPUT_EMBEDDING_BATCH.splitlines()[0]
-    )
-    result = await run_batch_module.run_request(handler, request)
-    line = result.to_json_line()
+    input_path = _write_batch(tmp_path, [INPUT_EMBEDDING_BATCH.splitlines()[0]])
+    output_path = tmp_path / "output.jsonl"
+    endpoints: dict[str, EndpointConfig] = {
+        "embeddings": {
+            "url": "/v1/embeddings",
+            "handler_getter": lambda: handler,
+            "wrapper_fn": None,
+        }
+    }
+    with (
+        input_path.open(encoding="utf-8") as input_file,
+        output_path.open("w", encoding="utf-8") as output_file,
+    ):
+        await dispatch_batch(
+            input_file,
+            output_file,
+            endpoints,
+            BatchProgressTracker(),
+            max_inflight=1,
+            output_order=output_order,
+        )
+    line = output_path.read_text().strip()
 
     # orjson writes the float32 value as 0.000007177709 and NaN as null, as the
     # online server returns them. Parsing the body back would rewrite the first
@@ -746,7 +767,8 @@ async def test_batch_rejects_unsupported_responses(make_response, error):
     assert result.error == error
 
 
-def test_embeddings():
+@pytest.mark.parametrize("output_order", ["input", "completion"])
+def test_embeddings(output_order):
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -763,6 +785,8 @@ def test_embeddings():
                 output_file.name,
                 "--model",
                 EMBEDDING_MODEL_NAME,
+                "--output-order",
+                output_order,
             ],
         )
         proc.communicate()
@@ -773,22 +797,28 @@ def test_embeddings():
             BatchRequestOutput.model_validate_json(line)
             for line in output_file.read().splitlines()
         ]
-        assert [output.custom_id for output in outputs] == [
+        expected_ids = [
             "request-1",
             "request-2",
             "request-3",
             "request-4",
         ]
-        for output in outputs[:3]:
+        if output_order == "input":
+            assert [output.custom_id for output in outputs] == expected_ids
+        by_id = {output.custom_id: output for output in outputs}
+        assert len(outputs) == len(by_id) == len(expected_ids)
+        assert set(by_id) == set(expected_ids)
+        for custom_id in expected_ids[:3]:
+            output = by_id[custom_id]
             assert output.error is None
             assert output.response is not None
             assert output.response.status_code == 200
             assert isinstance(output.response.body, EmbeddingResponse)
             assert len(output.response.body.data) == 1
             assert len(output.response.body.data[0].embedding) == 384
-        assert outputs[3].response is not None
-        assert outputs[3].response.status_code == 404
-        assert outputs[3].error is not None
+        assert by_id["request-4"].response is not None
+        assert by_id["request-4"].response.status_code == 404
+        assert by_id["request-4"].error is not None
 
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
@@ -1509,7 +1539,10 @@ def test_is_same_local_file_detects_aliases(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_batch_counts_error_responses_as_completed(tmp_path):
+@pytest.mark.parametrize("output_order", ["input", "completion"])
+async def test_dispatch_batch_counts_error_responses_as_completed(
+    tmp_path, output_order
+):
     """Synthesized error responses advance progress like any other response."""
     input_path = _write_batch(tmp_path, [INPUT_BATCH])
     output_path = tmp_path / "output.jsonl"
@@ -1522,7 +1555,14 @@ async def test_dispatch_batch_counts_error_responses_as_completed(tmp_path):
         tracker.pbar(total=num_requests) as pbar,
     ):
         # An empty registry makes every response a synthesized error.
-        await dispatch_batch(input_file, output_file, {}, tracker, max_inflight=2)
+        await dispatch_batch(
+            input_file,
+            output_file,
+            {},
+            tracker,
+            max_inflight=2,
+            output_order=output_order,
+        )
     assert pbar.n == num_requests
 
 
@@ -1638,7 +1678,101 @@ def _response(request_json: str) -> BatchRequestOutput:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_dispatch_batch_completion_order_preserves_finished_responses(
+    tmp_path, cancel
+):
+    """A completed response reaches disk even while the first request is blocked."""
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_finished = asyncio.Event()
+    first_stopped = asyncio.Event()
+
+    async def serve(request):
+        if request.prompt == "slow":
+            first_started.set()
+            try:
+                await release_first.wait()
+            finally:
+                first_stopped.set()
+        else:
+            await first_started.wait()
+            second_finished.set()
+        return CompletionResponse(
+            id="cmpl-test",
+            model=CHAT_MODEL_NAME,
+            choices=[],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    template = json.loads(INPUT_COMPLETIONS_BATCH.strip().split("\n")[0])
+    requests = [
+        template
+        | {
+            "custom_id": f"request-{index}",
+            "body": template["body"] | {"prompt": prompt},
+        }
+        for index, prompt in enumerate(["slow", "fast"])
+    ]
+    input_path = _write_batch(tmp_path, [json.dumps(request) for request in requests])
+    output_path = tmp_path / "output.jsonl"
+    endpoints: dict[str, EndpointConfig] = {
+        "completions": {
+            "url": "/v1/completions",
+            "handler_getter": lambda: serve,
+            "wrapper_fn": None,
+        }
+    }
+
+    with (
+        input_path.open(encoding="utf-8") as input_file,
+        output_path.open("w", encoding="utf-8") as output_file,
+    ):
+        task = asyncio.create_task(
+            dispatch_batch(
+                input_file,
+                output_file,
+                endpoints,
+                BatchProgressTracker(),
+                max_inflight=2,
+                output_order="completion",
+            )
+        )
+        try:
+            await asyncio.wait_for(second_finished.wait(), timeout=10)
+            written = [
+                BatchRequestOutput.model_validate_json(line)
+                for line in output_path.read_text().splitlines()
+            ]
+            assert [response.custom_id for response in written] == ["request-1"]
+            assert written[0].error is None
+            assert not task.done()
+
+            if cancel:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert first_stopped.is_set()
+            else:
+                release_first.set()
+                await asyncio.wait_for(task, timeout=10)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    written_ids = [
+        BatchRequestOutput.model_validate_json(line).custom_id
+        for line in output_path.read_text().splitlines()
+    ]
+    assert written_ids == (["request-1"] if cancel else ["request-1", "request-0"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output_order", ["input", "completion"])
+async def test_dispatch_batch_respects_max_inflight(
+    tmp_path, monkeypatch, output_order
+):
     """No more than max_inflight requests may be alive at once."""
     requests = _chat_requests(50)
     input_path = _write_batch(tmp_path, [json.dumps(r) for r in requests])
@@ -1663,7 +1797,12 @@ async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
         open(output_path, "w", encoding="utf-8") as output_file,
     ):
         await dispatch_batch(
-            input_file, output_file, {}, BatchProgressTracker(), max_inflight
+            input_file,
+            output_file,
+            {},
+            BatchProgressTracker(),
+            max_inflight,
+            output_order=output_order,
         )
 
     assert peak <= max_inflight

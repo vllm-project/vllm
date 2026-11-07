@@ -269,6 +269,14 @@ See [vllm download-kernels](./download-kernels.md) for the full reference of all
 
 Run batch prompts and write results to file.
 
+Responses are written in input order by default. Use `--output-order completion`
+to write each response as soon as it finishes, without waiting for earlier
+requests. Match results to inputs using `custom_id`, not line position. An
+interrupted local output file in this mode is not necessarily an input prefix;
+filter completed IDs rather than skipping the same number of input lines.
+Use a different output file for retries, since a new run truncates its output.
+Output URLs are still uploaded only after the whole batch succeeds.
+
 Running with a local file:
 
 ```bash

@@ -13,7 +13,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from http import HTTPStatus
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import IO, Any, NoReturn, TypeAlias, TypedDict
+from typing import IO, Any, Literal, NoReturn, TypeAlias, TypedDict
 from urllib.parse import urlparse
 
 import aiohttp
@@ -279,14 +279,18 @@ class BatchFrontendArgs(BaseFrontendArgs):
     """The path or url to a single output file. Currently supports
     local file paths, or web (http or https) urls. If a URL is specified,
     the file should be available via HTTP PUT."""
+    output_order: Literal["input", "completion"] = "input"
+    """Order in which responses are written. Input order waits for earlier
+    requests; completion order writes each finished response immediately.
+    Match completion-order results to inputs by custom_id, not line number."""
     output_tmp_dir: str | None = None
     """Directory for staging a URL input, a piped input, or the output before
     it is uploaded to a URL. When unset, piped input and output are held in
     memory and URL input is downloaded to the system temporary directory."""
     max_inflight: int | None = None
-    """Maximum number of requests queued at the engine at once. Responses are
-    written in input order, so up to 16 times this many finished responses may
-    be held behind a slow request. Defaults to twice max_num_seqs across all
+    """Maximum number of requests queued at the engine at once. In input-order
+    mode, up to 16 times this many finished responses may be held behind a slow
+    request. Defaults to twice max_num_seqs across all
     data-parallel engines, at least 1024. --max-num-queued-reqs and
     --max-num-queued-tokens are ignored."""
     enable_metrics: bool = False
@@ -355,7 +359,7 @@ _STAGING_CHUNK_SIZE = 1 << 20
 # longer timeout on each attempt.
 _INPUT_DOWNLOAD_TIMEOUT_S = 300
 
-# Responses are written in input order, so a slow request holds back those
+# In input-order mode, a slow request holds back those
 # behind it. Letting up to this many times --max-inflight requests finish ahead
 # of the oldest unwritten one keeps the engine busy behind long requests.
 _REORDER_WINDOW_FACTOR = 16
@@ -517,11 +521,11 @@ async def upload_data(
 async def batch_output_writer(
     path_or_url: str, output_tmp_dir: str | None
 ) -> AsyncIterator[IO[str]]:
-    """Yield a file that receives responses in input order.
+    """Yield a file that receives responses while the batch runs.
 
-    A local file holds the responses for a prefix of the input if the run
-    fails. A URL destination is staged and uploaded only once the batch
-    completes.
+    With input-order output, a local file holds an input prefix if the run
+    fails. Completion-order output instead retains every written response.
+    A URL destination is uploaded only once the batch completes.
     """
     if not is_url(path_or_url):
         logger.info("Writing outputs to local file %s", path_or_url)
@@ -1019,14 +1023,18 @@ async def dispatch_batch(
     max_inflight: int,
     window: int | None = None,
     engine_client: EngineClient | None = None,
+    output_order: Literal["input", "completion"] = "input",
 ) -> None:
     """Run every request with at most `max_inflight` alive at once.
 
-    Responses are written in input order, with at most `window` requests,
+    Responses default to input order, with at most `window` requests,
     `max_inflight` by default, dispatched but not yet written. The first
     request to raise, rather than return an error response, cancels the rest,
     as does an error response once `engine_client` is dead.
     """
+    if output_order not in ("input", "completion"):
+        raise ValueError(f"Unsupported output order: {output_order!r}")
+
     window = max(window or max_inflight, max_inflight)
     running = asyncio.Semaphore(max_inflight)
     unwritten = asyncio.Semaphore(window)
@@ -1046,19 +1054,24 @@ async def dispatch_batch(
             # Handlers answer a cancellation with an error response; drop it.
             if stopping:
                 return
-            # A dead engine answers every request with an error; keep a prefix.
+            # A dead engine answers every request with an error; stop writing.
             if (
                 response.error is not None
                 and engine_client is not None
                 and engine_client.errored
             ):
                 raise engine_client.dead_error
-            finished[index] = response.to_json_line()
-            while next_index in finished:
-                print(finished.pop(next_index), file=output_file)
-                next_index += 1
+            if output_order == "completion":
+                print(response.to_json_line(), file=output_file)
                 tracker.completed()
                 unwritten.release()
+            else:
+                finished[index] = response.to_json_line()
+                while next_index in finished:
+                    print(finished.pop(next_index), file=output_file)
+                    next_index += 1
+                    tracker.completed()
+                    unwritten.release()
             output_file.flush()
         except BaseException as exc:
             if failure is None:
@@ -1122,7 +1135,9 @@ async def run_batch(
     # The final drain reacquires every window slot, and the window is at least
     # max_inflight, so neither may exceed the batch.
     max_inflight = min(max_inflight, max(num_requests, 1))
-    window = min(max_inflight * _REORDER_WINDOW_FACTOR, max(num_requests, 1))
+    window = max_inflight
+    if args.output_order == "input":
+        window = min(max_inflight * _REORDER_WINDOW_FACTOR, max(num_requests, 1))
     tracker = BatchProgressTracker()
 
     async with batch_output_writer(
@@ -1137,6 +1152,7 @@ async def run_batch(
                 max_inflight,
                 window,
                 engine_client,
+                output_order=args.output_order,
             )
 
 
