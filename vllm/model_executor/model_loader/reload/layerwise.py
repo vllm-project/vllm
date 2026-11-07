@@ -4,9 +4,11 @@ import inspect
 from collections.abc import Callable
 from contextlib import nullcontext
 from functools import wraps
+from inspect import BoundArguments
 from weakref import WeakKeyDictionary, WeakSet
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -24,7 +26,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
-from .types import LayerReloadingInfo
+from .types import LayerReloadingInfo, RecordedCopies
 from .utils import (
     get_info_size,
     get_layer_params_buffers,
@@ -32,6 +34,7 @@ from .utils import (
     get_layer_tensors,
     get_tensor_load_numel,
     has_device_tensors,
+    stages_online_quant,
 )
 
 logger = init_logger(__name__)
@@ -225,9 +228,15 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
 
         # Buffer loaded weights, track loading progress. A load that writes
         # nothing (another rank's expert) is not replayed, so not buffered.
-        num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        # A staged online module buffers only what its loader copied (this
+        # rank's shard), not the received tensor.
+        copies = None
+        if info.kernel_tensors is not None and stages_online_quant(layer):
+            num_loaded, ret, copies = _record_copies(original_loader, bound_args)
+        else:
+            num_loaded, ret = get_numel_loaded(original_loader, bound_args)
         if num_loaded or not get_tensor_load_numel(bound_args.arguments["param"]):
-            info.loaded_weights.append((param_name, bound_args))
+            info.loaded_weights.append((param_name, copies or bound_args))
         info.load_numel += num_loaded
 
         logger.debug(
@@ -267,6 +276,57 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         return ret
 
     return online_process_loader
+
+
+class _CopyRecorder(TorchDispatchMode):
+    """Counts copied elements as `CopyCounter` does, and records the copies
+    into one parameter; `whole` if the loader also wrote another way."""
+
+    def __init__(self, param: torch.Tensor):
+        super().__init__()
+        self.storage = param.untyped_storage()._cdata
+        self.copied_numel = 0
+        self.copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.whole = False
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func is torch.ops.aten.copy_.default:
+            dst, src = args[0], args[1]
+            self.copied_numel += dst.numel()
+            # a source derived from the parameter (meta) has no bytes to keep
+            if dst.untyped_storage()._cdata == self.storage and not src.is_meta:
+                self.copies.append((dst, src))
+            else:
+                self.whole = True
+        elif func._schema.is_mutable:
+            self.whole = True
+        return func(*args, **(kwargs or {}))
+
+
+def _record_copies(
+    loader: Callable, args: BoundArguments
+) -> tuple[int, object, RecordedCopies | None]:
+    """As `get_numel_loaded`, plus the copies the loader made into the
+    parameter, each source copied out so the received tensor (or the packed
+    receive buffer it views) is not kept alive. None if the loader's writes
+    cannot be replayed as copies: the arguments are then buffered whole."""
+    param = args.arguments["param"]
+    with _CopyRecorder(param) as recorder:
+        ret = loader(*args.args, **args.kwargs)
+    numel = min(recorder.copied_numel, get_tensor_load_numel(param))
+    if recorder.whole:
+        return numel, ret, None
+    base = param.storage_offset()
+    copies = RecordedCopies(
+        (
+            dst.size(),
+            dst.stride(),
+            dst.storage_offset() - base,
+            src.detach().to(dtype=dst.dtype, copy=True),
+        )
+        for dst, src in recorder.copies
+    )
+    return numel, ret, copies
 
 
 def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
@@ -365,6 +425,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
 
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
+        assert isinstance(args, BoundArguments)  # attention is not recorded
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
@@ -412,6 +473,9 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Load all buffered weights into materialized layer (using original loaders)
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
+        if isinstance(args, RecordedCopies):
+            args.replay(param)
+            continue
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
 
@@ -476,6 +540,10 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
         if name in non_persistent and name not in loaded_tensor_names:
             continue
         _copy_into_kernel_tensor(getattr(layer, name), buffer)
+    # objects holding a processed param's data (triton_kernels storages)
+    for name, holder in getattr(layer, "_param_storage_aliases", {}).items():
+        if name in parameters:
+            holder.data = parameters[name].data
 
     _place_kernel_tensors(layer, info)
 

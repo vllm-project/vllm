@@ -78,10 +78,18 @@ def get_info_size(info: LayerReloadingInfo) -> int:
         number of bytes used by loaded weights
 
     """
+    values = (
+        value
+        for _, args in info.loaded_weights
+        for value in (
+            [source for *_, source in args]
+            if isinstance(args, list)
+            else args.arguments.values()
+        )
+    )
     return sum(
         value.nbytes
-        for _, args in info.loaded_weights
-        for value in args.arguments.values()
+        for value in values
         if isinstance(value, torch.Tensor) and value.device.type not in ("meta", "cpu")
     )
 

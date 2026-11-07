@@ -84,12 +84,14 @@ if triton_kernels_version is not None:
 
 def store_params_in_triton(layer: torch.nn.Module, **tensors) -> None:
     """Back each loaded param and its triton_kernels tensor by one storage, so the
-    param keeps its loaded bytes without a second copy of the data. The tensor
-    holds the param itself, so it follows the param when its data is rebound
-    (a staged reload points the processed param at the kernel tensor)."""
+    param keeps its loaded bytes without a second copy of the data. A staged
+    reload re-points the storages listed in `_param_storage_aliases` at the
+    kernel tensors it copies into."""
+    aliases = layer.__dict__.setdefault("_param_storage_aliases", {})
     for name, tensor in tensors.items():
         replace_parameter(layer, name, tensor.storage.data)
-        tensor.storage.data = getattr(layer, name)
+        tensor.storage.data = getattr(layer, name).data
+        aliases[name] = tensor.storage
 
 
 def triton_weight(layer: torch.nn.Module, name: str):

@@ -116,16 +116,20 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
         # Round-up padding is never loaded: count only the checkpoint elements,
-        # so the layer is processed as soon as they are loaded.
-        hidden = self.moe.hidden_dim_unpadded
-        intermediate = self.moe.intermediate_size_per_partition_unpadded
-        assert hidden is not None and intermediate is not None
-        w13_up = self.moe.w13_num_shards * intermediate
-        w13_weight.weight_loader_numel = num_experts * w13_up * hidden
-        w2_weight.weight_loader_numel = num_experts * hidden * intermediate
-        if self.moe.has_bias:
-            w13_bias.weight_loader_numel = num_experts * w13_up
-            w2_bias.weight_loader_numel = num_experts * hidden
+        # so the layer is processed as soon as they are loaded. Only the base
+        # loader is known to copy the unpadded rows alone (gpt-oss's copies
+        # the padded width); others count padding and complete at finish.
+        loader = extra_weight_attrs.get("weight_loader")
+        if getattr(loader, "__func__", None) is RoutedExperts.weight_loader:
+            hidden = self.moe.hidden_dim_unpadded
+            intermediate = self.moe.intermediate_size_per_partition_unpadded
+            assert hidden is not None and intermediate is not None
+            w13_up = self.moe.w13_num_shards * intermediate
+            w13_weight.weight_loader_numel = num_experts * w13_up * hidden
+            w2_weight.weight_loader_numel = num_experts * hidden * intermediate
+            if self.moe.has_bias:
+                w13_bias.weight_loader_numel = num_experts * w13_up
+                w2_bias.weight_loader_numel = num_experts * hidden
 
         layer.w13_input_scale = None
         layer.w2_input_scale = None

@@ -21,6 +21,7 @@ addresses.
 """
 
 import contextlib
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -416,11 +417,11 @@ class TestOnlineStaging:
         _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
         assert _ptrs(_state(model)) == ptrs
 
-    @pytest.mark.parametrize("has_bias", [False, True])
-    def test_padded_moe_is_processed_as_its_experts_arrive(self, has_bias):
-        # round-up padding is never loaded, and another rank's experts load
-        # nothing: the layer completes on its last local expert, not before
-        # (dropping it) and not at finish (buffering every expert)
+    @staticmethod
+    def _online_experts(cls, has_bias):
+        """An online MoE layer: 2 local experts of 3, round-up padded, TP rank
+        0 of 2; its process_weights_after_loading only records the call."""
+
         class _MoE(OnlineMoEMethodBase):
             def get_fused_moe_quant_config(self, layer):
                 return None
@@ -428,44 +429,98 @@ class TestOnlineStaging:
             def process_weights_after_loading(self, layer):
                 self.processed = True
 
-        method = object.__new__(_MoE)
-        method.requantization_source = None
-        method.processed = False
-        method.moe = SimpleNamespace(
+        config = SimpleNamespace(
             w13_num_shards=2,
+            is_act_and_mul=True,
             hidden_dim_unpadded=4,
-            intermediate_size_per_partition_unpadded=2,
+            intermediate_size_per_partition_unpadded=3,
             has_bias=has_bias,
+            tp_rank=0,
+            tp_shard_with_padding=False,
+            num_experts=3,
+            moe_parallel_config=SimpleNamespace(tp_size=2),
         )
-
-        def load_expert(param, loaded_weight, expert_id):
-            if expert_id < 2:  # local experts 0 and 1
-                region = tuple(slice(0, n) for n in loaded_weight.shape)
-                param.data[expert_id][region].copy_(loaded_weight)
-
-        layer = torch.nn.Module()
-        layer.quant_method = method
-        layer.quant_config = SimpleNamespace(online_quantization_config=None)
+        method = object.__new__(_MoE)
+        method.moe, method.requantization_source, method.processed = config, None, False
+        layer = object.__new__(cls)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config, layer.quant_method = config, method
+        layer.quant_config = SimpleNamespace(
+            get_name=lambda: "online", online_quantization_config=None
+        )
+        layer.expert_map_manager = SimpleNamespace(
+            map_global_to_local=lambda i: i if i < 2 else -1,
+            num_fused_shared_experts=0,
+        )
+        layer._loaded_expert_biases = set()
+        layer.shared_expert_online_loader = None
         with _DEVICE:
             method.create_weights(
-                layer,
-                num_experts=2,
-                hidden_size=8,
-                intermediate_size_per_partition=4,
-                params_dtype=torch.bfloat16,
-                weight_loader=load_expert,
+                layer, 2, 8, 8, torch.bfloat16, weight_loader=layer.weight_loader
             )
-        shapes = {"w13_weight": (4, 4), "w2_weight": (4, 2)}
-        if has_bias:
-            shapes |= {"w13_bias": (4,), "w2_bias": (4,)}
-        loads = [(e, n) for e in (2, 0, 3, 1) for n in shapes]
+        return layer
+
+    @pytest.mark.parametrize("has_bias", [False, True])
+    def test_padded_moe_is_processed_as_its_experts_arrive(self, has_bias):
+        # round-up padding is never loaded, and another rank's experts load
+        # nothing: the layer completes on its last local expert, not before
+        # (dropping it) and not at finish (buffering every expert)
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+        layer = self._online_experts(RoutedExperts, has_bias)
+        shapes = {"w1": (6, 4), "w3": (6, 4), "w2": (4, 6)}  # both TP ranks
+        kinds = ["weight", "bias"] if has_bias else ["weight"]
+        loads = [(e, s, k) for e in (2, 0, 1) for k in kinds for s in shapes]
         info = get_layerwise_info(layer)
-        for i, (expert_id, name) in enumerate(loads):
+        for i, (expert, shard, kind) in enumerate(loads):
+            name = ("w2" if shard == "w2" else "w13") + f"_{kind}"
+            shape = shapes[shard] if kind == "weight" else shapes[shard][:1]
             param = getattr(layer, name)
-            param.weight_loader(param, torch.ones(shapes[name]), expert_id=expert_id)
-            if expert_id == 2:
+            param.weight_loader(param, torch.ones(shape), name, shard, expert)
+            if expert == 2:
                 assert info.loaded_weights == []
-            assert method.processed == (i == len(loads) - 1)
+            assert layer.quant_method.processed == (i == len(loads) - 1)
+
+    def test_own_expert_loader_counts_padding(self):
+        # gpt-oss's loader copies the padded width: counting only checkpoint
+        # elements would process the layer before its last experts
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+        class _OwnLoader(RoutedExperts):
+            def weight_loader(self, *args, **kwargs):
+                return super().weight_loader(*args, **kwargs)
+
+        layer = self._online_experts(_OwnLoader, has_bias=False)
+        assert not hasattr(layer.w13_weight, "weight_loader_numel")
+        assert not hasattr(layer.w2_weight, "weight_loader_numel")
+
+    def test_staged_load_buffers_only_this_ranks_shard(self, monkeypatch):
+        # a TP loader copies one shard of the received tensor: only the shard
+        # is buffered, so the received tensor (with packed NCCL, a view of
+        # the whole receive buffer) is not kept until the module completes
+        init = _ToyModel.__init__
+
+        def with_shard_loader(self):
+            init(self)
+            online = self.deq.online
+            online.weight.weight_loader = lambda param, w: default_weight_loader(
+                param, w[: len(param)]
+            )
+            initialize_online_processing(online)
+
+        monkeypatch.setattr(_ToyModel, "__init__", with_shard_loader)
+        model = _cold_start(_checkpoint())
+        new = _checkpoint(1.01)
+        received = torch.cat([new["deq.online.weight"], torch.zeros_like(new["deq.online.weight"])])
+        alive = weakref.ref(received)
+        begin_direct_reload(model)
+        model.load_weights([("deq.online.weight", received)])
+        del received
+        assert alive() is None
+        assert get_layerwise_info(model.deq.online).loaded_weights  # bias pending
+        model.load_weights((n, t) for n, t in new.items() if n != "deq.online.weight")
+        finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+        _assert_same(_state(model), _state(_cold_start(new)))
 
 
 class TestRefusals:

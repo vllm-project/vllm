@@ -5,10 +5,20 @@ from inspect import BoundArguments
 
 import torch
 
-__all__ = ["LayerTensors", "LayerReloadingInfo"]
+__all__ = ["LayerTensors", "LayerReloadingInfo", "RecordedCopies"]
 
 # encodes both parameters and buffers separately
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+
+class RecordedCopies(list[tuple[torch.Size, tuple[int, ...], int, torch.Tensor]]):
+    """The copies a loader made into its parameter, buffered instead of its
+    arguments: (size, stride, offset into the parameter, copied source)."""
+
+    def replay(self, param: torch.Tensor) -> None:
+        for size, stride, offset, source in self:
+            view = param.data.as_strided(size, stride, param.storage_offset() + offset)
+            view.copy_(source)
 
 
 @dataclass
@@ -25,7 +35,9 @@ class LayerReloadingInfo:
     defer_processing: bool = False
 
     # used by `online_process_loader` to buffer args and tensors until ready to load
-    loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
+    loaded_weights: list[tuple[str, BoundArguments | RecordedCopies]] = field(
+        default_factory=list
+    )
 
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None
