@@ -7,6 +7,7 @@ import functools
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -26,6 +27,26 @@ AUTO_COOPERATIVE_MAX_ROWS = 64
 
 # Matches the -1 fill convention used for topk_indices_buffer elsewhere.
 IDX_OOB_FILL_VALUE = -1
+
+
+def canonicalize_topk_indices(indices: torch.Tensor) -> None:
+    """Order sparse KV selections in place when batch invariance is enabled.
+
+    Args:
+        indices: Integer logical KV indices, with -1 marking invalid entries.
+
+    Valid indices are sorted ascending and invalid entries remain at the end.
+    This fixes reduction-order differences for identical selected sets; it does
+    not resolve selection ties at the top-k cutoff.
+
+    """
+    if not envs.VLLM_BATCH_INVARIANT:
+        return
+    sentinel = torch.iinfo(indices.dtype).max
+    ordered = indices.masked_fill(indices == IDX_OOB_FILL_VALUE, sentinel)
+    ordered = ordered.sort(dim=-1).values
+    indices.copy_(ordered.masked_fill(ordered == sentinel, IDX_OOB_FILL_VALUE))
+
 
 try:
     import vllm._deepselect_C  # noqa: F401  (registers torch.ops.deep_select)
