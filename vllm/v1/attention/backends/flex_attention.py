@@ -405,6 +405,9 @@ class FlexAttentionMetadata:
     # generated tokens. Both must be set to enable.
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    # Encoder-only segment layout (see CommonAttentionMetadata): per-token
+    # segment ids; 0 = shared prefix, k >= 1 = candidate k.
+    segment_ids: torch.Tensor | None = None
 
     @cached_property
     def logical_block_ids(self):
@@ -496,7 +499,24 @@ class FlexAttentionMetadata:
         ) -> torch.Tensor:
             return request_lookup[q_idx] == request_lookup[kv_idx]
 
-        return final_mask_mod
+        if self.segment_ids is None:
+            return final_mask_mod
+        segment_ids = self.segment_ids
+
+        def segment_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            # The prefix (segment 0) is visible to its request; a candidate
+            # sees the prefix and itself, never another candidate.
+            kv_segment = segment_ids[kv_idx]
+            return (request_lookup[q_idx] == request_lookup[kv_idx]) & (
+                (kv_segment == 0) | (segment_ids[q_idx] == kv_segment)
+            )
+
+        return segment_mask_mod
 
     def get_sliding_window_mask_mod(self) -> _mask_mod_signature:
         """Creates the sliding window mask_mod function for FlexAttention.
@@ -1123,6 +1143,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             rswa_window=self.rswa_window,
+            segment_ids=(
+                None if uses_paged_kv else common_attn_metadata.encoder_segment_ids
+            ),
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.

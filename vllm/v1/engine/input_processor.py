@@ -135,6 +135,28 @@ class InputProcessor:
         )
         params.watermarking = watermarking
 
+    def _validate_segment_layout(
+        self, segment_lengths: list[int], prompt_len: int
+    ) -> None:
+        """Segment layouts need the V2 model runner and FlexAttention, and must
+        cover the prompt."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if not self.vllm_config.use_v2_model_runner:
+            raise VLLMValidationError("Segment layouts need the V2 model runner")
+        if self.vllm_config.attention_config.backend != (
+            AttentionBackendEnum.FLEX_ATTENTION
+        ):
+            raise VLLMValidationError(
+                "Segment layouts need --attention-backend FLEX_ATTENTION"
+            )
+        if sum(segment_lengths) != prompt_len:
+            raise VLLMValidationError(
+                f"segment_lengths sum to {sum(segment_lengths)}, but the prompt "
+                f"has {prompt_len} tokens",
+                parameter="segment_layout_params",
+            )
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -512,6 +534,13 @@ class InputProcessor:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
             pooling_params = params.clone()
+            if (layout := pooling_params.segment_layout_params) is not None:
+                self._validate_segment_layout(
+                    layout.segment_lengths,
+                    length_from_prompt_token_ids_or_embeds(
+                        prompt_token_ids, prompt_embeds
+                    ),
+                )
 
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None

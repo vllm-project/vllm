@@ -459,6 +459,13 @@ class CommonAttentionMetadata:
     table. Rows of one request are adjacent, so equal neighbours are PCP
     chunks sharing one KV context."""
 
+    encoder_segment_ids: torch.Tensor | None = None
+    """(num_actual_tokens,) segment id of each token for encoder-only attention
+    with a segment layout: 0 for a shared prefix (and for every token of a
+    request without a layout), k >= 1 for candidate k. A query attends to keys
+    of its request with segment 0 or its own segment. None: no request in the
+    batch has a layout. Only FlexAttention reads it."""
+
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
     request index to list of (start, end) token position ranges

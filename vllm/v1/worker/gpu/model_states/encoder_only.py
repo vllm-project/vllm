@@ -24,6 +24,21 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
+def segment_layout_rows(
+    segment_lengths: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Segment id and position of every prompt token of a segment layout: the
+    prefix is segment 0 at positions 0..P-1; candidate k is segment k, and its
+    positions restart at P."""
+    prefix_len = segment_lengths[0]
+    segment_ids = [torch.zeros(prefix_len, dtype=torch.int64)]
+    positions = [torch.arange(prefix_len, dtype=torch.int64)]
+    for k, length in enumerate(segment_lengths[1:], start=1):
+        segment_ids.append(torch.full((length,), k, dtype=torch.int64))
+        positions.append(torch.arange(prefix_len, prefix_len + length))
+    return torch.cat(segment_ids), torch.cat(positions)
+
+
 class EncoderOnlyModelState(DefaultModelState):
     """ModelState for encoder-only (BERT/RoBERTa) models.
 
@@ -98,10 +113,19 @@ class EncoderOnlyModelState(DefaultModelState):
             self.max_num_tokens, dtype=torch.int64, device=device
         )
         self.token_type_ids: dict[str, torch.Tensor] = {}
+        # Segment layouts (one-pass multi-candidate scoring): per request, the
+        # segment id and the position of every prompt token.
+        self.segment_layouts: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         pooling_params = new_req_data.pooling_params
+        if pooling_params is not None and (
+            layout := pooling_params.segment_layout_params
+        ):
+            self.segment_layouts[new_req_data.req_id] = segment_layout_rows(
+                layout.segment_lengths
+            )
         if pooling_params is None or pooling_params.extra_kwargs is None:
             return
 
@@ -119,11 +143,49 @@ class EncoderOnlyModelState(DefaultModelState):
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
         self.token_type_ids.pop(req_id, None)
+        self.segment_layouts.pop(req_id, None)
+
+    def _segment_rows(
+        self, input_batch: InputBatch, column: int
+    ) -> torch.Tensor | None:
+        """Column 0 (segment ids) or 1 (positions) of this step's tokens for
+        requests with a segment layout, as a CPU tensor over the padded batch;
+        None when no scheduled request has a layout. Rows of other requests
+        are left at 0 (segment ids) or -1 (positions: keep the default)."""
+        if not self.segment_layouts:
+            return None
+        rows = None
+        offset = 0
+        for i, req_id in enumerate(input_batch.req_ids):
+            num_tokens = int(input_batch.num_scheduled_tokens[i])
+            layout = self.segment_layouts.get(req_id)
+            if layout is not None:
+                if rows is None:
+                    rows = torch.full(
+                        (input_batch.num_tokens_after_padding,),
+                        0 if column == 0 else -1,
+                        dtype=torch.int64,
+                        pin_memory=PIN_MEMORY,
+                    )
+                start = int(input_batch.num_computed_tokens_np[i])
+                rows[offset : offset + num_tokens].copy_(
+                    layout[column][start : start + num_tokens]
+                )
+            offset += num_tokens
+        return rows
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        layout_positions = self._segment_rows(input_batch, column=1)
+        if layout_positions is not None:
+            # Candidates restart their positions right after the prefix.
+            default = model_inputs.get("positions")
+            if default is None:
+                default = input_batch.positions[: input_batch.num_tokens_after_padding]
+            override = layout_positions.to(self.device, non_blocking=True)
+            model_inputs["positions"] = torch.where(override >= 0, override, default)
         if not self.token_type_ids:
             return model_inputs
 
@@ -205,6 +267,7 @@ class EncoderOnlyModelState(DefaultModelState):
         else:
             max_seq_len = int(input_batch.seq_lens_cpu_upper_bound[:num_reqs].max())
 
+        segment_ids = self._segment_rows(input_batch, column=0)
         # The encoder builder forces ``causal=False`` regardless of this value.
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=input_batch.query_start_loc,
@@ -218,6 +281,11 @@ class EncoderOnlyModelState(DefaultModelState):
             slot_mapping=self._dummy_slot_mapping[:num_tokens],
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound[:num_reqs],
             positions=input_batch.positions,
+            encoder_segment_ids=(
+                None
+                if segment_ids is None
+                else segment_ids[:num_tokens].to(self.device, non_blocking=True)
+            ),
         )
 
         attn_metadata: dict[str, Any] = {}

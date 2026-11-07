@@ -8,7 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.outputs import LateChunkingMetadata
-from vllm.pooling_params import LateChunkingParams, PoolingParams
+from vllm.pooling_params import (
+    LateChunkingParams,
+    PoolingParams,
+    SegmentLayoutParams,
+)
 from vllm.utils import random_uuid
 
 from ..base.protocol import (
@@ -26,6 +30,14 @@ class LateChunkingConfig(BaseModel):
     chunk_size: int = Field(gt=0, le=2**63 - 1, strict=True)
 
 
+class SegmentLayoutConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_lengths: list[int] = Field(min_length=2)
+    """Token count of the shared prefix, then of each candidate; they must
+    sum to the prompt's token count."""
+
+
 class TokenEmbeddingRequest(
     PoolingBasicRequestMixin,
     CompletionRequestMixin,
@@ -35,6 +47,7 @@ class TokenEmbeddingRequest(
     """Token embeddings with optional full-document late chunking."""
 
     late_chunking_params: LateChunkingConfig | None = None
+    segment_layout_params: SegmentLayoutConfig | None = None
     encoding_format: Literal["float"] = "float"
     dimensions: None = None
 
@@ -50,6 +63,13 @@ class TokenEmbeddingRequest(
             late_chunking_params=(
                 LateChunkingParams(chunk_size=self.late_chunking_params.chunk_size)
                 if self.late_chunking_params is not None
+                else None
+            ),
+            segment_layout_params=(
+                SegmentLayoutParams(
+                    segment_lengths=list(self.segment_layout_params.segment_lengths)
+                )
+                if self.segment_layout_params is not None
                 else None
             ),
         )
