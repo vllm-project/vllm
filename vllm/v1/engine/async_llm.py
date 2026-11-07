@@ -1279,6 +1279,19 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
+    async def collective_rpc_per_engine(
+        self,
+        method: str,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+    ) -> list[list]:
+        """Perform a collective RPC call on every engine and return each
+        engine's worker results, in engine order."""
+        return await self.engine_core.collective_rpc_per_engine_async(
+            method, timeout, args, kwargs
+        )
+
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()

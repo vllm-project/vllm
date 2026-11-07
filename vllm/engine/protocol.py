@@ -299,6 +299,19 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
+    async def collective_rpc_per_engine(
+        self,
+        method: str,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+    ) -> list[list]:
+        """Perform a collective RPC call on every engine and return each
+        engine's worker results, in engine order. With data parallelism,
+        ``collective_rpc`` also reaches every engine but returns only the first
+        engine's results."""
+        raise NotImplementedError
+
     async def compute_weight_checksums(self) -> list[dict[str, str]]:
         """Return rank-qualified weight digests from every worker of every engine."""
         raise NotImplementedError

@@ -244,6 +244,20 @@ def test_dplb_weight_checksums_gather_every_engine():
     ]
 
 
+def test_dplb_collective_rpc_per_engine_returns_every_engine():
+    client = _make_dplb_client(num_engines=2)
+
+    async def call_utility(method, *args, engine):
+        assert (method, args) == ("collective_rpc", ("ping", None, (1,), None))
+        return [f"dp{engine[0]}:tp{tp}" for tp in (0, 1)]
+
+    client._call_utility_async = call_utility
+    per_engine = asyncio.run(client.collective_rpc_per_engine_async("ping", args=(1,)))
+    assert per_engine == [["dp0:tp0", "dp0:tp1"], ["dp1:tp0", "dp1:tp1"]]
+    # The first engine's results alone are what collective_rpc_async returns.
+    assert asyncio.run(client.collective_rpc_async("ping", args=(1,))) == per_engine[0]
+
+
 def test_dplb_late_interaction_sticky_routing():
     client = _make_dplb_client()
 

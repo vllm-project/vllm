@@ -376,6 +376,15 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def collective_rpc_per_engine_async(
+        self,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[list[_R]]:
+        raise NotImplementedError
+
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
@@ -1473,6 +1482,17 @@ class AsyncMPClient(MPClient):
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return await self.call_utility_async(
+            "collective_rpc", method, timeout, args, kwargs
+        )
+
+    async def collective_rpc_per_engine_async(
+        self,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[list[_R]]:
+        return await self.call_utility_all_async(
             "collective_rpc", method, timeout, args, kwargs
         )
 
