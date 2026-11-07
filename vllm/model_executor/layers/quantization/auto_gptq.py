@@ -731,6 +731,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             backend=self.wna16_moe_backend,
             routing_tables=layer._expert_routing_tables(),
         )
+        if layer.expert_placement is not None:
+            layer.expert_placement.finalize(layer, self.moe_kernel)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:

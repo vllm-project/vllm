@@ -12,6 +12,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.xpu_expert_placement import (
+    ExpertPlacement,
+    remap_unrouted,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -50,6 +54,8 @@ def prepare_fp8_moe_layer_for_xpu(
 
 
 class XPUExperts(mk.FusedMoEExpertsModular):
+    placement: ExpertPlacement | None = None  # set by ExpertPlacement.finalize
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -151,6 +157,11 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if self.placement is not None:
+            self._apply_placed(
+                output, hidden_states, w1, w2, topk_weights, topk_ids, activation
+            )
+            return
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
             if (
@@ -187,6 +198,47 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             a1q_scale=a1q_scale,
         )
+
+    def _apply_placed(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+    ) -> None:
+        """Experts in VRAM plus experts in pinned host memory, summed."""
+        placement = self.placement
+        assert placement is not None
+        hot, cold = placement.impls(
+            w1,
+            self.w1_scale,
+            w2,
+            self.w2_scale,
+            topk_ids.size(-1),
+            activation.value,
+            self.gemm1_clamp_limit,
+        )
+        if self.moe_config.ep_size > 1:
+            topk_ids = remap_unrouted(
+                topk_ids, placement.num_global, self.moe_config.ep_rank
+            )
+        hot.apply(
+            output=output,
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+        cold_out = torch.empty_like(output)
+        cold.apply(
+            output=cold_out,
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+        output.add_(cold_out)
 
 
 class XPUExpertsFp8(XPUExperts):
