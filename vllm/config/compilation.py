@@ -1218,6 +1218,15 @@ class CompilationConfig:
                 "non-negative (None = auto-infer)"
             )
 
+        if (
+            self.encoder_cudagraph_max_token_budget is not None
+            and self.encoder_cudagraph_max_token_budget <= 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_token_budget must be positive "
+                f"(None = no limit), got {self.encoder_cudagraph_max_token_budget}"
+            )
+
         if self.encoder_cudagraph_token_budgets and any(
             b <= 0 for b in self.encoder_cudagraph_token_budgets
         ):
