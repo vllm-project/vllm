@@ -1015,8 +1015,8 @@ def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(90),
-    reason="FA3 drops covered sliding windows only on Hopper",
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="FA3 drops covered sliding windows only on CUDA Hopper",
 )
 @pytest.mark.timeout(600)
 def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
