@@ -114,8 +114,12 @@ def test_strategy_selection():
         "Gemma4UnifiedForConditionalGeneration",
     ):
         assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
-    with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
-        select_read_strategy(model("LlamaForCausalLM"), generate)
+    llama = "LlamaForCausalLM"
+    assert select_read_strategy(model(llama), generate) is NextTokenStrategy
+    assert (
+        select_read_strategy(model(llama, "processed_logprobs"), generate)
+        is NextTokenStrategy
+    )
     with pytest.raises(ValueError, match="not raw_logits"):
         select_read_strategy(model(qwen, "raw_logits"), generate)
     # A generative architecture served as a pooling model has no read strategy.
