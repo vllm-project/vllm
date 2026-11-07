@@ -187,7 +187,7 @@ When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 ### Cache Management APIs
 
-- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
+- `/reset_prefix_cache` - Reset prefix cache (can disrupt service). Fails while requests are running, unless `reset_running_requests=true` (preempts them) or `keep_running_requests=true` (keeps them running; not for use after weight updates) is set
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
 - `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
 

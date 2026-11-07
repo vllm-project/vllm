@@ -211,7 +211,10 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         raise NotImplementedError
 
@@ -319,7 +322,10 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_prefix_cache_async(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         raise NotImplementedError
 
@@ -459,10 +465,13 @@ class InprocClient(EngineCoreClient):
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         return self.engine_core.reset_prefix_cache(
-            reset_running_requests, reset_connector
+            reset_running_requests, reset_connector, keep_running_requests
         )
 
     def reset_encoder_cache(self) -> None:
@@ -1113,10 +1122,16 @@ class SyncMPClient(MPClient):
         self.call_utility("reset_mm_cache")
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         return self.call_utility(
-            "reset_prefix_cache", reset_running_requests, reset_connector
+            "reset_prefix_cache",
+            reset_running_requests,
+            reset_connector,
+            keep_running_requests,
         )
 
     def reset_encoder_cache(self) -> None:
@@ -1406,11 +1421,17 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("reset_mm_cache")
 
     async def reset_prefix_cache_async(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         return all(
             await self.call_utility_all_async(
-                "reset_prefix_cache", reset_running_requests, reset_connector
+                "reset_prefix_cache",
+                reset_running_requests,
+                reset_connector,
+                keep_running_requests,
             )
         )
 

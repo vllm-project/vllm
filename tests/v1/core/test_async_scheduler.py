@@ -671,6 +671,53 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
         assert getattr(req, "num_stale_output_tokens", 0) == 0
 
 
+def test_reset_prefix_cache_keep_running_requests():
+    """keep_running_requests drops cached prefixes while a step is in flight,
+    without preempting. Blocks a running request fills afterwards are cached
+    again."""
+    block_size = 16
+    max_tokens = block_size + 1
+    scheduler = create_scheduler(
+        async_scheduling=True, enable_prefix_caching=True, block_size=block_size
+    )
+    block_pool = scheduler.kv_cache_manager.block_pool
+    req0, req1 = create_requests(
+        num_requests=2,
+        num_tokens=2 * block_size,
+        max_tokens=max_tokens,
+        same_prompt=True,
+        block_size=block_size,
+    )
+
+    scheduler.add_request(req0)
+    sched_outputs = deque([scheduler.schedule()])
+    assert block_pool.get_cached_block(req0.block_hashes[0], [0]) is not None
+
+    assert scheduler.reset_prefix_cache(keep_running_requests=True)
+    assert list(scheduler.running) == [req0]
+    assert req0.num_computed_tokens == 2 * block_size
+    assert block_pool.get_cached_block(req0.block_hashes[0], [0]) is None
+
+    scheduler.add_request(req1)
+    sched_outputs.append(scheduler.schedule())
+    assert sched_outputs[-1].num_scheduled_tokens[req1.request_id] == 2 * block_size
+
+    while sched_outputs:
+        sched_output = sched_outputs.popleft()
+        model_runner_output = _make_model_runner_output(sched_output)
+        scheduler.update_from_output(sched_output, model_runner_output)
+
+        sched_output = scheduler.schedule()
+        if sched_output.num_scheduled_tokens:
+            sched_outputs.append(sched_output)
+
+    assert scheduler.get_num_unfinished_requests() == 0
+    assert req0.num_output_tokens == max_tokens
+    assert req1.num_output_tokens == max_tokens
+    assert block_pool.get_cached_block(req0.block_hashes[2], [0]) is not None
+    assert block_pool.get_num_free_blocks() == block_pool.num_gpu_blocks - 1
+
+
 def test_requires_kv_delivery_defaults_to_producer_role():
     # No connector: nothing is handed off, so keep the lossless deliver-stale
     # path on preemption.
