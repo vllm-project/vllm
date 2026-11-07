@@ -2055,6 +2055,55 @@ def test_engram_thp_rejects_explicit_shared_memory():
         EngramConfig(use_thp=True, dp_shared_memory=True)
 
 
+def _parked_elastic_ep_config(kv_cache_memory_bytes=1 << 30, **overrides):
+    parallel = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_rank=1,
+        data_parallel_external_lb=True,
+        all2all_backend="nixl_ep",
+        distributed_executor_backend="mp",
+    )
+    parallel.enable_elastic_ep = True
+    for name, value in overrides.items():
+        setattr(parallel, name, value)
+    return VllmConfig(
+        parallel_config=parallel,
+        cache_config=CacheConfig(kv_cache_memory_bytes=kv_cache_memory_bytes),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+
+@pytest.fixture
+def parked_elastic_ep(monkeypatch):
+    monkeypatch.setenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "1")
+    monkeypatch.setenv("VLLM_ELASTIC_EP_JOIN_FILE", "/tmp/join.json")
+
+
+def test_parked_elastic_ep_accepts_supported_config(parked_elastic_ep):
+    _parked_elastic_ep_config()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"data_parallel_rank": 0}, "DP rank 0 cannot be parked"),
+        ({"all2all_backend": "allgather_reducescatter"}, "all2all-backend nixl_ep"),
+        ({"tensor_parallel_size": 2}, "tensor_parallel_size=1"),
+        ({"enable_fault_tolerance": True}, "fault tolerance"),
+        ({"kv_cache_memory_bytes": None}, "kv-cache-memory-bytes"),
+    ],
+)
+def test_parked_elastic_ep_rejects_unsupported(parked_elastic_ep, overrides, reason):
+    """A rank that cannot be parked fails at startup, before loading a model."""
+    with pytest.raises(ValueError, match=reason):
+        _parked_elastic_ep_config(**overrides)
+
+
+def test_parked_elastic_ep_checks_only_parked_ranks():
+    """Without VLLM_ELASTIC_EP_JOIN_FILE, rank 0 builds as before."""
+    _parked_elastic_ep_config(data_parallel_rank=0, kv_cache_memory_bytes=None)
+
+
 @pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [

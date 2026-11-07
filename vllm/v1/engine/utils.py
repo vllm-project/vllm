@@ -1400,6 +1400,27 @@ def launch_core_engines(
         )
 
 
+def _adopt_parked_engine_rank(
+    core_engines: list[CoreEngine], eng_index: int, parallel_config: ParallelConfig
+) -> CoreEngine | None:
+    """A parked elastic EP engine may join as another DP rank than its
+    front-end was started with. The front-end then takes the engine's rank."""
+    if not envs.VLLM_ELASTIC_EP_JOIN_FILE or len(core_engines) != 1:
+        return None
+    engine = core_engines[0]
+    if not engine.local or engine.state != CoreEngineState.NEW:
+        return None
+    logger.info(
+        "[Elastic EP] Front-end for DP rank %d serves DP rank %d",
+        parallel_config.data_parallel_rank,
+        eng_index,
+    )
+    engine.identity = eng_index.to_bytes(2, "little")
+    parallel_config.data_parallel_rank = eng_index
+    parallel_config.data_parallel_index = eng_index
+    return engine
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
     core_engines: list[CoreEngine],
@@ -1490,6 +1511,8 @@ def wait_for_engine_startup(
         eng_index = int.from_bytes(eng_identity, "little")
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
+            engine = _adopt_parked_engine_rank(core_engines, eng_index, parallel_config)
+        if engine is None:
             raise RuntimeError(
                 f"Message from engine with unexpected data parallel rank: {eng_index}"
             )
@@ -1565,6 +1588,12 @@ def wait_for_engine_startup(
             elastic_ep_max_dp_size = msg.get("elastic_ep_max_dp_size")
             if elastic_ep_max_dp_size is not None and local:
                 parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
+            data_parallel_size = msg.get("data_parallel_size")
+            if data_parallel_size is not None and local:
+                parallel_config.data_parallel_size = data_parallel_size
+            data_parallel_master_ip = msg.get("data_parallel_master_ip")
+            if data_parallel_master_ip is not None and local:
+                parallel_config.data_parallel_master_ip = data_parallel_master_ip
 
             # Validate config hash consistency across DP workers for MoE models.
             # Compare possibly-updated engine config hashes with each other.

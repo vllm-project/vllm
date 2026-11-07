@@ -210,7 +210,7 @@ class EplbModelState:
     """
     Device index for the async EPLB worker thread.
     """
-    communicator: EplbCommunicator
+    communicator: EplbCommunicator | None
     """
     The communicator for expert weight transfers.
     """
@@ -517,18 +517,23 @@ class EplbState:
         assert backend is not None, (
             "EPLB communicator backend must be set by ParallelConfig"
         )
+        from vllm.distributed.stateless_coordinator import DetachedGroupCoordinator
+
         expert_buffer = (
             None
             if backend == "symm_mem"
             else [torch.empty_like(w) for w in model.expert_weights[0]]
         )
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
-            backend=backend,
-            expert_weights=model.expert_weights,
-            expert_buffer=expert_buffer,
-        )
-        expert_buffer = communicator.owned_expert_buffer or expert_buffer
+        # A parked rank creates its communicator, a collective, when it joins.
+        communicator = None
+        if not isinstance(get_eplb_group(), DetachedGroupCoordinator):
+            communicator = create_eplb_communicator(
+                group_coordinator=get_eplb_group(),
+                backend=backend,
+                expert_weights=model.expert_weights,
+                expert_buffer=expert_buffer,
+            )
+            expert_buffer = communicator.owned_expert_buffer or expert_buffer
         assert expert_buffer is not None
 
         model_state = EplbModelState(
@@ -986,6 +991,7 @@ class EplbState:
                         )
 
                 if not skip_rearrange:
+                    assert eplb_model_state.communicator is not None
                     # Update expert weights
                     rearrange_expert_weights_inplace(
                         eplb_model_state.physical_to_logical_map,
