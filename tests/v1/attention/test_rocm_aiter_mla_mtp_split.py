@@ -1668,6 +1668,7 @@ def _adaptive_config(
             num_speculative_tokens=num_speculative_tokens,
             enable_adaptive_verification=adaptive,
             parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,

@@ -253,10 +253,6 @@ class Worker(WorkerBase):
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
-        # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
-        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -307,47 +303,29 @@ class Worker(WorkerBase):
             )
         return parameters
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        patterns = self.model_config.sleep_preserve_parameter_names
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = self._get_sleep_parameters(model)
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
+    def _discardable_parameters(self, model: nn.Module) -> set[int]:
+        """Storage of the parameters the weight update rewrites."""
+        storage = {
+            name: parameter.untyped_storage().data_ptr()
+            for name, parameter in self._get_sleep_parameters(model).items()
+        }
+        preserved: set[int] = set()
+        for pattern in self.model_config.sleep_preserve_parameter_names:
+            matches = fnmatch_filter(storage, pattern)
             if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu")
-            for name, param in parameters.items()
-            if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        parameters = self._get_sleep_parameters(model)
-        for name, value in self._sleep_saved_parameters.items():
-            parameters[name].copy_(value)
-        self._sleep_saved_parameters.clear()
+            preserved.update(storage[name] for name in matches)
+        return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
-
-        # Save the buffers before level 2 sleep
-        if level == 2:
-            model = self.model_runner.model
-            self._save_sleep_parameters(model)
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
-            draft = self.get_draft_model()
-            if draft is not None:
-                self._sleep_saved_draft_buffers = {
-                    name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
-                }
+        # Level 2 keeps everything the weight update doesn't rewrite.
+        discardable = (
+            self._discardable_parameters(self.model_runner.model)
+            if level == 2
+            else set()
+        )
 
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()
@@ -356,7 +334,7 @@ class Worker(WorkerBase):
         extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
         if extensible_kv_cache is not None:
             extensible_kv_cache.release_physical()
-        self.sleep_mode_backend.suspend(level)
+        self.sleep_mode_backend.suspend(discardable)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
@@ -388,25 +366,6 @@ class Worker(WorkerBase):
             get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
-
-        # Restore the buffers after level 2 sleep
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
-
-        if wake_weights and len(self._sleep_saved_draft_buffers):
-            draft = self.get_draft_model()
-            if draft is not None:
-                for name, buffer in draft.named_buffers():
-                    if name in self._sleep_saved_draft_buffers:
-                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
-            self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
 
@@ -792,19 +751,17 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
+        # The estimate is a throwaway capture pass; skip it when the flag
+        # says its result is not applied.
         cudagraph_memory_estimate = 0
-        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+        may_capture_graphs = (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ) and (
             self.use_v2_model_runner
             or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
-
-        # Respect the opt-in flag as originally designed.
-        cudagraph_memory_estimate_applied = (
-            cudagraph_memory_estimate
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            else 0
         )
+        if may_capture_graphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         init_free_memory = self.init_snapshot.free_memory
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -829,14 +786,14 @@ class Worker(WorkerBase):
 
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
+            profile_result.transient_peak_headroom + cudagraph_memory_estimate
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            - cudagraph_memory_estimate
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -861,40 +818,38 @@ class Worker(WorkerBase):
             total_mem = self.init_snapshot.total_memory
             current_util = self.cache_config.resolved_gpu_memory_utilization
             cg_util_delta = cudagraph_memory_estimate / total_mem
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
-                equiv_util = round(current_util - cg_util_delta, 4)
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.info(
-                    "CUDA graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
-                    "equivalent to --gpu-memory-utilization=%.4f without "
-                    "CUDA graph memory profiling. To maintain the same "
-                    "effective KV cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f. To disable, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
-                    current_util,
-                    equiv_util,
-                    suggested_util,
-                )
-            else:
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.warning(
-                    "CUDA graph memory profiling is disabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
-                    "Without it, CUDA graph memory is not accounted for "
-                    "during KV cache allocation, which may require lowering "
-                    "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
-                    "--gpu-memory-utilization from %.4f to %.4f.",
-                    current_util,
-                    suggested_util,
-                )
+            equiv_util = round(current_util - cg_util_delta, 4)
+            suggested_util = min(
+                round(current_util + cg_util_delta, 4),
+                1.0,
+            )
+            logger.info(
+                "CUDA graph memory profiling is enabled (default since "
+                "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                "equivalent to --gpu-memory-utilization=%.4f without "
+                "CUDA graph memory profiling. To maintain the same "
+                "effective KV cache size as before, increase "
+                "--gpu-memory-utilization to %.4f. To disable, set "
+                "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
+                current_util,
+                equiv_util,
+                suggested_util,
+            )
+        elif (
+            may_capture_graphs
+            and not envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            and not self.cache_config.enable_extensible_kv_cache
+        ):
+            # The extensible KV cache measures the capture footprint after
+            # warmup, so the disabled estimate loses nothing there.
+            logger.warning(
+                "CUDA graph memory profiling is disabled "
+                "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                "Without it, CUDA graph memory is not accounted for "
+                "during KV cache allocation, which may require lowering "
+                "--gpu-memory-utilization to avoid OOM. Consider "
+                "re-enabling it (the default as of v0.21.0)."
+            )
 
         return reserve_mm_ipc_gpu_memory(
             int(self.available_kv_cache_memory_bytes),

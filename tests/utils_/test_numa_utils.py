@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from vllm.config import ParallelConfig
+from vllm.config.utils import hash_config
 from vllm.utils import numa_utils
 
 
@@ -684,7 +685,7 @@ def test_parallel_config_auto_policy_survives_copy_without_changing_hash():
     from vllm.config.utils import replace
 
     parallel_config = ParallelConfig()
-    original_hash = parallel_config.compute_hash()
+    original_hash = hash_config(parallel_config)
     parallel_config.numa_bind = True
     parallel_config.numa_bind_nodes = [0]
     parallel_config._numa_bind_auto = True
@@ -693,7 +694,7 @@ def test_parallel_config_auto_policy_survives_copy_without_changing_hash():
         deepcopy(parallel_config),
     ):
         assert copied._numa_bind_auto is True
-        assert copied.compute_hash() == original_hash
+        assert hash_config(copied) == original_hash
 
 
 @pytest.mark.parametrize("dp_local_rank", [0, 1])

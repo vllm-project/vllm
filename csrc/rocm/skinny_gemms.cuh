@@ -1,26 +1,28 @@
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
+// Kernels and shared helpers of the "skinny" (wave-split-K) GEMMs. The host
+// launchers live in one translation unit per kernel family, see
+// skinny_gemms_{llmm1,wvsplitk,wvsplitkrc,wvsplitkq}.cu.
+
+#pragma once
+
+// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit,
+// which is several seconds of frontend for every skinny GEMM translation unit.
+#include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
+#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
+#include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-#include <stdexcept>
 #include <algorithm>
-#include <map>
-#include <mutex>
+#include <string>
 #include <utility>
 
 #include "core/cuda_compat.h"
-#include "dispatch_utils.h"
-#include "quantization/w8a8/fp8/common.cuh"
 #include "core/utils.hpp"
-
-// Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
-static constexpr int64_t kWvSlots = 8;
-// Slots held back for capturing streams, which cannot allocate one themselves.
-static constexpr int64_t kWvCaptureSlots = 8;
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
@@ -43,13 +45,30 @@ static constexpr int64_t kWvCaptureSlots = 8;
   #define __HIP__MI3XX__
 #endif
 
+// Defined unconditionally: a TU that already has a different LDS_SIZE (e.g.
+// skinny_gemms_int4.cuh, which uses 64 KiB and no gfx950 case) must not
+// silently size these kernels' LDS window from it.
+#ifdef LDS_SIZE
+  #error "LDS_SIZE already defined"
+#endif
 #if defined(__gfx950__)
   #define LDS_SIZE 160 * 1024
 #else
   #define LDS_SIZE 64 * 1024
 #endif
 
-int get_lds_size() {
+// Traps unconditionally, so it does not depend on NDEBUG or on <assert.h> being
+// included with a particular state (this used to #undef/#define NDEBUG around
+// the include, which is order-dependent now that the file is a header). Note
+// this trades the device-assert message (file/line) for a bare trap: these
+// stubs are never launched, they only exist so the arch-specific #if in the
+// launchers has something to call.
+#define UNREACHABLE_CODE __builtin_trap()
+
+// The helpers below keep function-local statics (device properties); because
+// they are inline, the C++ rules make that one object for the whole program
+// instead of one per translation unit, which is what the callers want.
+inline int get_lds_size() {
   static const int result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -59,7 +78,7 @@ int get_lds_size() {
   return result;
 }
 
-bool on_gfx1x() {
+inline bool on_gfx1x() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -69,7 +88,7 @@ bool on_gfx1x() {
   return result;
 }
 
-bool on_gfx12() {
+inline bool on_gfx12() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -78,7 +97,7 @@ bool on_gfx12() {
   return result;
 }
 
-bool on_gfx1151() {
+inline bool on_gfx1151() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -88,7 +107,7 @@ bool on_gfx1151() {
 }
 
 // gfx1150, gfx1152 and gfx1153: 1024 VGPRs a lane and a 128-bit memory bus.
-bool on_gfx1150_class() {
+inline bool on_gfx1150_class() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     const std::string device_arch = dprops->gcnArchName;
@@ -98,16 +117,6 @@ bool on_gfx1150_class() {
   }();
   return result;
 }
-
-#if defined(NDEBUG)
-  #undef NDEBUG
-  #include <assert.h>
-  #define UNREACHABLE_CODE assert(false);
-  #define NDEBUG
-#else
-  #define UNREACHABLE_CODE assert(false);
-#endif
-
 template <typename T>
 struct scalar {};
 
@@ -280,60 +289,6 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
       c[blockIdx.x * NUM_A_ROWS_PER_BLOCK / 2 + qwarpid / 2] = oval;
     }
   }
-}
-
-torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
-                    const int64_t rows_per_block) {
-  auto M = in_a.size(0);
-  auto K = in_a.size(1);
-  auto N = in_b.size(0);
-
-  TORCH_CHECK(N == 1, "Row number of activation tensor must be 1.");
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(in_b.dtype() == torch::kFloat16 ||
-              in_b.dtype() == torch::kBFloat16);
-
-  auto out_c = torch::empty(
-      {N, M}, torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
-
-  // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
-  // operations.
-  const int NUM_THREADS =
-      max(rows_per_block * 16,
-          K * 2 / 16 % WARP_SIZE == 0
-              ? K * 2 / 16
-              : K * 2 / 16 + (WARP_SIZE - K * 2 / 16 % WARP_SIZE));
-
-  int NUM_BLOCKS = M / rows_per_block;
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_b));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  // call the kernel function...
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "LLGemm1", [&] {
-    auto a_ptr = in_a.data_ptr<scalar_t>();
-    auto b_ptr = in_b.data_ptr<scalar_t>();
-    auto c_ptr = out_c.data_ptr<scalar_t>();
-    if (rows_per_block == 2) {
-      LLGemm1_kernel<scalar_t, 2>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else if (rows_per_block == 4) {
-      LLGemm1_kernel<scalar_t, 4>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else if (rows_per_block == 8) {
-      LLGemm1_kernel<scalar_t, 8>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else if (rows_per_block == 16) {
-      LLGemm1_kernel<scalar_t, 16>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    } else {
-      NUM_BLOCKS = M / 4;
-      LLGemm1_kernel<scalar_t, 4>
-          <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);
-    }
-  });
-
-  return out_c;
 }
 
 #if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
@@ -595,7 +550,7 @@ __global__ void wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap,
                                  const scalar_t* __restrict__ A,
                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif
 
@@ -829,7 +784,7 @@ __global__ void wvSplitK_hf_(const int K, const int Kbp, const int Kap,
                              const scalar_t* B, const scalar_t* __restrict__ A,
                              const scalar_t* __restrict__ BIAS, scalar_t* C,
                              const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif
 
@@ -1180,12 +1135,12 @@ __global__ void wvSplitK_hf_big_(const int K, const int Kbp, const int Kap,
                                  const scalar_t* __restrict__ A,
                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif
 
 // Find the min val of div2 that doesn't increase N/(div1*div2)
-int mindiv(int N, int div1, int div2) {
+inline int mindiv(int N, int div1, int div2) {
   int nPrRnd = div1 * div2;
   int rnds[13];
   for (int i = 0; i < 13; i++) {
@@ -1195,158 +1150,6 @@ int mindiv(int N, int div1, int div2) {
   for (int i = 12; i >= 0; i--)
     if (rnds[0] == rnds[i]) return (div2 - i);
   return 0;
-}
-
-torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
-                       const std::optional<at::Tensor>& in_bias,
-                       const int64_t CuCount) {
-  auto M_in = in_a.size(0);
-  auto K_in = in_a.size(1);
-  auto N_in = in_b.size(0);
-  auto Kap_in = in_a.stride(0);
-  auto Kbp_in = in_b.stride(0);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
-                   : 1;
-
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
-  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
-              in_a.dtype() == torch::kBFloat16);
-
-  auto out_c = torch::empty(
-      {N_in, M_in},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
-
-  dim3 grid(CuCount);
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  const int max_lds_len = get_lds_size() / 2;
-
-// WVSPLITK_CFG_AC arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N, A_CHUNK).
-//   THRDS   = wavefront width (32 on GFX11/GFX12, 64 on GFX9)
-//   WVPRGRP = waves per group
-//   YTILE   = output rows per thread tile
-//   UNRL    = K-loop unroll factor
-//   N       = batch size (passed through from the switch in wvSplitK)
-//   A_CHUNK = elements per thread per load; above 8 it needs K % A_CHUNK == 0
-#define WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, _AC)             \
-  {                                                                           \
-    dim3 block(_THRDS, _WVPRGRP);                                             \
-    int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);                 \
-    if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
-      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
-          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
-                                       By_in, af4, bf4, biasf4, c, __wvPrGrp, \
-                                       CuCount);                              \
-    else if (Kbp_in * N_in <= max_lds_len * 1.2)                              \
-      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>          \
-          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
-                                       By_in, af4, bf4, biasf4, c, __wvPrGrp, \
-                                       CuCount);                              \
-    else                                                                      \
-      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
-          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
-                                       By_in, af4, bf4, biasf4, c, __wvPrGrp, \
-                                       CuCount);                              \
-  }
-
-#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
-  WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
-
-#define WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N) \
-  {                                                       \
-    bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
-    if (_sYT <= 1)                                        \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
-    else if (_sYT <= 4 * 3)                               \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)           \
-    else if (__N == 4)                                    \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)           \
-    else                                                  \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
-  }
-
-// gfx1151 and the gfx1150 class take the tile that a sweep of every
-// non-spilling (YTILE, UNRL, A_CHUNK, WVPRGRP) found within ~1% of the best
-// one for nearly every (M, K, N) on that arch: 99.3-99.5% of the per-shape
-// best on average (benchmarks/kernels/sweep_bf16_kernel.py). The other archs
-// keep the generic rows.
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)      \
-  {                                                        \
-    if constexpr (_THRDS == 32) {                          \
-      if (on_gfx1151()) {                                  \
-        if (K_in < 1024 || K_in % 16 != 0)                 \
-          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)        \
-        else                                               \
-          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 4, __N, 16) \
-      } else if (on_gfx1150_class()) {                     \
-        if (K_in % 16 != 0)                                \
-          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)        \
-        else if (_sYT <= 8)                                \
-          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 2, __N, 16) \
-        else                                               \
-          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 2, 1, __N, 16) \
-      } else                                               \
-        WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)  \
-    } else                                                 \
-      WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)    \
-  }
-
-#define WVSPLIT_TILE(_sYT, __N)                                 \
-  {                                                             \
-    if (on_gfx1x()) { /* gfx11/GFX12, wave32 */                 \
-      WVSPLIT_TILE_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, _sYT, __N) \
-    } else { /* GFX9, wave64 */                                 \
-      WVSPLIT_TILE_CFG(/*THRDS=*/64, /*WVPRGRP=*/16, _sYT, __N) \
-    }                                                           \
-  }
-
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
-    using fptype = typename scalar<scalar_t>::type;
-    fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
-    const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
-    const fptype* biasf4 =
-        (in_bias.has_value() && in_bias->numel() > 0)
-            ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
-            : nullptr;
-    fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
-
-    // first shoot for biggest tile-size that keeps all simd busy,
-    // then cut the active waves to balance their distribution...
-    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);
-
-    switch (N_in) {
-      case 1:
-        WVSPLIT_TILE(sYT, 1)
-        break;
-      case 2:
-        WVSPLIT_TILE(sYT, 2)
-        break;
-      case 3:
-        WVSPLIT_TILE(sYT, 3)
-        break;
-      case 4:
-        WVSPLIT_TILE(sYT, 4)
-        break;
-      case 5:
-        WVSPLIT_TILE(sYT, 5)
-        break;
-      default:
-        throw std::runtime_error(
-            "Unsupported N value: " + std::to_string(M_in) + "," +
-            std::to_string(K_in) + "," + std::to_string(N_in));
-    }
-  });
-  return out_c;
 }
 
 // This version targets cases skinny where CUs are not filled
@@ -1833,250 +1636,10 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const int M, const int Bx, const int By,
                             const scalar_t* B, const scalar_t* __restrict__ A,
                             const scalar_t* __restrict__ BIAS, float* glbl,
-                            int* cntr, scalar_t* C,
-                            const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
-
-torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
-                         const std::optional<at::Tensor>& in_bias,
-                         const int64_t CuCount) {
-  static constexpr bool _DTRMNSTC = true;
-
-  auto M_in = in_b.size(0);
-  auto N_in = in_a.size(0);
-  auto K_in = in_b.size(1);
-  auto Kap_in = in_a.stride(0);
-
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
-                   : 1;
-
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
-  TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
-              in_a.dtype() == torch::kBFloat16);
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-
-  auto out_c = torch::empty(
-      {N_in, M_in},
-      torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
-
-  auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));
-
-  dim3 grid(CuCount);
-
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  // const int max_lds_len = get_lds_size() / 2;
-
-  // With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-  // and each working on a 512-shard of K, how many CUs would we need?
-  int rndup_cus = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
-
-  // How many of 4 waves in a group can work on same 16 Ms at same time? First
-  // try to maximize this. This reduces the Ms each group works on, i.e.
-  // increasing the number of CUs needed.
-  int GrpsShrB = min(N_p2 / 16, 4);
-
-  // Given the above, how many CUs would we need?
-  int CuNeeded = rndup_cus * GrpsShrB;
-
-  if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
-
-  // Can we increase SplitK by shrinking the K-shard to 256? That doubles both
-  // the CUs needed and the k-shards to read back, and the readback is serial in
-  // the shard count, so it pays only up to a crossover. The crossover is not a
-  // constant -- it falls as M grows -- so one cap cannot sit on it for every
-  // shape; this value minimizes total time over the admitted shapes. Retune it
-  // if the readback cost changes, and note the directions are not symmetric:
-  // capping too high costs about twice what capping too low does.
-  // Mirrored by rocm_unquantized_gemm_impl() in
-  // vllm/model_executor/layers/utils.py; both must pick the same chunkk or the
-  // host-side fit check bounds the wrong k_rnd.
-  constexpr int64_t CHUNKK2_MAX_SHARDS = 11;
-  const int64_t shards_chunkk2 = (K_in + 256 - 1) / 256;  // 256 == 512 / 2
-  const int chunkk = (N_p2 != 16 && CuNeeded * 2 <= CuCount &&
-                      shards_chunkk2 <= CHUNKK2_MAX_SHARDS)
-                         ? 2
-                         : 1;
-
-  // One fp32 partial per (M, N, k-shard) must fit the split-K workspace.
-  const int64_t k_rnd = (K_in + 512 / chunkk - 1) / (512 / chunkk);
-  constexpr int64_t glbl_cap = 128 * 1024 * (_DTRMNSTC ? 12 : 1);
-  const int64_t glbl_needed =
-      _DTRMNSTC ? (int64_t)N_p2 * M_in * k_rnd : (int64_t)N_p2 * M_in;
-  TORCH_CHECK(glbl_needed <= glbl_cap,
-              "wvSplitKrc: split-K workspace too small", " (need ", glbl_needed,
-              " > ", glbl_cap, " floats) for N=", N_in, " K=", K_in,
-              " M=", M_in);
-
-  // Split-K workspaces: one pre-partitioned pool per device.
-  // These must be zeroed before first use, and the kernel re-zeros them after
-  // each use.
-  // To avoid unnecessary overhead, we do not allocate them zeroed
-  // per-invocation. However, a simple static allocation does not work with
-  // multi-streams, because concurrent streams can alias into the same
-  // workspace. Solution: pre-allocate kWvSlots = 8 slots per device, plus
-  // kWvCaptureSlots reserved for capturing streams, and zero the whole pool
-  // once at creation. On first use, a stream takes one of the slots if any are
-  // still available. On subsequent uses, it re-uses the slot. If no slots are
-  // available, fall back to allocating a zeroed one per call, which is safe but
-  // adds overhead.
-  // A capturing stream must neither allocate nor enqueue anything -- either
-  // would be captured into the graph -- so it is only handed a reserved slot.
-  struct WvSplitKrcPool {
-    torch::Tensor glbl, cntr;
-    int64_t glbl_stride = 0, cntr_stride = 0;
-    int next_slot = 0;
-    int next_capture_slot = 0;
-    std::map<cudaStream_t, int> slot_of;
-    std::map<cudaStream_t, int> capture_slot_of;
-  };
-  // mutex not strictly necessary if caller is always single-threaded (Python)
-  // but this preserves Torch thread_local semantics for the C++ API
-  static std::mutex wv_pool_mu;
-  static std::map<int, WvSplitKrcPool> wv_pools;
-
-  float* glbl;
-  int* cntr;
-  // Fallback space
-  torch::Tensor spill_glbl, spill_cntr;
-  {
-    std::lock_guard<std::mutex> wv_lk(wv_pool_mu);
-    const int wv_dev = static_cast<int>(in_a.device().index());
-    WvSplitKrcPool& P = wv_pools[wv_dev];
-    constexpr int64_t wv_gf = 128 * 1024 * (_DTRMNSTC ? 12 : 1);
-    constexpr int64_t wv_ci = wv_gf / 4;
-    constexpr int64_t wv_all_slots = kWvSlots + kWvCaptureSlots;
-
-    // A stream whose capture was already invalidated reports an error; treat
-    // that as not capturing, since the capture is lost either way.
-    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
-    unsigned long long capture_id = 0;
-    if (cudaStreamGetCaptureInfo(stream, &capture_status, &capture_id) !=
-        cudaSuccess) {
-      capture_status = cudaStreamCaptureStatusNone;
-    }
-    const bool wv_capturing = capture_status != cudaStreamCaptureStatusNone;
-
-    if (!P.glbl.defined()) {
-      TORCH_CHECK(!wv_capturing,
-                  "wvSplitKrc: the split-K workspace pool cannot be allocated "
-                  "during graph capture. Call "
-                  "warmup_rocm_skinny_gemm_workspaces() "
-                  "(vllm/model_executor/layers/utils.py) eagerly first.");
-      P.glbl_stride = wv_gf;
-      P.cntr_stride = wv_ci;
-      P.glbl = torch::zeros(wv_gf * wv_all_slots, torch::TensorOptions()
-                                                      .dtype(torch::kFloat32)
-                                                      .device(in_a.device()))
-                   .detach();
-      P.cntr =
-          torch::zeros(
-              wv_ci * wv_all_slots,
-              torch::TensorOptions().dtype(torch::kInt).device(in_a.device()))
-              .detach();
-      // The mutex orders host access to the map, not device execution, so it
-      // alone would let another stream be handed a slot the fill above is
-      // still clearing. Synchronizing here, inside the lock, is what makes
-      // every slot safe to use without any further per-slot zeroing.
-      const cudaError_t wv_err = cudaStreamSynchronize(stream);
-      TORCH_CHECK(wv_err == cudaSuccess,
-                  "wvSplitKrc: failed to zero the split-K workspace pool: ",
-                  cudaGetErrorString(wv_err));
-    }
-
-    int wv_slot = -1;
-    if (wv_capturing) {
-      // One workspace per capturing stream, so graphs captured on the same
-      // stream share it -- safe because at most one of them replays at a time
-      // (vLLM captures one graph per padded batch size, and runs one per step).
-      auto cap_it = P.capture_slot_of.find(stream);
-      if (cap_it == P.capture_slot_of.end()) {
-        TORCH_CHECK(P.next_capture_slot < kWvCaptureSlots,
-                    "wvSplitKrc: no free capture workspace slot; more than ",
-                    kWvCaptureSlots,
-                    " distinct streams have captured a graph containing "
-                    "wvSplitKrc. Raise kWvCaptureSlots in "
-                    "csrc/rocm/skinny_gemms.cu.");
-        cap_it = P.capture_slot_of
-                     .emplace(stream, static_cast<int>(kWvSlots) +
-                                          P.next_capture_slot++)
-                     .first;
-      }
-      wv_slot = cap_it->second;
-    } else {
-      auto slot_it = P.slot_of.find(stream);
-      if (slot_it != P.slot_of.end()) {
-        wv_slot = slot_it->second;
-      } else if (P.next_slot < kWvSlots) {
-        wv_slot = P.next_slot++;
-        P.slot_of.emplace(stream, wv_slot);
-      }
-    }
-
-    if (wv_slot >= 0) {
-      glbl = P.glbl.data_ptr<float>() + wv_slot * P.glbl_stride;
-      cntr = P.cntr.data_ptr<int>() + wv_slot * P.cntr_stride;
-    } else {
-      spill_glbl = torch::zeros(
-          wv_gf,
-          torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()));
-      spill_cntr = torch::zeros(
-          wv_ci,
-          torch::TensorOptions().dtype(torch::kInt).device(in_a.device()));
-      glbl = spill_glbl.data_ptr<float>();
-      cntr = spill_cntr.data_ptr<int>();
-    }
-  }
-
-#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
-  {                                                                            \
-    dim3 block(64, 4);                                                         \
-    if constexpr (_DTRMNSTC)                                                   \
-      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 1>          \
-          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                       af4, bf4, biasf4, glbl, cntr, c,        \
-                                       CuCount);                               \
-    else                                                                       \
-      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 0>          \
-          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                       af4, bf4, biasf4, glbl, cntr, c,        \
-                                       CuCount);                               \
-  }
-
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "wvSplitKrc", [&] {
-    using fptype = typename scalar<scalar_t>::type;
-    const fptype* af4 = reinterpret_cast<const fptype*>(in_a.data_ptr());
-    const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
-    const fptype* biasf4 =
-        (in_bias.has_value() && in_bias->numel() > 0)
-            ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
-            : nullptr;
-    fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
-
-    switch (N_p2) {
-      case 16:
-        WVSPLITKrc(16, 1, 1) break;
-      case 32:
-        if (chunkk == 2) WVSPLITKrc(32, 2, 2) else WVSPLITKrc(32, 2, 1) break;
-      case 64:
-        if (chunkk == 2) WVSPLITKrc(64, 4, 2) else WVSPLITKrc(64, 4, 1) break;
-      case 128:
-        if (chunkk == 2) WVSPLITKrc(128, 4, 2) else WVSPLITKrc(128, 4, 1) break;
-      default:
-        throw std::runtime_error(
-            "Unsupported N value: " + std::to_string(M_in) + "," +
-            std::to_string(K_in) + "," + std::to_string(N_in));
-    }
-  });
-  return out_c;
+                            int* cntr, scalar_t* C, const int CuCount) {
+  UNREACHABLE_CODE;
 }
+#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
 
 #if defined(__HIP__MI3XX__) || defined(__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
@@ -2270,7 +1833,7 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   scalar_t* C, const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
                                   const int _WvPrGrp, const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
 
@@ -2467,94 +2030,11 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const float* __restrict__ s_A,
                               const float* __restrict__ s_B, const int _WvPrGrp,
                               const int CuCount) {
-  UNREACHABLE_CODE
+  UNREACHABLE_CODE;
 }
 #endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
 
-void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
-               const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
-               const at::Tensor& scale_a, const at::Tensor& scale_b,
-               const int64_t CuCount) {
-  static c10::ScalarType kFp8Type = is_fp8_ocp()
-                                        ? c10::ScalarType::Float8_e4m3fn
-                                        : c10::ScalarType::Float8_e4m3fnuz;
-  auto M_in = in_b.size(0);
-  auto K_in = in_b.size(1);
-  auto N_in = in_a.size(0);
-  auto Kap_in = in_a.stride(0);
-  auto Kbp_in = in_b.stride(0);
-  auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0)
-          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
-          : 1;
-  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
-                in_bias->sizes().size() == 2)
-                   ? in_bias->size(0)
-                   : 1;
-
-  TORCH_CHECK(K_in % 16 == 0, "k % 16 == 0");
-  TORCH_CHECK(in_a.dtype() == in_b.dtype() && in_a.dtype() == kFp8Type);
-  TORCH_CHECK(out_c.dtype() == torch::kFloat16 ||
-              out_c.dtype() == torch::kBFloat16);
-
-  dim3 grid(CuCount);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  const int max_lds_len = get_lds_size();
-
-#define WVSPLITKQ_IMPL(_THRDS, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
-  {                                                                            \
-    dim3 block(_THRDS, _WvPrGrp);                                              \
-    if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {             \
-      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEs, 16));      \
-      wvSplitKQ_hf_sml_<fptype, fp8_t, _THRDS, _YTILEs, _WvPrGrp, 16, _UNRLs,  \
-                        _N><<<grid, block, 0, stream>>>(                       \
-          K_in, Kap_in, Kbp_in, M_in, Bx_in, By_in, b_ptr, a_ptr, bias_ptr,    \
-          c_ptr, s_a, s_b, __wvPrGrp, CuCount);                                \
-    } else {                                                                   \
-      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEm, 16));      \
-      wvSplitKQ_hf_<fptype, fp8_t, _THRDS, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>  \
-          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,      \
-                                       By_in, b_ptr, a_ptr, bias_ptr, c_ptr,   \
-                                       s_a, s_b, __wvPrGrp, CuCount);          \
-    }                                                                          \
-  }
-
-#define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)      \
-  if (on_gfx12())                                                      \
-    WVSPLITKQ_IMPL(32, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
-  else                                                                 \
-    WVSPLITKQ_IMPL(64, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)
-
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(out_c.scalar_type(), "wvSplitKQ", [&] {
-    using fptype = typename scalar<scalar_t>::type;
-    auto c_ptr = reinterpret_cast<fptype*>(out_c.data_ptr());
-    auto s_a = scale_a.data_ptr<float>();
-    auto s_b = scale_b.data_ptr<float>();
-    VLLM_DISPATCH_FP8_TYPES(in_a.scalar_type(), "wvSplitKQ", [&] {
-      auto a_ptr = in_a.data_ptr<fp8_t>();
-      auto b_ptr = in_b.data_ptr<fp8_t>();
-      auto bias_ptr = (in_bias.has_value() && in_bias->numel() > 0)
-                          ? reinterpret_cast<fptype*>(in_bias->data_ptr())
-                          : nullptr;
-      switch (N_in) {
-        case 1:
-          WVSPLITKQ(16, 2, 2, 2, 2, 1)
-          break;
-        case 2:
-          WVSPLITKQ(16, 2, 2, 2, 2, 2)
-          break;
-        case 3:
-          WVSPLITKQ(16, 2, 2, 1, 1, 3)
-          break;
-        case 4:
-          WVSPLITKQ(16, 2, 2, 1, 1, 4)
-          break;
-        default:
-          throw std::runtime_error(
-              "Unsupported N value: " + std::to_string(M_in) + "," +
-              std::to_string(K_in) + "," + std::to_string(N_in));
-      }
-    });
-  });
-}
+// Do not leak this into the including translation units: skinny_gemms_int4.cuh
+// defines its own LDS_SIZE (64 KiB, no gfx950 case), so a shared TU must
+// never pick up one definition from the other by accident.
+#undef LDS_SIZE

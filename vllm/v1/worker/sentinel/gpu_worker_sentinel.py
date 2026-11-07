@@ -7,6 +7,7 @@ import torch
 from torch.distributed import TCPStore
 
 from vllm.config import set_current_vllm_config
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -255,7 +256,7 @@ class WorkerSentinel:
         model_runner = self.worker.model_runner
         assert model_runner.eplb_state is not None
         return model_runner.eplb_state.model_states[
-            model_runner.model_config.compute_hash()
+            hash_config_cached(model_runner.model_config)
         ]
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:

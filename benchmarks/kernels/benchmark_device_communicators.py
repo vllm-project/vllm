@@ -24,6 +24,7 @@ import os
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -33,6 +34,10 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
     AiterCustomAllreduce,
 )
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase,
+)
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     FlashInferAllReduce,
@@ -75,13 +80,23 @@ COMM_COLLECTIVE = {
     "flashinfer_mnnvl": "all-reduce",
     "aiter_ag": "all-gather",
     "pynccl_ag": "all-gather",
+    "tp_ag": "all-gather",
+    "rccl_ag": "all-gather",
+    "tp_ag_last": "all-gather-last-dim",
+    "rccl_ag_last": "all-gather-last-dim",
     "aiter_rs": "reduce-scatter",
     "pynccl_rs": "reduce-scatter",
 }
-COLLECTIVE_ORDER = ["all-reduce", "all-gather", "reduce-scatter"]
+COLLECTIVE_ORDER = [
+    "all-reduce",
+    "all-gather",
+    "all-gather-last-dim",
+    "reduce-scatter",
+]
 COLLECTIVE_BASELINE = {
     "all-reduce": "pynccl",
     "all-gather": "pynccl_ag",
+    "all-gather-last-dim": "rccl_ag_last",
     "reduce-scatter": "pynccl_rs",
 }
 
@@ -120,6 +135,7 @@ class CommunicatorBenchmark:
         self.symm_mem_comm_two_shot = None
         self.fi_ar_comm = None
         self.aiter_comm = None
+        self.tp_comm: CudaCommunicator | None = None
 
         self._init_communicators()
 
@@ -236,6 +252,13 @@ class CommunicatorBenchmark:
                     e,
                 )
                 self.aiter_comm = None
+            if self.aiter_comm is not None:
+                self.tp_comm = CudaCommunicator(
+                    self.cpu_group,
+                    self.device,
+                    dist.new_group(backend="nccl"),
+                    unique_name="tp",
+                )
 
     def benchmark_allreduce(
         self, sequence_length: int, num_warmup: int, num_trials: int
@@ -514,6 +537,30 @@ class CommunicatorBenchmark:
                     )
                 )
 
+        tp = self.tp_comm
+        tp_aiter = tp.aiter_ar_comm if tp is not None else None
+        if tp is not None and tp_aiter is not None:
+            self._check_tp_all_gather(sequence_length, tp, tp_aiter)
+            for suffix, dim in (("", 0), ("_last", -1)):
+                entries.append(
+                    (
+                        f"tp_ag{suffix}",
+                        lambda t, tp=tp, d=dim: tp.all_gather(t, d),
+                        lambda t: True,
+                        tp_aiter.capture(),
+                    )
+                )
+                entries.append(
+                    (
+                        f"rccl_ag{suffix}",
+                        lambda t, tp=tp, d=dim: DeviceCommunicatorBase.all_gather(
+                            tp, t, d
+                        ),
+                        lambda t: True,
+                        nullcontext(),
+                    )
+                )
+
         for name, fn, should_use_fn, context in entries:
             latency = self.benchmark_allreduce_single(
                 sequence_length, fn, should_use_fn, context, num_warmup, num_trials
@@ -522,6 +569,83 @@ class CommunicatorBenchmark:
                 results[name] = latency
 
         return results
+
+    def _check_tp_all_gather(
+        self,
+        sequence_length: int,
+        tp: CudaCommunicator,
+        aiter: AiterCustomAllreduce,
+    ) -> None:
+        from vllm.platforms.rocm import get_cdna_version
+
+        ws = self.world_size
+        x = torch.randn(
+            sequence_length,
+            4,
+            HIDDEN_SIZE // 4,
+            dtype=BENCHMARK_DTYPE,
+            device=self.device,
+        )
+        fits = (
+            get_cdna_version() in (3, 4)
+            and ws in (2, 4, 8)
+            and aiter.should_custom_ag(x)
+        )
+        cases = [
+            (x + self.rank + i * ws, dim, fits, True) for i, dim in enumerate((0, 1, 2))
+        ]
+        for shape in ((8, 12), (0, 1536)):
+            inp = torch.randn(shape, dtype=BENCHMARK_DTYPE, device=self.device)
+            cases.append((inp + self.rank, 1, False, False))
+        failures: list[str] = []
+        with patch.object(
+            aiter, "all_gather_unreg", wraps=aiter.all_gather_unreg
+        ) as spy:
+            for inp, dim, want_aiter, graph_check in cases:
+                tag = f"shape {tuple(inp.shape)} dim {dim}"
+                calls = spy.call_count
+                out = tp.all_gather(inp, dim)
+                ran_aiter = spy.call_count > calls
+                if ran_aiter != want_aiter:
+                    failures.append(f"{tag} eager: AITER ran={ran_aiter}")
+                expected = DeviceCommunicatorBase.all_gather(tp, inp, dim)
+                if not torch.equal(out, expected):
+                    failures.append(f"{tag} eager != rccl")
+                if not graph_check:
+                    continue
+                g_inp = inp.clone()
+                graph = torch.cuda.CUDAGraph()
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                calls = spy.call_count
+                with (
+                    torch.cuda.stream(stream),
+                    aiter.capture(),
+                    torch.cuda.graph(graph, stream=stream),
+                ):
+                    g_out = tp.all_gather(g_inp, dim)
+                ran_aiter = spy.call_count > calls
+                if ran_aiter != want_aiter:
+                    failures.append(f"{tag} graph: AITER ran={ran_aiter}")
+                g_inp.add_(1)
+                graph.replay()
+                expected = DeviceCommunicatorBase.all_gather(tp, g_inp, dim)
+                if not torch.equal(g_out, expected):
+                    failures.append(f"{tag} graph replay != rccl")
+
+        gathered: list[list[str] | None] = [None] * ws
+        dist.all_gather_object(gathered, failures, group=self.cpu_group)
+        bad = {rank: names for rank, names in enumerate(gathered) if names}
+        if bad:
+            if self.rank == 0:
+                logger.error(
+                    "TP all-gather mismatch at sequence length %s: %s",
+                    sequence_length,
+                    bad,
+                )
+            raise RuntimeError(
+                f"TP all-gather mismatch at sequence length {sequence_length}: {bad}"
+            )
 
 
 def _calculate_speedup_info(comm_results: dict[str, float], baseline: str) -> str:

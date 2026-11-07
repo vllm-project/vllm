@@ -4,7 +4,7 @@
 
 from pydantic import Field
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 
 @config
@@ -23,10 +23,11 @@ class AuxOutputConfig:
         """Whether any execution auxiliary output is enabled."""
         return self.enable_return_routed_experts
 
-    def compute_hash(self) -> str:
-        """Hash AuxOutput settings that alter the model forward graph."""
-        from vllm.config.utils import hash_factors
-
-        return hash_factors(
-            {"enable_return_routed_experts": self.enable_return_routed_experts}
-        )
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
+        ignored_factors = {
+            "max_bytes",
+        }
+        return get_compile_factors(self, ignored_factors)

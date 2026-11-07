@@ -35,7 +35,6 @@ from ..common.primitives import (
     commit_asm,
     copy_g2s,
     copy_s2cluster,
-    div_rn,
     fence_tmem,
     float_bits,
     launch,
@@ -47,7 +46,7 @@ from ..common.primitives import (
     pack_pair,
     push_float,
     release_tmem,
-    sigmoid,
+    situ_and_mul,
     smem_desc,
     smem_words,
     split,
@@ -59,27 +58,12 @@ from ..common.primitives import (
 )
 from ..gemm.ws_gemm import positive_zero, positive_zero32
 
-tanh = functools.partial(cute.math.tanh, fastmath=False)
 GRID, ROWS = 120, 112  # CTAs; CTAs with 64 down rows
 # With the MoE front rows: the K split by TP and a deeper ring that still fits beside
 # three o-proj consumer CTAs (<= 30 KB each; the kernel launches at the consumer's
 # entry and loads its first ring meanwhile).
 FRONT_KS, FRONT_RING = {8: 4, 16: 6}, {8: 112 * 1024, 16: 96 * 1024}
 COUNTERS = 4  # h ready, exit
-
-
-@cute.jit
-def situ(gate, up, beta, linear_beta, *, native: c.Constexpr = False):
-    if c.const_expr(native):
-        inv_beta, half = div_rn(c.Float32(1), beta), c.Float32(0.5)
-        g = half * beta * tanh(gate * inv_beta) * (c.Float32(1) + tanh(gate * half))
-        if linear_beta > 0:
-            up = linear_beta * tanh(up * div_rn(c.Float32(1), linear_beta))
-        return g * up
-    g = beta * tanh(div_rn(gate, beta)) * sigmoid(gate)
-    if linear_beta > 0:
-        up = linear_beta * tanh(div_rn(up, linear_beta))
-    return g * up
 
 
 @asm()
@@ -503,7 +487,7 @@ class SharedUmma(SharedBase):
                         sums[half] = sums[half] + parts[cell * self.n + self.slot(t, j)]
                 gate = Float32(c.BFloat16(sums[0]))
                 up = Float32(c.BFloat16(sums[1]))
-                value = c.BFloat16(situ(gate, up, beta, linear_beta))
+                value = c.BFloat16(situ_and_mul(gate, up, beta, linear_beta))
                 staged[t * width + j] = value
         named_barrier(1, 128)
         if tid < batch:

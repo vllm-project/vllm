@@ -364,7 +364,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
+        # Transformers-format Qwen3-ASR checkpoints do not set this
+        self.max_source_positions = getattr(config, "max_source_positions", 1500)
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize

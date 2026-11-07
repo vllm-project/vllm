@@ -456,7 +456,8 @@ def test_per_head_quant_scales_backend_selection(
 
 
 @pytest.mark.skipif(
-    CudaPlatform is None, reason="CUDA platform is required for this test"
+    CudaPlatform is None and RocmPlatform is None,
+    reason="CUDA or ROCm platform is required for this test",
 )
 @pytest.mark.parametrize("head_size", [64, 80, 96, 128, 192, 256])
 def test_int4_per_token_head_head_size_selection(head_size: int):
@@ -470,7 +471,7 @@ def test_int4_per_token_head_head_size_selection(head_size: int):
     vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
     with (
         set_current_vllm_config(vllm_config),
-        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", (CudaPlatform or RocmPlatform)()),
     ):
         backend = get_attn_backend(
             head_size=head_size,
@@ -560,11 +561,12 @@ def test_non_causal_autoselect_backend():
         attention_config=attention_config, cache_config=cache_config
     )
 
-    if CudaPlatform is None:
-        pytest.skip("CudaPlatform not available")
+    platform = CudaPlatform or RocmPlatform
+    if platform is None:
+        pytest.skip("CudaPlatform and RocmPlatform are not available")
     with (
         set_current_vllm_config(vllm_config),
-        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", platform()),
     ):
         backend = get_attn_backend(
             head_size=128,
