@@ -22,6 +22,10 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
+# On SM90 (head_size 80), FA4 beats FA3 for ViT attention once a sequence
+# reaches this many tokens; below it, and for windowed attention, FA3 is faster.
+VIT_LONG_SEQ_MIN_SEQLEN = 8192
+
 
 def flash_attn_maxseqlen_wrapper(
     q: torch.Tensor,
@@ -33,6 +37,7 @@ def flash_attn_maxseqlen_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    long_seq_fa_version: int | None = None,
 ) -> torch.Tensor:
     kwargs: dict[str, Any] = {}
     if is_rocm_aiter:
@@ -56,6 +61,8 @@ def flash_attn_maxseqlen_wrapper(
         # `flash_attn_varlen_func` needs a Python int for kernel launch bounds.
         with gpu_sync_allowed():
             max_seqlen = max_seqlen.item()
+    if long_seq_fa_version is not None and max_seqlen >= VIT_LONG_SEQ_MIN_SEQLEN:
+        kwargs["fa_version"] = long_seq_fa_version
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     supports_out = not current_platform.is_rocm()
@@ -96,6 +103,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    long_seq_fa_version: int | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q, memory_format=torch.contiguous_format)
 
@@ -117,6 +125,7 @@ def vit_flash_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    long_seq_fa_version: int | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
         q,
@@ -128,6 +137,7 @@ def vit_flash_attn_wrapper(
         scale,
         cu_seqlens,
         max_seqlen,
+        long_seq_fa_version,
     )
 
 
