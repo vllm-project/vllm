@@ -103,6 +103,11 @@ class BaseOffloader(ABC):
         """
         return weight
 
+    def invalidate_staged(self) -> None:  # noqa: B027
+        """Weights returned by `maybe_stage` were changed in place: copies
+        made ahead of time (prefetch) must be made again."""
+        pass
+
     def sync_prev_onload(self) -> None:  # noqa: B027
         """Sync previous onload operations. Override in subclasses."""
         pass
@@ -186,6 +191,7 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
             cpu_offload_max_bytes=int(uva.cpu_offload_gb * 1024**3),
             cpu_offload_params=uva.cpu_offload_params,
             stage_min_tokens=uva.cpu_offload_stage_min_tokens,
+            stage_prefetch=uva.cpu_offload_stage_prefetch,
         )
     else:
         return NoopOffloader()
