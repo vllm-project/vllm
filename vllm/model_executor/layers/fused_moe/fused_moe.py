@@ -356,6 +356,7 @@ def fused_moe_kernel(
     USE_TMA_B: tl.constexpr = False,
     USE_TMA_A: tl.constexpr = False,
     C_IS_SORTED: tl.constexpr = False,
+    launch_pdl: tl.constexpr = False,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -405,8 +406,15 @@ def fused_moe_kernel(
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
     offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    if launch_pdl:
+        # PDL: this grid may start before the preceding kernel has finished;
+        # wait for it before the first load.
+        tl.extra.cuda.gdc_wait()
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+        # Early exit after gdc_wait(). The dependent grid is released by the
+        # implicit trigger at grid completion; if an explicit
+        # gdc_launch_dependents() is ever added, it must also run on this path.
         return
     if not naive_block_assignment:
         offs_token_id = pid_m * BLOCK_SIZE_M + offs
@@ -987,6 +995,7 @@ def invoke_fused_moe_triton_kernel(
         USE_TMA_B=use_tma_b,
         USE_TMA_A=use_tma_a,
         C_IS_SORTED=C_is_sorted,
+        launch_pdl=current_platform.is_arch_support_pdl(),
         **config,
     )
 

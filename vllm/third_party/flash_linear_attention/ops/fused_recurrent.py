@@ -280,6 +280,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     SPLIT_BATCH_HEAD_GRID: tl.constexpr,
+    launch_pdl: tl.constexpr = False,
 ):
     if SPLIT_BATCH_HEAD_GRID:
         i_v, i_hv, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -294,6 +295,10 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     mask_v = o_v < V
     mask_h = mask_v[:, None] & mask_k[None, :]
 
+    if launch_pdl:
+        # PDL: this grid may start before the preceding kernel has finished;
+        # wait for it before the first load.
+        tl.extra.cuda.gdc_wait()
     state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
     p_o = o + (i_n * HV + i_hv) * V + o_v
 
@@ -301,6 +306,9 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     if state_idx <= 0:
         zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
         tl.store(p_o, zero, mask=mask_v)
+        # Early exit after gdc_wait(). The dependent grid is released by the
+        # implicit trigger at grid completion; if an explicit
+        # gdc_launch_dependents() is ever added, it must also run on this path.
         return
 
     p_h0 = h0 + state_idx * stride_init_state_token
@@ -502,6 +510,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
         num_warps=num_warps,
         num_stages=num_stages,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out, initial_state
 
