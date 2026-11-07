@@ -146,3 +146,36 @@ def build_dynamic_sd_schedule_lookup(
         )
 
     return dense_schedule
+
+
+def build_num_speculative_tokens_max_batch_sizes(
+    num_speculative_tokens_per_batch_size: object,
+    num_speculative_tokens_under_prefill_load: int | None,
+    vllm_max_batch_size: int,
+    vllm_num_speculative_tokens: int,
+) -> dict[int, int]:
+    """Map each number of draft tokens a step can verify to the largest batch
+    size that verifies it.
+
+    Dynamic SD picks the number from the batch size, and
+    num_speculative_tokens_under_prefill_load can lower it on any step.
+    """
+    if num_speculative_tokens_per_batch_size is None:
+        max_batch_sizes = {vllm_num_speculative_tokens: vllm_max_batch_size}
+    else:
+        dense_schedule = build_dynamic_sd_schedule_lookup(
+            num_speculative_tokens_per_batch_size,
+            vllm_max_batch_size=vllm_max_batch_size,
+            vllm_num_speculative_tokens=vllm_num_speculative_tokens,
+        )
+        # By ascending batch size, so each number keeps its largest batch.
+        max_batch_sizes = {
+            k: batch_size for batch_size, k in enumerate(dense_schedule) if batch_size
+        }
+    if num_speculative_tokens_under_prefill_load is not None:
+        for k, batch_size in list(max_batch_sizes.items()):
+            reduced_k = min(k, num_speculative_tokens_under_prefill_load)
+            max_batch_sizes[reduced_k] = max(
+                batch_size, max_batch_sizes.get(reduced_k, 0)
+            )
+    return max_batch_sizes

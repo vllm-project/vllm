@@ -82,6 +82,12 @@ else:
 
 logger = init_logger(__name__)
 
+# Speculative methods whose Model Runner V1 proposer can draft fewer tokens than
+# num_speculative_tokens on a step. V2 truncates drafts centrally.
+_V1_VARIABLE_NUM_SPEC_TOKENS_METHODS = frozenset(
+    {"ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash"}
+)
+
 _QWEN3_5_ARCHITECTURES = frozenset(
     {
         "Qwen3_5ForCausalLM",
@@ -740,29 +746,31 @@ class VllmConfig:
 
         Dynamic speculative decoding drafts as many tokens as its schedule gives
         the batch size, so a query length only runs up to the largest batch size
-        that drafts its number of tokens.
+        that drafts its number of tokens. `num_speculative_tokens_under_prefill_load`
+        adds the query length of its shortened drafts.
         """
         max_num_seqs = self.scheduler_config.max_num_seqs
         speculative_config = self.speculative_config
         num_new_sampled_tokens = decode_query_len - self.num_speculative_tokens
         if (
             speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not speculative_config.uses_variable_num_speculative_tokens()
             or num_new_sampled_tokens <= 0
         ):
             return {decode_query_len: max_num_seqs}
-        from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+        from vllm.v1.spec_decode.dynamic.utils import (
+            build_num_speculative_tokens_max_batch_sizes,
+        )
 
-        dense_schedule = build_dynamic_sd_schedule_lookup(
+        max_batch_sizes = build_num_speculative_tokens_max_batch_sizes(
             speculative_config.num_speculative_tokens_per_batch_size,
+            speculative_config.num_speculative_tokens_under_prefill_load,
             vllm_max_batch_size=max_num_seqs,
             vllm_num_speculative_tokens=self.num_speculative_tokens,
         )
-        # By ascending batch size, so each query length keeps its widest batch.
         return {
             k + num_new_sampled_tokens: batch_size
-            for batch_size, k in enumerate(dense_schedule)
-            if batch_size > 0
+            for k, batch_size in max_batch_sizes.items()
         }
 
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
@@ -1168,13 +1176,11 @@ class VllmConfig:
 
     def _maybe_disable_dynamic_sd_for_v1(self) -> None:
         speculative_config = self.speculative_config
-        # V2 truncates drafts centrally. V1 requires proposer support.
         if (
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or self.use_v2_model_runner
-            or speculative_config.method
-            in ("ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash")
+            or speculative_config.method in _V1_VARIABLE_NUM_SPEC_TOKENS_METHODS
         ):
             return
 
@@ -1206,6 +1212,81 @@ class VllmConfig:
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
+
+    def _maybe_disable_spec_tokens_under_prefill_load(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.num_speculative_tokens_under_prefill_load is None
+        ):
+            return
+
+        if self.parallel_config.data_parallel_size > 1:
+            reason = (
+                "data parallelism, because ranks schedule prefills independently "
+                "and would pick different speculative-token counts"
+            )
+        elif self.model_config is not None and self.model_config.is_diffusion:
+            reason = (
+                "diffusion models, because narrowing the canvas mid-denoise "
+                "discards denoised positions"
+            )
+        else:
+            return
+
+        logger.warning_once(
+            "num_speculative_tokens_under_prefill_load is not supported with %s. "
+            "Disabling it and falling back to static num_speculative_tokens=%d.",
+            reason,
+            speculative_config.num_speculative_tokens,
+        )
+        speculative_config.num_speculative_tokens_under_prefill_load = None
+
+    def _maybe_disable_spec_tokens_under_prefill_load_for_v1(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.num_speculative_tokens_under_prefill_load is None
+            or self.use_v2_model_runner
+        ):
+            return
+
+        if speculative_config.method not in _V1_VARIABLE_NUM_SPEC_TOKENS_METHODS:
+            reason = f"the '{speculative_config.method}' speculative method"
+        elif speculative_config.parallel_drafting and not (
+            speculative_config.use_dflash()
+        ):
+            # P-EAGLE and PARD size their drafting slots for
+            # num_speculative_tokens drafts.
+            reason = "parallel drafting"
+        else:
+            return
+
+        logger.warning_once(
+            "num_speculative_tokens_under_prefill_load is not supported with %s "
+            "on Model Runner V1. Disabling it and falling back to static "
+            "num_speculative_tokens=%d.",
+            reason,
+            speculative_config.num_speculative_tokens,
+        )
+        speculative_config.num_speculative_tokens_under_prefill_load = None
+
+    def _validate_spec_tokens_under_prefill_load(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.num_speculative_tokens_under_prefill_load is None
+            or self.scheduler_config.enable_chunked_prefill
+        ):
+            return
+
+        # Without chunking, a prefill runs only if it fits the leftover budget
+        # whole, which the draft-shortening rule does not account for.
+        raise ValueError(
+            "num_speculative_tokens_under_prefill_load requires chunked prefill, "
+            "which is disabled in this configuration. Enable chunked prefill or "
+            "unset num_speculative_tokens_under_prefill_load."
+        )
 
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
@@ -2003,6 +2084,8 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._maybe_disable_spec_tokens_under_prefill_load()
+        self._maybe_disable_spec_tokens_under_prefill_load_for_v1()
         self._maybe_disable_dynamic_sd_for_v1()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
@@ -2225,6 +2308,7 @@ class VllmConfig:
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
+        self._validate_spec_tokens_under_prefill_load()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)

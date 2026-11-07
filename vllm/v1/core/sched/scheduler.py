@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -298,6 +298,11 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_spec_tokens_under_prefill_load = (
+            speculative_config.num_speculative_tokens_under_prefill_load
+            if speculative_config is not None
+            else None
+        )
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
@@ -516,6 +521,101 @@ class Scheduler(SchedulerInterface):
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
         self._aborted_kv_loads: set[str] = set()
+
+    def _holds_local_prefill(self) -> bool:
+        """Whether the local prefill cadence holds prefill in the next
+        schedule() call."""
+        return (
+            self.local_prefill_interval > 1
+            and not self.prefill_capacity_bound
+            # That call becomes executed step num_executed_steps + 1 if it
+            # schedules anything, and last_prefill_step is stamped on the same
+            # convention.
+            and (self.num_executed_steps + 1) - self.last_prefill_step
+            < self.local_prefill_interval
+            and any(not r.is_prefill_chunk for r in self.running)
+        )
+
+    def _remaining_tokens_per_request(
+        self, num_scheduled_tokens: dict[str, int]
+    ) -> Iterator[int]:
+        """Tokens left to compute, after `num_scheduled_tokens`, for each
+        request a step can schedule. At most 1 is a decode."""
+        for request in self.running:
+            yield (
+                request.num_tokens
+                - request.num_computed_tokens
+                - num_scheduled_tokens.get(request.request_id, 0)
+            )
+
+        num_free_slots = (
+            self.max_num_active_reqs
+            - len(self.running)
+            - self.num_waiting_for_streaming_input
+        )
+        queues = [self.kv_holding_waiting]
+        if self._pause_state == PauseState.UNPAUSED:
+            queues += [self.waiting, self.async_kv_waiting]
+        for queue in queues:
+            for request in queue:
+                if num_free_slots <= 0:
+                    return
+                if self._is_blocked_waiting_status(request.status) and not (
+                    request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                    and request.request_id in self.finished_recving_kv_req_ids
+                ):
+                    continue
+                if (
+                    request.num_computed_tokens == 0
+                    and self.connector is not None
+                    and self.connector.may_load_async(request)
+                ):
+                    # Its prompt arrives as a KV load, not as prefill compute.
+                    continue
+                num_free_slots -= 1
+                yield request.num_tokens - request.num_computed_tokens
+
+    def _under_prefill_load(
+        self,
+        long_prefill_token_threshold: int,
+        num_scheduled_tokens: dict[str, int] | None = None,
+    ) -> bool:
+        """Whether the prefills that can run in a step fill the token budget
+        even with num_spec_tokens_under_prefill_load drafts per decode.
+
+        If they don't, shortening drafts would leave budget unused, so decodes
+        keep full drafts and chunked prefill fits the prefills next to them.
+
+        Counts the work left after `num_scheduled_tokens`, which estimates the
+        next step from this step's schedule. Prefix cache hits of waiting
+        requests aren't known yet, so their prompts count in full.
+        """
+        if self._pause_state == PauseState.PAUSED_ALL:
+            return False
+        spec = self.vllm_config.speculative_config
+        assert spec is not None and self.num_spec_tokens_under_prefill_load is not None
+        draft_slots = spec.max_num_new_slots_for_drafting
+        input_budget = self.scheduler_config.max_num_batched_tokens
+        num_tokens = 0
+        has_prefill = False
+        remaining_tokens = self._remaining_tokens_per_request(
+            num_scheduled_tokens or {}
+        )
+        for num_reqs, remaining in enumerate(remaining_tokens, start=1):
+            if remaining > 1:
+                has_prefill = True
+                if 0 < long_prefill_token_threshold < remaining:
+                    remaining = long_prefill_token_threshold
+                num_tokens += remaining
+            else:
+                # The newly sampled token plus its drafts.
+                num_tokens += 1 + self.num_spec_tokens_under_prefill_load
+            if has_prefill and (
+                num_tokens >= self.max_num_scheduled_tokens
+                or num_tokens + num_reqs * draft_slots > input_budget
+            ):
+                return True
+        return False
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -795,18 +895,25 @@ class Scheduler(SchedulerInterface):
         # in-flight chunks for interval-1 of every interval steps, capping
         # prefill at roughly one budget per interval and growing the waiting
         # queue without bound.
-        if (
-            not defer_prefills
-            and self.local_prefill_interval > 1
-            and not self.prefill_capacity_bound
-            # This call becomes executed step num_executed_steps + 1 if it
-            # schedules anything, and last_prefill_step is stamped on the same
-            # convention below.
-            and (self.num_executed_steps + 1) - self.last_prefill_step
-            < self.local_prefill_interval
-            and any(not r.is_prefill_chunk for r in self.running)
-        ):
+        if not defer_prefills and self._holds_local_prefill():
             defer_prefills = True
+
+        # Shorten drafts only when the prefills that can run fill the budget
+        # even next to shortened drafts.
+        num_spec_tokens_this_step = self.num_spec_tokens
+        if (
+            self.num_spec_tokens_under_prefill_load is not None
+            and not defer_prefills
+            and self._under_prefill_load(long_prefill_token_threshold)
+        ):
+            num_spec_tokens_this_step = self.num_spec_tokens_under_prefill_load
+            for req in self.running:
+                if (
+                    not req.is_prefill_chunk
+                    and len(req.spec_token_ids) > num_spec_tokens_this_step
+                ):
+                    # Rebind: async scheduling shares one placeholder list.
+                    req.spec_token_ids = req.spec_token_ids[:num_spec_tokens_this_step]
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1361,13 +1468,16 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        (
+                            num_spec_tokens_this_step > 0
+                            and self.dynamic_sd_lookup is None
+                        )
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
-                        padded_num_tokens = 1 + self.num_spec_tokens
+                        padded_num_tokens = 1 + num_spec_tokens_this_step
                         # Pad only when there is room for the sampled token(s).
                         if (
                             num_computed_tokens
@@ -1410,7 +1520,7 @@ class Scheduler(SchedulerInterface):
                             break
                         if (
                             pad_spec_decode
-                            and num_new_tokens != 1 + self.num_spec_tokens
+                            and num_new_tokens != 1 + num_spec_tokens_this_step
                         ):
                             # Alignment clipped the placeholder rows. The split
                             # aligns prefill chunks, but the padded tail rows are
@@ -1640,10 +1750,10 @@ class Scheduler(SchedulerInterface):
                     request, num_computed_tokens, num_new_tokens
                 )
                 if pad_spec_decode:
-                    assert num_new_tokens == 1 + self.num_spec_tokens
+                    assert num_new_tokens == 1 + num_spec_tokens_this_step
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
-                    ] * self.num_spec_tokens
+                    ] * num_spec_tokens_this_step
                 # Must use the SAME predicate as the deferral gate in the
                 # waiting loop (`num_computed_tokens < num_tokens - 1`).
                 # Stamping on `< num_prompt_tokens` instead let a request with
@@ -1774,12 +1884,23 @@ class Scheduler(SchedulerInterface):
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
 
-        # Dynamic speculative decoding: compute optimal K
+        # The drafts proposed after this step are verified in the next one, so
+        # shorten them only if the next step is expected to need it too.
         num_spec_tokens_to_schedule = self.num_spec_tokens
+        if (
+            self.num_spec_tokens_under_prefill_load is not None
+            and not self._holds_local_prefill()
+            and self._under_prefill_load(
+                long_prefill_token_threshold, num_scheduled_tokens
+            )
+        ):
+            num_spec_tokens_to_schedule = self.num_spec_tokens_under_prefill_load
+        # Dynamic speculative decoding: compute optimal K
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
-                len(num_scheduled_tokens)
-            ]
+            num_spec_tokens_to_schedule = min(
+                num_spec_tokens_to_schedule,
+                self.dynamic_sd_lookup[len(num_scheduled_tokens)],
+            )
 
         scheduled_encoder_input_stats = None
         if (

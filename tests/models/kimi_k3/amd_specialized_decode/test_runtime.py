@@ -47,7 +47,7 @@ def _vllm_config(**over) -> SimpleNamespace:
         enable_adaptive_verification=False,
         dynamic=False,
     )
-    spec.uses_dynamic_speculative_decoding = lambda: spec.dynamic
+    spec.uses_variable_num_speculative_tokens = lambda: spec.dynamic
     c = SimpleNamespace(
         additional_config={"decode_backend": "latency_specialized"},
         parallel_config=SimpleNamespace(

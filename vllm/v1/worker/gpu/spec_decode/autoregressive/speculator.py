@@ -158,7 +158,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing decode CUDA graphs",
             specialize_spec_tokens=self.supports_decode_metadata_update
-            and self.speculative_config.uses_dynamic_speculative_decoding(),
+            and self.speculative_config.uses_variable_num_speculative_tokens(),
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
 

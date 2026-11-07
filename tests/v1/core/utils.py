@@ -74,6 +74,7 @@ def create_scheduler(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    num_speculative_tokens_under_prefill_load: int | None = None,
     speculative_method: str | None = None,
     parallel_drafting: bool = False,
     skip_tokenizer_init: bool = False,
@@ -193,6 +194,10 @@ def create_scheduler(
             spec_kwargs["method"] = speculative_method
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
             spec_kwargs["prompt_lookup_min"] = 1
+        if num_speculative_tokens_under_prefill_load is not None:
+            spec_kwargs["num_speculative_tokens_under_prefill_load"] = (
+                num_speculative_tokens_under_prefill_load
+            )
         speculative_config = SpeculativeConfig(**spec_kwargs)
         speculative_config.parallel_drafting = parallel_drafting
 
