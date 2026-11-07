@@ -140,7 +140,7 @@ def main():
             f"{dense_ms / fused_ms:.2f},{'fused' if gate else 'dense'}",
             flush=True,
         )
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
 
 if __name__ == "__main__":
