@@ -671,6 +671,132 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
     assert computed_blocks[0] == block_pool.blocks[10:12]
 
 
+def test_sliding_window_stride_jump_inner_miss_and_off_lattice_window():
+    """Verify stride jumps when inner miss occurs and window ends off-lattice."""
+    block_size = 2
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,  # W = cdiv(7, 2) = 4 blocks
+    )
+    pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(spec, pool)
+
+    # 12 blocks: indices 0..11.
+    # Cached blocks: 6, 7, 8, 9 (valid window [6, 10)), 11 (cached), 8 (anchor).
+    # Miss at index 10 (strictly between anchor 8 and right edge 11).
+    cached_indices = {6, 7, 8, 9, 11}
+    block_hashes = [BlockHash(str(i).encode()) for i in range(12)]
+    for idx in cached_indices:
+        pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[idx], 0), pool.blocks[idx + 10]
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=12 * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+    )
+
+    # Jumps candidate end e from 12 to mismatch 10, then finds window [6, 10).
+    assert hit_length == 20
+    assert len(computed_blocks[0]) == 10
+    assert all(b == pool.null_block for b in computed_blocks[0][:6])
+    assert [b.block_id for b in computed_blocks[0][6:]] == [16, 17, 18, 19]
+
+
+def test_sliding_window_dropped_eagle_block_fallback_alignment():
+    """Verify dropped Eagle block fallback retains aligned blocks."""
+    block_size = 2
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(spec, pool)
+    block_hashes = [BlockHash(str(i).encode()) for i in range(4)]
+    for i, h in enumerate(block_hashes):
+        pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(h, 0), pool.blocks[i + 10]
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=True,
+        alignment_tokens=4,
+    )
+
+    # 4 blocks cached. Dropping 1 eagle block leaves 3 blocks. Aligning to
+    # alignment_tokens=4 leaves 2 blocks (4 tokens).
+    assert hit_length == 4
+    assert computed_blocks[0] == pool.blocks[10:12]
+
+
+def test_sliding_window_stride_equivalence_property_check():
+    """Property test comparing stride lookup against reference linear scan."""
+
+    def reference_find(cache: list[bool], w: int, n: int):
+        num = 0
+        for i in range(n - 1, -1, -1):
+            if cache[i]:
+                num += 1
+                if num >= w:
+                    return (i + w, [None] * i + cache[i : i + w])
+            else:
+                num = 0
+        return (num, cache[:num])
+
+    def stride_find(cache: list[bool], w: int, n: int):
+        e = n
+        while e >= w:
+            anchor = e - w
+            if not cache[anchor]:
+                e = anchor
+                continue
+            miss = None
+            for k in range(e - 1, anchor, -1):
+                if not cache[k]:
+                    miss = k
+                    break
+            if miss is not None:
+                e = miss
+                continue
+            return (e, [None] * anchor + cache[anchor:e])
+        k = 0
+        limit = min(w - 1, n)
+        while k < limit and cache[k]:
+            k += 1
+        return (k, cache[:k])
+
+    for seed in range(500):
+        rng = random.Random(seed)
+        n = rng.randint(4, 64)
+        w = rng.randint(2, 16)
+        p = rng.uniform(0.05, 0.95)
+        cache = [rng.random() < p for _ in range(n)]
+        ref_hit, ref_blocks = reference_find(cache, w, n)
+        stride_hit, stride_blocks = stride_find(cache, w, n)
+        assert ref_hit == stride_hit, f"Mismatch at seed {seed}"
+        assert ref_blocks == stride_blocks, f"Blocks mismatch at seed {seed}"
+
+
 def test_chunked_local_attention_remove_skipped_blocks():
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=2,
