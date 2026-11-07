@@ -1583,9 +1583,10 @@ class VllmConfig:
         self.instance_id = f"{time.time_ns()}"
 
         if self.model_config is not None and self.model_config.is_submodel_config:
-            # with_hf_config() view: the parent config was already validated,
-            # and this view's empty architecture list makes the model-dependent checks
-            # below unsafe (e.g. use_mla resolves the architecture registry).
+            # Derived view: the parent config was already validated. The code below
+            # would check the view's architecture against the parent's deployment
+            # (unsafe when it is empty: use_mla resolves the architecture registry)
+            # and rewrite configs shared with the parent.
             self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
             return
 
