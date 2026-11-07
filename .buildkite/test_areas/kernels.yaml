@@ -776,6 +776,7 @@ steps:
   - csrc/fused_mqa_topk/
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - tests/kernels/quantization/test_gelu_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
   - vllm/model_executor/kernels/linear/nvfp4/
@@ -790,6 +791,7 @@ steps:
     - pytest -v -s tests/kernels/test_top_k_per_row.py
     - pytest -v -s tests/kernels/attention/test_fused_mqa_topk.py
     - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_gelu_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
