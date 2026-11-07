@@ -48,6 +48,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 
 from .model import (
+    DeepseekV41LLMForCausalLM,
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
     _linear_scale_param_name,
@@ -304,6 +305,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+
+    packed_modules_mapping = DeepseekV41LLMForCausalLM.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
