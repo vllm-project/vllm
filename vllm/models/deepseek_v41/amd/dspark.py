@@ -53,6 +53,8 @@ from .model import (
     _linear_scale_param_name,
     _use_sequence_parallel,
 )
+from .mono_decode import flush as mono_flush
+from .mono_decode import link_layers
 from .ops import draft_lm_head
 
 if TYPE_CHECKING:
@@ -119,6 +121,7 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
+        self._mono_linked = False
 
         # Heads: final norm, and the Markov + confidence heads.
         # Loaded from the "final" MTP layer weights (mtp.*) in the target
@@ -206,6 +209,9 @@ class DSparkDeepseekV4Model(nn.Module):
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
         residual = post_mix = res_mix = pre_mix = None
+        if not self._mono_linked:
+            link_layers(list(self.layers))
+            self._mono_linked = True
         for layer in self.layers:
             hidden_states, residual, post_mix, res_mix, pre_mix = layer(
                 hidden_states,
@@ -216,6 +222,7 @@ class DSparkDeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+        mono_flush()
         hidden_states = mhc_post_torch(hidden_states, residual, post_mix, res_mix)
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]

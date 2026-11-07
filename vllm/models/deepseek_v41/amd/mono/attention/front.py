@@ -112,7 +112,7 @@ class FrontBuild:
     ratio: int  # the layer's compress ratio (0: no top-k keys)
     timeline: bool = False
     swa_width: int = WINDOW  # the SWA index rows' width (the DSpark draft's: wider)
-    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
+    tuned: bool = False
 
 
 def plus(t0, v):

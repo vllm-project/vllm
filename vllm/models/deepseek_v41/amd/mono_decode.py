@@ -29,6 +29,7 @@ other's pushes): the conditions read only metadata every rank holds alike.
 """
 
 import functools
+from collections.abc import Container, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -72,6 +73,10 @@ CDNA_VERSIONS = (3, 4)
 # The routed experts' intermediate width a rank at TP 4 (2304 / 4). vLLM pads
 # it to 640 on gfx942, and the gfx942 copies keep only the real columns.
 INTER_TP4 = 576
+MERGE_WIDTHS: dict[tuple[int, bool], tuple[int, ...]] = {
+    (8, False): (7,),
+    (8, True): (6,),
+}
 
 _runner = None
 _draft_runner = None
@@ -92,8 +97,9 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
                 )
             from vllm.models.deepseek_v41.amd.mono.runner import DSV41MonoLayer
 
+            tp = get_tensor_model_parallel_world_size()
             _draft_runner = DSV41MonoLayer(
-                get_tensor_model_parallel_world_size(),
+                tp,
                 get_tensor_model_parallel_rank(),
                 get_tp_group().cpu_group,
                 device,
@@ -101,6 +107,7 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
                 topk=draft.topk,
                 ug_groups=DRAFT_UG_GROUPS,
                 swa_width=draft.swa_width,
+                merge_widths=MERGE_WIDTHS.get((tp, True), ()),
             )
         return _draft_runner
     if _runner is None:
@@ -114,13 +121,54 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
         from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
 
         assert MAX_TOKENS >= MAX_ROWS, MAX_TOKENS
+        tp = get_tensor_model_parallel_world_size()
         _runner = DSV41MonoLayer(
-            get_tensor_model_parallel_world_size(),
+            tp,
             get_tensor_model_parallel_rank(),
             get_tp_group().cpu_group,
             device,
+            merge_widths=MERGE_WIDTHS.get((tp, False), ()),
         )
     return _runner
+
+
+def flush() -> None:
+    for runner in (_runner, _draft_runner):
+        if runner is not None and runner.pending:
+            runner.flush()
+
+
+def _hooked(layer, nxt) -> bool:
+    from torch.nn.modules import module as nn_module
+
+    return bool(
+        getattr(layer, "_forward_hooks", None)
+        or getattr(nxt, "_forward_pre_hooks", None)
+        or nn_module._global_forward_hooks
+        or nn_module._global_forward_pre_hooks
+    )
+
+
+def link_layers(
+    layers: Sequence["DeepseekV4DecoderLayer"], blocked: Container[int] = ()
+) -> None:
+    for i, layer in enumerate(layers):
+        mono = getattr(layer, "mono", None)
+        if mono is None or mono.ffn_only:
+            continue
+        nxt = layers[i + 1] if i + 1 < len(layers) else None
+        nmono = getattr(nxt, "mono", None)
+        mono.next_layer = None
+        if (
+            nxt is None
+            or nmono is None
+            or nmono.ffn_only
+            or nmono.draft != mono.draft
+            or getattr(nxt, "engram", None) is not None
+            or nxt.attn.layer_id in blocked
+        ):
+            continue
+        mono.next_layer = nxt
 
 
 def _record_view(kv: torch.Tensor, block: int) -> torch.Tensor:
@@ -319,6 +367,7 @@ class MonoDecodeLayer:
             swa_width,
         )
         self._weights: MonoLayerWeights | None = None
+        self.next_layer: DeepseekV4DecoderLayer | None = None
 
     @property
     def unfolded_entry(self) -> bool:
@@ -647,6 +696,30 @@ class MonoDecodeLayer:
             why = "more decode tokens than rows"
         return why, swa, comp
 
+    def _whole_step(self, layer: "DeepseekV4DecoderLayer", rows: int):
+        why, swa, comp = self._decode_step(layer, rows)
+        if why is None:
+            assert swa is not None
+            # the kernels' attention: causal SWA windows, the compressed cache
+            if comp is None and layer.attn.compress_ratio:
+                why = "layer metadata missing"
+            elif swa.decode_swa_width != self.swa_width:
+                why = f"SWA width {swa.decode_swa_width}"
+            elif (
+                swa.decode_swa_indices is None
+                or swa.decode_swa_lens is None
+                or swa.token_to_req_indices is None
+            ):
+                why = "SWA decode metadata missing"
+        return why, swa, comp
+
+    def _defers(self, layer: "DeepseekV4DecoderLayer", runner, rows: int) -> bool:
+        nxt = self.next_layer
+        if nxt is None or not runner.merges(rows) or _hooked(layer, nxt):
+            return False
+        assert nxt.mono is not None
+        return nxt.mono._whole_step(nxt, rows)[0] is None
+
     def __call__(
         self,
         layer: "DeepseekV4DecoderLayer",
@@ -663,30 +736,23 @@ class MonoDecodeLayer:
         mono kernels, or None when this step takes the original path (always for
         an ``ffn_only`` layer)."""
         if self.ffn_only:
+            flush()
             return None
         first = residual is None
         # the draft's first layer takes the embedding already broadcast to the
         # hc copies ([rows, hc, dim]), the target's the 2-D embedding
         if first and x.dim() != (3 if self.draft else 2):
+            flush()
             return self._skip("first layer of a pipeline stage")
-        why, swa, comp = self._decode_step(layer, x.shape[0])
+        why, swa, comp = self._whole_step(layer, x.shape[0])
         attn = layer.attn
         tensors = (x,) if first else (x, residual, post_mix, res_mix, pre_mix)
-        if why is None:
-            # the kernels' attention: causal SWA windows, the compressed cache
-            if comp is None and attn.compress_ratio:
-                why = "layer metadata missing"
-            elif swa.decode_swa_width != self.swa_width:
-                why = f"SWA width {swa.decode_swa_width}"
-            elif (
-                swa.decode_swa_indices is None
-                or swa.decode_swa_lens is None
-                or swa.token_to_req_indices is None
-            ):
-                why = "SWA decode metadata missing"
-            elif not all(t is not None and t.is_contiguous() for t in tensors):
-                why = "non-contiguous layer inputs"
+        if why is None and not all(
+            t is not None and t.is_contiguous() for t in tensors
+        ):
+            why = "non-contiguous layer inputs"
         if why is not None:
+            flush()
             return self._skip(why)
         assert swa is not None
         runner = _mono_runner(x.device, self if self.draft else None)
@@ -707,6 +773,7 @@ class MonoDecodeLayer:
             post_mix = res_mix = pre_mix  # unread without the fold
             fold = False
         elif layer.engram is not None and engram_hashes is not None:
+            flush()
             residual = layer.mhc_post(x, residual, post_mix, res_mix)
             hashes = engram_hashes[:, layer.engram.layer_hash_index]
             residual = layer.engram(residual, hashes, engram_mask)
@@ -737,6 +804,7 @@ class MonoDecodeLayer:
             swa.decode_swa_lens,
             swa.token_to_req_indices,
             fold=fold,
+            defer=self._defers(layer, runner, x.shape[0]),
             **kw,
         )
 
