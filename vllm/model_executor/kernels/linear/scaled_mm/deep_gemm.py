@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
+    is_deep_gemm_fp8_linear_requested,
     is_deep_gemm_supported,
     should_auto_disable_deep_gemm,
     should_use_deepgemm_for_fp8_linear,
@@ -66,13 +67,16 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
-        model_config = get_current_vllm_config().model_config
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
 
         if model_config is None:
             return False, "Model configuration is required."
 
         model_type = getattr(model_config.hf_text_config, "model_type", None)
-        if should_auto_disable_deep_gemm(model_type):
+        if should_auto_disable_deep_gemm(
+            model_type
+        ) and not is_deep_gemm_fp8_linear_requested(vllm_config.kernel_config):
             return False, f"Should not use deepgemm for model {model_type}"
 
         if not should_use_deepgemm_for_fp8_linear(
