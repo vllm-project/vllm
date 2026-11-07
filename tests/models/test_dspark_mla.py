@@ -490,3 +490,101 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
     assert len(groups) == 1
     assert len(groups[0].layer_names) == 29
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "vllm.models.deepseek_v4.nvidia.dspark",
+        "vllm.models.deepseek_v4.amd.dspark",
+        "vllm.models.deepseek_v41.nvidia.dspark",
+        "vllm.models.deepseek_v41.amd.dspark",
+    ],
+)
+@pytest.mark.parametrize(
+    ("cache_dtype", "kv_mxfp8"),
+    [
+        (torch.uint8, False),
+        (torch.uint8, True),
+        (torch.bfloat16, False),
+        (torch.float8_e4m3fn, False),
+    ],
+)
+def test_deepseek_dspark_insert_context_kv_uses_kv_only_op(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+    cache_dtype: torch.dtype,
+    kv_mxfp8: bool,
+):
+    """_insert_context_kv must call fused_deepseek_v4_kv_rope_insert directly on
+    strided page-aligned SWA caches without constructing dummy queries or calling
+    .view() on non-contiguous cache pages.
+    """
+    import importlib
+
+    if not torch.cuda.is_available():
+        monkeypatch.setattr(
+            torch.cuda,
+            "get_device_properties",
+            lambda *args, **kwargs: SimpleNamespace(gcnArchName="gfx942"),
+        )
+    mod = importlib.import_module(module_name)
+
+    block_size = 32
+    num_blocks = 2
+    row_size = (528 if kv_mxfp8 else 584) if cache_dtype == torch.uint8 else 512
+    page_stride = block_size * row_size + 64  # non-contiguous page stride
+    backing = torch.zeros((num_blocks, page_stride), dtype=torch.uint8).view(
+        cache_dtype
+    )
+    cache = backing.as_strided(
+        (num_blocks, block_size, row_size), (page_stride, row_size, 1)
+    )
+    kv = torch.randn(4, 512, dtype=torch.bfloat16)
+    positions = torch.arange(4, dtype=torch.int64)
+    slots = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
+    cos_sin = torch.randn(16, 64, dtype=torch.float32)
+    scale = torch.tensor([0.5], dtype=torch.float32)
+
+    attn_kwargs = {
+        "swa_cache_layer": SimpleNamespace(kv_cache=cache, block_size=block_size),
+        "rotary_emb": SimpleNamespace(cos_sin_cache=cos_sin),
+        "_flashinfer_fp8_kv_scale": scale,
+    }
+    if "deepseek_v41" in module_name or kv_mxfp8:
+        attn_kwargs["kv_mxfp8"] = kv_mxfp8
+    attn = SimpleNamespace(**attn_kwargs)
+
+    recorded_calls = []
+    monkeypatch.setattr(
+        torch.ops._C,
+        "fused_deepseek_v4_kv_rope_insert",
+        lambda *args: recorded_calls.append(args),
+        raising=False,
+    )
+
+    mod._insert_context_kv(attn, kv, positions, slots)
+
+    assert len(recorded_calls) == 1
+    (
+        arg_kv,
+        arg_cache,
+        arg_slots,
+        arg_pos,
+        arg_cos_sin,
+        arg_block_size,
+        arg_fp8_scale,
+        arg_kv_mxfp8,
+    ) = recorded_calls[0]
+    assert arg_kv is kv
+    assert arg_cache is cache
+    assert arg_slots is slots
+    assert arg_pos is positions
+    assert arg_cos_sin is cos_sin
+    assert arg_block_size == block_size
+    if cache_dtype == torch.float8_e4m3fn:
+        assert arg_fp8_scale is scale
+    else:
+        assert arg_fp8_scale is None
+    assert arg_kv_mxfp8 is kv_mxfp8
