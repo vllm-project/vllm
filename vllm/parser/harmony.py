@@ -81,6 +81,7 @@ class Segment(NamedTuple):
     recipient: str | None
     delta: str
     completed_message: Message | None = None
+    token_ids: tuple[int, ...] = ()
 
 
 @dataclass
@@ -346,7 +347,9 @@ class HarmonyParser(DelegatingParser):
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
 
+            token_ids_for_segment: tuple[int, ...] = ()
             if completed_message is not None:
+                token_ids_for_segment = tuple(self._current_message_tokens)
                 self._current_message_tokens.clear()
             else:
                 self._current_message_tokens.append(token_id)
@@ -360,6 +363,7 @@ class HarmonyParser(DelegatingParser):
                     recipient=recipient,
                     delta=delta,
                     completed_message=completed_message,
+                    token_ids=token_ids_for_segment,
                 )
             )
 

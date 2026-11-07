@@ -10,13 +10,16 @@ from openai.types.responses import (
     ResponseReasoningItem,
 )
 from openai.types.responses.response_output_item import McpCall
+from openai.types.responses.response_output_text import Logprob
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     response_previous_input_to_harmony,
 )
+from vllm.entrypoints.openai.responses.context import HarmonyContext
 from vllm.exceptions import VLLMValidationError
+from vllm.logprobs import Logprob as SampleLogprob
 
 
 class TestResponsePreviousInputToHarmony:
@@ -376,3 +379,41 @@ class TestHarmonyToResponseOutput:
 
         with pytest.raises(VLLMValidationError, match=f"Unknown channel: {channel}"):
             harmony_to_response_output(message, frozenset())
+
+
+class TestHarmonyLogprobs:
+    """Tests for attaching logprobs to final-channel Harmony messages."""
+
+    def test_final_message_carries_logprobs(self):
+        message = Message.from_role_and_content(Role.ASSISTANT, "hi").with_channel(
+            "final"
+        )
+        logprobs = [Logprob(token="hi", logprob=-0.1, bytes=[104, 105], top_logprobs=[])]
+
+        items = harmony_to_response_output(
+            message, frozenset(), message_logprobs=logprobs
+        )
+
+        assert items[0].content[0].logprobs == logprobs
+
+    def test_analysis_message_has_no_logprobs(self):
+        message = Message.from_role_and_content(Role.ASSISTANT, "think").with_channel(
+            "analysis"
+        )
+
+        items = harmony_to_response_output(message, frozenset(), message_logprobs=[])
+
+        assert not hasattr(items[0], "logprobs")
+
+    def test_extract_message_logprobs_skips_other_segments(self):
+        sample = {
+            tid: SampleLogprob(logprob=-float(tid)) for tid in (1, 2, 3, 4, 5)
+        }
+        output_logprobs = [{tid: sample[tid]} for tid in (1, 2, 3, 4, 5)]
+
+        # Tokens 1-2 belong to an earlier analysis segment; 3-5 are final.
+        result = HarmonyContext._extract_message_logprobs(
+            (3, 4, 5), [1, 2, 3, 4, 5], output_logprobs
+        )
+
+        assert [next(iter(d)) for d in result] == [3, 4, 5]

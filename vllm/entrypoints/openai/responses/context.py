@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
@@ -667,6 +668,8 @@ class HarmonyContext(ConversationContext):
         self.streamed_items_by_message: list[
             tuple[Message, list[ResponseOutputItem]]
         ] = []
+        self._message_token_ids: dict[int, tuple[int, ...]] = {}
+        self._message_logprobs: dict[int, list[dict[int, Any]]] = {}
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -704,6 +707,26 @@ class HarmonyContext(ConversationContext):
             self.current_turn_metrics.reset()
 
         self.last_append_segments = segments
+        for segment in segments:
+            msg = segment.completed_message
+            if msg is None:
+                continue
+            if segment.token_ids:
+                self._message_token_ids[id(msg)] = segment.token_ids
+            if (
+                self.request is not None
+                and self.request.is_include_output_logprobs()
+                and output.outputs
+                and msg.channel == "final"
+                and msg.recipient is None
+                and output.outputs[0].logprobs is not None
+            ):
+                self._message_logprobs[id(msg)] = self._extract_message_logprobs(
+                    segment.token_ids,
+                    output.outputs[0].token_ids,
+                    output.outputs[0].logprobs,
+                )
+
         self._messages.extend(
             segment.completed_message
             for segment in segments
@@ -981,3 +1004,34 @@ class HarmonyContext(ConversationContext):
                 for tool in self.called_tools
             )
         )
+
+    @staticmethod
+    def _extract_message_logprobs(
+        message_token_ids: tuple[int, ...],
+        output_token_ids: Sequence[int],
+        output_logprobs: Sequence[dict[int, Any]],
+    ) -> list[dict[int, Any]]:
+        """Return the logprobs for the exact token IDs that belong to a message.
+
+        Harmony output tokens are produced in message order, and the model's
+        per-token logprobs are aligned to the full output sequence. Match the
+        message's token IDs back to that sequence in-order so we never attach the
+        wrong logprobs to prior commentary or tool segments.
+        """
+        if not message_token_ids or not output_logprobs:
+            return []
+
+        sampled_logprobs: list[dict[int, Any]] = []
+        message_token_ids_iter = iter(message_token_ids)
+        next_message_token = next(message_token_ids_iter, None)
+
+        for token_id, logprob in zip(output_token_ids, output_logprobs):
+            if next_message_token is None:
+                break
+            if token_id != next_message_token:
+                continue
+            next_message_token = next(message_token_ids_iter, None)
+            if logprob and token_id in logprob:
+                sampled_logprobs.append({token_id: logprob[token_id]})
+
+        return sampled_logprobs
