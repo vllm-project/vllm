@@ -554,3 +554,43 @@ def test_delayed_text_keeps_split_markers_intact(parser_cls, mock_tokenizer, del
     )
     assert (result.reasoning, result.content) == ("reasoning", "content")
     assert result.tool_calls == [{"name": "weather", "arguments": "{}"}]
+
+
+def test_prompt_closed_reasoning_parses_output_as_content(
+    parser_cls, mock_tokenizer, mock_request
+):
+    # The prompt already closed the think block (continue_final_message), so
+    # the generated text must be content, not reasoning.
+    parser = parser_cls(mock_tokenizer)
+    parser.set_prompt_token_ids(mock_tokenizer.encode(END_THINK + "prior answer"))
+
+    output = "generated content"
+    reasoning, content, _ = parser.parse(
+        output,
+        mock_request,
+        model_output_token_ids=mock_tokenizer.encode(output),
+    )
+
+    assert reasoning is None
+    assert content == output
+
+
+def test_earlier_turn_reasoning_end_keeps_current_turn_reasoning(
+    parser_cls, mock_tokenizer, mock_request
+):
+    # A prior assistant turn closed reasoning and ended with EOT. The new turn
+    # opens a fresh assistant message, so the output is reasoning.
+    parser = parser_cls(mock_tokenizer)
+    parser.set_prompt_token_ids(
+        mock_tokenizer.encode(END_THINK + "prior" + EOT + "user" + EOT + "assistant")
+    )
+
+    output = "thinking now"
+    reasoning, content, _ = parser.parse(
+        output,
+        mock_request,
+        model_output_token_ids=mock_tokenizer.encode(output),
+    )
+
+    assert reasoning == output
+    assert content is None
