@@ -55,11 +55,13 @@ def _philox4x32_10(
     return counter_0, counter_1, counter_2, counter_3
 
 
-def _philox_uniform(
+def _philox_uint32(
     key_0_value: int,
     key_1_value: int,
     contexts: torch.Tensor,
     token_ids: torch.Tensor,
+    stream_0: int = 0,
+    stream_1: int = 0,
 ) -> torch.Tensor:
     contexts = contexts.to(torch.int64) & _UINT32_MASK
     prefix_shape = contexts.shape[:-1]
@@ -114,15 +116,29 @@ def _philox_uniform(
             state[2],
         ),
         (
-            (candidate_key_0 ^ state[3]) & _UINT32_MASK,
-            (candidate_key_1 ^ _TOKEN_DOMAIN) & _UINT32_MASK,
+            (candidate_key_0 ^ state[3] ^ stream_1) & _UINT32_MASK,
+            (candidate_key_1 ^ _TOKEN_DOMAIN ^ stream_0) & _UINT32_MASK,
         ),
     )
     word_index = token_words & 3
     output = outputs[0]
     for index in range(1, 4):
         output = torch.where(word_index == index, outputs[index], output)
-    return uint32_to_uniform(output)
+    return output
+
+
+_compiled_philox_uint32 = torch.compile(_philox_uint32, fullgraph=True, dynamic=True)
+
+
+def _philox_uniform(
+    key_0_value: int,
+    key_1_value: int,
+    contexts: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return uint32_to_uniform(
+        _philox_uint32(key_0_value, key_1_value, contexts, token_ids)
+    )
 
 
 _compiled_philox_uniform = torch.compile(_philox_uniform, fullgraph=True, dynamic=True)
@@ -143,3 +159,25 @@ class PhiloxPRF(WatermarkPRF):
         if contexts.device.type == "cuda":
             return _compiled_philox_uniform(*key_words, contexts, token_ids)
         return _philox_uniform(*key_words, contexts, token_ids)
+
+    def uint32(
+        self,
+        contexts: torch.Tensor,
+        token_ids: torch.Tensor,
+        stream: int = 0,
+    ) -> torch.Tensor:
+        """Return raw words as int64 values in [0, 2**32).
+
+        Contexts shaped [B, C] and token IDs shaped [V] produce [B, V].
+        Contexts shaped [N, C] and token IDs shaped [N, 1] produce [N, 1].
+        """
+        if not 0 <= stream <= 2**64 - 1:
+            raise ValueError("Philox streams must fit in 64 bits")
+        key_words = self.key & _UINT32_MASK, self.key >> 32
+        # Split outside torch.compile: Inductor miscompiles 64-bit shifts on CUDA.
+        stream_words = stream & _UINT32_MASK, stream >> 32
+        if contexts.device.type == "cuda":
+            return _compiled_philox_uint32(
+                *key_words, contexts, token_ids, *stream_words
+            )
+        return _philox_uint32(*key_words, contexts, token_ids, *stream_words)

@@ -1053,3 +1053,110 @@ def draft_philox_gumbel_sample(
         )
         finish_step(step)
     return sampled.view(-1)
+
+
+@triton.jit
+def _watermark_contexts_kernel(
+    contexts_ptr,
+    expanded_idx_mapping_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prompt_len_ptr,
+    total_len_ptr,
+    CONTEXT_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    req_idx = tl.load(expanded_idx_mapping_ptr + row)
+    valid_req = req_idx >= 0
+    req_idx = tl.maximum(req_idx, 0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    positions = tl.load(total_len_ptr + req_idx) - CONTEXT_WIDTH + offsets
+    valid = (
+        valid_req
+        & (offsets < CONTEXT_WIDTH)
+        & (positions >= tl.load(prompt_len_ptr + req_idx))
+    )
+    tokens = tl.load(
+        all_token_ids_ptr + req_idx * all_token_ids_stride + positions,
+        mask=valid,
+        other=-1,
+    )
+    tl.store(
+        contexts_ptr + row * CONTEXT_WIDTH + offsets,
+        tokens,
+        mask=offsets < CONTEXT_WIDTH,
+    )
+
+
+def watermark_contexts(
+    expanded_idx_mapping: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prompt_len: torch.Tensor,
+    total_len: torch.Tensor,
+    context_width: int,
+) -> torch.Tensor:
+    num_rows = expanded_idx_mapping.shape[0]
+    contexts = all_token_ids.new_empty(num_rows, context_width)
+    _watermark_contexts_kernel[(num_rows,)](
+        contexts,
+        expanded_idx_mapping,
+        all_token_ids,
+        all_token_ids.stride(0),
+        prompt_len,
+        total_len,
+        CONTEXT_WIDTH=context_width,
+        BLOCK_SIZE=triton.next_power_of_2(context_width),
+    )
+    return contexts
+
+
+@triton.jit
+def _watermark_skip_mask_kernel(
+    skip_ptr,
+    expanded_idx_mapping_ptr,
+    watermarking_ptr,
+    temperature_ptr,
+    contexts_ptr,
+    repeated_ptr,
+    CONTEXT_WIDTH: tl.constexpr,
+    CONTEXT_BLOCK: tl.constexpr,
+    HAS_REPEATED: tl.constexpr,
+):
+    row = tl.program_id(0)
+    req_idx = tl.maximum(tl.load(expanded_idx_mapping_ptr + row), 0)
+    apply = tl.load(watermarking_ptr + req_idx) != 0
+    apply &= tl.load(temperature_ptr + req_idx) != 0.0
+    offsets = tl.arange(0, CONTEXT_BLOCK)
+    context = tl.load(
+        contexts_ptr + row * CONTEXT_WIDTH + offsets,
+        mask=offsets < CONTEXT_WIDTH,
+        other=0,
+    )
+    apply &= tl.min(context, axis=0) >= 0
+    if HAS_REPEATED:
+        apply &= tl.load(repeated_ptr + row) == 0
+    tl.store(skip_ptr + row, ~apply)
+
+
+def watermark_skip_mask(
+    expanded_idx_mapping: torch.Tensor,
+    watermarking: torch.Tensor,
+    temperature: torch.Tensor,
+    contexts: torch.Tensor,
+    repeated_contexts: torch.Tensor | None,
+) -> torch.Tensor:
+    num_rows, context_width = contexts.shape
+    skip_mask = torch.empty(num_rows, dtype=torch.bool, device=watermarking.device)
+    _watermark_skip_mask_kernel[(num_rows,)](
+        skip_mask,
+        expanded_idx_mapping,
+        watermarking,
+        temperature,
+        contexts,
+        repeated_contexts,
+        CONTEXT_WIDTH=context_width,
+        CONTEXT_BLOCK=triton.next_power_of_2(context_width),
+        HAS_REPEATED=repeated_contexts is not None,
+    )
+    return skip_mask

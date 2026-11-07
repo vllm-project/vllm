@@ -1434,6 +1434,15 @@ class VllmConfig:
                 )
             return False
         if self.speculative_config is not None:
+            if not (
+                watermark_config.supports_speculative_decoding
+                or watermark_config.supports_target_only_watermarking
+            ):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding, even with "
+                    "allow_target_only_watermarking=true."
+                )
             speculative_config = self.speculative_config
             if speculative_config.draft_sample_method != "probabilistic":
                 raise ValueError(
@@ -1615,6 +1624,13 @@ class VllmConfig:
         self._resolve_and_verify_engram_config()
 
         self._check_supports_watermarking()
+        if (
+            self.watermark_config is not None
+            and self.watermark_config.algorithm == "synthid_text"
+        ):
+            from vllm.v1.watermarking.synthid import check_synthid_text_platform
+
+            check_synthid_text_platform()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
