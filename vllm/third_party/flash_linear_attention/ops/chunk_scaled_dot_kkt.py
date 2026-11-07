@@ -10,11 +10,45 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
 from .utils import FLA_CHUNK_SIZE
+
+# On RDNA (gfx11xx/gfx12xx) WMMA only
+# accepts 16-bit/int inputs, so a widened (e.g. fp32) tl.dot is lowered to a
+# software matmul (~190x amdgcn-stage blowup). There we cast both operands down
+# to k's native storage dtype (bf16/fp16) so fast WMMA is used instead.
+_CAST_DOT_TO_K_DTYPE = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1x
+
+    _CAST_DOT_TO_K_DTYPE = on_gfx1x()
+
+if current_platform.is_rocm():
+    _KKT_CONFIGS = [
+        triton.Config(
+            {
+                "BK": 128,
+                "matrix_instr_nonkdim": 16,
+                "waves_per_eu": 0,
+                "kpack": 2,
+            },
+            num_warps=4,
+            num_stages=1,
+        ),
+    ]
+    _KKT_KEY: list[str] = []  # static config; no key
+else:
+    _KKT_CONFIGS = [
+        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64, 128]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ]
+    _KKT_KEY = ["H", "K", "BT", "IS_VARLEN"]
 
 
 @triton.heuristics(
@@ -24,13 +58,8 @@ from .utils import FLA_CHUNK_SIZE
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "BT", "IS_VARLEN"],
+    configs=_KKT_CONFIGS,
+    key=_KKT_KEY,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_scaled_dot_kkt_fwd_kernel(
