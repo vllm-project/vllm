@@ -12,7 +12,7 @@ The MiniMax-M3-preview config selects a single set of branches:
       "index" attention branch.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 import torch
@@ -130,6 +130,9 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
+from vllm.models.minimax_m3.nvidia.specialized_decode import (
+    specialized_decode_config,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -143,6 +146,13 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
+        LowBatchAttention,
+    )
+    from vllm.models.minimax_m3.nvidia.specialized_decode.moe import LowBatchFfn
+    from vllm.models.minimax_m3.nvidia.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
 
 logger = init_logger(__name__)
 
@@ -560,6 +570,10 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         self.shared_experts: MiniMaxM3MLP | None = None
+        # Under decode_backend=latency_specialized MiniMaxM3Model sets the flag,
+        # and process_weights_after_loading builds the low-batch FFN.
+        self.use_low_batch_ffn = False
+        self.low_batch_ffn: LowBatchFfn | None = None
         if self.use_mega_moe:
             self._init_mega_moe_experts(config, quant_config, prefix)
             return
@@ -694,6 +708,20 @@ class MiniMaxM3MoE(nn.Module):
             not self.use_mega_moe
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
+
+    def process_weights_after_loading(self) -> None:
+        if self.use_low_batch_ffn:
+            from vllm.models.minimax_m3.nvidia.specialized_decode.moe import (
+                LowBatchFfn,
+                unsupported_reason,
+            )
+
+            if (reason := unsupported_reason(self)) is not None:
+                raise ValueError(
+                    "decode_backend=latency_specialized: the low-batch FFN cannot "
+                    f"take this MoE layer ({reason})."
+                )
+            self.low_batch_ffn = LowBatchFfn(self)
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""
@@ -1053,6 +1081,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
+        # Under decode_backend=latency_specialized the decode executor sets the
+        # flag, and the decoder layer's process_weights_after_loading builds
+        # the low-batch path.
+        self.use_low_batch_attention = False
+        self.low_batch_attention: LowBatchAttention | None = None
 
         self.use_qkv_fused_epilogue = _supports_qkv_fused_epilogue(self)
         if self.use_qkv_fused_epilogue:
@@ -1152,7 +1185,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor | QuantizedActivation,
+        low_batch: Callable[..., torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        """``low_batch``, when given, takes over after the KV insert: it gets
+        q, index_q and the KV and index caches and returns o_proj's output."""
         cos_sin_cache = self.rotary_emb.cos_sin_cache
         rotary_dim = self.rotary_emb.rotary_dim
         eps = self.q_norm.variance_epsilon
@@ -1239,6 +1275,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 write_qkv=not q_is_fp8,
             )
 
+        if low_batch is not None:
+            return low_batch(
+                q, index_q, self.kv_cache, self.indexer.index_cache.kv_cache
+            )
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)
         attn_output = self._run_attention(q, index_q, output)
         if self.use_sequence_parallel:
@@ -1362,6 +1402,23 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+
+    def process_weights_after_loading(self) -> None:
+        # Here rather than on the attention layer, so that the loader's
+        # attention pass does not change when the setting is off. The
+        # low-batch kernels read the E4M3 query of the CUTLASS decode and an
+        # NVFP4 index cache.
+        attn = self.self_attn
+        if (
+            getattr(attn, "use_low_batch_attention", False)
+            and getattr(attn.impl, "use_cutlass_decode", False)
+            and attn.indexer_kv_dtype == "nvfp4"
+        ):
+            from vllm.models.minimax_m3.nvidia.specialized_decode.attention import (
+                build_low_batch_attention,
+            )
+
+            attn.low_batch_attention = build_low_batch_attention(attn)
 
     def forward(
         self,
@@ -1526,10 +1583,26 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             layer.fuse_input_allreduce = idx > 0 and prev_defers
             prev_defers = layer.ffn_all_reduce_deferred
         self.fuse_final_norm_allreduce = prev_defers
-        if current_platform.is_cuda():
+        deferring = (
             self._init_fused_moe_finalize(vllm_config)
+            if current_platform.is_cuda()
+            else []
+        )
+        # decode_backend=latency_specialized: a decode executor over the layers.
+        self.specialized_decode: SpecializedDecode | None = None
+        if specialized_decode_config(vllm_config):
+            if not deferring:
+                raise ValueError(
+                    "decode_backend=latency_specialized needs MoE layers whose "
+                    "finalize the next layer's fused all-reduce + norm takes."
+                )
+            for moe in deferring:
+                moe.use_low_batch_ffn = True
+            from vllm.models.minimax_m3.nvidia.specialized_decode.runtime import decode
 
-    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> None:
+            self.specialized_decode = decode.SpecializedDecode(self)
+
+    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> list[MiniMaxM3MoE]:
         """Let small batches leave a MoE's top-k finalize to the next layer's
         input norm, which already fuses the TP all-reduce, and have it quantize
         the normed rows to the MXFP8 its qkv_proj reads.
@@ -1537,7 +1610,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         Each MoE whose successor can take the output gets the hint here, and
         ``defers_finalize`` decides per call. The final norm feeds the LM head
         in BF16, so the last layer keeps its own finalize. Builds a collective
-        kernel: every TP rank decides alike.
+        kernel: every TP rank decides alike. Returns the MoE layers that defer
+        (empty when none can).
         """
         from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
             init_fused_moe_finalize,
@@ -1545,7 +1619,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
 
         if not supports_fused_moe_finalize(vllm_config):
-            return
+            return []
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
             layer.block_sparse_moe
@@ -1556,7 +1630,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             and layer.block_sparse_moe.defer_finalize(FUSED_MOE_FINALIZE_MAX_TOKENS)
         ]
         if not deferring:
-            return
+            return []
         # The modular experts return the router's FP32 routing weights; the
         # monolithic kernel routes itself in BF16.
         experts_cls = getattr(
@@ -1574,6 +1648,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             FUSED_MOE_FINALIZE_MAX_TOKENS,
             len(deferring),
         )
+        return deferring
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1619,18 +1694,27 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # finishes the previous FFN's deferred all-reduce, so it is read there.
         # Cloned, as the norms may update `residual` in place.
         aux_hidden_states: list[torch.Tensor] = []
-        for idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer], start=self.start_layer
-        ):
-            hidden_states, residual = layer.forward_input_norm(hidden_states, residual)
-            # A later PP stage's start boundary is captured by the stage before.
-            if idx in self.aux_hidden_state_layers and (
-                idx > self.start_layer or get_pp_group().is_first_rank
-            ):
-                aux_hidden_states.append(residual.clone())
-            hidden_states, residual = layer.forward_after_input_norm(
-                positions, hidden_states, residual
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
+        if step is not None:
+            hidden_states, residual = step.run(
+                hidden_states, positions, aux_hidden_states
             )
+        else:
+            for idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer], start=self.start_layer
+            ):
+                hidden_states, residual = layer.forward_input_norm(
+                    hidden_states, residual
+                )
+                # A later PP stage's start boundary is captured by the stage before.
+                if idx in self.aux_hidden_state_layers and (
+                    idx > self.start_layer or get_pp_group().is_first_rank
+                ):
+                    aux_hidden_states.append(residual.clone())
+                hidden_states, residual = layer.forward_after_input_norm(
+                    positions, hidden_states, residual
+                )
         if forward_context is not None:
             forward_context.is_padding = is_padding
 
