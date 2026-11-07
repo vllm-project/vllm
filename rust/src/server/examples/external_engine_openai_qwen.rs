@@ -21,7 +21,8 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
-    CorsConfig, HttpListenerMode, ParserSelection, RendererSelection, serve,
+    CorsConfig, DEFAULT_FORWARDED_ALLOW_IPS, HttpListenerMode, ParserSelection, RendererSelection,
+    serve,
 };
 
 #[derive(Debug, Parser)]
@@ -96,6 +97,7 @@ async fn main() -> Result<()> {
         fingerprint_mode: Default::default(),
         cors: CorsConfig::default(),
         access_log: AccessLogConfig::default(),
+        forwarded_allow_ips: DEFAULT_FORWARDED_ALLOW_IPS.to_owned(),
         tls: None,
         root_path: None,
         api_keys: Vec::new(),

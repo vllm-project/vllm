@@ -16,6 +16,7 @@ http-body.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 indexmap.workspace = true
+ipnet.workspace = true
 itertools.workspace = true
 libc.workspace = true
 llm-multimodal.workspace = true

@@ -134,6 +134,32 @@ completion = client.chat.completions.create(
 )
 ```
 
+## Reverse proxies
+
+Both frontends use `FORWARDED_ALLOW_IPS` to decide which proxies can supply
+the client address through `X-Forwarded-For`. Set it to a comma-separated
+list of proxy IPs or CIDR networks:
+
+```bash
+FORWARDED_ALLOW_IPS="127.0.0.1,10.0.0.0/8" VLLM_USE_RUST_FRONTEND=1 \
+  vllm serve Qwen/Qwen3-0.6B
+```
+
+The Rust frontend defaults to `127.0.0.1,::1`, as does Uvicorn 0.53 and later.
+An empty value disables proxy trust. Use `*` only if all connections come
+through trusted proxies that remove client-supplied `X-Forwarded-For` headers
+before they set their own. If a proxy appends to the header, list its IP
+instead. The [Nginx example](../../deployment/nginx.md) uses this append behavior.
+
+The Rust frontend combines repeated `X-Forwarded-For` fields in order and selects the
+rightmost untrusted IP, or the leftmost IP if all are trusted. IPv4 and IPv6
+addresses may include a port; use brackets for IPv6 with a port. An explicit
+port is preserved; otherwise it is `0`. An invalid selected address or port
+leaves the socket address unchanged.
+
+For Rust, write networks with a prefix length, such as `10.0.0.0/8`.
+Dotted netmasks such as `10.0.0.0/255.0.0.0` are not supported.
+
 ## API Reference
 
 ### Completions API

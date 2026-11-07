@@ -10942,16 +10942,19 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
 /// thread-local subscriber sees its events.
 async fn access_log_lines(
     access_log: AccessLogConfig,
+    forwarded_allow_ips: Option<&str>,
     requests: Vec<Request<Body>>,
 ) -> Vec<String> {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let (chat, engine_task) = test_chat_with_engine_handle().await;
-    let app = build_router(Arc::new(
-        AppState::new(vec!["test-model".to_string()], chat)
-            .with_api_keys(vec!["secret".to_string()])
-            .with_access_log(access_log),
-    ));
+    let mut state = AppState::new(vec!["test-model".to_string()], chat)
+        .with_api_keys(vec!["secret".to_string()])
+        .with_access_log(access_log);
+    if let Some(forwarded_allow_ips) = forwarded_allow_ips {
+        state = state.with_forwarded_allow_ips(forwarded_allow_ips);
+    }
+    let app = build_router(Arc::new(state));
     let capture = AccessLogCapture::default();
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
@@ -10993,6 +10996,7 @@ async fn access_log_records_each_response() {
 
     let lines = access_log_lines(
         access_log,
+        None,
         vec![
             with_client,
             get("/v1/models", false),
@@ -11020,6 +11024,7 @@ async fn access_log_disabled_logs_nothing() {
             enabled: false,
             excluded_paths: Vec::new(),
         },
+        None,
         vec![
             Request::builder()
                 .method("GET")
@@ -11031,6 +11036,219 @@ async fn access_log_disabled_logs_nothing() {
     .await;
 
     assert_eq!(lines, Vec::<String>::new());
+}
+
+/// Only trusted transport peers can supply the client address, and an
+/// untrusted hop prevents a forwarded chain from spoofing an earlier client.
+#[tokio::test]
+#[serial]
+async fn access_log_uses_forwarded_client_only_from_trusted_proxies() {
+    let cases = [
+        (
+            "default_proxy",
+            None,
+            Some("127.0.0.1:52344"),
+            Some("198.51.100.7"),
+        ),
+        (
+            "default_ipv6_proxy",
+            None,
+            Some("[::1]:52344"),
+            Some("198.51.100.7"),
+        ),
+        (
+            "untrusted_peer",
+            None,
+            Some("203.0.113.2:52344"),
+            Some("198.51.100.7"),
+        ),
+        ("missing_header", None, Some("127.0.0.1:52344"), None),
+        (
+            "configured_ip",
+            Some("203.0.113.2"),
+            Some("203.0.113.2:52344"),
+            Some("198.51.100.7"),
+        ),
+        (
+            "rightmost_untrusted",
+            Some("127.0.0.1,10.0.0.0/8"),
+            Some("127.0.0.1:52344"),
+            Some("198.51.100.7, 203.0.113.4, 10.1.2.3"),
+        ),
+        (
+            "all_hops_trusted",
+            Some("127.0.0.1,10.0.0.0/8"),
+            Some("127.0.0.1:52344"),
+            Some("10.2.3.4, 10.1.2.3"),
+        ),
+        (
+            "cidr_with_host_bits",
+            Some("10.0.0.1/8"),
+            Some("10.2.3.4:52344"),
+            Some("198.51.100.7"),
+        ),
+        (
+            "cidr_with_leading_zero",
+            Some("010.0.0.0/8"),
+            Some("10.2.3.4:52344"),
+            Some("198.51.100.7"),
+        ),
+        (
+            "ipv6_network",
+            Some("2001:db8::/32"),
+            Some("[2001:db8::2]:52344"),
+            Some("2001:db9::7, 2001:db8::1"),
+        ),
+        (
+            "trust_all",
+            Some("*"),
+            Some("203.0.113.2:52344"),
+            Some("198.51.100.7, 10.1.2.3"),
+        ),
+        (
+            "trust_none",
+            Some(""),
+            Some("127.0.0.1:52344"),
+            Some("198.51.100.7"),
+        ),
+        (
+            "malformed_hop",
+            None,
+            Some("127.0.0.1:52344"),
+            Some("198.51.100.7, unknown"),
+        ),
+        ("missing_peer", None, None, Some("198.51.100.7")),
+        (
+            "missing_peer_trust_all",
+            Some("*"),
+            None,
+            Some("198.51.100.7"),
+        ),
+        (
+            "wildcard_must_stand_alone",
+            Some("*,127.0.0.1"),
+            Some("203.0.113.2:52344"),
+            Some("198.51.100.7"),
+        ),
+    ];
+    let mut lines = Vec::new();
+    for (name, allowed_ips, peer, forwarded_for) in cases {
+        let mut request = Request::builder().uri("/version");
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
+        let mut request = request.body(Body::empty()).expect("build request");
+        if let Some(peer) = peer {
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().expect("parse peer"),
+            ));
+        }
+        lines.extend(
+            access_log_lines(AccessLogConfig::default(), allowed_ips, vec![request])
+                .await
+                .into_iter()
+                .map(|line| format!("{name}: {line}")),
+        );
+    }
+
+    expect_test::expect![[r#"
+        [
+            "default_proxy: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "default_ipv6_proxy: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "untrusted_peer: INFO message=HTTP response client=203.0.113.2:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "missing_header: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "configured_ip: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "rightmost_untrusted: INFO message=HTTP response client=203.0.113.4:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "all_hops_trusted: INFO message=HTTP response client=10.2.3.4:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "cidr_with_host_bits: INFO message=HTTP response client=10.2.3.4:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "cidr_with_leading_zero: INFO message=HTTP response client=10.2.3.4:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "ipv6_network: INFO message=HTTP response client=[2001:db9::7]:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "trust_all: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "trust_none: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "malformed_hop: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "missing_peer: INFO message=HTTP response method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "missing_peer_trust_all: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "wildcard_must_stand_alone: INFO message=HTTP response client=203.0.113.2:52344 method=GET uri=\"/version\" version=HTTP/1.1 status=200 latency=<elapsed>",
+        ]
+    "#]].assert_debug_eq(&lines);
+}
+
+/// Treat repeated XFF fields as one chain and keep the selected hop's port.
+/// Invalid selected hops retain the transport peer.
+#[tokio::test]
+#[serial]
+async fn access_log_joins_forwarded_fields_and_preserves_ports() {
+    type HeaderFields = &'static [&'static [u8]];
+    let cases: &[(&str, Option<&str>, HeaderFields)] = &[
+        (
+            "untrusted_last_hop",
+            None,
+            &[b"198.51.100.7", b"203.0.113.4"],
+        ),
+        ("trusted_last_field", None, &[b"198.51.100.7", b"127.0.0.1"]),
+        (
+            "trust_all_fields",
+            Some("*"),
+            &[b"198.51.100.7", b"203.0.113.4"],
+        ),
+        ("last_field_empty", None, &[b"198.51.100.7", b""]),
+        ("ipv4_port", None, &[b"198.51.100.7:4711"]),
+        ("ipv6_port", None, &[b"[2001:db9::7]:443"]),
+        ("bracketed_ipv6", None, &[b"[2001:db9::7]"]),
+        (
+            "trusted_hop_with_port",
+            None,
+            &[b"198.51.100.7:4711, 127.0.0.1:123"],
+        ),
+        (
+            "invalid_port_at_trust_boundary",
+            None,
+            &[b"198.51.100.7, 127.0.0.1:bad"],
+        ),
+        (
+            "port_out_of_range",
+            None,
+            &[b"198.51.100.7, 127.0.0.1:65536"],
+        ),
+        ("invalid_prefix", None, &[b"\xff, 203.0.113.4"]),
+        ("invalid_selected_hop", None, &[b"203.0.113.4, \xff"]),
+    ];
+    let mut lines = Vec::new();
+    for (name, allowed_ips, fields) in cases {
+        let mut request =
+            Request::builder().uri("/v1/models").body(Body::empty()).expect("build request");
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:52344".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        for field in *fields {
+            request.headers_mut().append(
+                "x-forwarded-for",
+                axum::http::HeaderValue::from_bytes(field).unwrap(),
+            );
+        }
+        lines.extend(
+            access_log_lines(AccessLogConfig::default(), *allowed_ips, vec![request])
+                .await
+                .into_iter()
+                .map(|line| format!("{name}: {line}")),
+        );
+    }
+    expect_test::expect![[r#"
+        [
+            "untrusted_last_hop: INFO message=HTTP response client=203.0.113.4:0 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "trusted_last_field: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "trust_all_fields: INFO message=HTTP response client=198.51.100.7:0 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "last_field_empty: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "ipv4_port: INFO message=HTTP response client=198.51.100.7:4711 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "ipv6_port: INFO message=HTTP response client=[2001:db9::7]:443 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "bracketed_ipv6: INFO message=HTTP response client=[2001:db9::7]:0 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "trusted_hop_with_port: INFO message=HTTP response client=198.51.100.7:4711 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "invalid_port_at_trust_boundary: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "port_out_of_range: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "invalid_prefix: INFO message=HTTP response client=203.0.113.4:0 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "invalid_selected_hop: INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+        ]
+    "#]].assert_debug_eq(&lines);
 }
 
 /// Captures the `--log-error-stack` events as `LEVEL field=value ...`.

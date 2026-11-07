@@ -36,10 +36,10 @@ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_arg
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
-    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    CorsConfig, CustomHistogramBuckets, DEFAULT_FORWARDED_ALLOW_IPS, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    FingerprintMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -561,6 +561,12 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub log_stats_interval: Option<LogStatsInterval>,
 
+    /// Trusted proxy IPs or networks for forwarded client addresses (default
+    /// `127.0.0.1,::1`). Like Python, set through `FORWARDED_ALLOW_IPS`.
+    #[arg(long, hide = true, env = "FORWARDED_ALLOW_IPS")]
+    #[serde(skip)]
+    pub forwarded_allow_ips: Option<String>,
+
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix. Like Python, it is set only through the deprecated
     /// `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`.
@@ -792,6 +798,9 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_LOG_STATS_INTERVAL: {error}"))?;
             self.log_stats_interval = Some(interval);
         }
+        if let Some(value) = lookup("FORWARDED_ALLOW_IPS") {
+            self.forwarded_allow_ips = Some(value);
+        }
         if let Some(value) = lookup("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION") {
             self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
@@ -893,6 +902,9 @@ impl SharedRuntimeArgs {
             fingerprint_mode,
             cors,
             access_log,
+            forwarded_allow_ips: self
+                .forwarded_allow_ips
+                .unwrap_or_else(|| DEFAULT_FORWARDED_ALLOW_IPS.to_owned()),
             tls,
             root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
@@ -981,6 +993,9 @@ impl SharedRuntimeArgs {
             fingerprint_mode,
             cors,
             access_log,
+            forwarded_allow_ips: self
+                .forwarded_allow_ips
+                .unwrap_or_else(|| DEFAULT_FORWARDED_ALLOW_IPS.to_owned()),
             tls,
             root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,

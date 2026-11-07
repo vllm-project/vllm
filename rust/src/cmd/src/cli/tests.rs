@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::time::Duration;
 
+use clap::{CommandFactory, FromArgMatches};
 use expect_test::expect;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
@@ -14,6 +16,31 @@ use vllm_server::{
 use vllm_text::backend::hf::ModelSource;
 
 use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+
+/// Parse CLI fixtures without the caller's proxy settings.
+fn parse_without_forwarded_env<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let args = super::repartition_managed_engine_args::<Cli>(&args, Some("serve"))?;
+    let matches = Cli::command()
+        .mut_subcommand("serve", |command| {
+            command.mut_arg("forwarded_allow_ips", |arg| arg.env(None::<&str>))
+        })
+        .mut_subcommand("frontend", |command| {
+            command.mut_arg("runtime", |arg| {
+                arg.value_parser(|value: &str| {
+                    let mut args = super::parse_runtime_args_json(value)?;
+                    args.forwarded_allow_ips = None;
+                    Ok::<_, String>(args)
+                })
+            })
+        })
+        .try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
+}
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
@@ -199,7 +226,7 @@ fn render_args_reject_client_cert_verification_without_ca() {
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_without_forwarded_env([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -273,6 +300,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             {},
                         ),
                         log_stats_interval: None,
+                        forwarded_allow_ips: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
@@ -765,9 +793,10 @@ fn serve_args_forward_stream_interval_to_frontend_config() {
 #[test]
 fn serve_args_forward_env_only_settings_to_frontend_config() {
     let parse = |extra_args: &[&str]| {
-        let cli =
-            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
-                .unwrap();
+        let cli = parse_without_forwarded_env(
+            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args),
+        )
+        .unwrap();
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
@@ -776,6 +805,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
+    assert_eq!(config.forwarded_allow_ips, "127.0.0.1,::1");
     assert!(!config.disable_request_id_randomization);
     assert!(!config.api_server_options.skip_model_name_validation);
     assert!(!config.api_server_options.server_dev_mode);
@@ -785,7 +815,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         Some(32 * 1024 * 1024)
     );
 
-    // Set through `VLLM_LOG_STATS_INTERVAL`,
+    // Set through `VLLM_LOG_STATS_INTERVAL`, `FORWARDED_ALLOW_IPS`,
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
     // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
     // `VLLM_SERVER_DEV_MODE`, and `VLLM_MAX_N_SEQUENCES`, which bind these
@@ -793,6 +823,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
+        "--forwarded-allow-ips",
+        "10.0.0.0/8,::1",
         "--disable-request-id-randomization",
         "1",
         "--http-max-request-body-size",
@@ -805,6 +837,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         " 8 ",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
+    assert_eq!(config.forwarded_allow_ips, "10.0.0.0/8,::1");
     assert!(config.disable_request_id_randomization);
     assert!(config.api_server_options.skip_model_name_validation);
     assert!(config.api_server_options.server_dev_mode);
@@ -844,6 +877,7 @@ fn args_json_reads_env_only_settings_from_env() {
 
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
+    assert_eq!(args.forwarded_allow_ips, None);
     assert!(!args.disable_request_id_randomization);
     assert!(!args.api_server_options().skip_model_name_validation);
     assert!(!args.api_server_options().server_dev_mode);
@@ -855,6 +889,7 @@ fn args_json_reads_env_only_settings_from_env() {
 
     let args = apply(&[
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
+        ("FORWARDED_ALLOW_IPS", "10.0.0.0/8,::1"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
@@ -863,6 +898,7 @@ fn args_json_reads_env_only_settings_from_env() {
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
+    assert_eq!(args.forwarded_allow_ips.as_deref(), Some("10.0.0.0/8,::1"));
     assert!(args.disable_request_id_randomization);
     assert!(args.api_server_options().skip_model_name_validation);
     assert!(args.api_server_options().server_dev_mode);
@@ -873,6 +909,9 @@ fn args_json_reads_env_only_settings_from_env() {
     );
     let args = apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "0")]).unwrap();
     assert_eq!(args.api_server_options().request_body_limit_bytes, None);
+
+    let args = apply(&[("FORWARDED_ALLOW_IPS", "")]).unwrap();
+    assert_eq!(args.forwarded_allow_ips.as_deref(), Some(""));
 
     let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
     assert_eq!(args.log_stats_interval(), None);
@@ -1883,7 +1922,7 @@ fn serve_args_reject_unsupported_no_flag_alias() {
 
 #[test]
 fn frontend_args_accept_json() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_without_forwarded_env([
         "vllm-rs",
         "frontend",
         "--listen-fd",
@@ -1964,6 +2003,7 @@ fn frontend_args_accept_json() {
                             {},
                         ),
                         log_stats_interval: None,
+                        forwarded_allow_ips: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
@@ -2822,7 +2862,7 @@ fn serve_args_auto_forward_negative_value_without_separator() {
 
 #[test]
 fn serve_args_accept_handshake_aliases() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_without_forwarded_env([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -2897,6 +2937,7 @@ fn serve_args_accept_handshake_aliases() {
                             {},
                         ),
                         log_stats_interval: None,
+                        forwarded_allow_ips: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
@@ -3086,7 +3127,7 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
 
 #[test]
 fn serve_frontend_config_uses_dp_address_as_advertised_host() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_without_forwarded_env([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -3217,6 +3258,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enabled: true,
                 excluded_paths: [],
             },
+            forwarded_allow_ips: "127.0.0.1,::1",
             tls: None,
             root_path: None,
             api_keys: [],
@@ -3251,7 +3293,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
 
 #[test]
 fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_without_forwarded_env([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -3349,6 +3391,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enabled: true,
                 excluded_paths: [],
             },
+            forwarded_allow_ips: "127.0.0.1,::1",
             tls: None,
             root_path: None,
             api_keys: [],
@@ -3488,7 +3531,7 @@ fn frontend_config_excludes_tools_when_tool_choice_none_from_args_json() {
 
 #[test]
 fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_without_forwarded_env([
         "vllm-rs",
         "frontend",
         "--listen-fd",
@@ -3594,6 +3637,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enabled: true,
                 excluded_paths: [],
             },
+            forwarded_allow_ips: "127.0.0.1,::1",
             tls: None,
             root_path: None,
             api_keys: [],
