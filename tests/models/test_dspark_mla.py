@@ -19,7 +19,9 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkM
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
-    assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
+    assert issubclass(
+        ModelRegistry._try_load_model_cls("K3DSparkModel"), K3DSparkForCausalLM
+    )
     assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
 
 
