@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, cast
 
+from transformers import PreTrainedTokenizerBase
+
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media.connector import merge_media_io_kwargs
@@ -168,6 +170,16 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation: list[dict[str, Any]],
         params: ChatParams,
     ) -> list[int]:
+        tokenizer = self.get_tokenizer()
+        if (
+            type(tokenizer).apply_chat_template
+            is PreTrainedTokenizerBase.apply_chat_template
+        ):
+            raise VLLMValidationError(
+                "The kimi_k3 tokenizer mode requires native chat encoding.",
+                parameter="tokenizer_mode",
+            )
+
         # Tokenize eagerly: K3 encodes structural markers as special tokens and
         # user/tool text as ordinary tokens, so we cannot defer to a plain
         # re-tokenization of the rendered string downstream.
@@ -178,7 +190,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
-        return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
+        return tokenizer.apply_chat_template(conversation, **kwargs)
 
     def render_messages(
         self,
