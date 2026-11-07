@@ -24,11 +24,16 @@ from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
     _resolve_watermark_key,
+    create_sampler_watermarker,
     create_speculative_draft_watermarker,
     create_speculative_target_watermarker,
     speculative_target_watermark_key,
 )
-from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
+from vllm.v1.watermarking.watermarker import (
+    RandomSampler,
+    Watermarker,
+    WatermarkSample,
+)
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.watermark import (
@@ -1138,6 +1143,166 @@ def test_rejection_sampler_skips_only_partial_speculative_contexts(scope):
     assert torch.equal(
         kwargs["watermarking_skip_mask"], torch.tensor([True, False, False])
     )
+
+
+class ContextTokenWatermarker(Watermarker):
+    context_width = 1
+
+    def _sample_watermarked(self, logits, contexts):
+        return WatermarkSample(contexts[:, 0], logits)
+
+
+def _pin_sampler(watermarking, temperatures, contexts, scope="none"):
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = ContextTokenWatermarker()
+    sampler.deduplicate_contexts = scope
+    sampler.watermarking = SimpleNamespace(
+        np=np.array(watermarking), gpu=torch.tensor(watermarking)
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(
+            np=np.array(temperatures), gpu=torch.tensor(temperatures)
+        ),
+        seeds=SimpleNamespace(gpu=torch.zeros(len(temperatures), dtype=torch.int64)),
+    )
+    sampler.use_fp64_gumbel = False
+    sampler._get_contexts = lambda *args: torch.tensor(contexts)
+    return sampler
+
+
+def test_set_watermarked_sample_as_argmax_pins_only_watermarked_rows(monkeypatch):
+    sampler = _pin_sampler(
+        watermarking=[True, False, True, True],
+        temperatures=[1.0, 1.0, 0.0, 1.0],
+        contexts=[[3], [4], [5], [-1]],
+    )
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([0, 0, 0, 6]),
+    )
+    logits = torch.randn(4, 8)
+    original = logits.clone()
+
+    temperature, restore = sampler.set_watermarked_sample_as_argmax(
+        logits,
+        torch.arange(4),
+        np.arange(4),
+        torch.zeros(4, dtype=torch.int64),
+        torch.zeros(4, dtype=torch.int64),
+        torch.zeros(4, dtype=torch.int64),
+    )
+
+    # Row 3 has a partial context, so it is pinned to the seeded sample.
+    assert logits[[0, 3]].argmax(dim=-1).tolist() == [3, 6]
+    assert torch.isposinf(logits[[0, 3], [3, 6]]).all()
+    assert torch.equal(logits[[1, 2]], original[[1, 2]])
+    assert temperature.tolist() == [0.0, 1.0, 0.0, 0.0]
+    assert sampler.sampling_states.temperature.gpu.tolist() == [1.0, 1.0, 0.0, 1.0]
+
+    assert restore is not None
+    restore()
+    assert torch.equal(logits, original)
+
+
+def test_sampler_keeps_the_full_dual_key_watermarker_with_greedy_drafts():
+    watermarker = DualKeyGumbelWatermarker(key=42)
+
+    assert create_sampler_watermarker(watermarker, "greedy") is watermarker
+    assert (
+        create_sampler_watermarker(watermarker, "probabilistic")
+        is watermarker.target_watermarker
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_set_watermarked_sample_as_argmax_keeps_dual_key_routing():
+    device = "cuda"
+    num_rows, vocab_size = 256, 512
+    torch.manual_seed(0)
+    watermarker = DualKeyGumbelWatermarker(key=42, context_width=1, alpha=0.5)
+    contexts = torch.arange(num_rows, device=device).unsqueeze(-1)
+    logits = torch.randn(num_rows, vocab_size, device=device)
+    temperature = torch.ones(num_rows, device=device)
+    seeds = torch.arange(num_rows, dtype=torch.int64, device=device)
+    rows = torch.arange(num_rows, device=device)
+    pos = torch.full((num_rows,), 7, dtype=torch.int64, device=device)
+
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = watermarker
+    sampler.deduplicate_contexts = "none"
+    sampler.use_fp64_gumbel = False
+    sampler.watermarking = SimpleNamespace(
+        np=np.ones(num_rows, dtype=bool),
+        gpu=torch.ones(num_rows, dtype=torch.bool, device=device),
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(
+            np=np.ones(num_rows, dtype=np.float32), gpu=temperature
+        ),
+        seeds=SimpleNamespace(gpu=seeds),
+    )
+    sampler._get_contexts = lambda *args: contexts
+
+    random_sampler = RandomSampler(
+        expanded_idx_mapping=rows,
+        temperatures=temperature,
+        seeds=seeds,
+        positions=pos,
+        use_fp64=False,
+    )
+    skip_mask = torch.zeros(num_rows, dtype=torch.bool, device=device)
+    expected = watermarker.sample(logits, contexts, random_sampler, skip_mask).token_ids
+    key_a = watermarker.draft_watermarker.sample(
+        logits, contexts, random_sampler, skip_mask
+    ).token_ids
+    key_b = watermarker.target_watermarker.sample(
+        logits, contexts, random_sampler, skip_mask
+    ).token_ids
+
+    _, restore = sampler.set_watermarked_sample_as_argmax(
+        logits,
+        rows,
+        np.arange(num_rows),
+        pos,
+        torch.zeros(num_rows, dtype=torch.int64, device=device),
+        torch.zeros(num_rows, dtype=torch.int64, device=device),
+    )
+
+    assert restore is not None
+    pinned = logits.argmax(dim=-1)
+    restore()
+    assert torch.equal(pinned, expected)
+    assert (pinned != key_a).any()
+    assert (pinned != key_b).any()
+
+
+@pytest.mark.parametrize(
+    ("watermarking", "temperatures"),
+    [([False, False], [1.0, 1.0]), ([True, True], [0.0, 0.0])],
+    ids=["unwatermarked", "greedy"],
+)
+def test_set_watermarked_sample_as_argmax_ignores_requests_without_watermark_sampling(
+    watermarking, temperatures
+):
+    sampler = _pin_sampler(watermarking, temperatures, contexts=[[3], [4]])
+    sampler.watermarker = None
+    logits = torch.randn(2, 8)
+    original = logits.clone()
+
+    temperature, restore = sampler.set_watermarked_sample_as_argmax(
+        logits,
+        torch.arange(2),
+        np.arange(2),
+        torch.zeros(2, dtype=torch.int64),
+        torch.zeros(2, dtype=torch.int64),
+        torch.zeros(2, dtype=torch.int64),
+    )
+
+    assert restore is None
+    assert temperature is sampler.sampling_states.temperature.gpu
+    assert torch.equal(logits, original)
 
 
 @pytest.mark.skipif(
