@@ -69,3 +69,15 @@ steps:
       - vllm/config/compilation.py
       - vllm/compilation
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 18GB) NVML startup LLM regression"
+  key: nvml-startup-llm
+  device: h200_18gb
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/platforms/cuda.py
+  - vllm/logger.py
+  - tests/cuda/test_nvml_llm.py
+  commands:
+    - pytest -v -s cuda/test_nvml_llm.py
