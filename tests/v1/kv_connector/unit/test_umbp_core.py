@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import PreTrainedConfig
 
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
@@ -219,6 +220,26 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) == namespace(draft("drafter-a"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-b"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
+
+
+def test_namespace_distinguishes_effective_model_configs():
+    """Overridden RoPE or quantization must not reuse the defaults' KV."""
+    config = _kv_cache_config()
+
+    def namespace(rope_theta=1e6, quantization=None, **hf_fields):
+        vllm_config = _vllm_config({"mode": "standalone"})
+        vllm_config.model_config.hf_config = PreTrainedConfig(
+            rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+            **hf_fields,
+        )
+        vllm_config.model_config.quantization = quantization
+        return UMBPNamespace.from_vllm_config(vllm_config, config).value
+
+    default = namespace()
+    assert namespace() == default
+    assert namespace(name_or_path="/mnt/another-copy") == default
+    assert namespace(rope_theta=1e4) != default
+    assert namespace(quantization="fp8") != default
 
 
 def test_layout_planner_sizes_uniform_type_layers_independently():
