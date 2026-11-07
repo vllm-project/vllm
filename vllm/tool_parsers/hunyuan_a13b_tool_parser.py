@@ -57,9 +57,12 @@ class HunyuanA13BToolParser(ToolParser):
             r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{\s*\}'
         )
 
-        # TODO: not support nested json object in fc arguments.
+        # Strings are matched whole and (?1) recurses into nested objects, so the
+        # match ends at the brace that closes the arguments.
         self.tool_non_empty_arg_reg = re.compile(
-            r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*(\{(?:[^{}]|(?:\{[^{}]*\}))*\})'
+            r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*'
+            r'(\{(?:[^{}"]++|"(?:[^"\\]++|\\.)*+"|(?1))*+\})',
+            re.DOTALL,
         )
 
         self.bot_string = "<tool_calls>"
@@ -344,20 +347,6 @@ class HunyuanA13BToolParser(ToolParser):
             args_matches = list(self.tool_non_empty_arg_reg.finditer(current_text))
             if current_idx < len(args_matches):
                 args_text = args_matches[current_idx].group(1)
-                is_last_tool = current_idx == tool_count - 1
-                if not is_last_tool:
-                    next_tool_pos = current_text.find(
-                        "},{", args_matches[current_idx].start()
-                    )
-                    if next_tool_pos != -1:
-                        args_end_pos = next_tool_pos + 1
-                        args_text = (
-                            current_text[
-                                args_matches[current_idx].start() : args_end_pos
-                            ]
-                            .split('"arguments":')[1]
-                            .strip()
-                        )
                 sent_args = self.streaming_state["sent_tools"][current_idx][
                     "sent_arguments"
                 ]
