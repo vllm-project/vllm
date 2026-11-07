@@ -21,6 +21,7 @@ Compare two session dirs:
 """
 
 import argparse
+import contextlib
 import csv
 import json
 import os
@@ -105,36 +106,27 @@ def build_sweeps(mode: str) -> list[RunSpec]:
     ]
 
 
-def kill_vllm(pid: int) -> None:
+def kill_vllm(proc: subprocess.Popen) -> None:
     """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
     for attempt in range(1, 6):
-        if not _alive(pid):
-            print(f"      vLLM process ({pid}) has exited gracefully.")
+        if proc.poll() is not None:
+            print(f"      vLLM process ({proc.pid}) has exited gracefully.")
             return
-        print(f"      [Attempt {attempt}/5] Sending SIGINT to PID {pid}...")
-        os.kill(pid, signal.SIGINT)
-        for _ in range(10):
-            if not _alive(pid):
-                break
-            time.sleep(1)
-    if _alive(pid):
+        print(f"      [Attempt {attempt}/5] Sending SIGINT to PID {proc.pid}...")
+        proc.send_signal(signal.SIGINT)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+    if proc.poll() is None:
         print("      vLLM did not exit after 5 attempts. Force killing...")
-        os.kill(pid, signal.SIGKILL)
-        time.sleep(5)
-    if _alive(pid):
+        proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+    if proc.poll() is None:
         sys.exit(
-            f"FATAL: vLLM process ({pid}) could NOT be killed; GPU VRAM is "
+            f"FATAL: vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
             "likely still locked. Aborting to prevent cascading failures."
         )
     print("      vLLM successfully terminated.")
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def cleanup(fs_dir: Path) -> None:
@@ -168,7 +160,7 @@ def write_kv_config(path: Path, spec: RunSpec, fs_dir: Path) -> None:
     path.write_text(json.dumps(config, indent=2))
 
 
-def start_vllm(config_path: Path, log_path: Path) -> int:
+def start_vllm(config_path: Path, log_path: Path) -> subprocess.Popen:
     env = dict(os.environ, PYTHON_HASH_SEED="0")
     cmd = [
         "vllm",
@@ -185,23 +177,25 @@ def start_vllm(config_path: Path, log_path: Path) -> int:
     ]
     with log_path.open("w") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
-    return proc.pid
+    return proc
 
 
-def wait_for_vllm(pid: int, log_path: Path, timeout: int = 1800) -> None:
+def wait_for_vllm(proc: subprocess.Popen, log_path: Path, timeout: int = 1800) -> None:
     print(f"      Waiting for vLLM on port {PORT}...")
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{PORT}/v1/models"
     while time.monotonic() < deadline:
-        if not _alive(pid):
-            sys.exit(_crash_report(pid, log_path))
+        if proc.poll() is not None:
+            sys.exit(_crash_report(proc.pid, log_path))
         try:
             urlopen(url, timeout=5)
             print("      vLLM is ready!")
             return
         except OSError:
             time.sleep(5)
-    sys.exit(_crash_report(pid, log_path, "timed out waiting to accept connections"))
+    sys.exit(
+        _crash_report(proc.pid, log_path, "timed out waiting to accept connections")
+    )
 
 
 def _crash_report(pid: int, log_path: Path, why: str = "crashed during startup") -> str:
@@ -280,12 +274,12 @@ def run_one(spec: RunSpec, fs_dir: Path, session_dir: Path) -> dict:
     config_path = run_dir / "kv_transfer_config.json"
     write_kv_config(config_path, spec, fs_dir)
     print("  [3/5] Starting vLLM server...")
-    pid = start_vllm(config_path, vllm_log)
-    wait_for_vllm(pid, vllm_log)
+    proc = start_vllm(config_path, vllm_log)
+    wait_for_vllm(proc, vllm_log)
     print("  [4/5] Running guidellm benchmark...")
     result = {"spec": asdict(spec), "status": "ok", **run_guidellm(spec, guidellm_log)}
     print("  [5/5] Teardown: stopping vLLM...")
-    kill_vllm(pid)
+    kill_vllm(proc)
     time.sleep(5)
     return result
 
