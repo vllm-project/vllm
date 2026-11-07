@@ -30,12 +30,11 @@ void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
 #endif
 
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
-void cutlass_scaled_fp4_mm_sm120a(torch::stable::Tensor& D,
-                                  torch::stable::Tensor const& A,
-                                  torch::stable::Tensor const& B,
-                                  torch::stable::Tensor const& A_sf,
-                                  torch::stable::Tensor const& B_sf,
-                                  torch::stable::Tensor const& alpha);
+void cutlass_scaled_fp4_mm_sm120a(
+    torch::stable::Tensor& D, torch::stable::Tensor const& A,
+    torch::stable::Tensor const& B, torch::stable::Tensor const& A_sf,
+    torch::stable::Tensor const& B_sf, torch::stable::Tensor const& alpha,
+    std::optional<torch::stable::Tensor> const& bias);
 #endif
 
 void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
@@ -43,7 +42,8 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            const torch::stable::Tensor& B,
                            const torch::stable::Tensor& A_sf,
                            const torch::stable::Tensor& B_sf,
-                           const torch::stable::Tensor& alpha) {
+                           const torch::stable::Tensor& alpha,
+                           const std::optional<torch::stable::Tensor>& bias) {
   // Make sure we're on A's device.
   const torch::stable::accelerator::DeviceGuard device_guard(
       A.get_device_index());
@@ -51,6 +51,8 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
 
 #if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
   if (sm >= 100 && sm < 120) {
+    STD_TORCH_CHECK(!bias.has_value(),
+                    "The nvfp4 mm bias epilogue is not supported on SM ", sm);
     cutlass_scaled_fp4_mm_sm100a(D, A, B, A_sf, B_sf, alpha);
     return;
   }
@@ -58,7 +60,7 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
 
 #if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
   if (sm >= 120 && sm < 130) {
-    cutlass_scaled_fp4_mm_sm120a(D, A, B, A_sf, B_sf, alpha);
+    cutlass_scaled_fp4_mm_sm120a(D, A, B, A_sf, B_sf, alpha, bias);
     return;
   }
 #endif

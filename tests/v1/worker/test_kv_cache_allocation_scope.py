@@ -11,6 +11,7 @@ import torch
 import vllm.v1.hisparse.binding as hisparse_binding
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -60,6 +61,9 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
                 )
             ]
 
+        monkeypatch.setattr(
+            hisparse_binding, "get_hisparse_backend", CUDAHiSparseBackend
+        )
         monkeypatch.setattr(
             hisparse_binding,
             "get_hisparse_host_pool",
@@ -148,8 +152,6 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
         Worker,
         SimpleNamespace(
             sleep_mode_backend=SimpleNamespace(resume=lambda tags: None),
-            _sleep_saved_buffers={},
-            _sleep_saved_draft_buffers={},
             model_runner=runner,
             synchronize_device=lambda: None,
             vllm_config=SimpleNamespace(

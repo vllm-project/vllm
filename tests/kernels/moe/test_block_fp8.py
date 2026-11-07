@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -17,6 +19,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
     fused_experts,
     fused_topk,
+    override_config,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -31,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -47,11 +53,6 @@ dg_available = has_deep_gemm()
 device_capability = current_platform.get_device_capability()
 if device_capability is None or device_capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
 
 vllm_config = VllmConfig()
 
@@ -172,6 +173,55 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
+@pytest.mark.skipif(
+    "H200" not in torch.cuda.get_device_name(),
+    reason="The sorted-A TMA path is tuned for H200",
+)
+def test_sorted_a_tma_moe_matches_route_major(workspace_init):
+    """The H200 sorted path preserves routed FP8 block outputs exactly."""
+    torch.manual_seed(123)
+    m, experts, hidden, intermediate, topk = 1024, 256, 4096, 256, 8
+    x = (torch.randn((m, hidden)) / 10).to(torch.bfloat16)
+    w1, w2, quant_config = make_test_quant_config(
+        experts,
+        intermediate,
+        hidden,
+        torch.bfloat16,
+        torch.float8_e4m3fn,
+        block_shape=[128, 128],
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        max_num_tokens=m,
+    )
+    kernel = modular_triton_fused_moe(moe_config, quant_config)
+    triton_experts = kernel.fused_experts
+    assert isinstance(triton_experts, triton_moe.TritonExperts)
+    topk_ids = torch.randint(experts, (m, topk))
+    topk_weights = torch.softmax(torch.randn((m, topk)), dim=-1)
+    kwargs = dict(
+        activation=MoEActivation.SILU,
+        global_num_experts=experts,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+    )
+    with set_current_vllm_config(vllm_config):
+        triton_experts._enable_sorted_a_tma = False
+        expected = kernel.apply(x, w1, w2, topk_weights, topk_ids, **kwargs)
+        triton_experts._enable_sorted_a_tma = True
+        with patch.object(
+            triton_moe,
+            "invoke_fused_moe_triton_kernel",
+            wraps=triton_moe.invoke_fused_moe_triton_kernel,
+        ) as calls:
+            actual = kernel.apply(x, w1, w2, topk_weights, topk_ids, **kwargs)
+    assert any(call.kwargs.get("A_is_sorted") for call in calls.call_args_list)
+    assert torch.equal(expected, actual)
+
+
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS)
 @pytest.mark.parametrize("E", E)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -195,7 +245,7 @@ def test_w8a8_block_fp8_fused_moe(
         N,
         K,
         dtype,
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_act_token_quant=False,
         block_shape=block_size,
     )
@@ -260,6 +310,66 @@ def test_w8a8_block_fp8_fused_moe(
     torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
 
 
+@pytest.mark.parametrize("M", [24, 1024])
+@pytest.mark.parametrize("modular", [False, True])
+@torch.inference_mode()
+def test_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
+    if not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("This block FP8 TMA test requires SM90 or SM100")
+
+    E, N, K, topk = 256, 256, 128, 8
+    torch.manual_seed(123)
+    a = torch.randn((M, K), dtype=torch.bfloat16) / 10
+    score = torch.randn((M, E), dtype=torch.bfloat16)
+    w1, w2, quant_config = make_test_quant_config(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=[128, 128]
+    )
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    config_args = (w1.shape, w2.shape, topk, "fp8_w8a8", M)
+    config = try_get_optimal_moe_config(*config_args, block_shape=[128, 128])
+    assert w2.is_contiguous()
+
+    if modular:
+        moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
+
+        def run():
+            return moe.apply(
+                a,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                activation=MoEActivation.SILU,
+                apply_router_weight_on_input=False,
+                expert_map=None,
+                global_num_experts=E,
+            )
+
+    else:
+
+        def run():
+            return fused_experts(
+                a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
+            )
+
+    with set_current_vllm_config(vllm_config):
+        with override_config({**config, "USE_TMA": False}):
+            pointer_output = run()
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        with patch.object(
+            TensorDescriptor, "from_tensor", wraps=TensorDescriptor.from_tensor
+        ) as descriptors:
+            tma_output = run()
+        assert descriptors.call_count == 2
+
+    torch.testing.assert_close(tma_output, pointer_output, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])
 @torch.inference_mode()
 def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
@@ -273,7 +383,7 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
     a = torch.randn((M, K), dtype=torch.bfloat16) / 10
     score = torch.randn((M, E), dtype=torch.bfloat16)
     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
+        E, N, K, torch.bfloat16, current_platform.fp8_dtype(), block_shape=block_size
     )
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_s,
@@ -326,7 +436,7 @@ def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_i
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
     w1, w2, quant_config = make_test_quant_config(
-        E, N, K, dtype, quant_dtype=torch.float8_e4m3fn, block_shape=block_size
+        E, N, K, dtype, quant_dtype=current_platform.fp8_dtype(), block_shape=block_size
     )
 
     local_e = E // ep_size
@@ -391,7 +501,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
         N,
         K,
         dtype,
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         block_shape=block_size,
     )
@@ -513,7 +623,7 @@ def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
         inter_full,
         hidden,
         dtype,
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         block_shape=ckpt_block,
     )
