@@ -155,6 +155,18 @@ class GuidanceBackend(StructuredOutputBackend):
         # PreTrainedTokenizerFast is the same as TokenizersBackend
         return isinstance(tokenizer, TokenizersBackend)
 
+    @classmethod
+    def validate_tokenizer(cls, tokenizer: TokenizerLike) -> None:
+        """Raise a validation error when the guidance backend cannot use
+        this tokenizer."""
+        if not cls.is_tokenizer_supported(tokenizer):
+            raise VLLMValidationError(
+                "The 'guidance' structured output backend only supports fast "
+                "Hugging Face tokenizers and Tekken-based Mistral tokenizers. "
+                "Please use the 'xgrammar' backend or configure a fast "
+                "tokenizer instead."
+            )
+
     @staticmethod
     def _build_ll_tokenizer(tokenizer: TokenizerLike, vocab_size: int) -> Any:
         if is_mistral_tokenizer(tokenizer):
