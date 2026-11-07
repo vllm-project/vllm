@@ -2182,11 +2182,10 @@ class Scheduler(SchedulerInterface):
                 < (start_pos + num_encoder_tokens)
             ):
                 if num_computed_tokens < start_pos:
-                    # Account for EAGLE shift when rolling back to avoid
-                    # encoder cache miss. This ensures the scheduled range
-                    # stops before start_pos even with the shift.
-                    num_new_tokens = max(
-                        0, start_pos - (num_computed_tokens + shift_computed_tokens)
+                    # No drafter shift here: its read-ahead into this unscheduled
+                    # input falls back to token embeddings.
+                    num_new_tokens = min(
+                        num_new_tokens, start_pos - num_computed_tokens
                     )
                 else:
                     # The chunk starts on or inside the item (a prefix cache hit
