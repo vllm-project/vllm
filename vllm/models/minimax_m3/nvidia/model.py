@@ -146,10 +146,26 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Largest batch whose MoE top-k finalize runs inside the next layer's fused
-# all-reduce + input norm + MXFP8 quantization. Larger batches finalize in the
-# MoE and use the regular fused all-reduce + norm.
-FUSED_MOE_FINALIZE_MAX_TOKENS = 32
+# Largest batch whose MoE top-k finalize is fused into the next all-reduce +
+# input norm + MXFP8 quantization; larger batches finalize in the MoE. 512
+# covers the decode steps of up to 64 requests with 7 speculative tokens.
+FUSED_MOE_FINALIZE_MAX_TOKENS = 512
+# Up to this many tokens at TP4 the fused all-reduce is one-shot (every rank
+# multicasts its rows and reduces all of them); above it, two-shot (each token
+# is reduced by one rank, which multicasts the sum). One-shot traffic grows
+# with the batch. In decode on GB300 at TP4, one-shot was faster at 64 tokens
+# and two-shot at 128; the sizes in between were not measured in serving.
+FUSED_MOE_FINALIZE_ONE_SHOT_MAX_TOKENS = 64
+
+
+def fused_moe_finalize_one_shot_max_tokens(tp_size: int) -> int:
+    """The one-shot cutoff at ``tp_size``. Each rank reduces ``tp_size`` rows
+    per token, so above TP4 the cutoff shrinks to keep that at TP4's load."""
+    return min(
+        FUSED_MOE_FINALIZE_ONE_SHOT_MAX_TOKENS,
+        FUSED_MOE_FINALIZE_ONE_SHOT_MAX_TOKENS * 4 // tp_size,
+    )
+
 
 _QKV_FUSED_EPILOGUE_MIN_TOKENS = 512
 
@@ -1546,6 +1562,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         if not supports_fused_moe_finalize(vllm_config):
             return
+        max_num_tokens = FUSED_MOE_FINALIZE_MAX_TOKENS
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
             layer.block_sparse_moe
@@ -1553,7 +1570,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             if layer.is_moe_layer
             and successor.fuse_input_allreduce
             and get_input_quant_key(successor.self_attn.qkv_proj) == kMxfp8Dynamic
-            and layer.block_sparse_moe.defer_finalize(FUSED_MOE_FINALIZE_MAX_TOKENS)
+            and layer.block_sparse_moe.defer_finalize(max_num_tokens)
         ]
         if not deferring:
             return
@@ -1564,14 +1581,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
         init_fused_moe_finalize(
             hidden_size=self.config.hidden_size,
-            max_num_tokens=FUSED_MOE_FINALIZE_MAX_TOKENS,
+            max_num_tokens=max_num_tokens,
             top_k=self.config.num_experts_per_tok,
             fp32_weights=experts_cls is TrtLlmNvFp4ExpertsModular,
+            one_shot_max_tokens=fused_moe_finalize_one_shot_max_tokens(
+                get_tensor_model_parallel_world_size()
+            ),
         )
         logger.info_once(
             "MiniMax M3: MoE top-k finalize fused into the next all-reduce + "
             "input norm + MXFP8 quantization for up to %d tokens (%d layers).",
-            FUSED_MOE_FINALIZE_MAX_TOKENS,
+            max_num_tokens,
             len(deferring),
         )
 
