@@ -19,7 +19,8 @@ class AuxOutputConfig:
 
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or ``None`` to derive it from the KV cache capacity.
-    Grows when every object is referenced."""
+    Grows when every object is referenced.
+    Under pipeline parallelism, this is the total across all stages."""
 
     @property
     def enabled(self) -> bool:

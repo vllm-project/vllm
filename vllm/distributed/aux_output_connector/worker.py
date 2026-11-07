@@ -177,6 +177,11 @@ class AuxOutputWorkerConnector:
             max_bytes = (
                 kv_cache_config.num_blocks * scheduler_block_size * bytes_per_token
             )
+        elif vllm_config.parallel_config.pipeline_parallel_size > 1:
+            # R3 max_bytes covers all stages, which must hold the same blocks.
+            num_layers = vllm_config.model_config.get_total_num_hidden_layers()
+            global_block_nbytes = block_nbytes // shape_per_token[0] * num_layers
+            max_bytes = (max_bytes // global_block_nbytes) * block_nbytes
         store = BackgroundBlockObjectStore(
             BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
