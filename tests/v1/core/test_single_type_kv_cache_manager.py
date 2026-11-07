@@ -78,6 +78,19 @@ def test_external_computed_blocks_do_not_corrupt_free_pool():
     assert len(manager.req_to_blocks[request_id]) == 3
 
 
+def test_get_new_blocks_rejects_negative_count():
+    """A negative count must not reach the free queue and inflate its counter."""
+    block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
+
+    with pytest.raises(ValueError, match="num_blocks must be non-negative"):
+        block_pool.get_new_blocks(-1)
+    assert block_pool.get_num_free_blocks() == 4
+
+    # The pool is still usable afterwards and hands out exactly its blocks.
+    assert len(block_pool.get_new_blocks(4)) == 4
+    assert block_pool.get_num_free_blocks() == 0
+
+
 def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
     spec = MambaSpec(
         block_size=4,

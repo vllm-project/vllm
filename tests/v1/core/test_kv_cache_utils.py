@@ -727,6 +727,23 @@ def test_free_kv_cache_block_queue_popleft_n():
         assert block.next_free_block is None
 
 
+def test_free_kv_cache_block_queue_popleft_n_rejects_negative_n():
+    """A negative count used to inflate num_free_blocks and corrupt the list."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(4)]
+    queue = FreeKVCacheBlockQueue(blocks)
+
+    with pytest.raises(ValueError, match="n must be non-negative"):
+        queue.popleft_n(-1)
+    assert queue.num_free_blocks == 4
+
+    # The rejected call must leave the list intact, not just the counter: the
+    # old behaviour inflated the counter, so a later pop handed out the fake
+    # tail sentinel (block_id=-1) and the one after that hit an assert.
+    assert queue.popleft_n(4) == blocks
+    assert queue.num_free_blocks == 0
+    assert queue.popleft_n(0) == []
+
+
 @pytest.mark.parametrize("num_blocks", [1, 2, 16])
 def test_free_kv_cache_block_queue_popleft_n_drain_and_refill(num_blocks):
     """Draining a batch must leave the sentinels ready for reuse."""
