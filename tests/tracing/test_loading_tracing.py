@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import gc
+import time
 
 import pytest
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from tests.tracing.conftest import FAKE_TRACE_SERVER_ADDRESS, FakeTraceService
-from vllm.tracing import init_tracer, instrument, is_otel_available
+from vllm.tracing import (
+    init_tracer,
+    instrument,
+    instrument_manual,
+    is_otel_available,
+)
+from vllm.tracing.otel import _get_tracer
 
 # Skip everything if OTel is missing
 pytestmark = pytest.mark.skipif(not is_otel_available(), reason="OTel required")
@@ -85,3 +93,31 @@ class TestInterProcessPropagation:
 
         assert span["trace_id"] == fake_trace_id
         assert span["parent_span_id"] == fake_parent_id
+
+
+class TestTracerReuse:
+    """Per-request spans must not create a new tracer each time."""
+
+    @pytest.fixture(autouse=True)
+    def setup_tracing(self, monkeypatch):
+        monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
+        init_tracer("test.reuse", FAKE_TRACE_SERVER_ADDRESS)
+
+    def test_same_tracer_is_returned(self):
+        assert _get_tracer("vllm.test") is _get_tracer("vllm.test")
+
+    def test_manual_spans_do_not_accumulate_meters(
+        self, trace_service: FakeTraceService
+    ):
+        """opentelemetry-sdk 1.40.0 registers meters per new Tracer and the
+        default proxy MeterProvider keeps them forever (one set per request)."""
+
+        def count_proxy_meters() -> int:
+            return sum(type(o).__name__ == "_ProxyMeter" for o in gc.get_objects())
+
+        instrument_manual(span_name="warmup", start_time=time.time_ns())
+        before = count_proxy_meters()
+        for _ in range(200):
+            instrument_manual(span_name="llm_request", start_time=time.time_ns())
+
+        assert count_proxy_meters() == before
