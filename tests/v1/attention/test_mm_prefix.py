@@ -211,12 +211,16 @@ def _dense_reference(
     sliding_window_left,
     scale,
     mm_clamp_sw=0,
+    per_req_causal=None,
 ):
     """Dense float32 `(causal AND window) OR mm_prefix` per request.
 
     `mm_clamp_sw` confines the bidirectional block to the window, reproducing
     Gemma4's `mm_prefix_clamp_sliding_window`. Only the past bound applies, so
     future keys inside a range still pass.
+
+    ``per_req_causal`` marks requests that drop the causal bound (DiffusionGemma
+    denoise rows); their window becomes symmetric.
     """
     out = torch.empty_like(q, dtype=torch.float32)
     repeats = q.shape[1] // k_per_req[0].shape[1]
@@ -227,7 +231,12 @@ def _dense_reference(
         k_pos = torch.arange(k_len, device=q.device)
         delta = q_pos[:, None] - k_pos[None, :]
 
+        causal = per_req_causal is None or per_req_causal[req_idx]
         keep = delta >= 0
+        if not causal:
+            keep = torch.ones_like(keep)
+            if sliding_window_left is not None:
+                keep &= -delta < sliding_window_left
         if sliding_window_left is not None:
             keep &= delta < sliding_window_left
 
@@ -396,6 +405,63 @@ def test_window_modes_on_a_range_wider_than_the_window(window_mode):
 
     actual = _run_kernel(*args, mm_clamp_sw=mm_clamp_sw)
     torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_fa4
+@pytest.mark.parametrize("window_mode", WINDOW_MODES, ids=WINDOW_IDS)
+def test_per_request_causal_flags(window_mode):
+    """DiffusionGemma batches an image prefill (causal) with a denoise step
+    (bidirectional). The mask_mod reads the flags from aux_tensors[2]."""
+    sliding_window_left, mm_clamp_sw = window_mode
+    query_lens, seq_lens = [96, 32], [96, 288]
+    # Request 1's image is in its prompt; its denoise canvas is past it.
+    mm_ranges = {0: [(8, 71)], 1: [(16, 79)]}
+    per_req_causal = [True, False]
+    q, k, v, scale = _randn_qkv(query_lens, seq_lens)
+
+    cu_q = _cu_seqlens(query_lens)
+    staging = np.full((sum(query_lens), 2), 12345, dtype=np.int32)
+    num_rows = fill_mm_prefix_query_ranges(
+        staging, mm_ranges, cu_q, torch.tensor(seq_lens, dtype=torch.int32)
+    )
+    assert num_rows > 0
+    cu_q_gpu = cu_q.to(DEVICE)
+    flags = torch.tensor(per_req_causal, dtype=torch.int32, device=DEVICE)
+
+    out = torch.empty_like(q)
+    flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        out=out,
+        cu_seqlens_q=cu_q_gpu,
+        cu_seqlens_k=_cu_seqlens(seq_lens).to(DEVICE),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(seq_lens),
+        softmax_scale=scale,
+        causal=False,
+        fa_version=4,
+        mask_mod=_make_mm_prefix_mask_mod(
+            sliding_window=mm_clamp_sw,
+            sliding_window_left=sliding_window_left,
+            use_dynamic_causal=True,
+        ),
+        aux_tensors=[
+            torch.from_numpy(staging[:num_rows]).to(DEVICE),
+            cu_q_gpu,
+            flags,
+        ],
+    )
+
+    args = (q, k, v, query_lens, seq_lens, mm_ranges, sliding_window_left, scale)
+    expected = _reference(
+        *args, mm_clamp_sw=mm_clamp_sw, per_req_causal=per_req_causal
+    )
+    torch.testing.assert_close(out.float(), expected, atol=2e-2, rtol=2e-2)
+    # The flags must matter, or the test would pass with them ignored.
+    assert not torch.allclose(
+        expected, _reference(*args, mm_clamp_sw=mm_clamp_sw), atol=2e-2, rtol=2e-2
+    )
 
 
 @requires_fa4
