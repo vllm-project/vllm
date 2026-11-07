@@ -20,6 +20,7 @@ from vllm.config.utils import hash_config
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
+    _run_flashinfer_tactic_warmup,
     flashinfer_autotune,
 )
 
@@ -177,8 +178,8 @@ def test_flashinfer_autotune_lifecycle(
     model = runner.get_model()
     cache_path = tmp_path / "autotune.json"
     rank_cache_path = cache_path.with_name(f"autotune_dp0_rank{rank}.json")
-    # A matching cache lets every rank skip the tuning sweep, so the dummy
-    # failure case must run on a cache miss to reach the sweep at all.
+    # The dummy runs also warm up the kernels of cached tactics, so they run
+    # on a cache hit too; the dummy failure case covers the cache miss.
     cache_hit = failure != "dummy"
     if cache_hit:
         rank_cache_path.write_text(json.dumps({"_metadata": {}, "op": 1}))
@@ -246,6 +247,7 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(
         warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
     )
+    monkeypatch.setattr(warmup, "_run_flashinfer_tactic_warmup", events.warm)
 
     if failure is None:
         warmup.flashinfer_autotune(runner)
@@ -271,11 +273,10 @@ def test_flashinfer_autotune_lifecycle(
     if hisparse:
         expected.append(call.hisparse(runner))
     warmup_calls: list[tuple[str, object, dict]] = [
+        ("dummy", runner, {"skip_attn": hisparse}),
         ("replayssm", runner, {}),
         ("kimi", model, {}),
     ]
-    if use_v2 or not cache_hit:
-        warmup_calls.insert(0, ("dummy", runner, {"skip_attn": hisparse}))
     for name, arg, kwargs in warmup_calls:
         expected.append(getattr(call, name)(arg, **kwargs))
         if failure == name:
@@ -289,7 +290,39 @@ def test_flashinfer_autotune_lifecycle(
             expected.extend([call.reload(), call.barrier()])
         elif not use_v2:
             expected.append(call.tuner.save_configs(str(rank_cache_path)))
+        expected.append(call.warm(runner, skip_attn=hisparse))
     assert events.mock_calls == expected
+
+
+@pytest.mark.parametrize("skip_attn", [False, True])
+def test_flashinfer_tactic_warmup_runs_both_ends_of_each_bucket(skip_attn):
+    runner = _make_runner([])
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(8192, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
+            return_value=(1, 64, 128, 1024, 8192),
+        ) as get_buckets,
+        patch("vllm.utils.flashinfer.autotune") as autotune,
+    ):
+        _run_flashinfer_tactic_warmup(runner, skip_attn=skip_attn)
+
+    get_buckets.assert_called_once_with(8192)
+    autotune.assert_not_called()
+    assert runner._dummy_run.call_args_list == [
+        call(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            **({"skip_attn": True} if skip_attn else {}),
+        )
+        for num_tokens in (1, 2, 64, 65, 129, 1024, 1025)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -582,6 +615,9 @@ def autotune_run(monkeypatch, tmp_path):
         )
         monkeypatch.setattr(warmup, "replayssm_autotune_warmup", lambda runner: None)
         monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: None)
+        monkeypatch.setattr(
+            warmup, "_run_flashinfer_tactic_warmup", lambda runner, **kwargs: None
+        )
         return run
 
     return make_run

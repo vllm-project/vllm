@@ -481,6 +481,35 @@ def _run_flashinfer_autotune_dummy_runs(
             autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
+def _run_flashinfer_tactic_warmup(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
+    """Run every token bucket outside tune mode to compile its cached tactic.
+
+    A tuning pass runs only its own token count. On a cache hit nothing is
+    profiled, so the tactics selected for the other buckets would otherwise
+    JIT-compile on live requests. Serving rounds M up to a bucket, so run both
+    ends of each bucket's range: a model can switch paths inside it (e.g. a
+    fused kernel from M >= 512 that leaves the 512 bucket's GEMM tactic to
+    M in 257..511).
+    """
+    import vllm.utils.flashinfer as fi_utils
+
+    dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(max_tokens)
+    token_counts = set(buckets)
+    token_counts.update(prev + 1 for prev in buckets[:-1])
+    token_counts.difference_update(_flashinfer_autotune_token_counts(runner))
+    for num_tokens in sorted(token_counts):
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            **dummy_run_kwargs,
+        )
+
+
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
     """Identify a saved autotune file by its FlashInfer metadata and size."""
     try:
@@ -505,8 +534,8 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     """Load the per-rank autotune cache into the tuner, group-wide.
 
     Returns True only when every rank of the tune group had a matching file
-    and loaded it: the dummy-run sweep contains collectives, so skipping it
-    is safe only if the decision is unanimous.
+    and loaded it. Otherwise every rank drops its configs and retunes: a rank
+    with a cache hit skips the per-tactic reduces the other ranks block in.
     """
     if not _all_ranks_have_matching_cache(cache_path, tune_group):
         return False
@@ -572,7 +601,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         autotune_kwargs["skip_ops"] = skip_ops
 
     use_autotune_v2 = use_flashinfer_autotune_v2(runner)
-    cache_hit = False
     if use_autotune_v2:
         from flashinfer import autotune_v2, autotune_v2_reload
 
@@ -595,7 +623,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 cache_path,
             )
 
-        cache_hit = _load_shared_autotune_cache(cache_path, tuner, tune_group)
+        _load_shared_autotune_cache(cache_path, tuner, tune_group)
         autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
@@ -610,8 +638,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            if not cache_hit:
-                _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
@@ -626,3 +653,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             world.barrier()
     elif tuner._dirty:
         tuner.save_configs(str(cache_path))
+
+    with torch.inference_mode():
+        _run_flashinfer_tactic_warmup(runner, skip_attn=skip_attn)
