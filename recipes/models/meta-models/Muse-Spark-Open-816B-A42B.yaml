@@ -4,7 +4,7 @@ meta:
   provider: "Muse (Meta)"
   description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `muse` parsers, and an optional DSpark draft model for speculative decoding."
   date_added: 2026-10-15
-  date_updated: 2026-10-23
+  date_updated: 2026-11-07
   tasks:
     - text
     - multimodal
@@ -85,6 +85,32 @@ features:
             args:
               - "--speculative-config"
               - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false,"attention_backend":"ROCM_AITER_FA"}'
+            env:
+              AITER_UNIFIED_ATTN_SHORT_QUERY_3D: "1"
+              VLLM_KV_CACHE_LAYOUT: "LBHNC"
+      # A DSpark mode, not a feature: it serves only verify steps and needs
+      # adaptive verification off. Startup checks: unsupported() in
+      # muse_spark/nvidia/specialized_decode/runtime/__init__.py and
+      # deployment_refusals() in muse_spark/amd/mono/decoder.py.
+      dspark_specialized:
+        label: "DSpark + specialized decode"
+        description: "Low-concurrency decode path: DSpark verify steps run on fused persistent kernels, other steps on the regular path. Needs the Tensor + Expert Parallel strategy (TP4/8/16 on GB300, TP8 on MI355X) and an image built from vLLM main at or after 4fab5a0; vLLM refuses other deployments at startup."
+        variants: [default, mxfp4]
+        hardware:
+          default: unsupported
+          gb300: supported
+          mi355x: supported
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
+          - "--additional-config"
+          - '{"decode_backend":"latency_specialized"}'
+        hardware_overrides:
+          amd:
+            args:
+              - "--speculative-config"
+              - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false,"attention_backend":"ROCM_AITER_FA"}'
+              - "--monokernel"
             env:
               AITER_UNIFIED_ATTN_SHORT_QUERY_3D: "1"
               VLLM_KV_CACHE_LAYOUT: "LBHNC"
@@ -182,6 +208,13 @@ hardware_overrides:
       VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: "bf16"
       VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
 strategy_overrides: {}
+
+notes:
+  - title: "Specialized decode needs a newer image"
+    when:
+      hardware: [gb300, mi355x]
+      features: [spec_decoding]
+    body: "The **DSpark + specialized decode** method is on vLLM main since 2026-11-03 and is not in the `muse-spark-open` images. Serve it from `vllm/vllm-openai:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808` (GB300) or `vllm/vllm-openai-rocm:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808` (MI355X), or a later nightly."
 
 guide: |
   ## Overview
@@ -381,18 +414,28 @@ guide: |
   keep `--max-num-seqs 32`. For throughput beyond about 64 concurrent
   requests, use expert parallelism without DSpark.
 
-  ### Monokernel decode (MI355X, manual opt-in)
+  ### Specialized decode (GB300, MI355X)
 
-  On MI355X, `--monokernel` runs decoder layers 1-60 of the DSpark verify
-  steps of 1 to 16 requests as persistent FlyDSL launches: one launch a layer
-  for one or two requests, three for 3-16 requests, with the verify attention
-  fused into the launches for up to four requests. Add it to the MXFP4
-  command with **Tensor + Expert Parallel** (TP8 + `--enable-expert-parallel`)
-  and the seven-token DSpark profile above (AITER FA, bf16 KV cache). vLLM
-  refuses other deployments at startup; prefill and larger steps keep the
-  regular path. The launches keep the expert activations in bf16 (MXFP4
-  weights x bf16 activations) instead of the checkpoint's W4A4, so outputs
-  are close to, but not bit-identical with, the regular path.
+  The **DSpark + specialized decode** method runs DSpark verify steps on fused
+  persistent kernels and leaves prefill and other steps on the regular path.
+  It targets latency-bound serving with a few requests in flight. Use it with
+  the **Tensor + Expert Parallel** strategy; vLLM refuses other deployments at
+  startup. It is on vLLM main since 2026-11-03 and not in the `muse-spark-open`
+  images, so serve it from a nightly image built at or after `4fab5a0`.
+
+  - **GB300, NVFP4** (`--additional-config '{"decode_backend":"latency_specialized"}'`):
+    TP4, TP8 or TP16 with expert parallelism. It serves the verify step of one
+    request (1 + 7 draft tokens) under FULL CUDA graphs and needs adaptive
+    verification off, which the method sets. 1.53x single-stream decode at
+    TP8 + EP8 ([#64077](https://github.com/vllm-project/vllm/pull/64077)).
+  - **MI355X, MXFP4** (`--monokernel`): TP8 with expert parallelism and a bf16
+    KV cache. It runs decoder layers 1-60 of the DSpark verify steps of 1 to
+    16 requests as persistent FlyDSL launches: one launch a layer for one or
+    two requests, three for 3-16 requests, with the verify attention fused
+    into the launches for up to four requests. The launches keep the expert
+    activations in bf16 (MXFP4 weights x bf16 activations) instead of the
+    checkpoint's W4A4, so outputs are close to, but not bit-identical with,
+    the regular path.
 
   ### Adaptive DSpark (manual opt-in, Triton attention)
 
