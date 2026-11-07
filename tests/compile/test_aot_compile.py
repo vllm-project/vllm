@@ -23,6 +23,8 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
+    get_code_factors,
+    read_code_files,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -1093,3 +1095,24 @@ def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_
         assert traced > before
         assert torch.equal(mod(x + 10), (x + 10) * 2 + 1)
         assert counters["unique_graphs"] == traced
+
+
+def test_read_code_files_uses_source_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """UTF-8 traced sources must not depend on the locale default."""
+    source = "# non-ASCII: ✓\n"
+    traced_file = tmp_path / "traced.py"
+    traced_file.write_text(source, encoding="utf-8")
+    real_open = Path.open
+
+    def open_with_cp1252(self, mode="r", *args, **kwargs):
+        if "b" not in mode:
+            kwargs["encoding"] = "cp1252"
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_with_cp1252)
+
+    contents = read_code_files({traced_file})
+    assert contents == {traced_file: source}
+    assert get_code_factors(contents) == get_code_factors({traced_file: source})
