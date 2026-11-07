@@ -178,7 +178,6 @@ class BatchMemcpyParams(NamedTuple):
     # 0, which is what ROCm runtimes older than 7.13 require (see
     # _num_attrs_for_hip_version).
     attrs: _CUmemcpyAttributes
-    attrs_idx: ctypes.c_size_t
     num_attrs: int
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
     # cuMemcpyBatchAsync() with fail_idx for backward compatibility
@@ -217,7 +216,6 @@ def build_params(
         bpb=np.array(bpb, dtype=np.uint64),
         num_layers=len(src_tensors),
         attrs=attrs,
-        attrs_idx=ctypes.c_size_t(0),
         num_attrs=num_attrs,
         fail_idx=ctypes.c_size_t(0),
         stream_handle=stream.cuda_stream,
@@ -255,13 +253,18 @@ def copy_blocks(
     step = total if max_desc <= 0 else max_desc
     for off in range(0, total, step):
         cnt = min(step, total - off)
+        # attrIdxs must hold one entry per descriptor (cnt entries); a
+        # single size_t only covers the first one and leaves the driver
+        # reading past it (undefined behavior that happens to work when
+        # adjacent bytes read as zero). All-zero = attrs[0] for all.
+        attr_idxs = np.zeros(cnt, dtype=np.uint64)
         err = fn(
             dst_all[off : off + cnt].ctypes.data,
             src_all[off : off + cnt].ctypes.data,
             sz_all[off : off + cnt].ctypes.data,
             cnt,
             ctypes.addressof(params.attrs),
-            ctypes.byref(params.attrs_idx),
+            attr_idxs.ctypes.data,
             params.num_attrs,
             ctypes.byref(params.fail_idx),
             params.stream_handle,
