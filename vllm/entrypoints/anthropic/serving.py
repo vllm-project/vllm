@@ -41,6 +41,7 @@ from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StreamOptions,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -87,6 +88,28 @@ class _CountTokensChatRequest(ChatCompletionRequest):
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
         )
+
+
+def _tool_call_input(tool_call: ToolCall) -> dict[str, Any]:
+    """Decode tool-call arguments, or `{}` if they are not a JSON object."""
+    arguments = tool_call.function.arguments
+    if not arguments:
+        return {}
+
+    try:
+        decoded = json.loads(arguments)
+    except json.JSONDecodeError:
+        decoded = None
+
+    if isinstance(decoded, dict):
+        return decoded
+
+    logger.warning(
+        "Discarding unusable arguments for Anthropic tool call %s (%s)",
+        tool_call.id,
+        tool_call.function.name,
+    )
+    return {}
 
 
 def _build_anthropic_usage(
@@ -949,12 +972,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
+        tool_calls = choice.message.tool_calls
         result.stop_reason, result.stop_sequence = _to_anthropic_stop_reason(
             choice.finish_reason,
             choice.stop_reason,
-            tool_used=bool(choice.message.tool_calls),
-            # Their arguments are json-decoded below, so parsed calls are complete.
-            tool_complete=bool(choice.message.tool_calls),
+            tool_used=bool(tool_calls),
+            tool_complete=bool(tool_calls)
+            and all(_is_json(call.function.arguments) for call in tool_calls),
         )
 
         content: list[AnthropicContentBlock] = []
@@ -974,12 +998,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                 )
             )
 
-        for tool_call in choice.message.tool_calls:
+        for tool_call in tool_calls:
             anthropic_tool_call = AnthropicContentBlock(
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=_tool_call_input(tool_call),
             )
             content += [anthropic_tool_call]
 
