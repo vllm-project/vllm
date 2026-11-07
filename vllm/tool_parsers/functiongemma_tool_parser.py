@@ -22,6 +22,11 @@ from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+    find_tool_properties,
+)
 
 logger = init_logger(__name__)
 
@@ -41,13 +46,6 @@ def _skip_whitespace(text: str, pos: int) -> int:
     while pos < len(text) and text[pos] in " \n":
         pos += 1
     return pos
-
-
-def _decode_escaped(raw: str):
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
 
 
 def _decode_bare(raw: str):
@@ -76,7 +74,8 @@ def _parse_value(text: str, pos: int, partial: bool) -> tuple[object, int]:
         end = text.find(_ESCAPE, start)
         if end < 0:
             raise _IncompleteValue
-        return _decode_escaped(text[start:end]), end + len(_ESCAPE)
+        # <escape> delimits a string literal, even when its text looks like JSON.
+        return text[start:end], end + len(_ESCAPE)
     if text.startswith("{", pos):
         return _parse_object(text, pos + 1, partial)
     if text.startswith("[", pos):
@@ -157,7 +156,13 @@ class FunctionGemmaToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = []
         self.buffered_delta_text = ""
 
-    def _parse_arguments(self, args_str: str, partial: bool = False) -> dict:
+    def _parse_arguments(
+        self,
+        args_str: str,
+        request: ChatCompletionRequest | None = None,
+        func_name: str = "",
+        partial: bool = False,
+    ) -> dict:
         """Parse a FunctionGemma argument string into a dictionary.
 
         The chat template writes strings as ``<escape>text<escape>`` and
@@ -165,7 +170,15 @@ class FunctionGemmaToolParser(ToolParser):
         ``{key:value,...}`` with bare keys. With ``partial`` the string is a
         streaming prefix: parsing stops at the first incomplete value and the
         complete arguments before it are returned.
+
+        Escaped values stay strings, unless the tool schema declares a
+        non-string type for the argument: the bundled chat template escapes
+        every argument of earlier tool calls, so a model following that history
+        can escape typed arguments too.
         """
+        properties = find_tool_properties(
+            request.tools if request is not None else None, func_name
+        )
         arguments: dict = {}
         pos = 0
         while pos < len(args_str):
@@ -178,10 +191,17 @@ class FunctionGemmaToolParser(ToolParser):
             key = args_str[pos:colon].strip()
             if not key:
                 break
+            escaped = args_str.startswith(
+                _ESCAPE, _skip_whitespace(args_str, colon + 1)
+            )
             try:
                 value, pos = _parse_value(args_str, colon + 1, partial)
             except (_IncompleteValue, _MalformedValue):
                 break
+            if escaped:
+                value = coerce_to_schema_type(
+                    value, extract_types_from_schema(properties.get(key))
+                )
             arguments[key] = value
         return arguments
 
@@ -220,7 +240,7 @@ class FunctionGemmaToolParser(ToolParser):
                 if not func_name:
                     continue
 
-                arguments = self._parse_arguments(args_str)
+                arguments = self._parse_arguments(args_str, request, func_name)
 
                 tool_calls.append(
                     ToolCall(
@@ -280,7 +300,9 @@ class FunctionGemmaToolParser(ToolParser):
             ]
         )
 
-    def _close_tool_call(self, current_text: str) -> DeltaMessage | None:
+    def _close_tool_call(
+        self, current_text: str, request: ChatCompletionRequest
+    ) -> DeltaMessage | None:
         """Stream what is left of the current call, including its closing brace."""
         if not 0 <= self.current_tool_id < len(self.prev_tool_call_arr):
             return None
@@ -289,7 +311,7 @@ class FunctionGemmaToolParser(ToolParser):
         if self.current_tool_id < len(all_calls):
             match = all_calls[self.current_tool_id]
             if match[0]:
-                args = self._parse_arguments(match[1])
+                args = self._parse_arguments(match[1], request, match[0])
         if args or self.current_tool_name_sent:
             return self._stream_arguments(args, final=True)
         return None
@@ -344,7 +366,7 @@ class FunctionGemmaToolParser(ToolParser):
             # Starting a new function call
             if start_count > prev_start_count and start_count > end_count:
                 closing = (
-                    self._close_tool_call(current_text)
+                    self._close_tool_call(current_text, request)
                     if end_count > prev_end_count
                     else None
                 )
@@ -392,7 +414,7 @@ class FunctionGemmaToolParser(ToolParser):
 
                         if self.current_tool_name_sent and args_part:
                             current_args = self._parse_arguments(
-                                args_part, partial=True
+                                args_part, request, func_name, partial=True
                             )
                             if current_args:
                                 return self._stream_arguments(current_args, final=False)
@@ -401,7 +423,7 @@ class FunctionGemmaToolParser(ToolParser):
 
             # Function call just ended
             if end_count > prev_end_count:
-                return self._close_tool_call(current_text)
+                return self._close_tool_call(current_text, request)
 
             if delta_text:
                 return DeltaMessage(content=delta_text)
