@@ -86,6 +86,7 @@ def _xpress_latent_kernel(
     R: tl.constexpr,
     H: tl.constexpr,
     BP: tl.constexpr,
+    KC: tl.constexpr,
     HT: tl.constexpr,
     DO_MLP: tl.constexpr,
 ):
@@ -115,11 +116,12 @@ def _xpress_latent_kernel(
         R: latent rank.
         H: MLP hidden size.
         BP: B rounded up to a power of two (tile size).
+        KC: rank chunk of the embedding projection; R holds all of W_lat at once.
         HT: MLP hidden tile size.
         DO_MLP: whether to run the SwiGLU MLP here. False stops after the mixer
-            and hands its output back, so the caller can run the SwiGLU as
-            cuBLAS GEMMs instead -- see the comment at the MLP loop for why
-            that is faster.
+            and hands its output back, so ``xpress_latent_pass`` can run the
+            SwiGLU as GEMMs instead -- see the comment at the MLP loop for why
+            that can be faster.
 
     """
     n = tl.program_id(0).to(tl.int64)
@@ -127,23 +129,26 @@ def _xpress_latent_kernel(
     offs_r = tl.arange(0, R)
     mask_b = offs_b < B
 
-    xh = tl.load(
+    x = tl.load(
         xh_ptr + n * B * R + offs_b[:, None] * R + offs_r[None, :],
         mask=mask_b[:, None],
         other=0.0,
     ).to(tl.float32)
-    wlat = tl.load(wlat_ptr + offs_r[:, None] * R + offs_r[None, :])
 
-    prev = tl.load(blk_ptr + n * B + offs_b - 1, mask=mask_b & (offs_b >= 1), other=0)
-    am1 = tl.load(am1_ptr + n)
-    prev = tl.where(offs_b == 0, am1, prev)
-
-    lat = tl.load(
-        w1_ptr + prev[:, None] * R + offs_r[None, :],
-        mask=mask_b[:, None],
-        other=0.0,
-    )
-    x = xh + tl.dot(lat, wlat, out_dtype=tl.float32)
+    for k0 in tl.static_range(0, R, KC):
+        offs_k = k0 + tl.arange(0, KC)
+        wlat = tl.load(wlat_ptr + offs_k[:, None] * R + offs_r[None, :])
+        prev = tl.load(
+            blk_ptr + n * B + offs_b - 1, mask=mask_b & (offs_b >= 1), other=0
+        )
+        am1 = tl.load(am1_ptr + n)
+        prev = tl.where(offs_b == 0, am1, prev)
+        lat = tl.load(
+            w1_ptr + prev[:, None] * R + offs_k[None, :],
+            mask=mask_b[:, None],
+            other=0.0,
+        )
+        x += tl.dot(lat, wlat, out_dtype=tl.float32)
 
     u = tl.zeros([BP, R], dtype=tl.float32)
     for j in tl.static_range(B):
@@ -158,9 +163,9 @@ def _xpress_latent_kernel(
     ub = u.to(wg_ptr.dtype.element_ty)
     x = u
     # DO_MLP=False stops after the mixer and hands u back, so the caller can run the
-    # SwiGLU as cuBLAS GEMMs. The MLP's wg/wu/wd are ~768KB of the ~940KB this program
-    # reads, and with grid (N,) one SM pulls all of it; cuBLAS spreads the same reads
-    # over many SMs, and under a CUDA graph the extra launches cost nothing.
+    # SwiGLU as GEMMs. The MLP's wg/wu/wd are ~768KB of the ~940KB this program
+    # reads, and with grid (N,) one SM pulls all of it; GEMMs spread the same reads
+    # over many SMs, at the cost of extra launches, which still take time in a graph.
     for h0 in range(0, H if DO_MLP else 0, HT):
         offs_ht = h0 + tl.arange(0, HT)
         g = tl.dot(
@@ -198,16 +203,34 @@ def xpress_latent_pass(
     wg_t,
     wu_t,
     wd_t,
-    do_mlp: bool = True,
+    wgu_t: torch.Tensor | None = None,
+    do_mlp: bool | None = None,
+    kc: int | None = None,
+    ht: int = 64,
+    num_stages: int | None = None,
 ) -> None:
     """Run ``_xpress_latent_kernel`` over N blocks; see its docstring for shapes.
 
     The caller follows this with the readout matmul ``lat_out @ W2`` and one of
-    the fused argmax entry points below.
+    the fused argmax entry points below. ``do_mlp`` runs the SwiGLU MLP in the
+    kernel, else as GEMMs after it on ``wgu_t`` ([R, 2 * H], ``wg_t`` and ``wu_t``
+    side by side). ``kc``, ``ht`` and ``num_stages`` set the kernel's ``KC``,
+    ``HT`` and pipelining depth; None picks the platform default.
     """
     N, B = blk.shape
     R = xh.shape[-1]
     H = wg_t.shape[-1]
+    rocm = current_platform.is_rocm()
+    if do_mlp is None:
+        # MI355, one pass at bs=1 (latent + top-C readout + argmax): 54.0us fused
+        # with the one stage gfx950's LDS fits at HT=64, 44.8us fused with 3 stages
+        # at HT=32, 31.1us with the MLP as GEMMs.
+        do_mlp = not rocm
+    if kc is None:
+        # As fast as R on MI355, and at R=256 the W_lat tile then fits gfx942's 64KB.
+        kc = R // 2 if rocm else R
+    if kc <= 0 or kc & (kc - 1) or R % kc:
+        raise ValueError(f"kc must be a positive power of two dividing R={R}, got {kc}")
     _xpress_latent_kernel[(N,)](
         blk,
         tok_am1,
@@ -223,16 +246,23 @@ def xpress_latent_pass(
         R=R,
         H=H,
         BP=triton.next_power_of_2(B),
-        HT=64,
+        KC=kc,
+        HT=ht,
         DO_MLP=do_mlp,
         num_warps=8,
         # 3 stages, measured: one pass at bs=1 drops 76.7us -> 61.0us, because the
         # weight loads (wlat, wg, wu, wd: ~940KB per program) then overlap with the
         # dots instead of each one exposing its full latency. 4+ stages do not
         # compile -- the tiles already use most of the shared memory. gfx950's 160KB
-        # LDS fits only one stage.
-        num_stages=1 if current_platform.is_rocm() else 3,
+        # LDS fits only one stage at HT=64.
+        num_stages=num_stages or (1 if rocm else 3),
     )
+    if not do_mlp:
+        assert wgu_t is not None, "the GEMM MLP needs wgu_t"
+        u = lat_out.view(-1, R)
+        m = u.new_empty(u.shape[0], H)
+        torch.ops._C.silu_and_mul(m, u @ wgu_t)
+        u.addmm_(m, wd_t)
 
 
 @triton.jit
