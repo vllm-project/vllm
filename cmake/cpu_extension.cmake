@@ -499,6 +499,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
+    "csrc/cpu/topk_topp_sampler.cpp"
     "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
