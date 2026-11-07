@@ -47,6 +47,7 @@ from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache.shm import ShmObjectStoreSenderCache
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -64,6 +65,7 @@ from vllm.utils.serial_utils import numpy2base64
 from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
+    validate_qwen_image_features,
 )
 from .protocol import (
     GenerateDerenderChoice,
@@ -346,6 +348,26 @@ class ServingTokens(GenerateBaseServing):
             mm_kwargs = mm_kwargs_from_features(features)
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
+
+            if "image" in mm_kwargs:
+                ec_config = (
+                    self.engine_client.vllm_config.ec_transfer_config
+                    if request.ec_transfer_params
+                    else None
+                )
+                try:
+                    validate_qwen_image_features(
+                        features,
+                        mm_kwargs["image"],
+                        self.model_config.hf_config,
+                        allow_ec_metadata=bool(ec_config and ec_config.is_ec_consumer),
+                        allow_shm_handles=isinstance(
+                            self.online_renderer.renderer.mm_processor_cache,
+                            ShmObjectStoreSenderCache,
+                        ),
+                    )
+                except ValueError as exc:
+                    return self.create_error_response(exc, param="features")
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
