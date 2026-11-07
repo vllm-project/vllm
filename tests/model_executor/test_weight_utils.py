@@ -8,6 +8,7 @@ import huggingface_hub.constants
 import pytest
 import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
+from safetensors.torch import save_file
 
 import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
@@ -464,6 +465,51 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
             param.data.uniform_(-5, 5)
             initialize_single_dummy_weight(param, name=name)
             assert torch.all(param == values[name]), (type(norm).__name__, name)
+
+
+@pytest.mark.parametrize(
+    ("fs_type", "strategy", "available_ram_multiplier", "should_prefetch"),
+    [
+        pytest.param("virtiofs", None, 2, True, id="virtiofs"),
+        pytest.param("virtiofs", None, 1, False, id="virtiofs-low-ram"),
+        pytest.param("virtiofs", "lazy", 2, False, id="virtiofs-explicit-lazy"),
+        pytest.param("ext4", None, 2, False, id="ext4"),
+    ],
+)
+def test_auto_prefetch_selection(
+    tmp_path,
+    monkeypatch,
+    fs_type,
+    strategy,
+    available_ram_multiplier,
+    should_prefetch,
+):
+    """Auto-prefetch respects filesystem, RAM, and explicit lazy settings."""
+    checkpoint = tmp_path / "model.safetensors"
+    save_file({"weight": torch.ones(2)}, checkpoint)
+    monkeypatch.setattr(weight_utils, "_get_fs_type", lambda _: fs_type)
+    monkeypatch.setattr(
+        weight_utils,
+        "get_available_memory",
+        lambda: checkpoint.stat().st_size * available_ram_multiplier,
+    )
+    prefetched = []
+    monkeypatch.setattr(
+        weight_utils,
+        "_prefetch_all_checkpoints",
+        lambda files, **_: prefetched.extend(files),
+    )
+
+    weights = dict(
+        weight_utils.safetensors_weights_iterator(
+            [str(checkpoint)],
+            use_tqdm_on_load=False,
+            safetensors_load_strategy=strategy,
+        )
+    )
+
+    assert torch.equal(weights["weight"], torch.ones(2))
+    assert prefetched == ([str(checkpoint)] if should_prefetch else [])
 
 
 if __name__ == "__main__":
