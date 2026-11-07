@@ -2532,6 +2532,11 @@ def test_batch_invariant_sparse_indexer_reuses_deep_select(monkeypatch) -> None:
         "is_device_capability_family",
         lambda major: major == 100,
     )
+    monkeypatch.setattr(
+        sparse_attn_indexer,
+        "is_deep_select_supported",
+        lambda *_: True,
+    )
 
     logits = torch.zeros((2, 16))
     sparse_attn_indexer._top_k_per_row_prefill(

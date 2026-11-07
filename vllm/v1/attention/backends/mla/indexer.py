@@ -704,7 +704,6 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
-    row_starts: torch.Tensor | None = None
     global_seq_lens: torch.Tensor | None = None
     per_req_decode_lens: torch.Tensor | None = None
     decode_is_uniform: bool = True
@@ -1093,7 +1092,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        self.decode_row_starts_buffer = torch.zeros_like(self.decode_seq_lens_buffer)
         self.global_decode_seq_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -1856,7 +1854,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=schedule_metadata,
                 indices=decode_indices,
-                row_starts=self.decode_row_starts_buffer[:num_decode_tokens],
                 global_seq_lens=global_seq_lens_for_decode,
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,

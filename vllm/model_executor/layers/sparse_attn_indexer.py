@@ -90,7 +90,10 @@ def _top_k_per_row_prefill(
     top_k: int,
 ) -> None:
     if envs.VLLM_BATCH_INVARIANT:
-        if current_platform.is_device_capability_family(100):
+        if (
+            current_platform.is_device_capability_family(100)
+            and is_deep_select_supported(logits[:num_rows], top_k)
+        ):
             deep_select_topk(
                 logits[:num_rows],
                 top_k,
@@ -571,12 +574,6 @@ def sparse_attn_indexer(
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
-
-    if envs.VLLM_BATCH_INVARIANT and (dcp_world_size > 1 or use_pcp):
-        raise NotImplementedError(
-            "Batch-invariant sparse top-k does not support DCP/PCP: "
-            "the local selector and distributed merge use different tie-breaks."
-        )
 
     if candidate_blocks is not None:
         # Candidate blocks are request-local; the DCP-sharded logits layout
@@ -1214,15 +1211,16 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         if envs.VLLM_BATCH_INVARIANT:
-            assert decode_metadata.row_starts is not None
-            row_starts = decode_metadata.row_starts[:num_rows]
+            assert next_n == 1, (
+                "Batch-invariant sparse top-k decode requires one token per request."
+            )
             row_ends = seq_lens.reshape(-1)[:num_rows].contiguous()
             assert row_ends.numel() == num_rows, (
                 "Batch-invariant sparse top-k requires one sequence length per row."
             )
             _top_k_per_row_prefill(
                 logits,
-                row_starts,
+                torch.zeros_like(row_ends),
                 row_ends,
                 topk_indices,
                 num_rows,
@@ -1372,6 +1370,11 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
+        if envs.VLLM_BATCH_INVARIANT and (self.dcp_world_size > 1 or self.use_pcp):
+            raise NotImplementedError(
+                "Batch-invariant sparse top-k does not support DCP/PCP: "
+                "the local selector and distributed merge use different tie-breaks."
+            )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
