@@ -2586,17 +2586,25 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         super().pop_blocks_for_free(request_id)
         return trim_null_head(blocks)
 
-    def adopt_resident_page(
-        self, request_id: str, block_idx: int, block: KVCacheBlock
-    ) -> bool:
-        """Point a null prefix page at a pinned GPU copy of its contents."""
-        blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
-            return False
-        if self.get_resident_page(request_id, block_idx) is not None:
-            return False
-        self.residency_changes.setdefault(request_id, {})[block_idx] = block
-        return True
+    def adopt_resident_pages(
+        self,
+        request_id: str,
+        block_indices: Sequence[int],
+        blocks: Sequence[KVCacheBlock],
+    ) -> list[tuple[int, KVCacheBlock]]:
+        """Point null prefix pages at pinned GPU copies; return the adopted
+        ``(page, block)`` pairs."""
+        num_pages = len(self.req_to_blocks.get(request_id, ()))
+        candidates = [
+            (idx, block) for idx, block in zip(block_indices, blocks) if idx < num_pages
+        ]
+        current = self.get_residency_pages(request_id, [idx for idx, _ in candidates])
+        adopted = [
+            candidate for candidate, block in zip(candidates, current) if block.is_null
+        ]
+        if adopted:
+            self.residency_changes.setdefault(request_id, {}).update(adopted)
+        return adopted
 
     def drop_resident_page(
         self, request_id: str, block_idx: int
@@ -2604,9 +2612,19 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         """Stop reading a page from the GPU; return the block it was read from."""
         block = self.get_resident_page(request_id, block_idx)
         if block is not None:
-            changes = self.residency_changes.setdefault(request_id, {})
-            changes[block_idx] = self._null_block
+            self.drop_resident_pages(request_id, (block_idx,))
         return block
+
+    def drop_resident_pages(
+        self, request_id: str, block_indices: Sequence[int]
+    ) -> None:
+        """Stop reading pages from the GPU. Every index must be a resident page
+        within the request's row."""
+        if not block_indices:
+            return
+        changes = self.residency_changes.setdefault(request_id, {})
+        for block_idx in block_indices:
+            changes[block_idx] = self._null_block
 
     def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
@@ -2617,6 +2635,19 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         if changes:
             block = changes.get(block_idx, block)
         return None if block.is_null else block
+
+    def get_residency_pages(
+        self, request_id: str, block_indices: Sequence[int]
+    ) -> list[KVCacheBlock]:
+        """The request's pages with residency changes applied; host-only pages
+        are the null block. Every index must be within the request's row."""
+        if not block_indices:
+            return []
+        blocks = self.req_to_blocks[request_id]
+        changes = self.residency_changes.get(request_id)
+        if not changes:
+            return [blocks[idx] for idx in block_indices]
+        return [changes.get(idx, blocks[idx]) for idx in block_indices]
 
     def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
         """The request's row from ``start`` with residency changes applied. Unlike
