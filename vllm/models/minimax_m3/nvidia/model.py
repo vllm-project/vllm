@@ -241,8 +241,7 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         return False
     parallel_config = vllm_config.parallel_config
     return (
-        parallel_config.pipeline_parallel_size == 1
-        and parallel_config.enable_expert_parallel
+        parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
     )
 
@@ -449,7 +448,8 @@ class MiniMaxM3MLP(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            # Under SP the forward reduce-scatters the output itself.
+            reduce_results=reduce_results and not use_sequence_parallel,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
@@ -518,11 +518,11 @@ class MiniMaxM3MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         use_mega_moe: bool = False,
-        input_is_sequence_sharded: bool = False,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_is_sequence_sharded = input_is_sequence_sharded
+        self.use_sequence_parallel = use_sequence_parallel
         if self.tp_size > config.num_local_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -613,7 +613,7 @@ class MiniMaxM3MoE(nn.Module):
         # Replicated hidden states are sharded here, so each rank routes only
         # its own tokens through the EP-wide kernel.
         self.shard_replicated_input = (
-            self.tp_size > 1 and not self.input_is_sequence_sharded
+            self.tp_size > 1 and not self.use_sequence_parallel
         )
 
         def replicated_shared_experts() -> MiniMaxM3MLP:
@@ -1342,7 +1342,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
                 use_mega_moe=use_mega_moe,
-                input_is_sequence_sharded=self.use_sequence_parallel,
+                use_sequence_parallel=self.use_sequence_parallel,
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -1609,6 +1609,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     hidden_states,
                 )
             hidden_states = sp_shard(hidden_states)
+            if residual is not None:
+                residual = sp_shard(residual)
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
@@ -1637,6 +1639,14 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.end_layer, hidden_states, residual
             )
+            if self.use_sequence_parallel:
+                # PP transport expects tensors replicated across TP ranks.
+                hidden_size = hidden_states.shape[-1]
+                packed = torch.cat([hidden_states, residual, *aux_hidden_states], -1)
+                packed = sp_all_gather(packed)[:num_tokens]
+                hidden_states, residual, *aux_hidden_states = packed.split(
+                    hidden_size, dim=-1
+                )
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,

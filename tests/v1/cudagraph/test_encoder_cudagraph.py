@@ -1304,7 +1304,9 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
                 dest[rank] = emb.clone() if clone else emb
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm graph"
+)
 class TestDeepseekVL2CudaGraph:
     """CUDA graph tests for the batched-tile encoder pattern (DeepSeek-VL2)."""
 
@@ -1407,6 +1409,24 @@ class TestEncoderCudaGraphVideoReplay:
     def test_capture_creates_one_graph_per_budget(self):
         assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
         assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
+
+    def test_frame_slots_capped_by_budget(self):
+        """A large per-video frame limit must not inflate small graphs."""
+        mgr = _make_manager_for_gpu(
+            self.model,
+            _BUDGETS,
+            _VIDEO_MAX_BATCH,
+            self.device,
+            self.dtype,
+            max_frames_per_batch=1000,
+        )
+        mgr.capture(graph_pool=current_platform.graph_pool_handle())
+        for budget, meta in mgr.budget_graphs["default"].items():
+            assert meta.max_frames_per_batch == budget
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        result = mgr.execute(_make_video_mm_kwargs(grid_thw, self.device, self.dtype))
+        assert result is not None
+        assert [r.shape[0] for r in result] == [8, 4]
 
     # --- output shape ---
 

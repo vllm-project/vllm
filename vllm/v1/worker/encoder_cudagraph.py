@@ -387,12 +387,15 @@ class EncoderCudaGraphManager:
         axis_keys: CaptureAxisKeys = (),
     ):
         """Capture CUDA graph for a single token budget."""
+        # Every frame yields at least one token, so a batch that fits the
+        # budget has at most token_budget frames.
+        max_frames_per_batch = min(self.max_frames_per_batch, token_budget)
         logger.debug(
             "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
             "max_frames_per_batch=%d, axis_keys=%s",
             token_budget,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            max_frames_per_batch,
             axis_keys,
         )
 
@@ -401,7 +404,7 @@ class EncoderCudaGraphManager:
         capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
             token_budget,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            max_frames_per_batch,
             self.device,
             self.dtype,
             path,
@@ -442,7 +445,7 @@ class EncoderCudaGraphManager:
         graph_set[graph_map_key] = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
-            max_frames_per_batch=self.max_frames_per_batch,
+            max_frames_per_batch=max_frames_per_batch,
             graph=graph,
             input_buffers=values,
             output_buffer=output_buffer,
@@ -538,7 +541,7 @@ class EncoderCudaGraphManager:
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs,
             self.max_batch_size,
-            self.max_frames_per_batch,
+            graph_meta.max_frames_per_batch,
             path,
         )
 
