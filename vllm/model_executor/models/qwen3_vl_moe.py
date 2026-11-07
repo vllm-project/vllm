@@ -91,6 +91,9 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    # Overrides forward without the PP aux-state relay.
+    supports_aux_hidden_states_over_pp = False
+
     def __init__(
         self,
         *,

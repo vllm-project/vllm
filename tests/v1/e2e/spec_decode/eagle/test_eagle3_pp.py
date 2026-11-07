@@ -3,12 +3,18 @@
 import torch
 
 from tests.utils import multi_gpu_test
-from tests.v1.e2e.spec_decode.utils import compute_acceptance_len
+from tests.v1.e2e.spec_decode.utils import (
+    Messages,
+    compute_acceptance_len,
+    get_test_prompts,
+)
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 DRAFT = "nm-testing/Llama3_2_1B_speculator.eagle3"
+QWEN3_MOE_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
+QWEN3_MOE_DRAFT = "RedHatAI/Qwen3-30B-A3B-Instruct-2507-speculator.eagle3"
 PROMPTS = [
     "The capital of France is",
     "2 + 2 equals",
@@ -19,26 +25,34 @@ PROMPTS = [
 ACCEPTANCE_TOLERANCE = 0.95
 
 
-def _run(pp_size: int) -> float:
+def _run(
+    pp_size: int,
+    model: str = MODEL,
+    draft: str = DRAFT,
+    prompts: list[Messages] | None = None,
+    max_tokens: int = 32,
+    max_model_len: int = 512,
+) -> float:
     llm = LLM(
-        model=MODEL,
+        model=model,
         tensor_parallel_size=1,
         pipeline_parallel_size=pp_size,
-        max_model_len=512,
+        max_model_len=max_model_len,
         gpu_memory_utilization=0.45,
         disable_log_stats=False,
         compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
         speculative_config={
             "method": "eagle3",
-            "model": DRAFT,
+            "model": draft,
             "num_speculative_tokens": 3,
         },
     )
     try:
-        llm.generate(
-            PROMPTS,
-            SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True),
-        )
+        params = SamplingParams(temperature=0.0, max_tokens=max_tokens, ignore_eos=True)
+        if prompts is None:
+            llm.generate(PROMPTS, params)
+        else:
+            llm.chat(prompts, params)
         acceptance = compute_acceptance_len(llm.get_metrics())
         assert acceptance > 1
         return acceptance
@@ -57,3 +71,22 @@ def test_eagle3_pipeline_parallel_acceptance():
             f"PP={pp_size} acceptance regressed: {parallel:.3f} < "
             f"{baseline:.3f} * {ACCEPTANCE_TOLERANCE}"
         )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_qwen3_moe_eagle3_pipeline_parallel_acceptance():
+    # PP > 1 acceptance varies run to run; 4 prompts x 32 tokens is too few
+    # drafts to compare it with PP = 1 for this model.
+    run_args = dict(
+        model=QWEN3_MOE_MODEL,
+        draft=QWEN3_MOE_DRAFT,
+        prompts=get_test_prompts(mm_enabled=False, num_prompts=64),
+        max_tokens=128,
+        max_model_len=4096,
+    )
+    baseline = _run(1, **run_args)
+    parallel = _run(2, **run_args)
+    assert parallel >= baseline * ACCEPTANCE_TOLERANCE, (
+        f"PP=2 acceptance regressed: {parallel:.3f} < "
+        f"{baseline:.3f} * {ACCEPTANCE_TOLERANCE}"
+    )
