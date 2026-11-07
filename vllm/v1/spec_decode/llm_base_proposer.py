@@ -1395,9 +1395,11 @@ class SpecDecodeBaseProposer:
                     target_model.config.img_context_token_id
                 )
             else:
-                self.model.config.image_token_index = (
-                    target_model.config.image_token_index
-                )
+                target_config = target_model.config
+                token_index = getattr(target_config, "image_token_index", None)
+                if token_index is None:
+                    token_index = target_config.image_token_id
+                self.model.config.image_token_index = token_index
             target_language_model = cast(
                 SupportsMultiModal, target_model
             ).get_language_model()
