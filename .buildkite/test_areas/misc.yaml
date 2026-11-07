@@ -12,6 +12,7 @@ steps:
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
+    - vllm/entrypoints/generate/beam_search/
     - vllm/inputs/
     - vllm/logger.py
     - vllm/model_executor/

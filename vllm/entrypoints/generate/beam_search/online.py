@@ -19,6 +19,7 @@ from vllm.utils.async_utils import collect_from_async_generator
 
 from .utils import (
     BeamSearchSequence,
+    copy_extra_args,
     create_sort_beams_key_function,
     get_beam_search_eos_token_ids,
 )
@@ -69,6 +70,7 @@ class BeamSearchOnlineMixin(ABC):
             temperature=temperature,
             watermarking=False,
             detokenize=False,
+            extra_args=copy_extra_args(params.extra_args),
         )
         params.configure_logprobs(
             sampling_params, self.engine_client.input_processor.vllm_config

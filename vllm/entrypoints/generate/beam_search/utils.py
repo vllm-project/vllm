@@ -17,6 +17,23 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 
 
+def copy_extra_args(extra_args: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Give each internal beam-search request its own `extra_args` mapping.
+
+    The per-step params are built with ``skip_clone=True``, so `SamplingParams.clone`
+    shallow-copies and every beam would otherwise share one dict, unlike the ordinary
+    generate path which deep-copies. Values are shared; only the mapping is fresh,
+    so a processor that mutates a *value* still sees that mutation across beams.
+
+    An explicitly supplied empty mapping is preserved rather than collapsed to
+    ``None``: a processor may distinguish "configured with nothing" from "not
+    configured", and the ordinary generate path makes that distinction.
+    """
+    if extra_args is None:
+        return None
+    return dict(extra_args)
+
+
 @dataclass
 class BeamSearchSequence:
     """A sequence for beam search.
