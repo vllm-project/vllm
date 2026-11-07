@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
+from vllm.v1.hisparse.layout import HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
 
 
@@ -271,6 +272,34 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+def _resident_slot_mapping(
+    k_cache_layer: Any, k_cache_prefix: str
+) -> torch.Tensor | None:
+    """Resident slots for the rows the current forward writes.
+
+    The forward context's per-layer mapping follows the batch actually run.
+    SWA bounded replay runs the replay layers on a gathered sub-batch, where
+    the handle's stored mapping (the whole batch) would mirror the replayed
+    rows into another request's slots.
+    """
+    by_layer = get_forward_context().slot_mapping
+    if isinstance(by_layer, list):
+        if not by_layer:
+            return None
+        from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+        ubatch_id = dbo_current_ubatch_id()
+        if ubatch_id < 0 or ubatch_id >= len(by_layer):
+            return None
+        by_layer = by_layer[ubatch_id]
+    if isinstance(by_layer, dict):
+        resident_slots = by_layer.get(f"{k_cache_prefix}{HISPARSE_RESIDENT_SUFFIX}")
+        if resident_slots is not None:
+            return resident_slots
+    hisparse_cache = k_cache_layer.hisparse_cache
+    return hisparse_cache.slot_mapping if hisparse_cache is not None else None
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
@@ -317,6 +346,7 @@ class DeepseekCompressor(nn.Module):
         self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.block_size = vllm_config.cache_config.block_size
 
         wkv_wgate_sizes = (
             [self.head_dim, self.head_dim] if self.has_gate else [self.head_dim]
@@ -426,6 +456,7 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
+        hisparse_cache = getattr(k_cache_layer, "hisparse_cache", None)
         # Plain-row per-tensor fp8 caches (FlashInfer) carry the layer's scale;
         # fp8_ds_mla and bf16 rows need none.
         fp8_scale = (
@@ -434,12 +465,56 @@ class DeepseekCompressor(nn.Module):
             else None
         )
 
-        rope_quant_insert(
-            latent,
-            positions,
-            rotary_emb.cos_sin_cache,
-            kv_cache,
-            k_cache_metadata.slot_mapping,
-            self.compress_ratio,
-            fp8_scale=fp8_scale,
-        )
+        if hisparse_cache is None or hisparse_cache.is_host_writer:
+            rope_quant_insert(
+                latent,
+                positions,
+                rotary_emb.cos_sin_cache,
+                kv_cache,
+                k_cache_metadata.slot_mapping,
+                self.compress_ratio,
+                fp8_scale=fp8_scale,
+            )
+        if hisparse_cache is not None:
+            # The scheduler also promotes host pages into the rank-local GPU
+            # resident cache, and the decoder prefers those rows. Every rank
+            # writes its resident slot even when only rank 0 owns the host write.
+            resident = hisparse_cache.view
+            resident_slots = _resident_slot_mapping(k_cache_layer, self.k_cache_prefix)
+            if resident is not None and resident_slots is not None:
+                num_tokens = min(
+                    k_cache_metadata.slot_mapping.numel(), resident_slots.numel()
+                )
+                slots = resident_slots[:num_tokens].to(torch.int64)
+                if self.compress_ratio > 1:
+                    # Resident slots are per-token rows of the logical block;
+                    # the compressed cache stores ratio tokens per state.
+                    logical = (
+                        hisparse_cache.runtime.logical_block_size or self.block_size
+                    )
+                    storage = resident.block_size
+                    boundary = (positions[:num_tokens] + 1) % self.compress_ratio == 0
+                    compressed = (
+                        slots // logical * storage
+                        + (slots % logical) // self.compress_ratio
+                    )
+                    slots = torch.where(
+                        (slots >= 0) & boundary,
+                        compressed,
+                        torch.full_like(compressed, -1),
+                    )
+                rope_quant_insert(
+                    latent,
+                    positions,
+                    rotary_emb.cos_sin_cache,
+                    resident.cache,
+                    slots,
+                    self.compress_ratio,
+                    fp8_scale=fp8_scale,
+                )
+            # The write bypassed the hot bookkeeping, so drop any stale hot
+            # copy of the same global slots before the next swap-in.
+            hisparse_cache.runtime.invalidate_written_slots(
+                k_cache_metadata.slot_mapping,
+                k_cache_metadata.req_id_per_token,
+            )

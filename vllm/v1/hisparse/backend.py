@@ -61,13 +61,23 @@ class HiSparseBackend:
     def gather_resident_rows(
         self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor
     ) -> None:
-        """Copy resident rows into staging without changing their payload format."""
+        """Copy resident rows into staging without changing their payload format.
+
+        A 3D destination is a paged staging cache, filled in row order.
+        """
         rows = row_ids.to(torch.long).clamp_min(0)
         block_size = source.shape[1]
         payload = source[rows // block_size, rows % block_size]
         if payload.dtype != destination.dtype:
             payload = payload.contiguous().view(destination.dtype)
-        destination.copy_(payload)
+        if destination.dim() == 3:
+            positions = torch.arange(payload.shape[0], device=payload.device)
+            staged_block_size = destination.shape[1]
+            destination[
+                positions // staged_block_size, positions % staged_block_size
+            ] = payload
+        else:
+            destination.copy_(payload)
 
     def is_current_stream_capturing(self) -> bool:
         raise NotImplementedError
