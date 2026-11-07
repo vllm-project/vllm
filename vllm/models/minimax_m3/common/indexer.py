@@ -113,6 +113,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
+        tp_shard: int = 1,
     ) -> None:
         super().__init__()
         # Per-token storage width in elements of ``dtype``.
@@ -141,6 +142,8 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         self.query_dtype = query_dtype
         self.prefix = prefix
         self.cache_config = cache_config
+        self.tp_shard = tp_shard
+        self.index_slot_mapping: torch.Tensor | None = None
         # Impl-chosen backend -> each impl gets its own builder (get_attn_backend).
         self.backend_cls = backend_cls
         compilation_config = get_current_vllm_config().compilation_config
@@ -150,16 +153,29 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
-        self.kv_cache = kv_cache.squeeze(1)
+        kv_cache = kv_cache.squeeze(1)
+        if self.tp_shard > 1:
+            # Packed [B, N, D / tp] page -> [B, N / tp, D] token rows; the
+            # fused insert kernel addresses rows flat, so blocks must be dense.
+            num_blocks, block_size, content = kv_cache.shape
+            rows = block_size // self.tp_shard
+            assert content * self.tp_shard == self.head_dim
+            assert kv_cache.is_contiguous()
+            kv_cache = kv_cache.view(num_blocks, rows, self.head_dim)
+        self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
+        content = None
+        if self.tp_shard > 1:
+            content = self.head_dim * self.dtype.itemsize // self.tp_shard
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
+            state_content_bytes=content,
         )
 
     def forward(self) -> None: ...
@@ -366,6 +382,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        index_k_shard: int = 1,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -400,12 +417,20 @@ class MiniMaxM3IndexerImpl(nn.Module):
             cache_config=cache_config,
             indexer_kv_dtype=indexer_kv_dtype,
             backend_cls=type(self).indexer_backend_cls,
+            tp_shard=index_k_shard,
         )
 
     def reserve_workspace(self) -> None:
         """Reserve the workspace-manager scratch ``forward`` needs; called from
         the memory-profiling run, which skips ``forward``."""
         return
+
+    def get_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
+        if self.index_cache.tp_shard > 1:
+            slots = self.index_cache.index_slot_mapping
+            assert slots is not None
+            return slots[: slot_mapping.numel()]
+        return slot_mapping
 
     def forward(
         self,
@@ -417,6 +442,13 @@ class MiniMaxM3IndexerImpl(nn.Module):
 
 class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
     """Triton indexer score + top-k for both prefill and decode."""
+
+    def __init__(self, *, index_k_shard: int = 1, **kwargs) -> None:
+        if index_k_shard > 1:
+            raise ValueError(
+                "Triton indexer does not support a TP-sharded index-K cache"
+            )
+        super().__init__(index_k_shard=index_k_shard, **kwargs)
 
     def forward(
         self,
@@ -646,6 +678,7 @@ class MiniMaxM3Indexer(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        index_k_shard: int = 1,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
@@ -666,6 +699,7 @@ class MiniMaxM3Indexer(nn.Module):
             cache_config=cache_config,
             indexer_kv_dtype=indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            index_k_shard=index_k_shard,
         )
 
     @property
@@ -678,6 +712,9 @@ class MiniMaxM3Indexer(nn.Module):
 
     def reserve_workspace(self) -> None:
         self.impl.reserve_workspace()
+
+    def get_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
+        return self.impl.get_slot_mapping(slot_mapping)
 
     def forward(
         self,

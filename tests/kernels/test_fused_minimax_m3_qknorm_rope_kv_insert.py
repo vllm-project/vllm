@@ -562,15 +562,20 @@ def _has_native_fp8() -> bool:
     reason="e4m3 conversion requires CUDA SM89+ or ROCm CDNA3/4.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
-@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize(
+    "block_size,num_kv_heads,tp_shard",
+    [(16, 4, 1), (64, 4, 1), (128, 1, 2), (128, 1, 4)],
+)
 @pytest.mark.parametrize("index_k_scale", [0.1, 3000.0])
-def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
+def test_sparse_full_fp8_index(
+    num_tokens, block_size, num_kv_heads, tp_shard, index_k_scale
+):
     # The fp8 flavour is the device's own: e4m3fnuz on gfx942, else e4m3fn.
     fp8_dtype = current_platform.fp8_dtype()
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
-    num_heads, num_kv_heads, num_idx_heads = 16, 4, 4
+    num_heads, num_idx_heads = 16, 4
 
     q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
     k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
@@ -593,8 +598,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
         num_blocks * block_size, dtype=torch.int64, device=device
     )[:num_tokens]
     index_slot_mapping = torch.roll(slot_mapping, shifts=1)
+    if block_size == 128 and num_tokens > 1:
+        index_slot_mapping[-1] = -1
 
-    def run(index_dtype):
+    def run(index_dtype, index_cache=None, index_slots=None):
         qkv = qkv0.clone()
         kv_cache = torch.zeros(
             num_blocks,
@@ -604,9 +611,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
             dtype=dtype,
             device=device,
         )
-        index_cache = torch.zeros(
-            num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
-        )
+        if index_cache is None:
+            index_cache = torch.zeros(
+                num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
+            )
         q_out = torch.empty(num_tokens, qsz, dtype=dtype, device=device)
         index_q = torch.empty(num_tokens, iqsz, dtype=index_dtype, device=device)
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -623,7 +631,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
             ik_w,
             num_idx_heads,
             slot_mapping,
-            index_slot_mapping,
+            index_slot_mapping if index_slots is None else index_slots,
             kv_cache,
             index_cache,
             block_size,
@@ -666,6 +674,47 @@ def test_sparse_full_fp8_index(num_tokens, block_size, index_k_scale):
     # The oversized weights must actually saturate, so this cannot pass vacuously.
     if index_k_scale > 1:
         assert bool(saturated.any())
+
+    if block_size == 128:
+        from vllm.config import VllmConfig, set_current_vllm_config
+        from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+
+        with set_current_vllm_config(VllmConfig()):
+            cache = MiniMaxM3IndexerCache(
+                HEAD_DIM,
+                prefix="index_cache",
+                indexer_kv_dtype="fp8",
+                tp_shard=tp_shard,
+            )
+        for rank in range(tp_shard):
+            packed = torch.zeros(
+                num_blocks,
+                1,
+                block_size,
+                HEAD_DIM // tp_shard,
+                dtype=fp8_dtype,
+                device=device,
+            )
+            cache.bind_kv_cache(packed)
+            assert cache.kv_cache.data_ptr() == packed.data_ptr()
+            page = index_slot_mapping // block_size
+            offset = index_slot_mapping % block_size
+            index_slots = page * (block_size // tp_shard) + offset // tp_shard
+            index_slots.masked_fill_(
+                (index_slot_mapping < 0) | (offset % tp_shard != rank), -1
+            )
+            qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
+                fp8_dtype, cache.kv_cache, index_slots
+            )
+            # Sharding only changes index-K storage; all query heads and the
+            # main KV insert must be identical to the unsharded run.
+            for actual, expected in zip(
+                (qkv_sh, kvc_sh, qo_sh, iq_sh), (qkv_fp, kvc_fp, qo_fp, iq_fp)
+            ):
+                assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+            assert torch.equal(
+                idxc_sh.view(torch.uint8), idxc_fp[:, rank::tp_shard].view(torch.uint8)
+            )
 
 
 @pytest.mark.skipif(

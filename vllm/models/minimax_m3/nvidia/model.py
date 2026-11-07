@@ -931,7 +931,18 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
         self.num_idx_heads = self.num_kv_heads
         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
-        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        vllm_config = get_current_vllm_config()
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+        from vllm.models.minimax_m3.nvidia.indexer_msa import resolve_index_k_shard
+
+        index_k_shard = resolve_index_k_shard(
+            vllm_config,
+            self.total_idx_heads,
+            self.indexer_kv_dtype,
+            sparse_cfg["sparse_topk_blocks"],
+        )
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
         self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
@@ -944,7 +955,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            replicate_index_q=index_k_shard > 1,
         )
+        self.index_q_size = self.qkv_proj.num_index_heads * self.idx_head_dim
         # reduce_results=False: under sequence parallelism o_proj reduce-scatters
         # in forward; otherwise the all-reduce is fused with the following
         # post_attention_layernorm via fused_allreduce_gemma_rms_norm.
@@ -986,7 +999,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.index_rotary_emb = self.rotary_emb
 
         # Attention-backend wiring.
-        vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype = (
             cache_config.cache_dtype if cache_config is not None else "auto"
@@ -1000,12 +1012,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         set_default_quant_scales(self, register_buffer=True)
         # The fused insert quantizes k/v into NVFP4 pages with these scales.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
-        # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
-        # cache (--attention-config '{"indexer_kv_dtype": ...}').
-        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
-            "bf16"
-        )
-
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (so nothing crosses the eager break as a
         # Python value, which would freeze at capture).
@@ -1045,6 +1051,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            index_k_shard=index_k_shard,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
@@ -1169,7 +1176,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return sp_shard(output) if self.use_sequence_parallel else output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
+        index_slot_mapping = self.indexer.get_slot_mapping(
+            fwd_slot_mapping[self.indexer.index_cache.prefix]
+        )
         # FlashInfer autotunes the GEMMs its dummy runs call: take the unfused
         # path there so qkv_proj is tuned for the M < 512 fallback.
         if isinstance(hidden_states, QuantizedActivation):
@@ -1223,7 +1232,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 eps,
                 self.index_q_norm.weight,
                 self.index_k_norm.weight,
-                self.num_idx_heads,
+                self.qkv_proj.num_index_heads,
                 main_slot_mapping,
                 index_slot_mapping,
                 self.kv_cache,
