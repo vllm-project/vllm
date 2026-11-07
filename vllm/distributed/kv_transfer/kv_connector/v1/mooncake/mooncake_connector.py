@@ -3994,6 +3994,8 @@ class MooncakeConnectorWorker:
         self._received_layers: dict[str, set[str]] = {}
         self._control_channel = MooncakeControlChannel(self)
         self._pending_sends: list[tuple[tuple[SendTask, ...], Future[SendResult]]] = []
+        # Shared across layer submissions within one forward, then cleared.
+        self.cached_block_slices: dict[tuple, _BlockSlice | None] = {}
         self._ready_event: torch.Event | None = None
         self.retired_transfer_expiry_times: dict[str, float] = {}
         self._layer_index_by_name: dict[str, int] = {}
@@ -4047,6 +4049,7 @@ class MooncakeConnectorWorker:
         assert isinstance(metadata, MooncakeConnectorMetadata)
         # wait_for_save must drain device readers before replacing block tables.
         assert not self._pending_sends
+        self.cached_block_slices.clear()
         self.process_decode_ready_requests()
         ids = tuple(request.transfer_id for request in metadata.requests)
         cached_prefix_available = False
@@ -4099,6 +4102,7 @@ class MooncakeConnectorWorker:
         # No-forward steps skip wait_for_save; drain transfers here instead.
         if not ids:
             self._process_pending_transfers(wait=True)
+            self.cached_block_slices.clear()
 
     def _prepare_layerwise_regions(
         self, meta: MooncakeXferMetadata
@@ -4400,7 +4404,9 @@ class MooncakeConnectorWorker:
                     self.requests_to_send[transfer_id].error = error
         self._pending_sends.clear()
 
-    def _build_layer_transfer_task(self, state, destination, kv_cache_name):
+    def _build_layer_transfer_task(
+        self, state, destination, kv_cache_name, cached_block_slices
+    ):
         meta = destination.meta
         local_group_index = self.get_group_from_layer_name(kv_cache_name)
         remote_group_index = destination.layout.remote_group_by_layer[kv_cache_name]
@@ -4426,33 +4432,46 @@ class MooncakeConnectorWorker:
             not final_layer_ready or sent_tokens is not None
         ):
             return None
-        block_mapping: _BlockSlice | None
-        if is_state:
-            block_mapping = _build_state_block_slice(
-                state.block_ids[local_group_index],
-                remote_group_block_ids,
-                token_end=state.num_prompt_tokens,
-                null_block=NULL_BLOCK_ID,
-            )
-        elif is_window:
-            block_mapping = _build_window_block_slice(
-                state.block_ids[local_group_index],
-                remote_group_block_ids,
-                token_end=state.num_prompt_tokens,
-                block_size=block_size,
-                null_block=NULL_BLOCK_ID,
-            )
-        else:
-            block_mapping = _build_pending_block_slice(
-                state.block_ids[local_group_index],
-                remote_group_block_ids,
-                token_end=state.num_prompt_tokens,
-                available=available_tokens,
-                sent=sent_tokens,
-                block_size=block_size,
-                final=final_layer_ready,
-                token_start=token_start,
-            )
+        slice_key = (
+            state.transfer_id,
+            meta.worker_key,
+            local_group_index,
+            remote_group_index,
+            "state" if is_state else "window" if is_window else "attention",
+            available_tokens,
+            sent_tokens,
+            final_layer_ready,
+        )
+        if slice_key not in cached_block_slices:
+            block_mapping: _BlockSlice | None
+            if is_state:
+                block_mapping = _build_state_block_slice(
+                    state.block_ids[local_group_index],
+                    remote_group_block_ids,
+                    token_end=state.num_prompt_tokens,
+                    null_block=NULL_BLOCK_ID,
+                )
+            elif is_window:
+                block_mapping = _build_window_block_slice(
+                    state.block_ids[local_group_index],
+                    remote_group_block_ids,
+                    token_end=state.num_prompt_tokens,
+                    block_size=block_size,
+                    null_block=NULL_BLOCK_ID,
+                )
+            else:
+                block_mapping = _build_pending_block_slice(
+                    state.block_ids[local_group_index],
+                    remote_group_block_ids,
+                    token_end=state.num_prompt_tokens,
+                    available=available_tokens,
+                    sent=sent_tokens,
+                    block_size=block_size,
+                    final=final_layer_ready,
+                    token_start=token_start,
+                )
+            cached_block_slices[slice_key] = block_mapping
+        block_mapping = cached_block_slices[slice_key]
         if block_mapping is None:
             return None
         local_groups: list[tuple[int, ...]] = [()] * len(state.block_ids)
@@ -4501,7 +4520,10 @@ class MooncakeConnectorWorker:
                     for layer_index in state.available_tokens:
                         for kv_cache_name in remote_kv_cache_names.get(layer_index, ()):
                             layer_transfer_task = self._build_layer_transfer_task(
-                                state, destination, kv_cache_name
+                                state,
+                                destination,
+                                kv_cache_name,
+                                self.cached_block_slices,
                             )
                             if layer_transfer_task is not None:
                                 session_tasks.setdefault(session, []).append(
@@ -4624,6 +4646,7 @@ class MooncakeConnectorWorker:
                 for layer_index in layer_indices:
                     state.available_tokens[layer_index] = state.scheduled_end_tokens
         self._process_pending_transfers(wait=True)
+        self.cached_block_slices.clear()
         self.prefilling_transfer_ids = ()
 
 
