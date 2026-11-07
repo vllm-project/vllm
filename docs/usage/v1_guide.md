@@ -140,6 +140,7 @@ Whisper is supported natively. Other encoder-decoder models are supported via th
 - **Florence-2**: `Florence2ForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
 - **Nemotron 3.5 ASR**: `Nemotron3_5AsrForRNNT` is supported via [vllm-nemotron-asr-plugin](https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin).
 - **Parakeet TDT**: `ParakeetForTDT` is supported via [vllm-parakeet-plugin](https://github.com/Alex-Wengg/vllm-parakeet-plugin).
+- **T5Gemma 2**: `T5Gemma2ForConditionalGeneration` is supported via [vllm-t5gemma2-plugin](https://github.com/Chen-afk-art/vllm-t5gemma2-plugin).
 
 For other encoder-decoder models (e.g., `MllamaForConditionalGeneration`), we recommend
 following a similar pattern by implementing support through the [plugin system](../design/plugin_system.md).

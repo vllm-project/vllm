@@ -206,6 +206,7 @@ Some model architectures are supported via vLLM plugins. These plugins extend vL
 | `Nemotron3DiarizationForAudioFrameClassification` | NVIDIA Nemotron-3-Diarization | [vllm-nemotron-diarization-plugin](https://github.com/Alex-Wengg/vllm-nemotron-diarization-plugin) |
 | `Nemotron3_5AsrForRNNT` | NVIDIA Nemotron 3.5 ASR | [vllm-nemotron-asr-plugin](https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin) |
 | `ParakeetForTDT` | NVIDIA Parakeet TDT | [vllm-parakeet-plugin](https://github.com/Alex-Wengg/vllm-parakeet-plugin) |
+| `T5Gemma2ForConditionalGeneration` | T5Gemma 2 | [vllm-t5gemma2-plugin](https://github.com/Chen-afk-art/vllm-t5gemma2-plugin) |
 
 For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
 
