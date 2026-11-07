@@ -14,7 +14,10 @@ from .deepseek_scaling_rope import (
 )
 from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
-from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
+from .dynamic_ntk_scaling_rope import (
+    DynamicNTKScalingRotaryEmbedding,
+    DynamicNTKScalingRotaryEmbeddingForEncoder,
+)
 from .fope import FourierRotaryEmbedding
 from .gemma4_rope import Gemma4RotaryEmbedding
 from .linear_scaling_rope import LinearScalingRotaryEmbedding
@@ -226,7 +229,12 @@ def get_rope(
             max_trained_positions = rope_parameters.get(
                 "max_trained_positions", max_position
             )
-            rotary_emb = DynamicNTKScalingRotaryEmbedding(
+            dynamic_rope_cls = (
+                DynamicNTKScalingRotaryEmbeddingForEncoder
+                if rope_parameters.get("apply_per_sequence", False)
+                else DynamicNTKScalingRotaryEmbedding
+            )
+            rotary_emb = dynamic_rope_cls(
                 head_size,
                 rotary_dim,
                 max_position,
