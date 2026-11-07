@@ -635,6 +635,19 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
+def test_mamba_stochastic_rounding_cli_platform_check(monkeypatch):
+    """The CLI flag must hit the same platform check as MambaConfig itself
+    instead of failing later when the CUDA-only kernel is compiled."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    engine_args = EngineArgs(
+        model="facebook/opt-125m", enable_mamba_cache_stochastic_rounding=True
+    )
+    with pytest.raises(ValueError, match="only supported on NVIDIA CUDA"):
+        engine_args.create_engine_config()
+
+
 def test_multi_node_world_size_includes_pcp(monkeypatch):
     """PCP expands the process world size, so the --nnodes divisibility check
     must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
