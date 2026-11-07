@@ -17,12 +17,25 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    MultipleOf,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec, KVCacheSpec
 
 # One bf16 ``[index_k | index_z]`` row: 2 * 256 * 2 bytes.
 _ROW_ELEMENTS = 512
 _ROW_BYTES = _ROW_ELEMENTS * 2
+_TAIL_RING_BLOCK_SIZES = (32, 64, 128)
+
+
+def _minimum_tail_ring_block_size(
+    bytes_per_token: int, block_size: int, required_rows: int
+) -> int | None:
+    """Kernel block the tail ring needs, or None when ``block_size`` fits."""
+    for candidate in (block_size, *_TAIL_RING_BLOCK_SIZES):
+        page = candidate * bytes_per_token
+        if page % _ROW_BYTES == 0 and page // _ROW_BYTES >= required_rows:
+            return None if candidate == block_size else candidate
+    return _TAIL_RING_BLOCK_SIZES[-1]
 
 
 @dataclass
@@ -127,6 +140,15 @@ class Step5CSATailRingBackend(AttentionBackend):
     def get_builder_cls() -> type[Step5CSATailRingMetadataBuilder]:
         return Step5CSATailRingMetadataBuilder
 
+    @classmethod
+    def get_supported_kernel_block_sizes(
+        cls, kv_cache_spec: KVCacheSpec | None = None
+    ) -> list[int | MultipleOf]:
+        minimum = _configured_tail_ring_block_size()
+        if minimum is None:
+            return super().get_supported_kernel_block_sizes(kv_cache_spec)
+        return [MultipleOf(minimum)]
+
 
 class Step5CSATailRing(nn.Module, AttentionLayerBase):
     """Raw ``[index_k | index_z]`` rows of each request's open CSA region.
@@ -208,3 +230,30 @@ class Step5CSATailRing(nn.Module, AttentionLayerBase):
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict)
         return cast(Step5CSATailRingMetadata, attn_metadata[self.layer_name])
+
+
+def _configured_tail_ring_block_size() -> int | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    minimum: int | None = None
+    context = vllm_config.compilation_config.static_forward_context
+    for layer in context.values():
+        if not isinstance(layer, Step5CSATailRing):
+            continue
+        main = layer._static_forward_context.get(layer.main_layer_name)
+        if main is None:
+            continue
+        spec = main.get_kv_cache_spec(vllm_config)
+        if not isinstance(spec, AttentionSpec):
+            continue
+        needed = _minimum_tail_ring_block_size(
+            spec.real_page_size_bytes // spec.block_size,
+            spec.block_size,
+            layer.required_rows,
+        )
+        if needed is not None:
+            minimum = needed if minimum is None else max(minimum, needed)
+    return minimum
