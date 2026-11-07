@@ -8243,6 +8243,78 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
 
 
+@pytest.mark.parametrize("running", [False, True])
+def test_ec_connector_does_not_pin_future_runner_hits_at_admission(running):
+    """Future hits remain evictable so they cannot block earlier inputs."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=32,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_positions=[[PlaceholderRange(offset=80, length=32)]],
+    )
+    scheduler.add_request(request)
+    if running:
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[request.request_id] == 32
+
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+    manager.free(request)
+    request.mm_features[0].data = None
+    mm_hash = request.mm_features[0].identifier
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 32
+    assert not output.scheduled_encoder_inputs
+    assert request.request_id not in manager.cached[mm_hash]
+
+
+def test_ec_connector_defers_runner_hit_evicted_by_an_earlier_input():
+    """An evicted metadata-only hit must be re-admitted, not encoded locally."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=64,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_hashes_list=[["new-image", "cached-image"]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=32),
+                PlaceholderRange(offset=32, length=32),
+            ]
+        ],
+    )
+    (other,) = create_requests(
+        num_requests=1,
+        mm_hashes_list=[["other-image"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=32)]],
+        req_ids=["other"],
+    )
+    manager = EncoderCacheManager(cache_size=64)
+    scheduler.encoder_cache_manager = manager
+    manager.allocate(request, 1)
+    manager.free(request)
+    manager.allocate(other, 0)
+    manager.free(other)
+    request.mm_features[1].data = None
+    request.ec_transfer_params = {"cached-image": {}}
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 32
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+    assert "cached-image" not in manager.cached
+
+
 @pytest.mark.parametrize(
     "replay_tokens,window_loaded,local_hit",
     [(128, False, True), (128, False, False), (0, False, False), (128, True, False)],

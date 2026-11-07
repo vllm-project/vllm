@@ -847,13 +847,8 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            if (
-                self.ec_connector is not None
-                and request.mm_features
-                and not self.ec_connector.ensure_cache_available(
-                    request,
-                    request.num_computed_tokens - request.num_output_placeholders,
-                )
+            if self._ec_transfer_pending(
+                request, request.num_computed_tokens - request.num_output_placeholders
             ):
                 req_index += 1
                 continue
@@ -2149,6 +2144,16 @@ class Scheduler(SchedulerInterface):
         if self.is_encoder_decoder:
             lo = 0
 
+        cached_remote_inputs = set()
+        if self.ec_connector is not None and request.ec_transfer_params:
+            cached_remote_inputs = {
+                mm_features[i].identifier
+                for i in range(lo, hi)
+                if not self.is_encoder_decoder
+                and self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
+                is not None
+            }
+
         for i in range(lo, hi):
             mm_feature = mm_features[i]
             start_pos = mm_feature.mm_position.offset
@@ -2234,8 +2239,13 @@ class Scheduler(SchedulerInterface):
                     # previous step.
                     continue
 
-            if not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_embeds_to_schedule
+            # An earlier allocation may evict a hit that admission skipped.
+            # Re-admit that input next step instead of encoding metadata locally.
+            if (
+                item_identifier in cached_remote_inputs
+                or not self.encoder_cache_manager.can_allocate(
+                    request, i, encoder_compute_budget, num_embeds_to_schedule
+                )
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -2774,12 +2784,28 @@ class Scheduler(SchedulerInterface):
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
-        return (
-            self.ec_connector is not None
-            and bool(request.mm_features)
-            and not self.ec_connector.ensure_cache_available(
-                request, num_computed_tokens
+        if self.ec_connector is None or not request.mm_features:
+            return False
+        local_cache_hashes = set()
+        cache_manager = self.encoder_cache_manager
+        if not self.is_encoder_decoder:
+            for i, feature in enumerate(request.mm_features):
+                if (
+                    feature.mm_position.offset + feature.mm_position.length
+                    <= num_computed_tokens
+                ):
+                    continue
+                cached_num_embeds = cache_manager.get_cached_num_encoder_embeds(
+                    request, i
+                )
+                if cached_num_embeds == request.get_num_encoder_embeds(i):
+                    local_cache_hashes.add(feature.identifier)
+        if local_cache_hashes:
+            return not self.ec_connector.ensure_cache_available(
+                request, num_computed_tokens, local_cache_hashes=local_cache_hashes
             )
+        return not self.ec_connector.ensure_cache_available(
+            request, num_computed_tokens
         )
 
     @staticmethod

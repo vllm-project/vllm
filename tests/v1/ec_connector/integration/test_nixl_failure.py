@@ -32,6 +32,7 @@ from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 
 MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
+CONSUMER_EC_CPU_BYTES = 1 << 20
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +62,9 @@ def servers():
                 "ec_role": role,
                 "ec_connector_extra_config": {
                     "ec_enable_nixl": True,
-                    "ec_cpu_bytes": 64 << 20,
+                    "ec_cpu_bytes": (
+                        CONSUMER_EC_CPU_BYTES if role == "ec_consumer" else 64 << 20
+                    ),
                 },
             }
         )
@@ -198,3 +201,54 @@ async def test_missing_remote_encoding_is_request_scoped(servers, local_image):
         status, result = await _post(session, consumer, healthy)
         assert status == 200, result
         assert result["choices"][0]["message"]["content"], result
+
+
+@pytest.mark.asyncio
+async def test_runner_hit_survives_cpu_eviction_and_missing_producer(servers):
+    """A metadata-only repeat uses runner embeddings without a remote read."""
+    encoder, consumer = servers
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        _, request, mm_hash = await _encode(session, encoder)
+        status, result = await _post(session, consumer, request)
+        assert status == 200, result
+
+        size_bytes = request["ec_transfer_params"][mm_hash]["size_bytes"]
+        assert 0 < size_bytes <= CONSUMER_EC_CPU_BYTES
+        # Fill the CPU tier with fresh identities. Their combined size exceeds
+        # its capacity while remaining small relative to the runner cache.
+        for _ in range(CONSUMER_EC_CPU_BYTES // size_bytes + 1):
+            _, filler, _ = await _encode(session, encoder)
+            status, result = await _post(session, consumer, filler)
+            assert status == 200, result
+
+        with zmq.asyncio.Context() as ctx, ctx.socket(zmq.ROUTER) as router:
+            router.setsockopt(zmq.LINGER, 0)
+            port = router.bind_to_random_port("tcp://127.0.0.1")
+            request["ec_transfer_params"][mm_hash].update(
+                peer_host="127.0.0.1", peer_port=port
+            )
+            reads = []
+
+            async def reject_read():
+                identity, delimiter, payload = await router.recv_multipart()
+                req = msgspec.msgpack.decode(payload, type=XferReq)
+                reads.append(req.mm_hash)
+                ack = XferAck(
+                    mm_hash=req.mm_hash,
+                    status=XferStatus.NACK_MISSING,
+                    session_id=req.session_id,
+                )
+                await router.send_multipart(
+                    [identity, delimiter, msgspec.msgpack.encode(ack)]
+                )
+
+            rejection = asyncio.create_task(reject_read())
+            try:
+                status, result = await _post(session, consumer, request)
+            finally:
+                rejection.cancel()
+                await asyncio.gather(rejection, return_exceptions=True)
+            assert reads == [], "A runner cache hit contacted the producer"
+            assert status == 200, result
+            assert result["choices"][0]["message"]["content"], result
