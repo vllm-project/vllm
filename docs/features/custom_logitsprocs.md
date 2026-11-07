@@ -131,7 +131,7 @@ See examples below:
     ``` python
     # Pass in FQCN
     llm = LLM(
-        model="facebook/opt-125m",
+        model="Qwen/Qwen3-0.6B",
         logits_processors=["your.module.path:TargetTokenLogitsProcessor"],
     )
     ```
@@ -140,7 +140,7 @@ See examples below:
 
     ``` python
     # Pass in FQCN
-    engine_args = AsyncEngineArgs(model="facebook/opt-125m",
+    engine_args = AsyncEngineArgs(model="Qwen/Qwen3-0.6B",
                                   logits_processors=["your.module.path:TargetTokenLogitsProcessor"])
     async_llm = AsyncLLM.from_engine_args(engine_args)
     ```
@@ -148,7 +148,7 @@ See examples below:
 ??? code "Passing custom logits processor FQCN to vLLM server via CLI"
 
     ```bash
-    vllm serve facebook/opt-125m --logits_processors your.module.path:TargetTokenLogitsProcessor
+    vllm serve Qwen/Qwen3-0.6B --logits_processors your.module.path:TargetTokenLogitsProcessor
     ```
 
 ### Method 2: Automatically Detect Custom Logits Processors Installed in Your Python Environment As Entry Points
@@ -192,12 +192,12 @@ You can pass one or more custom logits processor class objects to the `LLM` and 
 
     # Pass class object to LLM constructor
     llm = LLM(
-        model="facebook/opt-125m",
+        model="Qwen/Qwen3-0.6B",
         logits_processors=[TargetTokenLogitsProcessor],
     )
 
     # Pass class object to AsyncLLM constructor
-    engine_args = AsyncEngineArgs(model="facebook/opt-125m",
+    engine_args = AsyncEngineArgs(model="Qwen/Qwen3-0.6B",
                                   logits_processors=[TargetTokenLogitsProcessor])
     async_llm = AsyncLLM.from_engine_args(engine_args)
     ```
