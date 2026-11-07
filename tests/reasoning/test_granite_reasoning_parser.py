@@ -40,6 +40,14 @@ COMPLETE_REASONING_WITH_THINK = {
     "reasoning": "This is a reasoning section",
     "content": None,
 }
+PUNCTUATION_AFTER_START_SEQ = {
+    # BPE merges the marker's ":" with the punctuation that follows it into one
+    # token, so a single delta closes the start of reasoning sequence and opens
+    # the reasoning at the same time.
+    "output": f"{START_REASONING}(thinking){START_RESPONSE}(answer)",
+    "reasoning": "(thinking)",
+    "content": "(answer)",
+}
 MULTIPLE_LINES_WITH_THINK = {
     "output": f"{START_REASONING}This\nThat{START_RESPONSE}This is the rest\nThat",
     "reasoning": "This\nThat",
@@ -83,6 +91,11 @@ TEST_CASES = [
         id="multiple_lines_with_think",
     ),
     pytest.param(
+        False,
+        PUNCTUATION_AFTER_START_SEQ,
+        id="punctuation_after_start_seq",
+    ),
+    pytest.param(
         True,
         SIMPLE_REASONING,
         id="simple_reasoning_streaming",
@@ -117,6 +130,11 @@ TEST_CASES = [
         MULTIPLE_LINES_WITH_THINK,
         id="multiple_lines_with_think_streaming",
     ),
+    pytest.param(
+        True,
+        PUNCTUATION_AFTER_START_SEQ,
+        id="punctuation_after_start_seq_streaming",
+    ),
 ]
 
 # Global tokenizer initialization to avoid repeated loading
@@ -143,6 +161,53 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+# Every joiner here makes BPE merge the marker's ":" with it into a single token,
+# so the delta that closes the start of reasoning sequence also opens the
+# reasoning. Whitespace, "." and letters do not merge, which is why the fixtures
+# above never exercised this.
+STRADDLING_JOINERS = [
+    ",",
+    "]",
+    '"',
+    "'",
+    ")",
+    "(",
+    "*",
+    "-",
+    "_",
+    "/",
+    ":",
+    ";",
+    "!",
+    "?",
+    "#",
+    "0",
+]
+
+
+@pytest.mark.parametrize("joiner", STRADDLING_JOINERS)
+def test_streaming_matches_non_streaming_across_straddling_joiners(joiner):
+    output = f"{START_REASONING}{joiner}thinking{joiner}{START_RESPONSE}{joiner}answer"
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        tokenizer
+    )
+    output_tokens: list[str] = [
+        tokenizer.convert_tokens_to_string([token])
+        for token in tokenizer.tokenize(output)
+    ]
+
+    expected_reasoning = f"{joiner}thinking{joiner}"
+    expected_content = f"{joiner}answer"
+    assert run_reasoning_extraction(parser, [output], streaming=False) == (
+        expected_reasoning,
+        expected_content,
+    )
+    assert run_reasoning_extraction(parser, output_tokens, streaming=True) == (
+        expected_reasoning,
+        expected_content,
+    )
 
 
 # Additional tests for verifying the correctness of granite streaming; this
@@ -255,6 +320,16 @@ STREAMING_13 = {
     "content": None,
 }
 
+# The delta closes the start of reasoning sequence and carries reasoning with
+# it; only the part inside the reasoning belongs in the delta message.
+STREAMING_14 = {
+    "previous_text": "Here is my thought process",
+    "current_text": "Here is my thought process:(",
+    "delta_text": ":(",
+    "reasoning": "(",
+    "content": None,
+}
+
 STREAMING_SUBCASES = [
     pytest.param(
         STREAMING_1,
@@ -307,6 +382,10 @@ STREAMING_SUBCASES = [
     pytest.param(
         STREAMING_13,
         id="Delta breaks potential responise sequence",
+    ),
+    pytest.param(
+        STREAMING_14,
+        id="Delta ends the start reasoning sequence and starts the reasoning",
     ),
 ]
 
