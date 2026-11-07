@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -33,6 +34,8 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+_ORDERED_DUPLICATE_THRESHOLD = 256
 
 
 class BlockHashToBlockMap:
@@ -79,7 +82,17 @@ class BlockHashToBlockMap:
         """Inserts the KVCacheBlock to the cache"""
         block_id = self._cache.setdefault(key, block.block_id)
         if block_id != block.block_id:
-            self._dup_ids.setdefault(key, {block_id: None})[block.block_id] = None
+            dup_ids = self._dup_ids.get(key)
+            if dup_ids is None:
+                self._dup_ids[key] = {block_id: None, block.block_id: None}
+            else:
+                dup_ids[block.block_id] = None
+                # Bound FIFO scans over deleted slots while keeping small
+                # duplicate sets compact. IDs cannot create reference cycles.
+                if len(dup_ids) == _ORDERED_DUPLICATE_THRESHOLD and not isinstance(
+                    dup_ids, OrderedDict
+                ):
+                    self._dup_ids[key] = gc_untrack(OrderedDict(dup_ids))
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """Pops block_id from the blocks cached under key, if it is there."""
