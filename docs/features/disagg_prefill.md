@@ -49,6 +49,8 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+A prefill or decode request carries one prompt. When `kv_transfer_params` sets `do_remote_prefill` or `do_remote_decode`, a `/v1/completions` request with several prompts, or a `/v1/chat/completions/batch` request with several conversations, fails with HTTP 400; send one request per prompt.
+
 ## Reusing prefill token ids on decode
 
 !!! note

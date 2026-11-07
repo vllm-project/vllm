@@ -664,6 +664,39 @@ class CompletionRequest(OpenAIBaseModel):
 
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_pd_kv_transfer_prompt_count(cls, data):
+        if not isinstance(data, dict):
+            return data
+        kv_transfer_params = data.get("kv_transfer_params")
+        if not isinstance(kv_transfer_params, dict) or not (
+            kv_transfer_params.get("do_remote_prefill")
+            or kv_transfer_params.get("do_remote_decode")
+        ):
+            return data
+
+        # Count engine inputs the way prompt_to_seq does: a string, a flat
+        # token list or a single embedding is one prompt.
+        num_prompts = 0
+        for value in (data.get("prompt"), data.get("prompt_embeds")):
+            if value is None:
+                continue
+            if isinstance(value, list) and not (
+                len(value) > 0 and is_list_of(value, int)
+            ):
+                num_prompts += len(value)
+            else:
+                num_prompts += 1
+        if num_prompts > 1:
+            raise VLLMValidationError(
+                "Completions with P/D `kv_transfer_params` take a single "
+                f"prompt: one KV transfer cannot serve {num_prompts} prompts.",
+                parameter="kv_transfer_params",
+            )
+
+        return data
+
 
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)

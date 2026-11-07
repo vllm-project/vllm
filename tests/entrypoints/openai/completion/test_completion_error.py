@@ -1275,6 +1275,28 @@ def test_beam_search_echo_logprobs_rejected(max_tokens):
         )
 
 
+@pytest.mark.parametrize("flag", ["do_remote_prefill", "do_remote_decode"])
+def test_pd_kv_transfer_rejects_several_prompts(flag):
+    """One P/D KV transfer covers one prompt."""
+    kv_transfer_params = {flag: True}
+    for prompt in ("one prompt", ["one prompt"], [1, 2, 3]):
+        CompletionRequest(
+            model=MODEL_NAME, prompt=prompt, kv_transfer_params=kv_transfer_params
+        )
+    for prompt in (["first", "second"], [[1, 2], [3, 4]]):
+        with pytest.raises(VLLMValidationError, match="cannot serve 2 prompts"):
+            CompletionRequest(
+                model=MODEL_NAME, prompt=prompt, kv_transfer_params=kv_transfer_params
+            )
+    with pytest.raises(VLLMValidationError, match="cannot serve 2 prompts"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="one prompt",
+            prompt_embeds=b"one embedding",
+            kv_transfer_params=kv_transfer_params,
+        )
+
+
 class TestCompletionPromptListLimit:
     """Regression tests for CVE: unbounded prompt list fan-out."""
 
