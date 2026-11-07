@@ -28,8 +28,8 @@ steps:
     - cd tests
     - pytest -v -s v1/shutdown
 
-- label: ":intel: (BMG) [DEBUG] xccl repro - pidfd"
-  key: debug-xccl-repro-pidfd
+- label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 1"
+  key: debug-xccl-repro-pidfd-1
   timeout_in_minutes: 60
   device: intel_gpu_k8s
   num_devices: 2
@@ -43,6 +43,45 @@ steps:
     - tests/xpu_debug/
   commands:
     - uname -r && cat /proc/cmdline
+    - env | grep -i "META_DATA" || true
+    - pip install py-spy || true
+    - python tests/xpu_debug/xccl_repro.py 100 --dump
+
+- label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 2"
+  key: debug-xccl-repro-pidfd-2
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/workspace/vllm/"
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - tests/xpu_debug/
+  commands:
+    - uname -r && cat /proc/cmdline
+    - env | grep -i "META_DATA" || true
+    - pip install py-spy || true
+    - python tests/xpu_debug/xccl_repro.py 100 --dump
+
+- label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 3"
+  key: debug-xccl-repro-pidfd-3
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/workspace/vllm/"
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - tests/xpu_debug/
+  commands:
+    - uname -r && cat /proc/cmdline
+    - env | grep -i "META_DATA" || true
     - pip install py-spy || true
     - python tests/xpu_debug/xccl_repro.py 100 --dump
 
@@ -62,4 +101,5 @@ steps:
     - tests/xpu_debug/
   commands:
     - uname -r && cat /proc/cmdline
+    - env | grep -i "META_DATA" || true
     - python tests/xpu_debug/xccl_repro.py 100
