@@ -240,7 +240,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             self.vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
             ((max_num_reqs, num_heads, head_size), model_config.dtype),
             ((max_num_reqs, num_heads), torch.float32),
@@ -256,7 +256,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         max_cached_len = max(0, model_config.max_model_len - 1)
         alloc_len = round_up(max_cached_len, self.kv_cache_spec.block_size)
         cache_buf_shape = (1, num_kv_heads, alloc_len, head_size)
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             (cache_buf_shape, torch.float16),
             (cache_buf_shape, torch.float16),
         )
