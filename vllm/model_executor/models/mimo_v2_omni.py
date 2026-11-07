@@ -940,9 +940,8 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
       regenerate the exact same timestamp token IDs.
     """
 
-    # fps assumed for vllm-decoded video (numpy T,H,W,C arrays).
-    # The video loader samples ~32 frames; treat each frame as 1 s apart so
-    # MiMoVLProcessor sees 1 fps input and resamples internally.
+    # Frame rate assumed for video_audio frames, which carry no loader
+    # metadata (plain videos are stamped by _video_timestamps).
     _INPUT_FPS: float = 1.0
 
     def _get_mm_fields_config(
