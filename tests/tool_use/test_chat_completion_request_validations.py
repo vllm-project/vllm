@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.exceptions import VLLMValidationError
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 
 def test_chat_completion_request_with_no_tools():
@@ -198,4 +207,179 @@ def test_multiple_structured_outputs_rejected():
                     "regex": ".*",
                 },
             }
+        )
+
+
+def test_typed_named_tool_choice_accepted():
+    choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        model="facebook/opt-125m",
+        tools=[SAMPLE_TOOL],
+        tool_choice=choice,
+    )
+    assert isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+    assert request.tool_choice.function.name == "get_weather"
+
+
+def test_typed_tools_accepted():
+    tool = ChatCompletionToolsParam.model_validate(SAMPLE_TOOL)
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        model="facebook/opt-125m",
+        tools=[tool],
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    assert request.tools is not None and len(request.tools) == 1
+    assert request.tools[0].function.name == "get_weather"
+    assert request.tools[0] == tool
+
+
+def test_typed_tools_and_typed_tool_choice_accepted():
+    tool = ChatCompletionToolsParam.model_validate(SAMPLE_TOOL)
+    choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        model="facebook/opt-125m",
+        tools=[tool],
+        tool_choice=choice,
+    )
+    assert isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+    assert request.tool_choice.function.name == "get_weather"
+    assert request.tools is not None and len(request.tools) == 1
+    assert request.tools[0].function.name == "get_weather"
+
+
+def test_typed_named_tool_choice_mismatch_rejected():
+    choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="unknown_fn")
+    )
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            model="facebook/opt-125m",
+            tools=[SAMPLE_TOOL],
+            tool_choice=choice,
+        )
+
+
+def test_typed_tools_mismatch_rejected():
+    tool = ChatCompletionToolsParam.model_validate(SAMPLE_TOOL)
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            model="facebook/opt-125m",
+            tools=[tool],
+            tool_choice={"type": "function", "function": {"name": "unknown_fn"}},
+        )
+
+
+def test_both_typed_mismatch_rejected():
+    tool = ChatCompletionToolsParam.model_validate(SAMPLE_TOOL)
+    choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="unknown_fn")
+    )
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            model="facebook/opt-125m",
+            tools=[tool],
+            tool_choice=choice,
+        )
+
+
+def test_typed_tools_and_tool_choice_end_to_end_schema():
+    tool = ChatCompletionToolsParam.model_validate(SAMPLE_TOOL)
+    choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        model="facebook/opt-125m",
+        tools=[tool],
+        tool_choice=choice,
+    )
+    schema = get_json_schema_from_tools(request.tool_choice, request.tools)
+    assert schema == {"type": "object", "properties": {"location": {"type": "string"}}}
+
+
+def test_empty_tools_with_typed_named_tool_choice_mismatch_rejected():
+    choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            model="facebook/opt-125m",
+            tools=[],
+            tool_choice=choice,
+        )
+
+
+def test_typed_tool_with_extra_fields_preserved():
+    tool = ChatCompletionToolsParam.model_validate(
+        {**SAMPLE_TOOL, "custom_field": "custom_value"}
+    )
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        model="facebook/opt-125m",
+        tools=[tool],
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    assert request.tools is not None and len(request.tools) == 1
+    assert getattr(request.tools[0], "custom_field", None) == "custom_value"
+
+
+def test_non_pydantic_tool_object_matched():
+    custom_tool = SimpleNamespace(function=SimpleNamespace(name="get_weather"))
+    data = {
+        "tools": [custom_tool],
+        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+    }
+    check_tool_usage: Any = ChatCompletionRequest.check_tool_usage
+    validated = check_tool_usage(data)
+    assert validated["tools"] == [custom_tool]
+
+    mismatch_data = {
+        "tools": [custom_tool],
+        "tool_choice": {"type": "function", "function": {"name": "unknown_fn"}},
+    }
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        check_tool_usage(mismatch_data)
+
+
+def test_dict_only_tool_choice_and_tools_unchanged():
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        model="facebook/opt-125m",
+        tools=[SAMPLE_TOOL],
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    assert request.tools is not None and len(request.tools) == 1
+    assert request.tools[0].function.name == "get_weather"
+    assert isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+    assert request.tool_choice.function.name == "get_weather"
+
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Hello"}],
+            model="facebook/opt-125m",
+            tools=[SAMPLE_TOOL],
+            tool_choice={"type": "function", "function": {"name": "unknown_fn"}},
         )
