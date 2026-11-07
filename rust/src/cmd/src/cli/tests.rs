@@ -250,6 +250,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         default_chat_template_kwargs: None,
                         reasoning_effort_map: None,
                         trust_request_chat_template: false,
+                        trust_request_mm_kwargs: false,
+                        no_trust_request_mm_kwargs: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
@@ -1145,6 +1147,60 @@ fn serve_args_accept_explicit_deepseek_v32_renderer() {
 }
 
 #[test]
+fn trust_request_mm_kwargs_flag_is_opt_in_and_frontend_only() {
+    let parse = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .expect("parse serve flags");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        assert!(
+            args.managed_engine.python_args.is_empty(),
+            "frontend-only trust flag must not be forwarded to the engine",
+        );
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .trust_request_mm_kwargs
+    };
+
+    assert!(!parse(&[]));
+    assert!(parse(&["--trust-request-mm-kwargs"]));
+    assert!(!parse(&["--trust-request-mm-kwargs=false"]));
+    assert!(!parse(&["--no-trust-request-mm-kwargs"]));
+}
+
+#[test]
+fn frontend_args_json_sets_trust_request_mm_kwargs_explicitly() {
+    let parse = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+        .expect("parse frontend JSON");
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        args.into_config().api_server_options.trust_request_mm_kwargs
+    };
+
+    assert!(!parse(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    assert!(parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","trust_request_mm_kwargs":true}"#
+    ));
+    assert!(!parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","trust_request_mm_kwargs":false}"#
+    ));
+}
+
+#[test]
 fn serve_passes_enable_request_id_headers_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1941,6 +1997,8 @@ fn frontend_args_accept_json() {
                         default_chat_template_kwargs: None,
                         reasoning_effort_map: None,
                         trust_request_chat_template: false,
+                        trust_request_mm_kwargs: false,
+                        no_trust_request_mm_kwargs: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
@@ -2874,6 +2932,8 @@ fn serve_args_accept_handshake_aliases() {
                         default_chat_template_kwargs: None,
                         reasoning_effort_map: None,
                         trust_request_chat_template: false,
+                        trust_request_mm_kwargs: false,
+                        no_trust_request_mm_kwargs: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
@@ -3191,6 +3251,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                trust_request_mm_kwargs: false,
                 log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
@@ -3323,6 +3384,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                trust_request_mm_kwargs: false,
                 log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
@@ -3568,6 +3630,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                trust_request_mm_kwargs: false,
                 log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,

@@ -64,6 +64,12 @@ message GenerateRequest {
   // output after reasoning. Prefer a constraint that covers the full output
   // from the first generated token.
   EngineReasoningGate engine_reasoning_gate = 18;
+
+  // Per-request multimodal processor overrides.
+  google.protobuf.Struct mm_processor_kwargs = 19;
+
+  // Per-request media loading and decoding options.
+  google.protobuf.Struct media_io_kwargs = 20;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output

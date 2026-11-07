@@ -323,20 +323,31 @@ fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
 fn multimodal_backend_with_limits(
     limit_mm_per_prompt: MmLimitPerPrompt,
 ) -> Arc<dyn ChatTextBackend> {
-    let config_path = std::env::temp_dir().join(format!(
-        "vllm-grpc-qwen-config-{}.json",
-        uuid::Uuid::new_v4()
-    ));
+    multimodal_backend_with_config(limit_mm_per_prompt, None)
+}
+
+fn multimodal_backend_with_config(
+    limit_mm_per_prompt: MmLimitPerPrompt,
+    image_preprocessor_config: Option<&str>,
+) -> Arc<dyn ChatTextBackend> {
+    let suffix = uuid::Uuid::new_v4();
+    let config_path = std::env::temp_dir().join(format!("vllm-grpc-qwen-config-{suffix}.json"));
+    let processor_path =
+        std::env::temp_dir().join(format!("vllm-grpc-qwen-processor-{suffix}.json"));
     fs::write(
         &config_path,
         r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
     )
     .expect("write qwen test config");
+    if let Some(config) = image_preprocessor_config {
+        fs::write(&processor_path, config).expect("write qwen image preprocessor config");
+    }
     let model_info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
         "qwen2-vl-test".to_string(),
         Some("qwen2_vl".to_string()),
         vllm_chat::multimodal::MultimodalConfigFiles {
             config: Some(&config_path),
+            preprocessor_config: image_preprocessor_config.map(|_| processor_path.as_path()),
             ..Default::default()
         },
         Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
@@ -345,6 +356,9 @@ fn multimodal_backend_with_limits(
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
+    if image_preprocessor_config.is_some() {
+        let _ = fs::remove_file(processor_path);
+    }
     Arc::new(FakeMultimodalBackend { model_info })
 }
 
@@ -382,11 +396,31 @@ async fn setup_grpc_service_with_backend<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
-    setup_grpc_service_with_engine_script(
+    setup_grpc_service_with_backend_trust(engine_id, output_specs, backend, check_request, false)
+        .await
+}
+
+async fn setup_grpc_service_with_backend_trust<F>(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    backend: Arc<dyn ChatTextBackend>,
+    check_request: F,
+    trust_request_mm_kwargs: bool,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    EngineHealth,
+    MockEngineTask,
+)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
+    setup_grpc_service_with_engine_script_trust(
         engine_id,
         default_ready_response(),
         backend,
         None,
+        trust_request_mm_kwargs,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -408,6 +442,33 @@ async fn setup_grpc_service_with_engine_script<F>(
     ready: EngineCoreReadyResponse,
     backend: Arc<dyn ChatTextBackend>,
     engine_shutdown: Option<tokio_util::sync::CancellationToken>,
+    script: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    EngineHealth,
+    MockEngineTask,
+)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    setup_grpc_service_with_engine_script_trust(
+        engine_id,
+        ready,
+        backend,
+        engine_shutdown,
+        false,
+        script,
+    )
+    .await
+}
+
+async fn setup_grpc_service_with_engine_script_trust<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    backend: Arc<dyn ChatTextBackend>,
+    engine_shutdown: Option<tokio_util::sync::CancellationToken>,
+    trust_request_mm_kwargs: bool,
     script: F,
 ) -> (
     InferenceServer<InferenceServiceImpl>,
@@ -445,8 +506,11 @@ where
     let chat = ChatLlm::from_shared_backend(llm, backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
-        InferenceServer::new(InferenceServiceImpl::new(state.clone()))
-            .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
+        InferenceServer::new(
+            InferenceServiceImpl::new(state.clone())
+                .with_trust_request_mm_kwargs(trust_request_mm_kwargs),
+        )
+        .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
         ControlServer::new(ControlServiceImpl::new(state).with_engine_shutdown(engine_shutdown)),
         engine_health,
         engine_task,
@@ -999,6 +1063,210 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
         .expect("multimodal generate");
 
     engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+/// A valid per-request `max_pixels` must alter the actual image features
+/// sent through gRPC to the engine, not only parse into a processor config.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_image_max_pixels_override_changes_engine_features() {
+    // A 256x256 PNG: large enough for a Qwen2-VL pixel budget to affect
+    // patch expansion. The same source image is used for both requests.
+    const PNG_DATA_URI: &str = concat!(
+        "data:image/png;base64,",
+        "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAACAElEQVR42u3TQQ0AAAjEsBODYCQihTcaaFIFS5bq",
+        "gbciAQYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYA",
+        "A4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABMIAKGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAA",
+        "GAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAbA",
+        "AGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAY",
+        "AAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAGUAEDgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHA",
+        "AGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAABgADAAG",
+        "AAOAAcAAYAAwABgADAAGAAOAAcAAYAAwABgADAAGAAOAAcAAYAAwABgADAAGAAOAAcAAYAAwABgADAAGAAOAAcAA",
+        "YAAwABgADAAGAAOAAcAAYAAwAFwL4YoXrXbgQbEAAAAASUVORK5CYII="
+    );
+    let observed_lengths = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+    for (index, max_pixels) in [None, Some(3_136_usize)].into_iter().enumerate() {
+        let recorded = Arc::clone(&observed_lengths);
+        let (inference_service, control_service, health, engine_task) =
+            setup_grpc_service_with_backend_trust(
+                if index == 0 {
+                    b"engine-grpc-image-baseline"
+                } else {
+                    b"engine-grpc-image-override"
+                },
+                default_stream_output_specs(),
+                multimodal_backend_with_config(
+                    Default::default(),
+                    Some(r#"{"min_pixels":3136,"max_pixels":65536}"#),
+                ),
+                move |request| {
+                    let features =
+                        request.mm_features.as_ref().expect("image features in engine request");
+                    assert_eq!(features.len(), 1);
+                    assert_eq!(features[0].modality.as_str(), "image");
+                    if index == 0 {
+                        assert_eq!(features[0].identifier, "image-max-pixels");
+                    } else {
+                        assert_ne!(features[0].identifier, "image-max-pixels");
+                        assert!(
+                            features[0]
+                                .mm_hash
+                                .as_ref()
+                                .is_some_and(|hash| hash.starts_with("mm-override-v1:"))
+                        );
+                    }
+                    recorded
+                        .lock()
+                        .expect("record image length")
+                        .push(features[0].mm_position.length);
+                },
+                true,
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+        client
+            .generate(pb::GenerateRequest {
+                model: "test-model".to_string(),
+                request_id: format!("test-image-max-pixels-{index}"),
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![11, QWEN_IMAGE_TOKEN_ID, 13],
+                })),
+                media: vec![pb::MediaItem {
+                    modality: pb::Modality::Image as i32,
+                    source: Some(pb::media_item::Source::DataUri(PNG_DATA_URI.to_string())),
+                    mime_type: String::new(),
+                    uuid: "image-max-pixels".to_string(),
+                }],
+                mm_processor_kwargs: max_pixels.map(|max_pixels| {
+                    json_to_proto_struct(&serde_json::json!({"max_pixels": max_pixels}))
+                        .expect("valid processor override")
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("gRPC image generation should succeed");
+        engine_task.await.expect("mock engine task");
+        server_task.abort();
+    }
+    let lengths = observed_lengths.lock().expect("recorded image token lengths");
+    assert_eq!(lengths.len(), 2);
+    assert!(
+        lengths[1] < lengths[0],
+        "lower max_pixels should produce fewer image tokens; baseline={}, overridden={}",
+        lengths[0],
+        lengths[1]
+    );
+}
+
+/// Untrusted gRPC clients may not enable per-request media or processor kwargs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_multimodal_kwargs_require_explicit_trust_over_network() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-kwargs-untrusted",
+        default_stream_output_specs(),
+    )
+    .await;
+    let request = || pb::GenerateRequest {
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: vec![1, 2, 3],
+        })),
+        ..Default::default()
+    };
+    let mut processor = request();
+    processor.mm_processor_kwargs = json_to_proto_struct(&serde_json::json!({"max_pixels": 3136}));
+    let status = client
+        .generate(processor)
+        .await
+        .expect_err("must reject untrusted processor overrides");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("--trust-request-mm-kwargs"));
+
+    let mut media = request();
+    media.media_io_kwargs = json_to_proto_struct(&serde_json::json!({"video": {"fps": 2}}));
+    let status = client.generate(media).await.expect_err("must reject untrusted media overrides");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("--trust-request-mm-kwargs"));
+    server_task.abort();
+}
+
+/// Exercise request-scoped kwargs at the gRPC boundary, not only in the
+/// converter unit tests. Invalid requests must fail before reaching the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_multimodal_kwargs_reject_invalid_requests_over_network() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_backend_trust(
+            b"engine-grpc-kwargs-validation",
+            default_stream_output_specs(),
+            Arc::new(FakeTextBackend::default()),
+            |_| {},
+            true,
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let base_request = || pb::GenerateRequest {
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: vec![1, 2, 3],
+        })),
+        ..Default::default()
+    };
+
+    // Unsupported options must never disappear silently.
+    let mut unknown = base_request();
+    unknown.mm_processor_kwargs = json_to_proto_struct(&serde_json::json!({"unknown": 1}));
+    let status = client.generate(unknown).await.expect_err("reject unknown processor option");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("unsupported mm_processor_kwargs"));
+
+    let mut excessive_fps = base_request();
+    excessive_fps.media_io_kwargs =
+        json_to_proto_struct(&serde_json::json!({"video": {"fps": 60}}));
+    let status = client.generate(excessive_fps).await.expect_err("reject excessive FPS");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("fps"));
+
+    // Even valid options have no meaning without a raw multimodal payload.
+    let mut missing_media = base_request();
+    missing_media.mm_processor_kwargs =
+        json_to_proto_struct(&serde_json::json!({"max_pixels": 512}));
+    let status = client.generate(missing_media).await.expect_err("reject kwargs without media");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("require raw media"));
+
+    let mut preprocessed = preprocessed_grpc_request(vec![preprocessed_grpc_media(
+        pb::Modality::Image,
+        "image-a",
+        0,
+        1,
+    )]);
+    preprocessed.mm_processor_kwargs =
+        json_to_proto_struct(&serde_json::json!({"max_pixels": 512}));
+    let status = client
+        .generate(preprocessed)
+        .await
+        .expect_err("reject kwargs for preprocessed features");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("not preprocessed features"));
+
     server_task.abort();
 }
 

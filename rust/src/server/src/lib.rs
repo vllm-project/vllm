@@ -275,9 +275,11 @@ where
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
         )
         .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-        let inference_service =
-            grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let inference_service = grpc::InferenceGrpcService::new(
+            grpc::InferenceServiceImpl::new(state.clone())
+                .with_trust_request_mm_kwargs(config.api_server_options.trust_request_mm_kwargs),
+        )
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))

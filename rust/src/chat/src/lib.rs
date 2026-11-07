@@ -201,6 +201,25 @@ impl ChatRequestProcessor {
         media: multimodal::MultimodalInput,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
+        self.prepare_media_with_video_fps(media, token_ids, None).await
+    }
+
+    async fn prepare_media_with_video_fps(
+        &self,
+        media: multimodal::MultimodalInput,
+        token_ids: &mut Vec<u32>,
+        video_fps: Option<f64>,
+    ) -> Result<Option<MmFeatures>> {
+        self.prepare_media_with_options(media, token_ids, video_fps, None).await
+    }
+
+    async fn prepare_media_with_options(
+        &self,
+        media: multimodal::MultimodalInput,
+        token_ids: &mut Vec<u32>,
+        video_fps: Option<f64>,
+        mm_overrides: Option<multimodal::MmProcessorOverrides>,
+    ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
             return Ok(None);
         }
@@ -211,8 +230,15 @@ impl ChatRequestProcessor {
         let features = match media {
             multimodal::MultimodalInput::Raw(parts) => {
                 let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-                info.prepare_multimodal(parts, token_ids, model_dtype, self.max_model_len)
-                    .await?
+                info.prepare_multimodal_with_options(
+                    parts,
+                    token_ids,
+                    model_dtype,
+                    self.max_model_len,
+                    video_fps,
+                    mm_overrides,
+                )
+                .await?
             }
             multimodal::MultimodalInput::Preprocessed(features) => {
                 info.prepare_preprocessed(features, token_ids.len())?
@@ -462,6 +488,33 @@ impl ChatLlm {
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
         self.processor.prepare_media(media.into(), token_ids).await
+    }
+
+    /// Prepare raw media with a request-scoped default video sampling rate.
+    /// Explicit per-item FPS values continue to take precedence.
+    pub async fn prepare_media_with_video_fps(
+        &self,
+        media: impl Into<multimodal::MultimodalInput>,
+        token_ids: &mut Vec<u32>,
+        video_fps: Option<f64>,
+    ) -> Result<Option<MmFeatures>> {
+        self.processor
+            .prepare_media_with_video_fps(media.into(), token_ids, video_fps)
+            .await
+    }
+
+    /// Prepare media with gRPC request-scoped processor and media options.
+    /// Overrides are limited to checkpoint-bounded image settings.
+    pub async fn prepare_media_with_options(
+        &self,
+        media: impl Into<multimodal::MultimodalInput>,
+        token_ids: &mut Vec<u32>,
+        video_fps: Option<f64>,
+        mm_overrides: Option<multimodal::MmProcessorOverrides>,
+    ) -> Result<Option<MmFeatures>> {
+        self.processor
+            .prepare_media_with_options(media.into(), token_ids, video_fps, mm_overrides)
+            .await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
