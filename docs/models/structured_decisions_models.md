@@ -161,7 +161,7 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | limit | value |
 | --- | --- |
 | questions per request | 64 |
-| options per `choice` | 26 |
+| options per `choice` | 26; 255 for [Clef-Flash](#clef-flash) and [Clef-Omni](#clef-omni), which read no labels |
 | levels per `score` | 10 |
 
 #### Joint reads

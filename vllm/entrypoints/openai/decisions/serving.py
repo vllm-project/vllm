@@ -68,7 +68,9 @@ class OpenAIServingDecisions(BaseServingDecisions):
                     f"questions: at most {self.limits.max_questions} for this model"
                 )
             questions = [
-                make_read_question(i, question, self.limits.max_options)
+                make_read_question(
+                    i, question, self.limits.max_options, self.limits.labeled
+                )
                 for i, question in enumerate(request.questions)
             ]
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]

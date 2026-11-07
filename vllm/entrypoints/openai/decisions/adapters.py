@@ -27,7 +27,10 @@ from .question_types import (
 
 
 def make_read_question(
-    index: int, question: DecisionQuestion, max_options: int = len(LABELS)
+    index: int,
+    question: DecisionQuestion,
+    max_options: int = len(LABELS),
+    labeled: bool = True,
 ) -> Question:
     if isinstance(question, PredicateQuestion):
         options = [Option("false"), Option("true")]
@@ -38,7 +41,7 @@ def make_read_question(
         ]
     else:
         options = [Option(level.label, level.description) for level in question.levels]
-    limit = min(max_options, len(LABELS))
+    limit = min(max_options, len(LABELS)) if labeled else max_options
     if len(options) > limit:
         raise StructuredDecisionError(
             f"This model supports at most {limit} choices per question"

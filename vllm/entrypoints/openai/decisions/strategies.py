@@ -857,6 +857,7 @@ class JointSchemaStrategy(ReadStrategy):
     )
     #: The reference's default bound on a prompt, in tokens.
     MAX_LENGTH = 64000
+    MAX_OPTIONS = 255
     TYPE_IDS = {"noul": 0, "choice": 1, "score": 2}
     NOUL_CRITERIA = {
         "true": "The proposition is true or the answer is yes.",
@@ -888,7 +889,10 @@ class JointSchemaStrategy(ReadStrategy):
         )
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+        # The head reads each option's span, not a label token.
+        return DecisionLimits(
+            max_questions=64, max_options=self.MAX_OPTIONS, labeled=False
+        )
 
     def render_state(self, state: Any) -> str:
         return self._render(state)
