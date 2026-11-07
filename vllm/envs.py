@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
+    VLLM_SHM_WAIT_BACKEND: Literal["auto", "stock", "futex"] = "auto"
+    VLLM_SHM_READER_STRIDE: int = 128
+    VLLM_SHM_SPIN_NS: int = 0
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -2381,6 +2384,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # Local MessageQueue wait backend. Auto selects futex on supported Linux
+    # x86_64/aarch64 GIL-enabled CPython with the extension installed, otherwise
+    # stock with an initialization message. Stock is the explicit opt-out;
+    # explicit futex never falls back on unsupported or missing installations.
+    "VLLM_SHM_WAIT_BACKEND": env_with_choices(
+        "VLLM_SHM_WAIT_BACKEND", "auto", ["auto", "stock", "futex"]
+    ),
+    # Futex control bytes per local reader:16 or128. Captured in writer handles.
+    "VLLM_SHM_READER_STRIDE": lambda: int(os.getenv("VLLM_SHM_READER_STRIDE", "128")),
+    # Futex busy-spin nanoseconds before parking:0..1000000. Writer-selected.
+    "VLLM_SHM_SPIN_NS": lambda: int(os.getenv("VLLM_SHM_SPIN_NS", "0")),
     # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
     # Must be set together with VLLM_NIC_SELECTION_VARS.
     "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),

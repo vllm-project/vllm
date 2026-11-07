@@ -13,10 +13,10 @@ from itertools import chain
 from multiprocessing import shared_memory
 from multiprocessing.synchronize import Lock as LockType
 from typing import Any
-from unittest.mock import patch
 
 import torch
 
+from vllm.distributed.device_communicators.shm_utils import attach_shared_memory
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -144,22 +144,10 @@ class SingleWriterShmRingBuffer:
             self._init_auth_secret()
         else:
             # we are opening an existing buffer
-            # fix to https://stackoverflow.com/q/62748654/9191338
-            # Python incorrectly tracks shared memory even if it is not
-            # created by the process. The following patch is a workaround.
-            with patch(
-                "multiprocessing.resource_tracker.register",
-                lambda *args, **kwargs: None,
-            ):
-                self.shared_memory = shared_memory.SharedMemory(name=name)
-                # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
-                # Some platforms allocate memory based on page size,
-                # so the shared memory block size may be larger or equal
-                # to the requested size. The size parameter is ignored
-                # when attaching to an existing block.
-                assert (
-                    self.shared_memory.size >= self.data_buffer_size + self.DATA_OFFSET
-                )
+            self.shared_memory = attach_shared_memory(name)
+            # Some platforms round allocations up to a page; size is ignored
+            # when attaching to an existing block.
+            assert self.shared_memory.size >= self.data_buffer_size + self.DATA_OFFSET
 
         logger.debug(
             "Shared memory created/opened with name: %s, size: %d",

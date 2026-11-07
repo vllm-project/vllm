@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -33,6 +32,7 @@ from zmq import (  # type: ignore
 )
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.shm_utils import attach_shared_memory
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -358,26 +358,14 @@ class ShmRingBuffer:
         else:
             # we are opening an existing buffer
             self.is_creator = False
-            # fix to https://stackoverflow.com/q/62748654/9191338
-            # Python incorrectly tracks shared memory even if it is not
-            # created by the process. The following patch is a workaround.
-            with patch(
-                "multiprocessing.resource_tracker.register",
-                lambda *args, **kwargs: None,
-            ):
-                try:
-                    self.shared_memory = shared_memory.SharedMemory(name=name)
-                    # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
-                    # Some platforms allocate memory based on page size,
-                    # so the shared memory block size may be larger or equal
-                    # to the requested size. The size parameter is ignored
-                    # when attaching to an existing block.
-                    assert self.shared_memory.size >= self.total_bytes_of_buffer
-                except FileNotFoundError:
-                    # we might deserialize the object in a different node
-                    # in this case, this object is not used,
-                    # and we should suppress the error
-                    pass
+            try:
+                self.shared_memory = attach_shared_memory(name)
+                # Some platforms round allocations up to a page; size is
+                # ignored when attaching to an existing block.
+                assert self.shared_memory.size >= self.total_bytes_of_buffer
+            except FileNotFoundError:
+                # Deserialization on a remote node does not use this buffer.
+                pass
 
     def handle(self):
         return (
@@ -487,6 +475,7 @@ class Handle:
     remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
     tensor_arena_handle: tuple[int, int, int, str] | None = None
+    event_handle: tuple | None = None
 
 
 def _close_zmq(context: zmq.Context, sockets: list[zmq.Socket]) -> None:
@@ -516,6 +505,13 @@ class MessageQueue:
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
         self.shutting_down = False
+        self._event_queue = None
+        from vllm.distributed.device_communicators.shm_event_queue import (
+            EventQueue,
+            requested,
+        )
+
+        event_mode = requested() if n_local_reader > 0 else False
         context = Context()
 
         self.tensor_arena: ShmTensorArena | None = None
@@ -549,10 +545,15 @@ class MessageQueue:
             self.current_idx = 0
 
             # Create the notification side of the SpinCondition
-            local_notify_addr = get_open_zmq_ipc_path()
-            self._spin_condition = SpinCondition(
-                is_reader=False, context=context, notify_address=local_notify_addr
-            )
+            if event_mode:
+                self._event_queue = EventQueue.create(n_local_reader, max_chunks)
+                local_notify_addr = None
+                self._spin_condition = None
+            else:
+                local_notify_addr = get_open_zmq_ipc_path()
+                self._spin_condition = SpinCondition(
+                    is_reader=False, context=context, notify_address=local_notify_addr
+                )
         else:
             self.buffer = None  # type: ignore
             local_subscribe_addr = None
@@ -588,6 +589,7 @@ class MessageQueue:
         self._is_remote_reader = False
 
         self.handle = Handle(
+            event_handle=self._event_queue.handle if self._event_queue else None,
             local_reader_ranks=local_reader_ranks,
             buffer_handle=self.buffer.handle() if self.buffer is not None else None,
             local_subscribe_addr=local_subscribe_addr,
@@ -624,6 +626,7 @@ class MessageQueue:
     @staticmethod
     def create_from_handle(handle: Handle, rank) -> "MessageQueue":
         self = MessageQueue.__new__(MessageQueue)
+        self._event_queue = None
         self.handle = handle
         self._is_writer = False
 
@@ -662,10 +665,23 @@ class MessageQueue:
             self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
-            assert isinstance(handle.local_notify_addr, str)
-            self._spin_condition = SpinCondition(
-                is_reader=True, context=context, notify_address=handle.local_notify_addr
-            )
+            event_handle = getattr(handle, "event_handle", None)
+            if event_handle is not None:
+                from vllm.distributed.device_communicators.shm_event_queue import (
+                    EventQueue,
+                )
+
+                self._event_queue = EventQueue.attach(
+                    event_handle, self.local_reader_rank
+                )
+                self._spin_condition = None
+            else:
+                assert isinstance(handle.local_notify_addr, str)
+                self._spin_condition = SpinCondition(
+                    is_reader=True,
+                    context=context,
+                    notify_address=handle.local_notify_addr,
+                )
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -725,12 +741,40 @@ class MessageQueue:
         """If this is an idle reader, wakes it up so it can clean up and shut
         down"""
         self.shutting_down = True
+        if self._event_queue is not None:
+            self._event_queue.cancel()
         if self._spin_condition is not None:
             self._spin_condition.cancel()
 
     @contextmanager
+    def _acquire_event_buffer(self, timeout, *, writer, indefinite=False):
+        """Use the common deadline/warning policy without ZMQ recheck polling."""
+        assert self._event_queue is not None
+        wait_policy = self.ReadTimeoutWithWarnings(
+            timeout=timeout, should_warn=not indefinite
+        )
+
+        def warning_if_due():
+            if wait_policy.should_warn():
+                logger.info(LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL)
+
+        with self._event_queue.acquire(
+            self.buffer,
+            timeout,
+            writer=writer,
+            wait_timeout_ms=lambda: wait_policy.timeout_ms(recheck=False),
+            on_timeout=warning_if_due,
+        ) as buf:
+            yield buf
+
+    @contextmanager
     def acquire_write(self, timeout: float | None = None):
         assert self._is_writer, "Only writers can acquire write"
+        if self._event_queue is not None:
+            with self._acquire_event_buffer(timeout, writer=True) as buf:
+                yield buf
+            self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
+            return
         start_time = time.monotonic()
         n_warning = 1
         while True:
@@ -814,22 +858,26 @@ class MessageQueue:
             self.n_warning = 1
             self.timeout = timeout
 
-        def timeout_ms(self) -> int:
+        def timeout_ms(self, *, recheck: bool = True) -> int | None:
             """Returns a timeout, capped at the recheck interval, that is:
             - min(time to deadline, time to next warning) if we're logging warnings
             - time to deadline, if we're not logging warnings
             - recheck interval if the timeout is None and we're not logging warnings
             - raise TimeoutError if we are past the deadline
             """
-            wait_ms = SHM_READER_RECHECK_INTERVAL_MS
+            wait_ms = SHM_READER_RECHECK_INTERVAL_MS if recheck else None
             if self.warning_wait_time_ms is not None:
-                wait_ms = min(wait_ms, self.warning_wait_time_ms)
+                wait_ms = (
+                    self.warning_wait_time_ms
+                    if wait_ms is None
+                    else min(wait_ms, self.warning_wait_time_ms)
+                )
             if self.timeout is None:
                 return wait_ms
             time_left_ms = int((self.deadline - time.monotonic()) * 1000)
             if time_left_ms <= 0:
                 raise TimeoutError
-            return min(wait_ms, time_left_ms)
+            return time_left_ms if wait_ms is None else min(wait_ms, time_left_ms)
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
@@ -868,6 +916,7 @@ class MessageQueue:
         # for readers, `self.current_idx` is the next block to read
         # if this block is not ready,
         # we need to wait until it is written
+        assert self._spin_condition is not None
         self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
 
         if self.shutting_down:
@@ -891,6 +940,8 @@ class MessageQueue:
         if self.shutting_down:
             raise RuntimeError("cancelled")
         if self._is_local_reader:
+            if self._event_queue is not None:
+                return self._event_queue.endpoint.readable()
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 return self._is_readable(metadata_buffer)
         if self._is_remote_reader:
@@ -906,6 +957,14 @@ class MessageQueue:
         """
         if self._is_remote_reader:
             self.remote_socket.poll(timeout=REMOTE_POLL_WAIT_MS)
+            return
+        if self._event_queue is not None:
+            # This active-output wait must also observe caller-owned pending work.
+            # Ordinary idle dequeues still park in the native futex acquire.
+            while not pending and time.monotonic() < deadline:
+                if self.readable():
+                    return
+                sched_yield()
             return
         read_flag_idx = self.local_reader_rank + 1
         monotonic = time.monotonic
@@ -923,6 +982,19 @@ class MessageQueue:
         indefinite: bool = False,
     ):
         assert self._is_local_reader, "Only readers can acquire read"
+        if self._event_queue is not None:
+            acquired = False
+            try:
+                with self._acquire_event_buffer(
+                    timeout, writer=False, indefinite=indefinite
+                ) as buf:
+                    acquired = True
+                    yield buf
+            finally:
+                if acquired:
+                    self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
+            return
+        assert self._spin_condition is not None
         read_timeout = self.ReadTimeoutWithWarnings(
             timeout=timeout, should_warn=not indefinite
         )
@@ -1010,7 +1082,8 @@ class MessageQueue:
                         buf[offset:buf_offset] = to_bytes_big(buf_len, 4)
                         buf[buf_offset : (offset := buf_offset + buf_len)] = buffer
 
-            self._spin_condition.notify()
+            if self._spin_condition is not None:
+                self._spin_condition.notify()
 
         if self.n_remote_reader > 0:
             self.remote_socket.send_multipart(all_buffers, copy=False)
