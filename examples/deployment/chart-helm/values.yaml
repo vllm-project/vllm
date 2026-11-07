@@ -43,8 +43,10 @@ resources:
     nvidia.com/gpu: 1
 
 # -- Type of gpu used
-gpuModels:
-  - "TYPE_GPU_USED"
+gpuModels: []
+
+# -- Pod affinity configuration. Takes precedence over gpuModels when set.
+affinity: {}
 
 # -- Autoscaling configuration
 autoscaling:
