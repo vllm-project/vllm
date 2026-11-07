@@ -333,6 +333,37 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
         validate_parsed_serve_args(args)
 
 
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--enable-log-requests"],
+        ["--enable-log-outputs"],
+        ["--enable-log-requests", "--enable-log-outputs"],
+    ],
+)
+def test_log_request_ids_only_rejects_content_logging(
+    serve_parser, monkeypatch, extra_args
+):
+    monkeypatch.delenv("VLLM_REQUEST_BODY_LOG_LEVEL", raising=False)
+    args = serve_parser.parse_args(args=["--enable-log-request-ids-only", *extra_args])
+    with pytest.raises(TypeError, match="--enable-log-request-ids-only"):
+        validate_parsed_serve_args(args)
+
+
+def test_log_request_ids_only_rejects_request_body_log_level(serve_parser, monkeypatch):
+    monkeypatch.setenv("VLLM_REQUEST_BODY_LOG_LEVEL", "INFO")
+    args = serve_parser.parse_args(args=["--enable-log-request-ids-only"])
+    with pytest.raises(TypeError, match="VLLM_REQUEST_BODY_LOG_LEVEL"):
+        validate_parsed_serve_args(args)
+
+
+def test_log_request_ids_only_passes_alone(serve_parser, monkeypatch):
+    monkeypatch.delenv("VLLM_REQUEST_BODY_LOG_LEVEL", raising=False)
+    args = serve_parser.parse_args(args=["--enable-log-request-ids-only"])
+    validate_parsed_serve_args(args)
+    assert AsyncEngineArgs.from_cli_args(args).enable_log_request_ids_only
+
+
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 
