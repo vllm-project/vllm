@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 
@@ -2263,6 +2263,17 @@ def _validate_mxfp4_experts_config(
         )
 
 
+def mxfp4_backend_supports_csf_scales(
+    backend: Mxfp4MoeBackend, config: FusedMoEConfig
+) -> bool:
+    """Whether the selected MXFP4 backend can keep scales compressed."""
+    if backend != Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
+        return False
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+
+    return B12xExperts.supports_mxfp4_csf_scales(config)
+
+
 def make_mxfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
@@ -2273,10 +2284,22 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
+    experts_kwargs: dict[str, Any] = {}
+    if envs.VLLM_B12X_MOE_MXFP4_CSF and mxfp4_backend in B12X_BACKENDS:
+        if mxfp4_backend_supports_csf_scales(mxfp4_backend, moe_config):
+            experts_kwargs["csf_scales"] = True
+        else:
+            logger.warning_once(
+                "VLLM_B12X_MOE_MXFP4_CSF is enabled, but the selected b12x "
+                "backend, layer geometry or installed package does not support "
+                "resident MXFP4 CSF scales. Keeping uncompressed scales."
+            )
+
     return make_moe_kernel(
         moe_quant_config,
         moe_config,
         experts_cls,
         routing_tables,
         experts_log="Using %s",
+        experts_kwargs=experts_kwargs,
     )

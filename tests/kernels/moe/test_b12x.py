@@ -5,6 +5,7 @@
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -45,6 +46,10 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
     prepare_nvfp4_moe_layer_for_b12x,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_csf import (
+    MXFP4_CSF_ROWS,
+    encode_mxfp4_csf_scales,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
@@ -53,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.b12x import get_b12x_fused_moe, get_b12x_preparation
 from vllm.utils.torch_utils import set_random_seed
 
 
@@ -152,6 +158,15 @@ def _nvfp4_activation_reference(
     )
 
 
+def _has_b12x_csf() -> bool:
+    fused_moe = get_b12x_fused_moe()
+    return (
+        hasattr(fused_moe, "Mxfp4CsfWeights")
+        and hasattr(fused_moe, "ExecutionCapacity")
+        and get_b12x_preparation() is not None
+    )
+
+
 def _has_b12x_moe() -> bool:
     return (
         torch.cuda.is_available()
@@ -173,6 +188,7 @@ def _make_b12x_moe_kernel(
     topk: int,
     activation: MoEActivation,
     quant_config: FusedMoEQuantConfig,
+    layers: list | None = None,
 ) -> mk.FusedMoEKernel:
     num_experts = w1.shape[0]
     moe_config = make_dummy_moe_config(
@@ -208,6 +224,8 @@ def _make_b12x_moe_kernel(
             layer.w13_input_scale = 1.0 / quant_config.a1_gscale
             layer.w2_input_scale = 1.0 / quant_config.a2_gscale
     experts.process_weights_after_loading(layer)
+    if layers is not None:
+        layers.append(layer)
     return mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
@@ -1011,9 +1029,10 @@ def _make_b12x_moe_case(
     activation: MoEActivation = MoEActivation.SILU,
     tokens: int = 16,
     seed: int = 19,
+    intermediate_size: int = 128,
 ) -> _B12xMoeCase:
     set_random_seed(seed)
-    num_experts, hidden_size, intermediate_size = 4, 512, 128
+    num_experts, hidden_size = 4, 512
     dtype = torch.bfloat16
     hidden_states = torch.randn((tokens, hidden_size), device="cuda", dtype=dtype) / 10
     w1_rows = 2 * intermediate_size if activation.is_gated else intermediate_size
@@ -1355,3 +1374,478 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
             )
             assert cosine >= 0.999 and relative_l2 <= 0.01
         graph.reset()
+
+
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
+@torch.inference_mode()
+def test_b12x_mxfp4_w4a8_compact_n64_runs(workspace_init) -> None:
+    # An intermediate size of 192 is 64 modulo 128, so b12x repacks the weights
+    # to compact N64 and must execute them through the prepared native path.
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        case = _make_b12x_moe_case("mxfp4", "mxfp8", intermediate_size=192)
+        reference = torch_moe(
+            case.hidden_states,
+            case.w1_ref,
+            case.w2_ref,
+            case.score,
+            case.topk,
+            activation=case.activation,
+        )
+        num_experts = case.w1.shape[0]
+        w1_scale, w2_scale = case.quant_config.w1_scale, case.quant_config.w2_scale
+        assert w1_scale is not None and w2_scale is not None
+        w1_orig, w2_orig = case.w1.clone(), case.w2.clone()
+        w1_scale_orig, w2_scale_orig = w1_scale.clone(), w2_scale.clone()
+        layers: list = []
+        kernel = _make_b12x_moe_kernel(
+            case.hidden_states,
+            case.w1,
+            case.w2,
+            case.topk,
+            case.activation,
+            case.quant_config,
+            layers,
+        )
+        (layer,) = layers
+        experts = kernel.impl.fused_experts
+        assert isinstance(experts, B12xExperts)
+        topk_weights, topk_ids, _ = fused_topk(
+            case.hidden_states, case.score, case.topk, renormalize=False
+        )
+
+        def apply() -> torch.Tensor:
+            return kernel.apply(
+                hidden_states=case.hidden_states,
+                w1=case.w1,
+                w2=case.w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=case.activation,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        experts.warmup_launches(layer, token_counts=(1, 16, 64))
+        outputs = [apply()]
+        assert getattr(experts, "_native_experts", None) is not None
+        # Reload the weights, as a weight update does, and run again.
+        # The first load repacks the weights in place; reload from pristine copies.
+        layer.w13_weight, layer.w2_weight = w1_orig.clone(), w2_orig.clone()
+        layer.w13_weight_scale = w1_scale_orig.clone()
+        layer.w2_weight_scale = w2_scale_orig.clone()
+        experts.process_weights_after_loading(layer)
+        assert getattr(experts, "_native_experts", None) is not None
+        outputs.append(apply())
+
+    for output in outputs:
+        torch.testing.assert_close(output, reference, atol=2e-1, rtol=2e-1)
+        cosine = torch.nn.functional.cosine_similarity(
+            output.flatten().float(), reference.flatten().float(), dim=0
+        )
+        assert cosine > 0.99
+
+
+@pytest.mark.skipif(
+    not _has_b12x_moe() or not _has_b12x_csf(),
+    reason="requires b12x MXFP4 CSF kernels on SM120/SM121",
+)
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("intermediate", [192, 256])
+def test_b12x_mxfp4_csf_checkpoint_loading_preserves_generation(
+    tmp_path, monkeypatch, vllm_runner, enforce_eager, intermediate
+):
+    """Loading packed weights preserves generation with one routed row per call."""
+    from safetensors.torch import save_file
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    from vllm import SamplingParams
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Compare matching GEMM layouts to isolate scale storage from arithmetic.
+    monkeypatch.setenv("B12X_W4A8_CSF_INLINE", str(int(intermediate % 128 == 64)))
+    config = Qwen3MoeConfig(
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=256,
+        moe_intermediate_size=intermediate,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=64,
+        num_experts=8,
+        num_experts_per_tok=1,
+        max_position_embeddings=64,
+    )
+    config.architectures = ["Qwen3MoeForCausalLM"]
+    with torch.device("cpu"), torch.random.fork_rng(devices=[]):
+        torch.manual_seed(29)
+        weights = {
+            name: tensor.contiguous()
+            for name, tensor in Qwen3MoeForCausalLM(config)
+            .to(torch.bfloat16)
+            .state_dict()
+            .items()
+            if ".mlp.experts." not in name
+        }
+        for index in range(2):
+            for expert in range(8):
+                for projection, rows, cols in (
+                    ("gate_proj", intermediate, 256),
+                    ("up_proj", intermediate, 256),
+                    ("down_proj", 256, intermediate),
+                ):
+                    prefix = f"model.layers.{index}.mlp.experts.{expert}.{projection}"
+                    weights[f"{prefix}.weight"] = torch.randint(
+                        256, (rows, cols // 2), dtype=torch.uint8
+                    )
+                    weights[f"{prefix}.weight_scale"] = torch.randint(
+                        118, 122, (rows, cols // 32), dtype=torch.uint8
+                    )
+    config.quantization_config = {"quant_method": "mxfp4"}
+    config.save_pretrained(tmp_path)
+    save_file(weights, str(tmp_path / "model.safetensors"))
+
+    results = []
+    for compressed in (False, True):
+        monkeypatch.setenv("VLLM_B12X_MOE_MXFP4_CSF", str(int(compressed)))
+
+        def check_resident_scales(model, compressed=compressed):
+            layers = [m for m in model.modules() if isinstance(m, RoutedExperts)]
+            assert len(layers) == 2
+            pointers = []
+            for layer in layers:
+                assert isinstance(layer.quant_method, Mxfp4MoEMethod)
+                assert (
+                    layer.quant_method.mxfp4_backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8
+                )
+                assert layer.w13_weight_scale.numel() == 0
+                assert layer.w2_weight_scale.numel() == 0
+                prepared = layer._b12x_prepared_experts
+                inline = intermediate % 128 == 64
+                assert (prepared.mxfp4_csf_inline is not None) == (
+                    compressed and inline
+                )
+                assert (prepared.mxfp4_csf is not None) == (compressed and not inline)
+                pointers.append(
+                    (
+                        prepared.w1_blockscale.data_ptr(),
+                        prepared.w2_blockscale.data_ptr(),
+                    )
+                )
+            if compressed:
+                assert pointers[0] == pointers[1]
+
+        with vllm_runner(
+            str(tmp_path),
+            dtype="bfloat16",
+            moe_backend="b12x",
+            skip_tokenizer_init=True,
+            enforce_eager=enforce_eager,
+            enable_flashinfer_autotune=False,
+            max_model_len=32,
+            max_num_seqs=1,
+            max_num_batched_tokens=32,
+            kv_cache_memory_bytes=16 << 20,
+            seed=29,
+            compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+        ) as llm:
+            llm.apply_model(check_resident_scales)
+            completion = (
+                llm.get_llm()
+                .generate(
+                    [{"prompt_token_ids": [1]}],
+                    SamplingParams(
+                        temperature=0, max_tokens=4, ignore_eos=True, logprobs=4
+                    ),
+                )[0]
+                .outputs[0]
+            )
+            assert len(completion.token_ids) == 4
+            results.append(
+                (
+                    completion.token_ids,
+                    [
+                        {token: value.logprob for token, value in step.items()}
+                        for step in completion.logprobs
+                    ],
+                )
+            )
+    assert results[0] == results[1]
+
+
+@pytest.mark.parametrize(
+    "hidden,intermediate,activation,dtype,expected",
+    [
+        (256, 192, MoEActivation.SILU, torch.bfloat16, True),
+        (256, 256, MoEActivation.SILU, torch.bfloat16, True),
+        (4096, 1024, MoEActivation.SILU, torch.bfloat16, True),
+        (256, 224, MoEActivation.SILU, torch.bfloat16, False),
+        (8192, 192, MoEActivation.SILU, torch.bfloat16, False),
+        (256, 8192, MoEActivation.SILU, torch.bfloat16, False),
+        (256, 192, MoEActivation.SITU, torch.bfloat16, False),
+        (256, 192, MoEActivation.SILU, torch.float16, False),
+        (256, 256, MoEActivation.SITU, torch.bfloat16, True),
+        (256, 256, MoEActivation.SILU, torch.float16, True),
+    ],
+)
+def test_mxfp4_csf_requires_unpadded_scale_geometry(
+    hidden, intermediate, activation, dtype, expected
+):
+    config = make_dummy_moe_config(
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        activation=activation,
+        in_dtype=dtype,
+    )
+    has_csf = _has_b12x_csf()
+    assert mxfp4_oracle.mxfp4_backend_supports_csf_scales(
+        Mxfp4MoeBackend.B12X_MXFP4_MXFP8, config
+    ) == (has_csf and expected)
+    assert not mxfp4_oracle.mxfp4_backend_supports_csf_scales(
+        Mxfp4MoeBackend.B12X_MXFP4_BF16, config
+    )
+
+
+@pytest.mark.skipif(
+    not _has_b12x_moe() or not _has_b12x_csf(),
+    reason="requires b12x MXFP4 CSF kernels on SM120/SM121",
+)
+@pytest.mark.parametrize("intermediate", [192, 256])
+@pytest.mark.parametrize("tokens,topk", [(1, 2), (3, 1), (7, 1), (64, 2)])
+@torch.inference_mode()
+def test_b12x_mxfp4_resident_scales_match_plain_scales(
+    intermediate, tokens, topk, monkeypatch, workspace_init
+):
+    """CSF preserves scales and outputs for cached live capacities and graph replays."""
+    from vllm.v1.worker.workspace import lock_workspace
+
+    monkeypatch.setenv("B12X_W4A8_CSF_INLINE", str(int(intermediate % 128 == 64)))
+    set_random_seed(29)
+    num_experts, hidden = 8, 256
+    config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+    )
+    backend = Mxfp4MoeBackend.B12X_MXFP4_MXFP8
+    weights = [
+        torch.randint(256, shape, device="cuda", dtype=torch.uint8)
+        for shape in (
+            (num_experts, 2 * intermediate, hidden // 2),
+            (num_experts, hidden, intermediate // 2),
+        )
+    ]
+    scales = [
+        torch.randint(
+            118, 122, (*w.shape[:2], w.shape[2] // 16), device="cuda", dtype=torch.uint8
+        )
+        for w in weights
+    ]
+    kernels, layers = [], []
+    with set_current_vllm_config(VllmConfig()):
+        for compressed in (False, True):
+            monkeypatch.setenv("VLLM_B12X_MOE_MXFP4_CSF", str(int(compressed)))
+            layer = torch.nn.Module()
+            layer.activation = MoEActivation.SILU
+            layer.apply_router_weight_on_input = False
+            for name, value in zip(
+                ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+                (*weights, *scales),
+            ):
+                layer.register_parameter(
+                    name, torch.nn.Parameter(value.clone(), requires_grad=False)
+                )
+            quant = mxfp4_oracle.make_mxfp4_moe_quant_config(
+                backend, layer.w13_weight_scale, layer.w2_weight_scale
+            )
+            kernel = mxfp4_oracle.make_mxfp4_moe_kernel(
+                quant, config, B12xExperts, backend
+            )
+            kernel.fused_experts.process_weights_after_loading(layer)
+            kernels.append(kernel)
+            layers.append(layer)
+
+        plain_experts = kernels[0].fused_experts
+        resident_experts = kernels[1].fused_experts
+        assert isinstance(plain_experts, B12xExperts)
+        assert isinstance(resident_experts, B12xExperts)
+        plain = plain_experts._prepared()
+        resident = resident_experts._prepared()
+        inline = intermediate % 128 == 64
+        assert (resident.mxfp4_csf_inline is not None) == inline
+        assert (
+            layers[1].w13_weight_scale.numel() == layers[1].w2_weight_scale.numel() == 0
+        )
+
+        if inline:
+            assert resident.mxfp4_csf is None
+        else:
+            assert resident.mxfp4_csf is not None
+            resident.mxfp4_csf.decode(
+                torch.arange(num_experts, device="cuda", dtype=torch.int32),
+                resident.w1_blockscale,
+                resident.w2_blockscale,
+            )
+        for expanded, expected in zip(
+            (resident.w1_blockscale, resident.w2_blockscale),
+            (plain.w1_blockscale, plain.w2_blockscale),
+        ):
+            assert torch.equal(expanded.view(torch.uint8), expected.view(torch.uint8))
+        with pytest.raises(NotImplementedError, match="reloading"):
+            kernels[1].fused_experts.process_weights_after_loading(layers[1])
+
+        resident_experts._plan(tokens=1, topk=topk, activation=MoEActivation.SILU)
+
+        def reject_runtime_preparation(*args, **kwargs):
+            pytest.fail("a new live batch tried to prepare kernels during inference")
+
+        monkeypatch.setattr(
+            resident_experts._preparation_session, "prepare", reject_runtime_preparation
+        )
+
+        x = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+        ids = torch.arange(tokens * topk, device="cuda", dtype=torch.int32)
+        ids = ids.view(tokens, topk).remainder(num_experts)
+        routing = torch.full((tokens, topk), 1.0 / topk, device="cuda")
+
+        def apply(index):
+            return kernels[index].apply(
+                hidden_states=x,
+                w1=layers[index].w13_weight,
+                w2=layers[index].w2_weight,
+                topk_weights=routing,
+                topk_ids=ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        def assert_outputs_match(csf_out, plain_out):
+            if inline:
+                torch.testing.assert_close(csf_out, plain_out, rtol=0, atol=0)
+                return
+            # The plain layer runs the legacy plan/bind path here, not the native one.
+            torch.testing.assert_close(csf_out, plain_out, atol=2e-3, rtol=2e-2)
+            cosine = torch.nn.functional.cosine_similarity(
+                csf_out.float().flatten(), plain_out.float().flatten(), dim=0
+            )
+            assert cosine > 0.9999
+
+        expected = apply(0)
+        assert torch.isfinite(expected).all() and torch.count_nonzero(expected)
+        assert_outputs_match(apply(1), expected)
+        lock_workspace()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
+            output = apply(1)
+        for _ in range(2):
+            x.neg_()
+            ids.add_(2).remainder_(num_experts)
+            resident.w1_blockscale.view(torch.uint8).fill_(0x7F)
+            resident.w2_blockscale.view(torch.uint8).fill_(0x7F)
+            graph.replay()
+            assert_outputs_match(output, apply(0))
+        graph.reset()
+
+
+def _decode_mxfp4_csf_scales(
+    fixed: torch.Tensor, exceptions: torch.Tensor, cols: int
+) -> torch.Tensor:
+    """Rebuild one CPU ``[rows, cols]`` E8M0 matrix from its b12x planes."""
+    if (
+        fixed.dtype != torch.uint8
+        or fixed.dim() != 2
+        or fixed.shape[0] == 0
+        or exceptions.dtype != torch.uint32
+        or not 1 <= cols <= 255
+        or fixed.shape[0] * MXFP4_CSF_ROWS * cols > 1 << 24
+    ):
+        raise ValueError("Invalid MXFP4 CSF planes")
+    row_bytes = -(-cols // 8)
+    if fixed.shape[1] != MXFP4_CSF_ROWS * (1 + row_bytes):
+        raise ValueError("MXFP4 CSF fixed plane does not match the column count")
+    rows = fixed.shape[0] * MXFP4_CSF_ROWS
+    planes = fixed.numpy()
+    bases = planes[:, :MXFP4_CSF_ROWS].reshape(rows, 1).astype(np.int16)
+    bits = np.unpackbits(
+        planes[:, MXFP4_CSF_ROWS:].reshape(rows, row_bytes), axis=1, bitorder="little"
+    )[:, :cols]
+    out = (bases + bits).reshape(-1)
+    if (out > 255).any():
+        raise ValueError("MXFP4 CSF selector exceeds the byte range")
+    out = out.astype(np.uint8)
+    words = exceptions.reshape(-1).numpy()
+    positions = words & 0xFFFFFF
+    if positions.size and (
+        positions[-1] >= rows * cols or (positions[1:] <= positions[:-1]).any()
+    ):
+        raise ValueError("CSF exception positions must be increasing and in range")
+    out[positions] = (words >> 24).astype(np.uint8)
+    return torch.from_numpy(out.reshape(rows, cols))
+
+
+def _mxfp4_scales(experts: int, rows: int, cols: int, seed: int = 0) -> np.ndarray:
+    """E8M0 bytes clustered on two neighbours, as in real checkpoints, plus outliers."""
+    rng = np.random.default_rng(seed)
+    shape = (experts, rows, cols)
+    raw = 118 + rng.binomial(1, 0.4, shape)
+    outliers = rng.random(shape) < 0.02
+    raw[outliers] += rng.integers(-5, 6, int(outliers.sum()))
+    return raw.astype(np.uint8)
+
+
+@pytest.mark.parametrize("rows, cols", [(16, 1), (32, 7), (64, 90), (16, 255)])
+def test_mxfp4_csf_round_trips(rows, cols):
+    raw = _mxfp4_scales(3, rows, cols)
+    fixed, exceptions = encode_mxfp4_csf_scales(torch.from_numpy(raw))
+
+    row_bytes = -(-cols // 8)
+    for expert in range(3):
+        assert fixed[expert].dtype == torch.uint8
+        assert fixed[expert].shape == (rows // 16, 16 * (1 + row_bytes))
+        assert exceptions[expert].dtype == torch.uint32
+        decoded = _decode_mxfp4_csf_scales(fixed[expert], exceptions[expert], cols)
+        assert np.array_equal(decoded.numpy(), raw[expert])
+
+
+def test_mxfp4_csf_picks_the_window_with_fewest_exceptions():
+    # Every row holds only two neighbouring bytes, so no exceptions are needed,
+    # including at the top of the byte range.
+    raw = np.empty((1, 32, 10), dtype=np.uint8)
+    raw[0, :16] = [120, 121] * 5
+    raw[0, 16:] = [254, 255] * 5
+    fixed, exceptions = encode_mxfp4_csf_scales(torch.from_numpy(raw))
+    assert exceptions[0].numel() == 0
+    assert list(fixed[0][0, :16]) == [120] * 16
+    assert list(fixed[0][1, :16]) == [254] * 16
+    assert torch.equal(
+        fixed[0][0, 16:].reshape(16, 2),
+        torch.tensor([[0xAA, 0x02]], dtype=torch.uint8).expand(16, 2),
+    )
+    decoded = _decode_mxfp4_csf_scales(fixed[0], exceptions[0], 10)
+    assert np.array_equal(decoded.numpy(), raw[0])
+
+
+def test_mxfp4_csf_keeps_arbitrary_bytes_exact():
+    raw = np.random.default_rng(1).integers(0, 256, (2, 32, 33), dtype=np.uint8)
+    fixed, exceptions = encode_mxfp4_csf_scales(torch.from_numpy(raw))
+    for expert in range(2):
+        words = exceptions[expert].numpy()
+        assert (np.diff(words & 0xFFFFFF) > 0).all()
+        decoded = _decode_mxfp4_csf_scales(fixed[expert], exceptions[expert], 33)
+        assert np.array_equal(decoded.numpy(), raw[expert])
+
+
+@pytest.mark.parametrize(
+    "shape", [(1, 15, 4), (1, 16, 256), (16, 4), (0, 16, 4), (1, 0, 4)]
+)
+def test_mxfp4_csf_rejects_unsupported_shapes(shape):
+    with pytest.raises(ValueError):
+        encode_mxfp4_csf_scales(torch.zeros(shape, dtype=torch.uint8))
