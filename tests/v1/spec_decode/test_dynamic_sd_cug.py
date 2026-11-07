@@ -65,7 +65,11 @@ def _create_vllm_config_for_dsd(
 
     speculative_config = MagicMock()
     speculative_config.uses_dynamic_speculative_decoding.return_value = use_dynamic_sd
+    speculative_config.uses_variable_num_speculative_tokens.return_value = (
+        use_dynamic_sd
+    )
     speculative_config.enable_adaptive_verification = False
+    speculative_config.num_speculative_tokens_under_prefill_load = None
     if use_dynamic_sd:
         # DSD reads the per-batch-size schedule; a schedule entry with K
         # speculative tokens maps to decode query length K + 1. By default
