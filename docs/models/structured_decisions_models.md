@@ -26,6 +26,7 @@ used for classification and routing.
 | `Gemma4ForConditionalGeneration`        | T + I<sup>+</sup> + V + A<sup>*</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-E2B-it`, etc.            |
 | `Gemma4UnifiedForConditionalGeneration` | T + I<sup>+</sup> + V + A             | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-12B-it`, etc.            |
 | `Lfm2VlForConditionalGeneration`        | T + I<sup>+</sup>                     | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
+| `Qwen3VLForConditionalGeneration`       | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3-VL-4B-Instruct`, etc.        |
 | `Qwen3_5ForConditionalGeneration`       | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
 | `Qwen3_5MoeForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
 | `DiffusionGemmaForBlockDiffusion`       | T + I<sup>+</sup> + V<sup>+</sup>     | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
