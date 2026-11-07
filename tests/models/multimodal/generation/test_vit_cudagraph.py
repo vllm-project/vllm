@@ -221,6 +221,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
+    "kimi_k3": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-K3",
+        modalities=["image"],
+        image_prompt="<|kimi_image_placeholder|>What is in this image?",
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        # 1 text + 1 vision layer with random weights, as for kimi_vl.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "enable_chunked_prefill": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiK3ForConditionalGeneration",
+            ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "minimax_m3": VitCudagraphTestConfig(
         model="MiniMaxAI/MiniMax-M3",
         modalities=["image"],
@@ -680,6 +699,8 @@ def test_eonly_vit_cudagraph_outputs(
     from transformers import AutoProcessor
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
     token_budgets = [64, 256, 2048]
@@ -741,3 +762,99 @@ def test_eonly_vit_cudagraph_outputs(
         for result in results:
             assert result["stats"][0]["token_budgets"] == token_budgets
         print(f"E-only {model_id}: {results}")
+
+
+def _check_k3_replay_and_threshold(worker, grids, hits, misses):
+    """Run one image batch through the real manager; compare with eager.
+
+    Args:
+        grids: grid_thw of each image in the batch.
+        hits: expected graph hits for the batch.
+        misses: expected eager fallbacks for the batch.
+
+    """
+    import torch
+
+    from vllm.utils.torch_utils import set_random_seed
+
+    runner = worker.model_runner
+    manager = (
+        runner.model_state.encoder_runner.cudagraph_manager
+        if hasattr(runner, "model_state")
+        else runner.encoder_cudagraph_manager
+    )
+    assert manager is not None and manager.is_captured()
+    model = runner.model
+    patch = runner.model_config.hf_config.vision_config.patch_size
+    set_random_seed(0)
+    with torch.inference_mode():
+        num_patches = sum(t * h * w for t, h, w in grids)
+        kwargs = {
+            # The input norm takes raw 8-bit pixels.
+            "pixel_values": torch.randint(
+                0,
+                256,
+                (num_patches, 3, patch, patch),
+                device=runner.device,
+                dtype=torch.uint8,
+            ),
+            "grid_thws": grids,
+        }
+        before = manager.get_cumulative_stats()
+        actual = torch.cat(manager.execute(kwargs))
+        after = manager.get_cumulative_stats()
+        assert after["graph_hits"] - before["graph_hits"] == hits
+        assert after["graph_misses"] - before["graph_misses"] == misses
+        expected = model.encoder_eager_forward(kwargs)
+        assert actual.shape == expected.shape
+        assert torch.isfinite(actual).all() and expected.abs().max() > 0
+        # Two bf16 ulps at the output scale: replay runs padded GEMMs.
+        bound = 2 * expected.abs().max().item() * 2**-7
+        diff = (actual.float() - expected.float()).abs().max().item()
+        assert diff <= bound, f"max abs diff {diff} > {bound}"
+    return manager.token_budgets
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD Kimi-K3 encoder graphs")
+@pytest.mark.parametrize(
+    ("grids", "hits", "misses"),
+    [
+        pytest.param([[1, 16, 16]], 1, 0, id="fills_smallest_budget_64"),
+        pytest.param([[1, 28, 28]], 1, 0, id="padded_budget_196"),
+        pytest.param([[1, 32, 64]], 1, 0, id="fills_largest_budget_512"),
+        pytest.param([[1, 34, 64]], 0, 1, id="above_largest_budget_544"),
+        pytest.param([[1, 28, 28]] * 2, 2, 0, id="two_images_share_replay"),
+        pytest.param([[1, 28, 28], [1, 34, 64]], 1, 1, id="only_oversize_eager"),
+    ],
+)
+def test_kimi_k3_vit_cudagraph_replay_and_threshold(
+    grids, hits, misses, vllm_runner, monkeypatch
+):
+    """Replay matches eager; graphs serve items up to the largest budget (512
+    output tokens by default) and larger items run eagerly."""
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["kimi_k3"]
+    compilation_config = get_compilation_config(config)
+    compilation_config.pop("encoder_cudagraph_token_budgets")
+    compilation_config["encoder_cudagraph_max_vision_items_per_batch"] = 2
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=compilation_config,
+        **config.vllm_runner_kwargs,
+    ) as vllm_model:
+        results = vllm_model.llm.collective_rpc(
+            partial(
+                _check_k3_replay_and_threshold,
+                grids=grids,
+                hits=hits,
+                misses=misses,
+            )
+        )
+    for token_budgets in results:
+        assert token_budgets[-1] == 512
