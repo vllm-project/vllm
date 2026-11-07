@@ -1975,6 +1975,70 @@ def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
     assert launches.item() == 1, "captured graph must not bake in the skip"
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@torch.inference_mode()
+def test_hisparse_c4_rows_follow_live_token_slots(monkeypatch):
+    """Dummy runs skip the HiSparse connector's per-step refresh, so the C4
+    row slots must come from the live token slots, not an earlier step."""
+    from dataclasses import dataclass
+
+    from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v4.nvidia.ops import sparse_attn_compress_cutedsl
+
+    @dataclass
+    class SlotMetadata:
+        slot_mapping: torch.Tensor
+
+    written: list[torch.Tensor] = []
+    monkeypatch.setattr(
+        sparse_attn_compress_cutedsl,
+        "_SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL",
+        lambda **kw: written.append(kw["k_cache_metadata"].slot_mapping.clone()),
+    )
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.head_dim, compressor.rope_head_dim = 512, 64
+    compressor.compress_ratio, compressor.overlap = 4, True
+    compressor.use_fp4_cache = False
+    compressor._quant_block = 64
+    compressor._token_stride = 576
+    compressor._scale_dim = 8
+    compressor.rms_norm_eps = 1e-6
+    compressor.norm = SimpleNamespace(weight=torch.ones(512, device="cuda"))
+    compressor.k_cache_prefix = "main"
+    num_tokens = 8
+    hisparse_cache = SimpleNamespace(
+        view=SimpleNamespace(cache=torch.zeros(1, 64, 584, dtype=torch.uint8)),
+        token_slot_mapping=torch.tensor(
+            [-1, -1, -1, -1, 4, 5, 6, 7], dtype=torch.int64, device="cuda"
+        ),
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int64, device="cuda"),
+        runtime=SimpleNamespace(tokens_per_row=4),
+    )
+    compressor._static_forward_context = {
+        "main": SimpleNamespace(kv_cache=None, hisparse_cache=hisparse_cache)
+    }
+    state_metadata = SimpleNamespace(
+        token_to_req_indices=torch.zeros(num_tokens, dtype=torch.int32),
+        slot_mapping=torch.arange(num_tokens, device="cuda"),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        block_size=4,
+    )
+    main_metadata = SlotMetadata(torch.full((num_tokens,), -1, device="cuda"))
+
+    compressor._compress_norm_rope_store(
+        state_metadata,
+        state_cache=torch.zeros(1),
+        state_width=1024,
+        positions=torch.arange(num_tokens, device="cuda"),
+        rotary_emb=SimpleNamespace(cos_sin_cache=torch.zeros(1, 64)),
+        attn_metadata={"main": main_metadata},
+        pdl_kwargs={},
+    )
+
+    assert written[0].tolist() == [-1] * 7 + [1]
+
+
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────
 
 

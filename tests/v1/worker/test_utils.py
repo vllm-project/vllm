@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _flatten_row_mirrors,
     _select_written_row_mirrors,
     _SlotMappingStaging,
+    _token_mirrors_to_rows,
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
@@ -34,7 +35,7 @@ from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle, compress_slot_mapping
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -114,6 +115,9 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = CUDAHiSparseBackend()
     worker._slot_mapping_staging = None
+    worker._row_slot_mappings = ()
+    worker.tokens_per_row = 1
+    worker.row_value_bytes = 0
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
@@ -203,6 +207,21 @@ def test_hisparse_gpu_slots_select_written_rows_from_async_envelope():
     assert _select_written_row_mirrors(candidates, source_slots, 0) == (
         SparseKVRowMirror((102, 502), 1002, 2),
         SparseKVRowMirror((21, 301), 2001, 3),
+    )
+
+
+def test_hisparse_compressed_rows_mirror_the_rows_their_tokens_write():
+    """A C4 token span mirrors exactly the rows its compressed slots write."""
+    token_slots = torch.arange(256 + 6, 256 + 15)
+    row_slots = torch.empty_like(token_slots)
+    compress_slot_mapping(token_slots, 4, row_slots)
+    (row_mirror,) = _token_mirrors_to_rows(
+        (SparseKVRowMirror((256 + 6,), 512 + 6, 9),), 4
+    )
+
+    assert row_slots.tolist() == [-1, 65, -1, -1, -1, 66, -1, -1, -1]
+    assert _select_written_row_mirrors((row_mirror,), row_slots.numpy(), 0) == (
+        SparseKVRowMirror((65,), 129, 2),
     )
 
 

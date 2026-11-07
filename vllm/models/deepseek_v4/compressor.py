@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar, cast
 
 import torch
@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.hisparse.runtime import compress_slot_mapping
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -470,6 +471,20 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
+        hisparse_cache = getattr(k_cache_layer, "hisparse_cache", None)
+        if hisparse_cache is not None:
+            assert hisparse_cache.view is not None
+            assert hisparse_cache.slot_mapping is not None
+            assert hisparse_cache.token_slot_mapping is not None
+            kv_cache = hisparse_cache.view.cache
+            num_slots = k_cache_metadata.slot_mapping.shape[0]
+            row_slots = hisparse_cache.slot_mapping[:num_slots]
+            compress_slot_mapping(
+                hisparse_cache.token_slot_mapping[:num_slots],
+                hisparse_cache.runtime.tokens_per_row,
+                row_slots,
+            )
+            k_cache_metadata = replace(k_cache_metadata, slot_mapping=row_slots)
 
         # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
         # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
