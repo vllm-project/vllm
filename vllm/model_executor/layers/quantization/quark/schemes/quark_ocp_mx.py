@@ -90,7 +90,8 @@ class QuarkOCP_MX(QuarkScheme):
             # warnings below do not apply.
             return
 
-        if not current_platform.supports_mx():
+        # MXFP4 backends report their own capabilities after activation overrides.
+        if not current_platform.supports_mx() and self.weight_dtype != "mxfp4":
             logger.warning_once(
                 "The current platform does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "

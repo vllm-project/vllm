@@ -40,6 +40,28 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
+### RDNA4 MXFP4 with FlyDSL
+
+The `flydsl` linear backend supports dense MXFP4 weights on ROCm
+gfx1200/gfx1201. It accepts packed E2M1 weights with E8M0 scales per 32 weights
+and static per-tensor or dynamic per-token FP8 E4M3 activations. Compatible
+Quark and compressed-tensors checkpoints use the shared MXFP4 kernel interface.
+
+Install a FlyDSL build providing `flydsl.kernels.gemm.rdna4_mxfp4`. FlyDSL is the
+default dense MXFP4 backend on RDNA4 when this package is available. Automatic
+selection uses per-token FP8 activations for checkpoints declaring MXFP4 or
+unquantized activations. Checkpoints with a supported FP8 activation scheme use
+that scheme.
+
+```bash
+vllm serve <model>
+```
+
+Explicit activation overrides and backend choices take precedence. For example,
+`--kernel-config '{"linear_backend_per_quant":{"mxfp4":"emulation"}}'` selects
+emulation, and `--quantization-config '{"linear":{"activation":"mxfp4"}}'`
+requests MXFP4 activations. The kernel class is `Rdna4Mxfp4LinearKernel`.
+
 ## Hadamard Input Transforms (QuIP)
 
 Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.

@@ -82,6 +82,9 @@ from vllm.model_executor.kernels.linear.mxfp4.emulation import (
 from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
     FlashInferMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.flydsl import (
+    Rdna4Mxfp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.humming import (
     HummingMxFp4LinearKernel,
 )
@@ -247,6 +250,8 @@ from vllm.model_executor.layers.quantization.utils.humming import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
 )
 from vllm.platforms import PlatformEnum, current_platform
@@ -374,6 +379,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "exllama": {
         ExllamaLinearKernel,
+    },
+    "flydsl": {
+        Rdna4Mxfp4LinearKernel,
     },
     "emulation": {
         EmulationMxfp8LinearKernel,
@@ -632,6 +640,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        Rdna4Mxfp4LinearKernel,
         Rdna3W4A8MxFp4LinearKernel,
         AiterMxfp4LinearKernel,
         EmulationMxfp4LinearKernel,
@@ -1058,9 +1067,6 @@ def init_mxfp4_linear_kernel(
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform."""
     activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
-    config = MxFp4LinearLayerConfig(
-        activation_quant_key=activation_quant_key,
-    )
 
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
@@ -1085,18 +1091,29 @@ def init_mxfp4_linear_kernel(
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
-        if not kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
+        candidate_activation = activation_quant_key
+        if (
+            kernel_cls is Rdna4Mxfp4LinearKernel
+            and activation_quant_key in (None, kMxfp4Dynamic)
+            and not _user_linear_activation_override_is_set()
+        ):
+            candidate_activation = kFp8DynamicTokenSym
+
+        if not kernel_cls._supports_quant_scheme(kMxfp4Static, candidate_activation):
             failure_reasons.append(
                 f"{kernel_cls.__name__}: quantization scheme "
-                f"{kMxfp4Static}x{activation_quant_key} not supported"
+                f"{kMxfp4Static}x{candidate_activation} not supported"
             )
             continue
 
+        config = MxFp4LinearLayerConfig(activation_quant_key=candidate_activation)
         can_implement, reason = kernel_cls.can_implement(config)
         if not can_implement:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
+        if candidate_activation != activation_quant_key:
+            logger.info_once("Using per-token FP8 activations for RDNA4 MXFP4")
         logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 

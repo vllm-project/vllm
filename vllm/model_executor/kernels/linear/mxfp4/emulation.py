@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp6E2M3Dynamic,
@@ -31,9 +32,21 @@ from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 logger = init_logger(__name__)
 
+
+def _quant_dequant_fp8_per_token(x: torch.Tensor) -> torch.Tensor:
+    """Reference path for an explicit FP8 activation override on MXFP4 weights."""
+    from vllm import _custom_ops as ops
+
+    quantized, scale = ops.scaled_fp8_quant(
+        x.reshape(-1, x.shape[-1]).contiguous(), use_per_token_if_dynamic=True
+    )
+    return (quantized.to(x.dtype) * scale).to(x.dtype).reshape(x.shape)
+
+
 _ACTIVATION_QUANT_DEQUANT_FUNCS: dict[
     QuantKey, Callable[[torch.Tensor], torch.Tensor]
 ] = {
+    kFp8DynamicTokenSym: _quant_dequant_fp8_per_token,
     kMxfp4Dynamic: quant_dequant_mxfp4,
     kMxfp6E3M2Dynamic: partial(quant_dequant_mxfp6, quant_dtype="fp6_e3m2"),
     kMxfp6E2M3Dynamic: partial(quant_dequant_mxfp6, quant_dtype="fp6_e2m3"),
@@ -74,11 +87,15 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
         if config.activation_quant_key not in (
             None,
+            kFp8DynamicTokenSym,
             kMxfp4Dynamic,
             kMxfp6E3M2Dynamic,
             kMxfp6E2M3Dynamic,
         ):
-            return False, "only supports MXFP4 or MXFP6 or unquantized activations"
+            return (
+                False,
+                "only supports FP8 per-token, MXFP4, MXFP6 or unquantized activations",
+            )
 
         if not has_quark():
             return False, "amd-quark package not available"

@@ -257,6 +257,7 @@ LinearBackend = Literal[
     "deep_gemm",
     "torch",
     "aiter",
+    "flydsl",
     "machete",
     "fbgemm",
     "conch",
@@ -396,6 +397,8 @@ class KernelConfig:
     - "deep_gemm": Use DeepGEMM kernels
     - "torch": Use PyTorch native scaled_mm kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
+    - "flydsl": Use FlyDSL MXFP4 weights with static or per-token FP8 activations on
+      ROCm RDNA4 (gfx1200/gfx1201)
     - "machete": Use Machete kernels (mixed-precision)
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
