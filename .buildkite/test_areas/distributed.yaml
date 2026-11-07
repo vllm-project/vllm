@@ -875,12 +875,12 @@ steps:
   device: b200-k8s
   num_devices: 2
   source_file_dependencies:
+  - .buildkite/scripts/check-kv-connectors.sh
+  - requirements/test/kv_connectors_cuda.txt
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - vllm/distributed/mooncake_store.py
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
-  - vllm/distributed/mooncake_store.py
-  - tests/model_executor/model_loader/test_weight_cache.py
-  - requirements/test/kv_connectors_cuda.txt
-  - .buildkite/scripts/check-kv-connectors.sh
   env:
     VLLM_HOST_IP: "127.0.0.1"
   commands:
