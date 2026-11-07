@@ -234,14 +234,14 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         qkvr, _ = self.qkvr(hidden_states)
 
         attn_metadata = get_forward_context().attn_metadata
-        attn_output = torch.empty(
+        # The single-pass decode kernel never writes CUDA-graph padding rows,
+        # and NaN left there would reach the MoE gate.
+        attn_output = torch.zeros(
             (num_tokens, self.num_heads, self.head_dim),
             dtype=qkvr.dtype,
             device=qkvr.device,
         )
-        if not isinstance(attn_metadata, dict):
-            attn_output.zero_()
-        else:
+        if isinstance(attn_metadata, dict):
             conv_meta = attn_metadata[self.conv_owner.prefix]
             md = attn_metadata[self.prefix]
             assert isinstance(conv_meta, InklingSconvMetadata)
