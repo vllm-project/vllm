@@ -239,18 +239,18 @@ if _SDK_AVAILABLE:
             body = b"".join([chunk async for chunk in response.body_iterator])
             translated = _translate_vllm_error_body(body, request)
             if translated is not None:
+                translated.raw_headers.extend(
+                    (name, value)
+                    for name, value in response.raw_headers
+                    if name.lower() not in (b"content-length", b"content-type")
+                )
                 return translated
-            passthrough_headers = {
-                k: v
-                for k, v in response.headers.items()
-                if k.lower() != "content-length"
-            }
-            return Response(
+            passthrough = Response(
                 content=body,
                 status_code=response.status_code,
-                headers=passthrough_headers,
-                media_type=content_type,
             )
+            passthrough.raw_headers = response.raw_headers
+            return passthrough
 
     def _translate_vllm_error_body(raw: bytes, request: Request) -> JSONResponse | None:
         """Translate a vLLM ``ErrorResponse`` body to a ``CohereError`` body.

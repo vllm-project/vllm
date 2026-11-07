@@ -77,6 +77,15 @@ def app(registry):
     async def raise_http_exception_404():
         raise HTTPException(status_code=404, detail="not found")
 
+    @app.get("/raise_http_exception_with_headers/{status_code}")
+    async def raise_http_exception_with_headers(status_code: int):
+        headers = (
+            {"WWW-Authenticate": "Bearer"}
+            if status_code == 401
+            else {"Retry-After": "30"}
+        )
+        raise HTTPException(status_code, "request rejected", headers=headers)
+
     @app.get("/raise_request_validation_error")
     async def raise_request_validation_error(n: int):
         # Invalid ``n`` triggers FastAPI's RequestValidationError.
@@ -220,3 +229,23 @@ async def test_http_requests_total_records_correct_status(
             f"Expected NO '5xx' recording for {endpoint} "
             f"(should be '4xx'), but found: {metrics}"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status_code,header,value",
+    [(401, "WWW-Authenticate", "Bearer"), (429, "Retry-After", "30")],
+)
+async def test_http_exception_preserves_response_headers(
+    app, status_code, header, value
+):
+    """Clients need authentication challenges and retry delays on error responses."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.get(f"/raise_http_exception_with_headers/{status_code}")
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["message"] == "request rejected"
+    assert response.headers.get(header) == value
