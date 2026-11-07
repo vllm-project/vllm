@@ -44,6 +44,7 @@ from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
     replayssm_lifecycle_warmup,
 )
+from vllm.model_executor.warmup.triton_moe_warmup import triton_moe_warmup
 from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
 )
@@ -309,6 +310,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+        triton_moe_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
