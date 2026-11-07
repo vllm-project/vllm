@@ -138,6 +138,7 @@ steps:
       - tests/models/test_muse_spark_rocm_loading.py
       - tests/models/test_muse_spark_nvidia_shared_rope.py
       - tests/models/test_dsv4_mono_decode.py
+      - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - vllm/models/muse_spark/
       - tests/models/test_muse_spark_logits_local.py
@@ -165,6 +166,7 @@ steps:
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_mono.py
+        models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
@@ -221,6 +223,7 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s models/inkling/rocm
+      - pytest -v -s models/inkling/test_mm_towers.py models/inkling/test_moe_weight_layout.py models/inkling/test_qkvr_prep.py
 
 # Disabled until the gguf installation is locked.
 # - label: ":nvidia: (B200) Flint"
@@ -270,45 +273,44 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
-# Disabled until the KV connectors installation is locked.
-# - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
-#   key: kimi-k3-prefix-cache-4xb200
-#   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
-#   optional: true
-#   automatic_shard: true
-#   timeout_in_minutes: 75
-#   device: b200-k8s
-#   num_devices: 4
-#   source_file_dependencies:
-#   - vllm/models/kimi_k3/
-#   - vllm/v1/core/
-#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-#   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
-#   - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
-#   - vllm/distributed/mooncake_store.py
-#   - vllm/v1/simple_kv_offload/
-#   - vllm/v1/spec_decode/
-#   - vllm/model_executor/layers/mamba/
-#   - tests/models/kimi_k3/test_prefix_cache.py
-#   - .buildkite/scripts/install-kv-connectors.sh
-#   commands:
-#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-#   - pytest -v -s models/kimi_k3/test_prefix_cache.py
-#   mirror:
-#     amd:
-#       label: ":amd: (MI355) Kimi K3 Prefix Cache"
-#       dind: false
-#       device: mi355_4
-#       timeout_in_minutes: 60
-#       working_dir: "/vllm-workspace/tests"
-#       env:
-#         VLLM_ROCM_USE_AITER: "1"
-#         MOONCAKE_PROTOCOL: "tcp"
-#       depends_on:
-#       - image-build-amd
-#       source_file_dependencies:
-#       - vllm/platforms/rocm.py
-#       - requirements/kv_connectors_rocm.txt
+- label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
+  key: kimi-k3-prefix-cache-4xb200
+  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+  optional: true
+  automatic_shard: true
+  timeout_in_minutes: 75
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - vllm/v1/core/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+  - vllm/distributed/mooncake_store.py
+  - vllm/v1/simple_kv_offload/
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/layers/mamba/
+  - tests/models/kimi_k3/test_prefix_cache.py
+  - .buildkite/scripts/check-kv-connectors.sh
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Kimi K3 Prefix Cache"
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      env:
+        VLLM_ROCM_USE_AITER: "1"
+        MOONCAKE_PROTOCOL: "tcp"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - requirements/test/rocm.txt
 
 - label: ":nvidia: (H200) Step5"
   key: step5-unit-tests
@@ -408,6 +410,7 @@ steps:
         models/qwen4_exp/test_qsa_prepare_amd.py
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
+      - pytest -v -s models/qwen4_exp/test_qsa_reference.py
 
 - label: ":nvidia: (B200) Qwen4 Exp HC Kernels"
   key: qwen4-exp-hc-kernels-b200

@@ -486,7 +486,13 @@ class LoRAModelManager:
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
 
-        for module_name, module in self.model.named_modules(remove_duplicate=False):
+        named_modules = list(self.model.named_modules(remove_duplicate=False))
+        runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
+        # MoERunner aliases block modules. Visit them last so that the block path,
+        # which is what adapters target, is the one tracked in `self.modules`.
+        named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
+
+        for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
                 continue
 

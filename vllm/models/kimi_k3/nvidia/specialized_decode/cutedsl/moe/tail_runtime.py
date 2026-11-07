@@ -31,8 +31,12 @@ CAP, POLL_CAP = 64, 8
 # B32 52.20/53.18, B64 79.27/81.50; TP16 B16 33.98/34.49, B32 42.19/42.52, B64
 # 65.05/60.51.
 TWOSHOT = {8: "", 16: "33-64:1"}
-# WaveMoeTail batches that release the next AttnRes at entry.
-EARLY = {8: "9-64:1", 16: "9-64:1"}
+# WaveMoeTail batches that release the next AttnRes at entry (every published batch:
+# TP8 B5+, TP16 B9+). The AttnRes then runs its saved-block statistics and exchange
+# beside the tail and only its Lamport poll waits for the output rows; the next input
+# projection's weight prologue starts with it. GB300 TP8 K3.1 DSpark k=4 step, R1 (B5),
+# ms, release after the output multicast -> at entry: DCP8 136.5K 10.26 -> 10.21.
+EARLY = {8: "1-64:1", 16: "9-64:1"}
 # WaveMoeTail batches whose up projection runs on tcgen05 (B9+; 1-GPU WaveMoeTail us
 # mma.sync vs tcgen05, B16/32/64: TP8 4.53/5.80/9.05 vs 4.45/5.26/7.80, TP16 two-shot
 # 4.50/5.39/7.75 vs 4.52/5.46/7.21).
@@ -86,7 +90,9 @@ class MoeTailBox:
     def __init__(self, group, device, tp, rank):
         self.rank = rank
         self.latent = OprojMailbox(group, device, tp, rank, (3, tp, CAP, 3584))
-        self.rs = OprojMailbox(group, device, tp, rank, (3, tp, CAP, 7168 // tp))
+        self.rs = OprojMailbox(  # peer stores only
+            group, device, tp, rank, (3, tp, CAP, 7168 // tp), multicast=False
+        )
         self.out = OprojMailbox(group, device, tp, rank, (1, CAP, 7168))
         ptrs = self.rs.handle.buffer_ptrs
         self.peers = torch.tensor(ptrs, dtype=torch.int64, device=device)
