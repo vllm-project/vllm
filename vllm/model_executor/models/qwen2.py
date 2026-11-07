@@ -36,6 +36,7 @@ from transformers import Qwen2Config
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -54,6 +55,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.tpsp import TPSPContext, TPSPOpsGroup
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
@@ -76,6 +79,8 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+
+logger = init_logger(__name__)
 
 
 class Qwen2MLP(nn.Module):
@@ -395,9 +400,50 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.tpsp_requested = False
+        self.tpsp_context: TPSPContext | None = None
+        self.max_tpsp_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _maybe_profile_tpsp(self) -> None:
+        if not self.tpsp_requested or self.tpsp_context is not None:
+            return
+
+        if (backend_cls := current_platform.get_tpsp_backend_cls()) is None:
+            logger.warning("TPSP using regular forward: no fused backend")
+            self.tpsp_requested = False
+            return
+
+        from vllm.distributed.parallel_state import get_tp_group
+
+        first_layer = self.layers[0]
+        backend = backend_cls(
+            get_tp_group().device_group.group_name,
+            first_layer.self_attn.o_proj.weight.device,
+        )
+        ops_groups = [
+            TPSPOpsGroup(
+                "o_proj",
+                first_layer.self_attn.o_proj,
+                first_layer.post_attention_layernorm,
+            ),
+            TPSPOpsGroup(
+                "down_proj",
+                first_layer.mlp.down_proj,
+                self.layers[1].input_layernorm,
+            ),
+        ]
+        context = backend.profile(ops_groups, self.max_tpsp_batched_tokens)
+        if context is not None:
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                layer.tpsp_context = context
+        else:
+            self.tpsp_requested = False
+        self.tpsp_context = context
 
     def forward(
         self,
@@ -406,6 +452,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        self._maybe_profile_tpsp()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -417,6 +464,10 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        context = self.tpsp_context
+        tpsp_active = context is not None and context.profile.is_active(
+            hidden_states.size(0)
+        )
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
@@ -428,7 +479,20 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            if tpsp_active:
+                next_norm = (
+                    self.layers[idx + 1].input_layernorm
+                    if idx + 1 < self.end_layer
+                    else self.norm
+                )
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    next_norm=next_norm,
+                )
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -442,7 +506,8 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 }
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if not tpsp_active:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:

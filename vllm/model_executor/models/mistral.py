@@ -11,6 +11,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -129,6 +130,7 @@ class MistralAttention(LlamaAttention):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        tpsp_active: bool = False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -137,8 +139,9 @@ class MistralAttention(LlamaAttention):
             attn_scale = self._get_llama_4_attn_scale(positions)
             q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
+        if not tpsp_active:
+            attn_output, _ = self.o_proj(attn_output)
+        return attn_output
 
 
 class MistralDecoderLayer(LlamaDecoderLayer):
@@ -183,7 +186,12 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         t_cond: torch.Tensor | None = None,
+        *,
+        next_norm: RMSNorm | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if next_norm is not None:
+            raise ValueError("TPSP is not supported by MistralDecoderLayer")
+
         # Self Attention
         if residual is None:
             residual = hidden_states

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.model_executor.tpsp import TPSPBackend
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
@@ -233,6 +234,11 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
+    def get_tpsp_backend_cls(cls) -> type[TPSPBackend]:
+        from .tpsp_cuda import CudaTPSPBackend
+
+        return CudaTPSPBackend
+
     def get_hisparse_backend_cls(cls) -> str | None:
         return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
 
@@ -1049,5 +1055,6 @@ try:
 finally:
     if nvml_available:
         pynvml.nvmlShutdown()
+
 
 CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
