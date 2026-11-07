@@ -30,6 +30,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -70,6 +71,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -863,6 +869,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # One fused kernel inserts both caches, so NVFP4 K/V needs an NVFP4
         # index cache.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
+        # Whether the attention can emit MXFP8 for o_proj; resolved on first use.
+        self._o_proj_mxfp8: bool | None = None
         # Indexer and main attention are separate impls. This indexer is
         # ROCm-only, so the model selects it rather than the neutral
         # MiniMaxM3Indexer, which knows nothing about it and would pick its own.
@@ -1244,8 +1252,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 qkv, positions, fwd_slot_mapping
             )
             output = torch.empty_like(q)
-            attn_output = self._run_attention(q, index_q, output)
-            output, _ = self.o_proj(attn_output)
+            gfx942_attn = self._run_attention(q, index_q, output)
+            output, _ = self.o_proj(gfx942_attn)
             return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
@@ -1256,10 +1264,24 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 main_slot_mapping,
                 fwd_slot_mapping[self.indexer.index_cache.prefix],
             )
-            output = torch.empty_like(q)
-            attn_output = self._run_attention(
-                q, None if self.skip_index_topk else index_q, output
-            )
+            index_arg = None if self.skip_index_topk else index_q
+            attn_output: torch.Tensor | QuantizedActivation
+            if self._emits_o_proj_mxfp8():
+                # Decode-only: the attention kernel writes MXFP8 for o_proj.
+                out_q = q.new_empty((q.shape[0], self.q_size), dtype=MXFP8_VALUE_DTYPE)
+                out_scale = q.new_empty(
+                    (q.shape[0], self.q_size // MXFP8_BLOCK_SIZE),
+                    dtype=MXFP8_SCALE_DTYPE,
+                )
+                self._run_attention(
+                    q, index_arg, None, out_q=out_q, out_scale=out_scale
+                )
+                attn_output = QuantizedActivation(
+                    out_q, out_scale, q.dtype, out_q.shape, kMxfp8Dynamic
+                )
+            else:
+                output = torch.empty_like(q)
+                attn_output = self._run_attention(q, index_arg, output)
             output, _ = self.o_proj(attn_output)
             return output
         q = qkv.new_empty((num_tokens, self.q_size))
@@ -1461,13 +1483,37 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         output, _ = self.o_proj(attn_output)
         return output
 
+    def _emits_o_proj_mxfp8(self) -> bool:
+        """Whether this step's attention writes MXFP8 for ``o_proj`` itself:
+        the NVFP4 decode kernel can, ``o_proj`` takes MXFP8 input, and the
+        batch is decode-only (a captured piecewise graph or a mixed batch keeps
+        the bf16 output)."""
+        if self._o_proj_mxfp8 is None:
+            self._o_proj_mxfp8 = hasattr(
+                self.impl, "forward_decode_mxfp8"
+            ) and _can_fuse_input_norm_mxfp8(self.o_proj)
+        if not self._o_proj_mxfp8:
+            return False
+        ctx = get_forward_context()
+        if ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+            return False
+        all_md = ctx.attn_metadata
+        md = all_md.get(self.layer_name) if isinstance(all_md, dict) else None
+        return (
+            isinstance(md, MiniMaxM3SparseMetadata)
+            and md.num_prefills == 0
+            and md.num_decodes > 0
+        )
+
     @eager_break_during_capture
     def _run_attention(
         self,
         query: torch.Tensor,
         index_query: torch.Tensor | None,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
+        output: torch.Tensor | None,
+        out_q: torch.Tensor | None = None,
+        out_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
         # Single eager break around both: their split-K kernels read per-request
         # metadata and can't be captured into a cudagraph. The indexer writes its
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
@@ -1526,6 +1572,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                         self.indexer(index_query)
                 else:
                     self.indexer(index_query)
+        if out_q is not None:
+            assert out_scale is not None
+            self.impl.forward_decode_mxfp8(  # type: ignore[attr-defined]
+                self, query, self.kv_cache, out_q, out_scale
+            )
+            return None
+        assert output is not None
         if self.use_aiter_sparse_pa:
             assert isinstance(self.impl, MiniMaxM3SparseAiterPAImpl)
             return self.impl.forward(
