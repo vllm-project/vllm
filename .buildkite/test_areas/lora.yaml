@@ -9,6 +9,10 @@ steps:
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/lora
+  - vllm/v1/worker/lora_model_runner_mixin.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/v1/worker/gpu/model_runner.py
   - tests/lora
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an
@@ -35,6 +39,10 @@ steps:
       timeout_in_minutes: 85
       source_file_dependencies:
       - vllm/lora
+      - vllm/v1/worker/lora_model_runner_mixin.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/v1/worker/gpu/model_runner.py
       - tests/lora
       - vllm/platforms/rocm.py
       depends_on:
@@ -53,6 +61,10 @@ steps:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/models/transformers/moe.py
+  - vllm/v1/worker/lora_model_runner_mixin.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/v1/worker/gpu/model_runner.py
   - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
@@ -86,6 +98,10 @@ steps:
       - vllm/lora
       - vllm/model_executor/layers/fused_moe/
       - vllm/model_executor/models/transformers/moe.py
+      - vllm/v1/worker/lora_model_runner_mixin.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/v1/worker/gpu/model_runner.py
       - vllm/platforms/rocm.py
       - tests/lora
       commands:

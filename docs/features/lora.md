@@ -451,6 +451,27 @@ Classification heads support LoRA A/B weights (matching the base head's output s
 
 ## Using Tips
 
+### Idle data-parallel workers
+
+Idle data-parallel workers still run forwards to participate in MoE collectives.
+These forwards use no adapter for their dummy tokens and preserve loaded adapters;
+they do not perform the dummy-adapter setup and cleanup used during warmup.
+
+Dispatched tokens carry adapter identities, which each receiving worker translates
+into its own GPU slots. Adapters can therefore occupy different slots on different
+workers. The same adapter weights must still be resident on every worker that
+processes its tokens. Loading an adapter on only one rank is insufficient.
+
+Residency, eviction and in-place weight updates are not coordinated by this
+mapping. Preload the participating adapter set on all workers and keep it resident
+while requests run; `max_loras` must accommodate that set on each worker.
+
+Adapter preservation does not guarantee bitwise-identical floating-point results
+across changing peer workloads. For deterministic score comparisons on supported
+configurations, enable `VLLM_BATCH_INVARIANT=1`; see [batch invariance](batch_invariance.md)
+for its limits and performance trade-offs. `--enforce-eager` alone does not make
+execution batch-invariant.
+
 ### Configuring `max_lora_rank`
 
 The `--max-lora-rank` parameter controls the maximum rank allowed for LoRA adapters. This setting affects memory allocation and performance:
