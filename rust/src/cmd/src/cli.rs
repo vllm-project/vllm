@@ -507,6 +507,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_tokenizer_info_endpoint: bool,
 
+    /// Accept `MediaItem.nixl_ref` images on the gRPC server: the server reads
+    /// them from the memory of the NIXL agent that each request names. Only
+    /// trusted peers may reach the gRPC port when this is on; see the security
+    /// guide. Needs a build with the `nixl-media` feature.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_grpc_nixl_media: bool,
+
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
     /// prevent reverse proxies/tunnels with read timeouts from closing the
@@ -1015,6 +1027,7 @@ impl SharedRuntimeArgs {
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
+            enable_grpc_nixl_media: self.enable_grpc_nixl_media,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {
