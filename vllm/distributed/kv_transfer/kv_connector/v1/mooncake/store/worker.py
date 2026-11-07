@@ -2324,7 +2324,7 @@ class MooncakeStoreWorker:
         current_event = None
         for request in metadata.requests:
             if request.can_save:
-                current_event = torch.cuda.Event()
+                current_event = torch.Event()
                 current_event.record()
                 break
 
