@@ -19,7 +19,12 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ..models.utils import check_logprobs_close
+from ..utils import (
+    compare_two_settings,
+    create_new_process_for_each_test,
+    multi_gpu_only,
+)
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -458,4 +463,59 @@ def test_pp_mixed_precision_kv_cache():
         env,
         env,
         method="generate_close",
+    )
+
+
+@multi_gpu_only(num_gpus=2)
+@pytest.mark.parametrize(
+    ("model_id", "model_kwargs"),
+    [
+        pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
+        # Startup check only: dummy weights give near-uniform logits.
+        pytest.param(
+            "baidu/ERNIE-4.5-21B-A3B-PT",
+            {
+                "load_format": "dummy",
+                "hf_overrides": {
+                    "num_hidden_layers": 2,
+                    "hidden_size": 512,
+                    "intermediate_size": 1024,
+                    "num_attention_heads": 4,
+                    "num_key_value_heads": 1,
+                    "moe_num_experts": 4,
+                    "moe_k": 2,
+                    "moe_intermediate_size": 256,
+                    "moe_num_shared_experts": 1,
+                },
+            },
+            id="ernie45_moe",
+        ),
+    ],
+)
+@create_new_process_for_each_test()
+def test_pp_tied_word_embeddings(
+    vllm_runner, example_prompts, model_id: str, model_kwargs: dict
+):
+    """The last PP stage needs its own embedding to tie lm_head to it."""
+    outputs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            model_id,
+            trust_remote_code=False,
+            max_model_len=512,
+            enable_chunked_prefill=True,
+            enforce_eager=True,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+            **model_kwargs,
+        ) as vllm_model:
+            outputs[pp_size] = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens=8, num_logprobs=5
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[1],
+        outputs_1_lst=outputs[2],
+        name_0="pp1",
+        name_1="pp2",
     )
