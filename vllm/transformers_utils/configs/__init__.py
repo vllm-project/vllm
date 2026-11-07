@@ -42,9 +42,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MingV3ASRConfig": "vllm.transformers_utils.configs.ming_v3_asr",
-    "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
-    "MiniMaxM3TextConfig": "vllm.transformers_utils.configs.minimax_m3",
     "Moondream3Config": "vllm.transformers_utils.configs.moondream3",
     "Moondream3TextConfig": "vllm.transformers_utils.configs.moondream3",
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
@@ -92,6 +90,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
     "Kimi_K25Config": "transformers",
+    "MiniMaxM3VLConfig": "transformers",
     "Step3p7TextConfig": "transformers",
 }
 
@@ -122,9 +121,8 @@ __all__ = [
     "RWConfig",
     "MiDashengLMConfig",
     "MingV3ASRConfig",
-    "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
-    "MiniMaxM3TextConfig",
+    "MiniMaxM3VLConfig",
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",

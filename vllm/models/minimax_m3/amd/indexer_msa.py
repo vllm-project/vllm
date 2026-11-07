@@ -165,9 +165,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        self.sparse_block_size = int(
-            text_config.sparse_attention_config["sparse_block_size"]
-        )
+        self.sparse_block_size = int(text_config.index_block_size)
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # Companions to the base's num_valid_pages_buffer, for the two vectors
         # only the emitted table needs.
@@ -887,11 +885,7 @@ def msa_indexer_cp_enabled(
     ``select_msa_indexer_impl_cls``'s gate re-asked at the CP world. Call once
     per model: the projection layout and head count are decided off one answer.
     """
-    requested = vllm_config.attention_config.minimax_m3_indexer_cp
-    sparse_cfg = getattr(
-        vllm_config.model_config.hf_text_config, "sparse_attention_config", None
-    )
-    if not requested or sparse_cfg is None:
+    if not vllm_config.attention_config.minimax_m3_indexer_cp:
         return False
 
     if not msa_indexer_selected:
@@ -906,16 +900,15 @@ def msa_indexer_cp_enabled(
         spec = vllm_config.speculative_config
         n_spec = int(getattr(spec, "num_speculative_tokens", 0) or 0) if spec else 0
         reason = msa_indexer_unsupported_reason(
-            topk_blocks=int(sparse_cfg["sparse_topk_blocks"]),
-            sparse_block_size=int(sparse_cfg["sparse_block_size"]),
-            index_head_dim=int(sparse_cfg["sparse_index_dim"]),
+            topk_blocks=int(config.index_topk_blocks),
+            sparse_block_size=int(config.index_block_size),
+            index_head_dim=int(config.index_head_dim),
             indexer_kv_dtype=vllm_config.attention_config.resolve_indexer_kv_dtype(
                 "bf16"
             ),
             max_model_len=vllm_config.model_config.max_model_len,
-            score_type=sparse_cfg.get("sparse_score_type", "max"),
             cp_world=tp_size,
-            num_index_heads=int(sparse_cfg["sparse_num_index_heads"]),
+            num_index_heads=int(config.index_n_heads),
             num_kv_heads=max(1, int(config.num_key_value_heads) // tp_size),
             max_query_len=n_spec + 1,
             dcp_size=vllm_config.parallel_config.decode_context_parallel_size,

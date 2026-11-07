@@ -148,6 +148,7 @@ def m3_config():
         hidden_size=HIDDEN,
         num_local_experts=0,
         num_hidden_layers=0,
+        layer_types=[],
         rms_norm_eps=1e-5,
     )
     return SimpleNamespace(
