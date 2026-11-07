@@ -58,8 +58,9 @@ def merge_attn_states_torch(
     out_se = p_lse_exp + s_lse_exp
     if output_lse is not None:
         output_lse = torch.log(out_se) + max_lse
-        output_lse[prefill_tokens_with_context:] = suffix_lse[
-            prefill_tokens_with_context:
+        # output_lse is [NUM_HEADS, NUM_TOKENS]; the split is over tokens.
+        output_lse[:, prefill_tokens_with_context:] = suffix_lse[
+            :, prefill_tokens_with_context:
         ]
     p_scale = p_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
     s_scale = s_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
@@ -109,6 +110,140 @@ def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
     merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
 
     assert not output.isnan().any()
+
+
+# The Triton kernel tiles over tokens, so behavior depends on where a batch
+# falls relative to a tile: batches smaller than one tile (decode), ragged
+# tails, and a context split landing mid-tile.
+TILE_EDGE_TOKENS = [1, 2, 7, 8, 16, 17, 33, 64, 65, 127, 129, 200]
+
+
+def _random_inputs(
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    dtype: torch.dtype,
+    head_pad: int = 0,
+    lse_transposed: bool = False,
+    with_inf: bool = False,
+):
+    def make_output():
+        # Allocate padded and slice so stride(1) > head_size, as the MLA
+        # backends do when they pass a `[..., :v_head_dim]` view.
+        full = torch.randn(
+            (num_tokens, num_heads, head_size + head_pad), dtype=dtype, device=DEVICE
+        )
+        return full[..., :head_size]
+
+    def make_lse():
+        if lse_transposed:
+            # Backends whose output is [NUM_TOKENS, NUM_HEADS] hand us a view.
+            return torch.randn(
+                (num_tokens, num_heads), dtype=torch.float32, device=DEVICE
+            ).t()
+        return torch.randn((num_heads, num_tokens), dtype=torch.float32, device=DEVICE)
+
+    prefix_lse, suffix_lse = make_lse(), make_lse()
+    if with_inf:
+        # FA2 reports +inf for zero-length sequences. Only mark the prefix so
+        # that no token is empty on both sides (that case has its own test).
+        prefix_lse[torch.rand(num_heads, num_tokens, device=DEVICE) < 0.1] = float(
+            "inf"
+        )
+    return make_output(), prefix_lse, make_output(), suffix_lse
+
+
+def _assert_matches_torch(
+    prefix_output,
+    prefix_lse,
+    suffix_output,
+    suffix_lse,
+    prefill_tokens_with_context=None,
+):
+    num_tokens, num_heads, head_size = prefix_output.shape
+    dtype = prefix_output.dtype
+    output = torch.zeros((num_tokens, num_heads, head_size), dtype=dtype, device=DEVICE)
+    output_lse = torch.zeros(
+        (num_heads, num_tokens), dtype=torch.float32, device=DEVICE
+    )
+
+    expected, expected_lse = merge_attn_states_torch(
+        output.clone(),
+        prefix_output,
+        prefix_lse.clone(),
+        suffix_output,
+        suffix_lse.clone(),
+        output_lse.clone(),
+        prefill_tokens_with_context,
+    )
+    merge_attn_states_triton(
+        output,
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        output_lse,
+        prefill_tokens_with_context,
+    )
+
+    atol, rtol = (1e-3, 1e-2) if dtype == torch.bfloat16 else (1e-3, 1e-3)
+    torch.testing.assert_close(output.float(), expected.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(output_lse, expected_lse, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_tokens", TILE_EDGE_TOKENS)
+@pytest.mark.parametrize("head_size", [64, 128, 512])
+@torch.inference_mode()
+def test_merge_attn_states_tile_edges(num_tokens: int, head_size: int) -> None:
+    """Batches that do not fill a whole tile, or leave a ragged tail, must
+    still merge every token exactly once."""
+    _assert_matches_torch(
+        *_random_inputs(num_tokens, 8, head_size, torch.bfloat16, with_inf=True)
+    )
+
+
+@pytest.mark.parametrize("prefill_tokens_with_context", [0, 1, 15, 16, 17, 64, 65, 100])
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_merge_attn_states_context_split(
+    prefill_tokens_with_context: int, input_dtype: torch.dtype
+) -> None:
+    """Tokens at or past prefill_tokens_with_context copy the suffix verbatim.
+    The split is per token, so it must be honored when it falls inside a tile."""
+    prefix_output, prefix_lse, suffix_output, suffix_lse = _random_inputs(
+        100, 8, 128, input_dtype
+    )
+    _assert_matches_torch(
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        prefill_tokens_with_context=prefill_tokens_with_context,
+    )
+
+
+@pytest.mark.parametrize("head_pad", [0, 8, 64])
+@pytest.mark.parametrize("lse_transposed", [False, True])
+@torch.inference_mode()
+def test_merge_attn_states_strided_inputs(head_pad: int, lse_transposed: bool) -> None:
+    """Backends pass padded head strides and transposed LSE views, so the
+    kernel must index by the tensors' real strides rather than assume a
+    contiguous layout."""
+    prefix_output, prefix_lse, suffix_output, suffix_lse = _random_inputs(
+        200,
+        8,
+        128,
+        torch.bfloat16,
+        head_pad=head_pad,
+        lse_transposed=lse_transposed,
+    )
+    _assert_matches_torch(
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        prefill_tokens_with_context=100,
+    )
 
 
 def generate_markdown_table():
