@@ -49,6 +49,11 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    enable_source_attribution: bool = False
+    """Include the logical producer on each KV cache event. Source paths are
+    scoped to a scheduler lifetime, not persistent storage identities.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

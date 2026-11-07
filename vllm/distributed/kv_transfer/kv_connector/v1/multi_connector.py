@@ -35,7 +35,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_events import EventSource, KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -648,6 +648,22 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 request, block_ids
             ),
         )
+
+    def take_events_with_source(
+        self, source: "EventSource"
+    ) -> Iterable["KVCacheEvent"]:
+        from vllm.distributed.kv_events import EventSource
+
+        for index, (connector, config) in enumerate(
+            zip(self._connectors, self._ktc_kv_transfer_config, strict=True)
+        ):
+            assert config is not None
+            child_source = EventSource(
+                source_id=f"{source.source_id}/{index}",
+                kind="connector",
+                connector_name=config.kv_connector,
+            )
+            yield from connector.take_events_with_source(child_source)
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:

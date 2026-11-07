@@ -4,6 +4,10 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## KV Cache Events
+
+- [Event source attribution](kv_event_source_attribution.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

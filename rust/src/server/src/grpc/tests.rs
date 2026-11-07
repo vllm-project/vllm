@@ -2604,6 +2604,7 @@ fn kv_event_source_filters_and_exposes_zmq_publisher() {
     let mut ready = default_ready_response();
     ready.data_parallel_rank = 2;
     ready.kv_events_config = Some(KvEventsConfig {
+        enable_source_attribution: true,
         enable_kv_cache_events: false,
         publisher: "null".to_string(),
         endpoint: "tcp://*:5559".to_string(),

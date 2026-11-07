@@ -376,6 +376,52 @@ def test_event_publisher_factory(random_port):
     publisher.shutdown()
 
 
+def test_registered_publisher_accepts_legacy_constructor():
+    """An opt-in feature must not add kwargs to legacy publisher constructors."""
+    import uuid
+
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.config.utils import config
+
+    name = f"legacy-{uuid.uuid4().hex}"
+
+    @config
+    class CustomConfig(KVEventsConfig):
+        publisher: str = name  # type: ignore[assignment]
+        """Name supplied by the publisher registration API."""
+
+    def legacy_constructor(
+        data_parallel_rank,
+        endpoint,
+        replay_endpoint,
+        buffer_steps,
+        hwm,
+        max_queue_size,
+        topic,
+    ):
+        return ZmqEventPublisher(
+            data_parallel_rank,
+            endpoint,
+            replay_endpoint,
+            buffer_steps,
+            hwm,
+            max_queue_size,
+            topic,
+        )
+
+    EventPublisherFactory.register_publisher(name, legacy_constructor)
+    config = CustomConfig(
+        enable_kv_cache_events=True, endpoint=f"inproc://{name}", topic="legacy"
+    )
+    publisher = EventPublisherFactory.create(config, data_parallel_rank=2)
+    try:
+        resolved = publisher.get_publisher_config()
+        assert resolved.endpoint == f"{config.endpoint}_dp2"
+        assert resolved.topic == "legacy"
+    finally:
+        publisher.shutdown()
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [("tcp://*:5557", "tcp://*:5558"), ("tcp://*:0", "tcp://*:0")],

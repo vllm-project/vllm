@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import asdict
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -60,4 +62,11 @@ async def show_version():
 async def kv_event_sources(raw_request: Request):
     """KV-event publisher config per DP rank; empty on render-only servers."""
     client: EngineClient | None = raw_request.app.state.engine_client
-    return client.get_kv_event_sources() if client is not None else {}
+    sources = client.get_kv_event_sources() if client is not None else {}
+    result = {}
+    for rank, config in sources.items():
+        fields = asdict(config)
+        if not config.enable_source_attribution:
+            fields.pop("enable_source_attribution")
+        result[rank] = fields
+    return result
