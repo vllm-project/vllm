@@ -332,12 +332,13 @@ class NgramProposerGPU:
             valid_sampled_tokens_count: Count of valid tokens per sequence
 
         Returns:
-            draft_tokens: Proposed draft token IDs [batch_size, k]
+            draft_tokens: Proposed draft token IDs
+                [batch_size, num_speculative_tokens]
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
 
         """
-        assert num_speculative_tokens == self.k
+        assert 0 <= num_speculative_tokens <= self.k
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 
@@ -368,6 +369,15 @@ class NgramProposerGPU:
         )
         token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
 
+        if num_speculative_tokens == 0:
+            draft_tokens = torch.empty(
+                (batch_size, 0), dtype=torch.int32, device=self.device
+            )
+            num_valid_draft_tokens = torch.zeros(
+                batch_size, dtype=torch.int64, device=self.device
+            )
+            return draft_tokens, num_valid_draft_tokens
+
         num_tokens_tmp = (num_tokens_no_spec + valid_sampled_tokens_count).to(
             torch.int32
         )
@@ -384,6 +394,12 @@ class NgramProposerGPU:
                     num_tokens_tmp,
                     token_ids_gpu,
                     combined_mask,
+                )
+
+            if num_speculative_tokens < self.k:
+                draft_tokens = draft_tokens[:, :num_speculative_tokens]
+                num_valid_draft_tokens = num_valid_draft_tokens.clamp(
+                    max=num_speculative_tokens
                 )
 
             return draft_tokens, num_valid_draft_tokens
