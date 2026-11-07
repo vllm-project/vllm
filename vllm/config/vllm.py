@@ -51,7 +51,7 @@ from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
 from .mamba import MambaBackendEnum, MambaConfig
-from .model import ModelConfig
+from .model import PROCESSED_LOGPROBS_MODES, ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
@@ -1458,6 +1458,13 @@ class VllmConfig:
                     "mtp speculative decoding, and not DFlash2 and LiLiCorr "
                     "candidate-head drafters yet."
                 )
+            if watermark_config.algorithm == "sbw":
+                # SBW has no speculative-decoding path: the in-kernel recovery
+                # draw supports only the Philox-PRF Gumbel watermarker, and SBW
+                # defines no draft/target role split.
+                raise ValueError(
+                    "SBW watermarking does not support speculative decoding yet."
+                )
             if (
                 not watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding
@@ -1500,13 +1507,28 @@ class VllmConfig:
         from vllm.sampling_params import BeamSearchParams, SamplingParams
 
         if isinstance(config, BeamSearchParams):
-            logger.warning_once(
-                "Watermarking is enabled, but beam search cannot be watermarked. "
-                "This and subsequent beam search requests will run without "
-                "watermarking.",
-                scope="global",
-            )
-            return False
+            if not watermark_config.supports_greedy:
+                logger.warning_once(
+                    "Watermarking is enabled, but beam search cannot be watermarked. "
+                    "This and subsequent beam search requests will run without "
+                    "watermarking.",
+                    scope="global",
+                )
+                return False
+            if self.model_config.logprobs_mode not in PROCESSED_LOGPROBS_MODES:
+                logger.warning_once(
+                    "Watermarking is enabled, but beam search cannot be "
+                    "watermarked unless the engine runs a processed logprobs "
+                    "mode (logprobs_mode='processed_logprobs'): beam expansion "
+                    "ranks candidates by the returned logprobs, which otherwise "
+                    "do not carry the watermark bias. This and subsequent beam "
+                    "search requests will run without watermarking.",
+                    scope="global",
+                )
+                return False
+            if config.watermarking is False:
+                warn_watermarking_override()
+            return True
         if not isinstance(config, SamplingParams):
             raise TypeError(f"Unsupported watermarking config: {type(config).__name__}")
         if config.trace_decode_token_ids is not None:
@@ -1517,7 +1539,7 @@ class VllmConfig:
                 scope="global",
             )
             return False
-        if config.temperature == 0:
+        if config.temperature == 0 and not watermark_config.supports_greedy:
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
                 "(temperature=0) cannot be watermarked. This and subsequent "

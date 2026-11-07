@@ -877,10 +877,20 @@ class CPUWatermarkSampler(CPUSampler):
             device=self.req_states.device,
         )
         self.watermarking_np = self.watermarking.numpy()
+        # -1 marks "unset": the context start is the request prompt length.
+        self.watermark_context_start = torch.full(
+            (self.sampling_states.max_num_reqs,),
+            -1,
+            dtype=torch.int64,
+            device=self.req_states.device,
+        )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         super().add_request(req_idx, sampling_params)
         self.watermarking_np[req_idx] = sampling_params.watermarking
+        context_start = sampling_params._watermark_context_start
+        if context_start is not None:
+            self.watermark_context_start[req_idx] = context_start
         if sampling_params.watermarking and sampling_params.temperature == 0:
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
@@ -963,10 +973,19 @@ class CPUWatermarkSampler(CPUSampler):
         expanded_idx_mapping: torch.Tensor,
         contexts: torch.Tensor,
     ) -> torch.Tensor:
+        # The mask function indexes boundaries by request slot, so resolve the
+        # context start over every slot: beam requests mark where their
+        # generated tokens begin inside the submitted prompt; all others use
+        # the prompt length.
+        boundary_lens = torch.where(
+            self.watermark_context_start >= 0,
+            self.watermark_context_start,
+            self.req_states.prompt_len,
+        )
         return _repeated_context_mask(
             self.req_states.all_token_ids,
             expanded_idx_mapping,
-            self.req_states.prompt_len,
+            boundary_lens,
             self.req_states.total_len,
             contexts,
             self.deduplicate_contexts_max_history,
@@ -981,13 +1000,17 @@ class CPUWatermarkSampler(CPUSampler):
         safe_req_indices = req_indices.clamp_min(0)
         total_lens = self.req_states.total_len[safe_req_indices].to(torch.int64)
         prompt_lens = self.req_states.prompt_len[safe_req_indices].to(torch.int64)
+        context_starts = self.watermark_context_start[safe_req_indices]
+        # Beam search marks where its generated tokens start inside the
+        # submitted prompt; every other request starts at the prompt end.
+        context_starts = torch.where(context_starts >= 0, context_starts, prompt_lens)
         offsets = torch.arange(
             -context_width, 0, dtype=torch.int64, device=req_indices.device
         )
         positions = total_lens.unsqueeze(-1) + offsets
         valid = (
             valid_reqs.unsqueeze(-1)
-            & (positions >= prompt_lens.unsqueeze(-1))
+            & (positions >= context_starts.unsqueeze(-1))
             & (positions < total_lens.unsqueeze(-1))
         )
         contexts = self.req_states.all_token_ids[

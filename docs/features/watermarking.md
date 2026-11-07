@@ -68,12 +68,14 @@ When `watermark_config` is set, the Prometheus counter
 - `watermarked`: watermarking was enabled for the request, including when
   enforcement overrides an opt-out.
 - `skipped`: the request asked for the watermark (omitted or `true`) but could
-  not use it, such as `temperature=0` and trace replay requests. A beam search
-  request that asks for the watermark runs without it and logs a warning. Its
-  beam steps count as `not_watermarked`, not `skipped`, when enforcement is off.
+  not use it, such as `temperature=0` Gumbel and trace replay requests. A
+  Gumbel engine's beam search request that asks for the watermark runs without
+  it and logs a warning. Its beam steps count as `not_watermarked`, not
+  `skipped`, when enforcement is off.
 - `not_watermarked`: all other finished requests. This includes explicit
-  opt-outs, pooling requests, and the internal requests of beam search (one
-  per beam step), generative scoring and language detection, unless enforced.
+  opt-outs, pooling requests, the internal requests of Gumbel beam search and
+  unwatermarked beam search (one per beam step), generative scoring and
+  language detection, unless enforced.
 
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
@@ -111,8 +113,17 @@ generation.
   greedy decoding. Transcription and translation can use a nonzero temperature
   to apply the configured watermark.
 - `top_k=1` cannot embed a watermark, even with enforcement and nonzero temperature.
-- Beam search cannot apply a watermark. The first watermarked beam request emits
-  a server-side warning and runs without watermarking.
+- Beam search cannot apply a noise-based (Gumbel) watermark: the first such
+  beam request emits a server-side warning and runs without watermarking.
+  Logit-bias watermarking (`sbw`) can watermark beam search, but only when the
+  engine starts with `logprobs_mode="processed_logprobs"` (or
+  `"processed_logits"`), because beam expansion ranks candidates by the
+  returned logprobs. On the raw default the beam request emits a server-side
+  warning and runs without watermarking. Each beam step submits the original
+  prompt plus the beam-so-far as its prompt; the watermark sampler marks the
+  beam-so-far as generated history, so contexts slide over it exactly as in
+  ordinary inference and the winning beam detects with the standard detector
+  on its generated tokens.
 - Trace replay replaces the sampled token and therefore cannot apply a
   watermark. The first watermarked trace replay request emits a server-side
   warning and runs without watermarking.
@@ -232,6 +243,42 @@ vllm serve MODEL \
   --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.1}'
 ```
 
+### SBW (Stateless Bernoulli Watermarking)
+
+SBW biases the logit of each candidate token by `+delta` if it belongs to a
+pseudorandomly chosen green list, then delegates token selection to the normal
+sampler. Green-list membership for token `v` at step `t` is determined by a
+single Philox 4x32-10 call: `CBRNG(v, seed_t) < gamma`, where `seed_t` is
+derived from the recent token context and `gamma` is the green-list fraction.
+
+Because SBW adds a logit bias rather than noise, greedy requests
+(`temperature=0`) are watermarked: the bias shifts the argmax toward green
+tokens.
+
+Reference: Ceppi & Sanchez, "Flip, Don't Shuffle: Watermarking LLMs at the
+Speed of Inference", EMNLP 2026. <https://arxiv.org/abs/2609.03844>
+
+Two seeding schemes are available via `sbw_scheme`:
+
+- `selfhash` (default): anchored minhash PRF. The seed depends on both the
+  context tokens and the candidate token. Default `context_width` is 4.
+- `lefthash`: additive PRF. One seed per context row, independent of the
+  candidate token. Faster but less robust to substitution attacks. Default
+  `context_width` is 1, equivalent to SBW-1 from the paper.
+
+`sbw_gamma` sets the green-list fraction and defaults to 0.5. `sbw_delta`
+sets the logit bias for green tokens and defaults to 2.0.
+
+Example configuration:
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"sbw","key":42}'
+```
+
+SBW does not support speculative decoding; the combination is rejected at
+startup.
+
 ### SynthID-Text
 
 [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
@@ -267,6 +314,17 @@ from vllm.v1.watermarking import GumbelWatermarkDetector
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 token_ids = tokenizer.encode(text, add_special_tokens=False)
 result = GumbelWatermarkDetector(key=42, prf="philox").detect(token_ids)
+print(result.p_value, result.is_watermarked)
+```
+
+For SBW, use `SBWWatermarkDetector` with the same key, scheme, and gamma used
+at generation time:
+
+```python
+from vllm.v1.watermarking import SBWWatermarkDetector
+
+token_ids = tokenizer.encode(text, add_special_tokens=False)
+result = SBWWatermarkDetector(key=42, scheme="selfhash", gamma=0.25).detect(token_ids)
 print(result.p_value, result.is_watermarked)
 ```
 
@@ -312,6 +370,16 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
+- Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
+  bypass watermarking and emit a warning once per worker.
+- High `sbw_delta` values bias token selection away from the model distribution,
+  which can reduce output quality. The default of 2.0 is a reasonable starting
+  point; lower values reduce the effect on quality at the cost of weaker signal.
+- Beam search expands candidates from model log probabilities. Gumbel-max
+  watermarking cannot apply; `sbw` can, provided the engine runs with
+  `logprobs_mode="processed_logprobs"`: the default `raw_logprobs` come from
+  before the watermark bias and the beam request runs unwatermarked with a
+  warning.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
 - Global custom logits processors are unavailable because Model Runner V2 does
