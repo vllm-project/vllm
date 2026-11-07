@@ -4,11 +4,14 @@
 
 `build_for_cudagraph_capture` derives the draft count from the query length
 (`num_decode_draft_tokens = query_len - 1`), so a capture shape of one token
-per request describes rows with zero drafts. `GDNAttentionMetadataBuilder`
-routes every row with `num_decode_draft_tokens_cpu >= 0` through the
-speculative path, zero drafts included: that path is the only one that
-applies each row's accepted-token offset to the recurrent state, so a
-zero-draft decode row must not fall back to the plain decode path.
+per request describes rows with zero drafts. By default
+`GDNAttentionMetadataBuilder` routes every row with
+`num_decode_draft_tokens_cpu >= 0` through the speculative path, zero drafts
+included: that path is the only one that applies each row's accepted-token
+offset to the recurrent state, so a zero-draft decode row must not fall back
+to the plain decode path. When the K0 env knobs enable the V2 align
+preprocess fold, the fold applies the offset in preprocess instead and
+draft-less decode rows take the regular decode path.
 """
 
 import pytest
@@ -156,7 +159,8 @@ def test_plain_decode_without_spec_decode_skips_the_speculative_path():
         # Kimi-Linear's KDA layers subclass GatedDeltaNetAttention and consume
         # this same metadata, and prefix caching (which Kimi enables by
         # default) puts the cache in align mode -- so the guarantee has to hold
-        # for that state shape and mode too.
+        # for that state shape and mode too (default routing: the align fold
+        # is env-gated).
         (
             "align",
             MambaStateShapeCalculator.kda_state_shape(
@@ -170,14 +174,16 @@ def test_plain_decode_without_spec_decode_skips_the_speculative_path():
 def test_zero_draft_batch_still_applies_the_accepted_token_offset(
     mamba_cache_mode, shapes, dtypes
 ):
-    """The numeric difference the fix makes, on the batch shape that triggers it.
+    """Upstream routing (no align fold): a batch of zero-draft rows stays on
+    the speculative path, the only reader that applies each row's
+    accepted-token offset.
 
     The recurrent kernels read their state at column `num_accepted_tokens - 1`
-    of `spec_state_indices_tensor`. Before the fix, a batch in which *every*
-    speculative row drafted nothing was pushed onto the non-speculative path,
-    which passes `non_spec_state_indices_tensor` -- always column 0 -- and
-    drops `num_accepted_tokens` entirely. A row that accepted drafts on the
-    previous step wrote its fresh state further along, so column 0 is stale.
+    of `spec_state_indices_tensor`. A batch in which *every* speculative row
+    drafted nothing must not be pushed onto the non-speculative path, which
+    passes `non_spec_state_indices_tensor` -- always column 0 -- and drops
+    `num_accepted_tokens` entirely: a row that accepted drafts on the previous
+    step wrote its fresh state further along, so column 0 is stale.
     """
     accepted = [NUM_SPEC, 1]
     meta = _decode_metadata(
@@ -209,3 +215,41 @@ def test_zero_draft_batch_still_applies_the_accepted_token_offset(
         # distinct labels for the same one -- otherwise `read != fallback`
         # here would mean nothing.
         assert (read != fallback) == (num_accepted > 1)
+
+
+def test_align_fold_routes_zero_draft_rows_to_the_regular_path(
+    monkeypatch,
+):
+    """With the align preprocess fold active (V2 runner + the K0 env
+    knobs), a batch of zero-draft decode rows takes the regular decode
+    path.
+
+    The fold applies each row's pending accepted-token offset to the running
+    block (column 0) in preprocess, so the plain decode kernels start from the
+    accepted state and the rows skip the verify premium of an always-accepted
+    T=1 window. The KDA state shape is kept from the upstream-routing case to
+    pin the same guarantee for Kimi-Linear-style layers in align mode.
+    """
+    monkeypatch.setenv("VLLM_MAMBA_K0_SLOT_RELEASE", "1")
+    accepted = [NUM_SPEC, 1]
+    meta = _decode_metadata(
+        _builder(
+            use_spec_decode=True,
+            mamba_cache_mode="align",
+            shapes=MambaStateShapeCalculator.kda_state_shape(
+                tp_world_size=1, num_heads=4, head_dim=32, num_spec=NUM_SPEC
+            ),
+            dtypes=(torch.bfloat16, torch.bfloat16),
+        ),
+        accepted,
+    )
+
+    assert meta.num_spec_decodes == 0
+    assert meta.num_decodes == 2
+    # The fold, not the metadata, carries the accepted offset now.
+    assert meta.num_accepted_tokens is None
+    assert meta.spec_state_indices_tensor is None
+    # Every row reads the running block (column 0), which the fold
+    # normalizes in preprocess before the forward.
+    assert meta.non_spec_state_indices_tensor is not None
+    assert meta.non_spec_state_indices_tensor.shape[0] == 2

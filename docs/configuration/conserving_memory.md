@@ -91,6 +91,15 @@ If you run out of CPU RAM, try the following options:
 - (Multi-modal models only) you can set the size of multi-modal cache by setting `mm_processor_cache_gb` engine argument (default 4 GiB).
 - (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable, in GiB (default 0, meaning vLLM doesn't override the KV cache size through this variable).
 
+## Speculative-window memory for hybrid mamba models
+
+Hybrid-state (mamba + full-attention) models running MTP speculative decoding reserve a per-request speculative window even when the dynamic spec-tier table (`num_speculative_tokens_per_batch_size`) resolves the step to K=0 at high batch counts. Two opt-in environment variables make that memory reclaimable:
+
+- `VLLM_MAMBA_PRICED_ADMISSION` (default `0`): when a waiting request cannot admit at its scheduled tier's state footprint, retry the admission at the K=0 tier (the speculative window as null row slots) before stalling. The admitted tier is pinned per request and promoted back when the count-based tier rises.
+- `VLLM_MAMBA_K0_SLOT_RELEASE` (default `0`): release running rows' idle speculative windows back to the pool at the K=0 crossing; released rows promote (their windows refill) when the batch drains and the tier rises. Requires a mamba spec-tier table.
+
+Both default to off. The release is demand-gated: it fires when admissions actually stall on blocks, not on the tier alone.
+
 ## Multi-modal input limits
 
 You can allow a smaller number of multi-modal items per prompt to reduce the memory footprint of the model:

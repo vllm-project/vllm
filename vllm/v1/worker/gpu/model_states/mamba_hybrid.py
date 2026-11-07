@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
@@ -136,6 +137,44 @@ class MambaHybridModelState(DefaultModelState):
                 (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
 
+    def _num_decode_draft_tokens_np(
+        self, input_batch: InputBatch, num_reqs: int
+    ) -> np.ndarray:
+        """Per-request draft counts for decode rows, -1 sentinel otherwise.
+
+        The attention builders select spec-decode rows from this array, so
+        non-decode rows need the -1 sentinel. Decode rows without drafts (the
+        K=0 ladder tier) carry 0: the align preprocess folds their pending
+        accepted-token offset into the running block, letting them take the
+        regular decode path; without that fold only the spec path applies the
+        offset.
+        """
+        is_prefilling_np = input_batch.is_prefilling_np
+        if input_batch.prefill_runs_as_decode_np is not None:
+            # A prompt tail the scheduler padded with placeholder drafts must
+            # run as a spec-decode row: the prefill kernels can't roll them
+            # back.
+            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
+        num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
+        num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+        if num_draft_tokens_per_req is None:
+            num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, np.int32)
+        # Test request state, not num_scheduled_tokens == draft_count+1:
+        # adaptive rewrites num_scheduled_tokens to an even split, so that
+        # equality rarely holds and would demote every verify row to decode.
+        is_decode = (
+            ~is_prefilling_np
+            & (input_batch.num_scheduled_tokens > 0)
+            & (
+                input_batch.num_scheduled_tokens
+                <= self.vllm_config.num_speculative_tokens + 1
+            )
+        )
+        num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+            is_decode, num_draft_tokens_per_req, -1
+        )
+        return num_decode_draft_tokens_np
+
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
     ) -> tuple[list[int], MambaSpec]:
@@ -222,6 +261,12 @@ class MambaHybridModelState(DefaultModelState):
         # scheduling.
         block = 256
         grid = (triton.cdiv(num_reqs, block),)
+        # Draft-less decode rows (the K=0 ladder tier) run the regular decode
+        # kernels, which read the running block at offset 0: the pre-copy must
+        # fold their pending accepted offset in before the forward.
+        num_decode_draft_tokens_gpu = torch.from_numpy(
+            self._num_decode_draft_tokens_np(input_batch, num_reqs)
+        ).to(self.device)
         preprocess_mamba_align_fused_kernel[grid](
             input_batch.idx_mapping,
             self._mamba_state_idx_gpu,
@@ -230,9 +275,13 @@ class MambaHybridModelState(DefaultModelState):
             self.num_accepted_tokens_gpu,
             self._mamba_src_col_gpu,
             self._mamba_src_off_gpu,
+            num_decode_draft_tokens_gpu,
             num_reqs,
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            K0_FOLD_RESET=(
+                envs.VLLM_MAMBA_K0_SLOT_RELEASE or envs.VLLM_MAMBA_PRICED_ADMISSION
+            ),
         )
 
         if replayssm is not None:
@@ -248,6 +297,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_col_gpu,
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
+            num_decode_draft_tokens_gpu,
         )
 
     def prepare_attn(
@@ -301,28 +351,11 @@ class MambaHybridModelState(DefaultModelState):
                 input_batch.idx_mapping
             ]
 
-            # GDN uses >= 0 to select spec-decode rows, so non-decode rows
-            # need the -1 sentinel. Decode rows without drafts stay spec rows:
-            # only that path applies the previous step's accepted offset.
-            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
-            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is None:
-                num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, np.int32)
-            # Test request state, not num_scheduled_tokens == draft_count+1:
-            # adaptive rewrites num_scheduled_tokens to an even split, so that
-            # equality rarely holds and would demote every verify row to decode.
-            is_decode = (
-                ~is_prefilling_np
-                & (input_batch.num_scheduled_tokens > 0)
-                & (
-                    input_batch.num_scheduled_tokens
-                    <= self.vllm_config.num_speculative_tokens + 1
-                )
+            # GDN uses > 0 (align fold) or >= 0 (upstream) to select
+            # spec-decode rows, so non-decode rows need the -1 sentinel.
+            num_decode_draft_tokens_cpu = torch.from_numpy(
+                self._num_decode_draft_tokens_np(input_batch, num_reqs)
             )
-            num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                is_decode, num_draft_tokens_per_req, -1
-            )
-            num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)

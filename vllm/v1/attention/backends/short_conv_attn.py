@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
@@ -134,6 +135,16 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_spec = self.num_spec_tokens
+        # K=0 ladder rows (draft count 0) take the regular decode path only
+        # when the V2 align preprocess folds their pending accepted-token
+        # offset into the running block; otherwise the speculative path is the
+        # only reader that applies the offset (upstream routing).
+        self._k0_regular_decode: bool = (
+            self.num_spec > 0
+            and self.vllm_config.cache_config.mamba_cache_mode == "align"
+            and self.vllm_config.use_v2_model_runner
+            and (envs.VLLM_MAMBA_K0_SLOT_RELEASE or envs.VLLM_MAMBA_PRICED_ADMISSION)
+        )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
@@ -272,11 +283,15 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     ) -> PleShortConvAttentionMetadata:
         m = common_attn_metadata
         spec_sequence_masks_cpu: torch.Tensor | None = None
-        # Detect speculative-decode requests. We use -1 to mark prefill and
-        # plain-decode requests, so any value >= 0 is a (multi-query)
-        # spec-decode request.
+        # Detect speculative-decode requests. -1 marks prefill rows; with the
+        # align fold active, draft-less decode rows (count 0, the K=0 ladder
+        # tier) also take the regular decode path -- the fold applies their
+        # accepted-token offset to the running block.
         if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
-            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
+            if self._k0_regular_decode:
+                candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] > 0
+            else:
+                candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
             if bool(candidate_mask.any().item()):
                 spec_sequence_masks_cpu = candidate_mask
 

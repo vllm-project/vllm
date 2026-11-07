@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import Any, Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
@@ -15,7 +15,10 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
+    SingleTypeKVCacheManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -208,6 +211,7 @@ class KVCacheManager:
         # admitting waiting/preempted requests, to avoid frequent preemptions.
         assert watermark >= 0.0, "watermark must be non-negative"
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
+        self._admission_fail_count = 0
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,
@@ -234,6 +238,35 @@ class KVCacheManager:
 
         """
         return self.block_pool.get_usage()
+
+    def _log_admission_failure(
+        self,
+        request: Request,
+        num_blocks_to_allocate: int,
+        watermark_blocks: int,
+        reserved_blocks: int,
+        full_fit: bool,
+    ) -> None:
+        self._admission_fail_count += 1
+        if self._admission_fail_count != 1 and self._admission_fail_count % 50 != 0:
+            return
+        free_blocks = self.block_pool.get_num_free_blocks()
+        logger.warning(
+            "KV admission failed (%s, occurrence #%d): req=%s prompt=%d tokens "
+            "needs %d blocks (alloc=%d + watermark=%d) but only %d free "
+            "(%d reserved for in-flight) of %d pool blocks (usage=%.1f%%)",
+            "full-sequence gate" if full_fit else "chunk allocation",
+            self._admission_fail_count,
+            request.request_id,
+            request.num_tokens,
+            num_blocks_to_allocate + watermark_blocks,
+            num_blocks_to_allocate,
+            watermark_blocks,
+            free_blocks,
+            reserved_blocks,
+            self.kv_cache_config.num_blocks,
+            self.usage * 100,
+        )
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
@@ -412,6 +445,7 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        count_failure: bool = True,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -437,6 +471,10 @@ class KVCacheManager:
                 free blocks to hold the full sequence, accounting for prefix cache hits
                 and sliding window. Used as an admission gate to prevent over-admitting
                 requests when chunked prefill would otherwise only check the first chunk
+            count_failure: Whether a failed admission is recorded in the
+                admission-failure log. The priced-admission retry passes False
+                on its first attempt: a failure at the scheduled tier that
+                then admits at a cheaper tier is not a stall.
             reserved_blocks: Number of free blocks that must be left available for
                 other in-flight sequences to complete. The actual allocation is only
                 made if it fits within (free blocks - reserved_blocks). Used to gate
@@ -566,6 +604,14 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
+                if count_failure:
+                    self._log_admission_failure(
+                        request,
+                        num_blocks_to_allocate,
+                        watermark_blocks,
+                        reserved_blocks,
+                        full_fit=True,
+                    )
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -604,7 +650,20 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
+        self._last_chunk_check = (
+            num_blocks_to_allocate,
+            available_blocks,
+            request.request_id,
+        )
         if required_blocks > available_blocks:
+            if count_failure:
+                self._log_admission_failure(
+                    request,
+                    num_blocks_to_allocate,
+                    watermark_blocks,
+                    reserved_blocks,
+                    full_fit=False,
+                )
             # Cannot allocate new blocks
             return None
 
@@ -622,12 +681,16 @@ class KVCacheManager:
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
-        new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id,
-            num_tokens_need_slot,
-            num_tokens_main_model,
-            num_encoder_tokens,
-        )
+        try:
+            new_blocks = self.coordinator.allocate_new_blocks(
+                request.request_id,
+                num_tokens_need_slot,
+                num_tokens_main_model,
+                num_encoder_tokens,
+            )
+        except ValueError:
+            self._log_allocation_failure(request.request_id, num_tokens_need_slot)
+            raise
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -677,6 +740,196 @@ class KVCacheManager:
         self.coordinator.remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
         )
+
+    def take_spec_row_rebuilds(self) -> set[str]:
+        """The request ids whose runner rows must be rebuilt this step."""
+        rebuilds: set[str] = set()
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                rebuilds |= manager.take_spec_row_rebuilds()
+        return rebuilds
+
+    def spec_admission_priceable(self, request_id: str) -> bool:
+        """Whether the request's admission can be priced down to the K=0
+        spec tier (any mamba group can hold it as a null window)."""
+        return any(
+            manager.spec_admission_priceable(request_id)
+            for manager in self.coordinator.single_type_managers
+            if isinstance(manager, MambaManager)
+        )
+
+    def mark_spec_admission_tier0(self, request_id: str) -> bool:
+        """Mark a waiting request for a K=0-tier admission: its speculative
+        window is born as null row slots. Returns False when no mamba
+        group can price the admission."""
+        marked = False
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                marked = manager.mark_spec_admission_tier0(request_id) or marked
+        return marked
+
+    def unmark_spec_admission(self, request_id: str) -> None:
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.unmark_spec_admission(request_id)
+
+    def _request_end_num_tokens(self, request: Request) -> int:
+        """Upper bound on the request's final total token count: the prompt
+        plus its generation cap, bounded by the model length."""
+        sampling_params = request.sampling_params
+        max_gen = sampling_params.max_tokens if sampling_params is not None else None
+        end = request.num_prompt_tokens + (
+            max_gen if max_gen is not None else self.max_model_len
+        )
+        return min(end, self.max_model_len)
+
+    def _log_allocation_failure(
+        self, request_id: str, num_tokens_need_slot: int
+    ) -> None:
+        """Diagnostic context for an allocation failure: the last formed-batch
+        fit-check verdict, the failing row's per-manager state, and every
+        allocated row's per-manager real (non-null) block count."""
+        logger.error(
+            "allocation failure context: request=%s num_tokens_need_slot=%s "
+            "last_fit_check=%s",
+            request_id,
+            num_tokens_need_slot,
+            getattr(self, "_last_fit_check", None),
+        )
+        check_state = getattr(self, "_last_chunk_check", None)
+        if check_state is not None:
+            logger.error(
+                "allocation failure check-state: check_req=%s check_free=%s "
+                "placement_free=%s check_req_id=%s",
+                check_state[0],
+                check_state[1],
+                self.block_pool.get_num_free_blocks(),
+                check_state[2],
+            )
+        for manager in self.coordinator.single_type_managers:
+            blocks = manager.req_to_blocks.get(request_id)
+            logger.error(
+                "allocation failure row: manager=%s row_len=%s pool_free=%s "
+                "pool_blocks=%s held_end_need=%s",
+                manager.__class__.__name__,
+                len(blocks) if blocks is not None else None,
+                manager.block_pool.get_num_free_blocks(),
+                manager.block_pool.num_gpu_blocks,
+                (
+                    max(
+                        cdiv(num_tokens_need_slot, manager.block_size) - len(blocks),
+                        0,
+                    )
+                    if blocks is not None
+                    else None
+                ),
+            )
+        for manager in self.coordinator.single_type_managers:
+            rows = {}
+            real_sum = 0
+            for req_id, row in manager.req_to_blocks.items():
+                if not row:
+                    continue
+                real = sum(1 for block in row if not block.is_null)
+                real_sum += real
+                entry = [len(row), real]
+                if isinstance(manager, MambaManager):
+                    entry.append(req_id in manager._spec_released)
+                    entry.append(req_id in manager._checkpoints)
+                rows[req_id] = entry
+            logger.error(
+                "allocation failure rows: manager=%s real_sum=%s free=%s "
+                "pool=%s rows=%s",
+                manager.__class__.__name__,
+                real_sum,
+                manager.block_pool.get_num_free_blocks(),
+                manager.block_pool.num_gpu_blocks,
+                rows,
+            )
+
+    def spec_batch_fits_tier(
+        self, requests: list[Request], tier: int, reserved_blocks: int = 0
+    ) -> bool:
+        """Whole-batch fit check for the formed-batch uniform-tier rule:
+        whether the formed batch can hold every row's end-state footprint
+        at the given spec tier simultaneously, plus the admission
+        watermark, in every constrained pool. Rows not yet allocated
+        reserve their full end state; allocated rows (running or
+        kv-holding) reserve the remaining growth to it — their held
+        blocks are already outside the free count, and the growth is the
+        chunk-allocation demand the running loop will make on the pool
+        (unreserved growth is how long generations exhaust the pool).
+        Each manager prices its own footprint: token-proportional for
+        attention-style groups, the resident state set for the mamba
+        align group. Managers sharing one block pool are priced against
+        it together."""
+        pools: dict[int, list[SingleTypeKVCacheManager]] = {}
+        for manager in self.coordinator.single_type_managers:
+            pools.setdefault(id(manager.block_pool), []).append(manager)
+        end_tokens = [self._request_end_num_tokens(request) for request in requests]
+        self._last_fit_check: dict[str, Any] = {
+            "tier": tier,
+            "formed": len(requests),
+            "watermark": self.watermark_blocks,
+            "reserved": reserved_blocks,
+            "pools": {},
+        }
+        verdict = True
+        for pool_managers in pools.values():
+            need = sum(
+                manager.spec_batch_tier_need(requests, tier, end_tokens)
+                for manager in pool_managers
+            )
+            free = pool_managers[0].block_pool.get_num_free_blocks()
+            if need == 0:
+                self._last_fit_check["pools"][pool_managers[0].__class__.__name__] = (
+                    need,
+                    free,
+                    True,
+                )
+                continue
+            ok = need + self.watermark_blocks + reserved_blocks <= free
+            self._last_fit_check["pools"][pool_managers[0].__class__.__name__] = (
+                need,
+                free,
+                ok,
+            )
+            if not ok:
+                verdict = False
+        return verdict
+
+    def is_spec_released(self, request_id: str) -> bool:
+        """Whether the request is pinned at the K=0 spec tier."""
+        return any(
+            manager.is_spec_released(request_id)
+            for manager in self.coordinator.single_type_managers
+            if isinstance(manager, MambaManager)
+        )
+
+    def promote_spec_blocks(self, request_id: str, reserve: int = 0) -> bool:
+        """Price and run the pinned row's promotion to the full spec tier.
+
+        Refills the window's null positions only when the pool fits them
+        (plus `reserve`); otherwise the row stays pinned. Returns True
+        when any mamba group promoted the row (its runner row is marked
+        for rebuild and must be routed through the resumed channel).
+        """
+        promoted = False
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                promoted = manager.promote_spec_blocks(request_id, reserve) or promoted
+        return promoted
+
+    def release_spec_blocks(self, request_id: str) -> bool:
+        """Swap the running row's real window blocks for null slots (the
+        K=0 crossing release). Returns True when any mamba group released
+        blocks (the runner row is marked for rebuild and must be routed
+        through the resumed channel)."""
+        released = False
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                released = manager.release_spec_blocks(request_id) or released
+        return released
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping and return its blocks without

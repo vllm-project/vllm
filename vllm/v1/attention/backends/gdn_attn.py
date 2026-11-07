@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.checkpoint import (
@@ -192,6 +193,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
+        # K=0 ladder rows (draft count 0) take the regular decode path only
+        # when the V2 align preprocess folds their pending accepted-token
+        # offset into the running block; otherwise the speculative path is the
+        # only reader that applies the offset (upstream routing).
+        self._k0_regular_decode: bool = (
+            self.use_spec_decode
+            and self.vllm_config.cache_config.mamba_cache_mode == "align"
+            and self.vllm_config.use_v2_model_runner
+            and (envs.VLLM_MAMBA_K0_SLOT_RELEASE or envs.VLLM_MAMBA_PRICED_ADMISSION)
+        )
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph: bool = (
@@ -358,11 +369,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
-            spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            # Spec rows carry a real draft count; -1 marks prefill rows. With
+            # the align fold active, draft-less decode rows (count 0, the K=0
+            # ladder tier) also take the regular decode path -- the fold
+            # applies their accepted-token offset to the running block, so
+            # they must not pay the verify premium for an always-accepted
+            # T=1 window.
+            if self._k0_regular_decode:
+                spec_sequence_masks_cpu = num_decode_draft_tokens_cpu > 0
+            else:
+                spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
-            # A batch whose rows all drafted nothing still has to run the
-            # speculative path: that is the only path that applies each row's
-            # accepted-token offset to the recurrent state.
             if num_spec_decodes == 0:
                 num_spec_decodes = 0
                 spec_sequence_masks = None

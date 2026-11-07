@@ -9414,3 +9414,772 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
+
+
+def _mamba_priced_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    num_blocks: int,
+    schedule_table: list[tuple[int, int, int]],
+):
+    """A mamba-align scheduler with a dynamic spec-tier table and a tight
+    state pool, for the pool-priced admission tests."""
+    monkeypatch.setenv("VLLM_MAMBA_PRICED_ADMISSION", "1")
+    return create_scheduler(
+        max_num_seqs=16,
+        num_blocks=num_blocks,
+        block_size=16,
+        num_speculative_tokens=2,
+        num_speculative_tokens_per_batch_size=schedule_table,
+        kv_cache_spec=MambaSpec(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=2,
+        ),
+    )
+
+
+def test_mamba_tier0_climb_price_bounds(monkeypatch):
+    """Pins both branches of the tier-0 climb pricing. An unallocated row
+    that admission will pin prices min(ceiling, end_span): the climb is
+    bounded by the row's boundary crossings, so a short-span row prices
+    BELOW the old resident floor (an intentional loosening — the row
+    holds one state block and never crosses), and a long-span row prices
+    at the ceiling. An allocated pinned row prices only its remaining
+    climb, bounded by the crossings ahead — zero once the row reaches
+    its end-state span (the decode settle)."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=10, schedule_table=[(1, 128, 2)]
+    )
+    mamba_manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    # ceiling = resident(2) + window(2) + advance slack(2) = 6.
+    (short,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=4, block_size=16, req_ids=["short"]
+    )
+    assert mamba_manager.spec_batch_tier_need([short], 0, [20]) == 2
+    (long,) = create_requests(
+        num_requests=1,
+        num_tokens=16,
+        max_tokens=1000,
+        block_size=16,
+        req_ids=["long"],
+    )
+    assert mamba_manager.spec_batch_tier_need([long], 0, [1016]) == 6
+
+    # Allocated + pinned, mid-climb: 1 real block in a 3-slot row, 63
+    # crossings ahead → min(6 - 1, 63) = 5.
+    pool = mamba_manager.block_pool
+    row = [pool.get_new_blocks(1)[0], pool.null_block, pool.null_block]
+    mamba_manager.req_to_blocks[long.request_id] = row
+    mamba_manager._spec_released.add(long.request_id)
+    assert mamba_manager.spec_batch_tier_need([long], 0, [1016]) == 5
+
+    # Row at its end-state span (64 + window 2): no crossings ahead, no
+    # remaining climb — the decode settle.
+    full_row = row + [pool.null_block] * 63
+    mamba_manager.req_to_blocks[long.request_id] = full_row
+    assert mamba_manager.spec_batch_tier_need([long], 0, [1016]) == 0
+
+    # Tier>0 pricing is unchanged: a pinned row prices its window alone.
+    assert mamba_manager.spec_batch_tier_need([long], 2, [1016]) == 2
+
+
+def test_priced_admission_degrades_to_k0_before_stalling(monkeypatch):
+    """Formed-batch uniform tier, the margin pressure shape: the running
+    row's remaining growth plus the waiting rows' end-states do not fit
+    at the table's K>0 tier, so the step degrades to the K=0 tier and
+    the whole batch admits pinned — the sound projection prices the
+    margin before any row is admitted, instead of admitting K>0 rows
+    and degrading one through the retry net (the net stays gated for
+    the bottom-out refusal, see
+    test_uniform_tier_refusal_gates_admission)."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=10, schedule_table=[(1, 128, 2)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=4, block_size=16, req_ids=["a"]
+    )
+    req_b, req_c = create_requests(
+        num_requests=2, num_tokens=16, max_tokens=4, block_size=16, req_ids=["b", "c"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    # req_a admits alone at the table's K=2 tier (3 blocks fit easily).
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    for req in (req_b, req_c):
+        scheduler.add_request(req)
+    output = scheduler.schedule()
+    # The end-state projection (req_a's remaining growth 1 + 2 waiting
+    # rows x 4 = 9) exceeds the 6 free at K=2 and K=1; at K=0 it fits
+    # (2 x 2 + 1 = 5): the step degrades to K=0 and the whole batch
+    # admits pinned — no row is admitted at a tier the margin cannot
+    # hold, so no per-row retry is needed.
+    assert set(output.num_scheduled_tokens) == {
+        req.request_id for req in (req_a, req_b, req_c)
+    }
+    assert output.num_spec_tokens_to_schedule == 0
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+    assert kv_cache_manager.is_spec_released(req_c.request_id)
+    assert req_c.request_id in mamba_manager.req_to_blocks
+    row = mamba_manager.req_to_blocks[req_c.request_id]
+    assert row[-2:] == [kv_cache_manager.block_pool.null_block] * 2
+
+
+def test_priced_admission_pin_gates_promotion(monkeypatch):
+    """Formed-batch uniform tier: when the formed batch's end-state does
+    not fit at any K>0 tier, the WHOLE batch admits at the K=0 tier (one
+    tier per step — no per-request degradation); when the batch drains
+    and the step tier rises, the null-window rows are promoted (priced)
+    together and routed through the resumed channel."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=9, schedule_table=[(1, 4, 2), (5, 16, 1), (17, 128, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=4, block_size=16, req_ids=["a"]
+    )
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=1, block_size=16, req_ids=["b"]
+    )
+    (req_c,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=4, block_size=16, req_ids=["c"]
+    )
+    for req in (req_a, req_b, req_c):
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    # The forming batch of 3 cannot hold 3 full windows in a 9-block
+    # pool (12 > 10 at K=2 and K=1; 3 K=0 rows at 3 blocks fit): the step
+    # tier is demoted to K=0 and every row admits pinned — all-or-nothing
+    # per batch, no mixed-tier step.
+    assert output.num_spec_tokens_to_schedule == 0
+    for req in (req_a, req_b, req_c):
+        assert kv_cache_manager.is_spec_released(req.request_id)
+    _model_output(scheduler, output, [[100], [100], [100]])
+
+    # req_b finishes and returns its blocks; the formed batch drains to 2
+    # and the table's answer rises to K=2: the step tier rises with it,
+    # the refill now fits (4 window blocks vs 4 free), and both
+    # null-window rows are promoted and routed through the resumed
+    # channel.
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([req_a.request_id, req_c.request_id], [[1, 2], [1, 2]])
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_a.request_id] == 1
+    assert output.num_scheduled_tokens[req_c.request_id] == 1
+    assert output.num_spec_tokens_to_schedule == 2
+    for req in (req_a, req_c):
+        assert not kv_cache_manager.is_spec_released(req.request_id)
+        assert all(
+            block.ref_cnt == 1
+            for block in mamba_manager.req_to_blocks[req.request_id][-2:]
+        )
+        assert req.request_id in output.scheduled_cached_reqs.resumed_req_ids
+
+
+def test_priced_admission_no_promotion_while_table_schedules_k0(monkeypatch):
+    """While the count-based table schedules K=0, a pinned row stays
+    pinned even when the pool could afford the refill: the table is the
+    prior and the promotion follows it, not the free pool alone."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=12, schedule_table=[(1, 1, 2), (2, 16, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    req_a, req_b = create_requests(
+        num_requests=2, num_tokens=32, max_tokens=4, block_size=16
+    )
+    scheduler.add_request(req_a)
+    # req_a admits alone: the forming batch of 1 is at the table's K=2
+    # tier (full window, no pin).
+    output = scheduler.schedule()
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # req_b joins a forming batch of 2: the table's answer for the formed
+    # batch is K=0, so req_b is born pinned at the K=0 tier.
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+    _model_output(scheduler, output, [[100], [100]])
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_a.request_id] == 1
+    assert output.num_scheduled_tokens[req_b.request_id] == 1
+    assert (
+        req_a.request_id not in output.scheduled_spec_decode_tokens
+        and req_b.request_id not in output.scheduled_spec_decode_tokens
+    )
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+
+
+def _mamba_slot_release_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    num_blocks: int,
+    schedule_table: list[tuple[int, int, int]],
+):
+    """A mamba-align scheduler with a dynamic spec-tier table and the K=0
+    slot-release knob on WITHOUT priced admission (the stripped arm), for
+    the promotion-revival tests."""
+    monkeypatch.setenv("VLLM_MAMBA_K0_SLOT_RELEASE", "1")
+    return create_scheduler(
+        max_num_seqs=16,
+        num_blocks=num_blocks,
+        block_size=16,
+        num_speculative_tokens=2,
+        num_speculative_tokens_per_batch_size=schedule_table,
+        kv_cache_spec=MambaSpec(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=2,
+        ),
+    )
+
+
+def test_slot_release_demand_gates_running_window(monkeypatch):
+    """The K=0 release is demand-gated: a running row keeps its window at
+    a K=0 step until admissions actually stall on blocks, and the stall's
+    release lets the stalled row admit in the SAME step (the freed window
+    is the admission's blocks). The released row routes through the
+    resumed channel so the runner rebuilds the nulled row."""
+    scheduler = _mamba_slot_release_scheduler(
+        monkeypatch, num_blocks=5, schedule_table=[(1, 1, 2), (2, 16, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, block_size=16, req_ids=["a"]
+    )
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=1, block_size=16, req_ids=["b"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    # req_a admits alone at the table's K=2 tier: real window, no pin.
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # The formed batch of 2 lands at the K=0 tier, but the pool cannot
+    # hold req_b's born-null row (req_a's full row holds 4 of 5 blocks):
+    # the admission stalls — and the release STILL holds, because the
+    # gate reads the previous step's clean verdict.
+    assert req_b.request_id not in output.num_scheduled_tokens
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    assert (
+        mamba_manager.req_to_blocks[req_a.request_id][-2:]
+        != [kv_cache_manager.block_pool.null_block] * 2
+    )
+    _model_output(scheduler, output, [[100]])
+
+    output = scheduler.schedule()
+    # The stall opens the gate: req_a's window frees and req_b admits
+    # born-null in the same step; the release routes req_a through the
+    # resumed channel.
+    assert kv_cache_manager.is_spec_released(req_a.request_id)
+    assert (
+        mamba_manager.req_to_blocks[req_a.request_id][-2:]
+        == [kv_cache_manager.block_pool.null_block] * 2
+    )
+    assert req_a.request_id in output.scheduled_cached_reqs.resumed_req_ids
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+    assert req_b.request_id in output.num_scheduled_tokens
+
+
+def test_slot_release_promotes_when_tier_rises(monkeypatch):
+    """A released row is not a life sentence: when the formed batch drains
+    and the table's tier rises, the released row promotes BEFORE the tier
+    is finalized — the window refills with fresh blocks, the pin lifts,
+    and drafts resume. A promotion attempted after the pin demoted the
+    tier could never fire (its gate is step_tier > 0): under homeostasis
+    spec decode would never return."""
+    scheduler = _mamba_slot_release_scheduler(
+        monkeypatch, num_blocks=5, schedule_table=[(1, 1, 2), (2, 16, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, block_size=16, req_ids=["a"]
+    )
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=1, block_size=16, req_ids=["b"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # The K=0 crossing stalls req_b's admission; the release gate holds.
+    assert req_b.request_id not in output.num_scheduled_tokens
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    output = scheduler.schedule()
+    # The stall opens the gate: req_a releases and req_b admits born-null.
+    assert kv_cache_manager.is_spec_released(req_a.request_id)
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+    _model_output(scheduler, output, [[100], [100]])
+
+    output = scheduler.schedule()
+    # req_b finished (max_tokens=1): the formed batch drains to req_a
+    # alone, the table's tier rises to K=2, the formed batch's end-state
+    # (req_a's window) fits, and the released row promotes — the pin
+    # lifts, the window refills with fresh blocks, and the step schedules
+    # drafts again.
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    assert (
+        mamba_manager.req_to_blocks[req_a.request_id][-2:]
+        != [kv_cache_manager.block_pool.null_block] * 2
+    )
+    assert all(
+        block.ref_cnt == 1
+        for block in mamba_manager.req_to_blocks[req_a.request_id][-2:]
+    )
+    assert output.num_spec_tokens_to_schedule == 2
+    assert req_a.request_id in output.scheduled_cached_reqs.resumed_req_ids
+
+
+def test_priced_and_slot_release_both_knobs_lifecycle(monkeypatch):
+    """Both knobs engaged: the priced arm's bottom-out stall opens the
+    demand gate, the release frees the running row's window, the stalled
+    row admits born-null, and the priced promotion lifts the released row
+    when the batch drains — the full lifecycle with priced admission AND
+    slot release active together."""
+    monkeypatch.setenv("VLLM_MAMBA_K0_SLOT_RELEASE", "1")
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=5, schedule_table=[(1, 1, 2), (2, 16, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, block_size=16, req_ids=["a"]
+    )
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=1, block_size=16, req_ids=["b"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # The formed batch of 2 lands at the K=0 tier, but the grown batch's
+    # end-state does not fit the free pool: the bottom-out stalls req_b's
+    # admission — and the release gate holds (the previous step's verdict
+    # was clean).
+    assert req_b.request_id not in output.num_scheduled_tokens
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    output = scheduler.schedule()
+    # The bottom-out stall opens the gate: req_a's window frees and req_b
+    # admits born-null in the same step.
+    assert kv_cache_manager.is_spec_released(req_a.request_id)
+    assert (
+        mamba_manager.req_to_blocks[req_a.request_id][-2:]
+        == [kv_cache_manager.block_pool.null_block] * 2
+    )
+    assert req_a.request_id in output.scheduled_cached_reqs.resumed_req_ids
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+    assert req_b.request_id in output.num_scheduled_tokens
+    _model_output(scheduler, output, [[100], [100]])
+
+    output = scheduler.schedule()
+    # req_b finished: the formed batch drains to req_a alone, the table's
+    # tier rises to K=2, and the PRICED promotion lifts the released row.
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    assert (
+        mamba_manager.req_to_blocks[req_a.request_id][-2:]
+        != [kv_cache_manager.block_pool.null_block] * 2
+    )
+    assert output.num_spec_tokens_to_schedule == 2
+    assert req_a.request_id in output.scheduled_cached_reqs.resumed_req_ids
+
+
+def test_slot_release_promotes_at_intermediate_rung(monkeypatch):
+    """The promotion fires at an intermediate rung: released rows promote
+    when the tier rises from K=0 to K=1 (a partial drain), not only at the
+    top of the ladder — and two released rows promote together when the
+    formed batch's end-state fits the risen tier."""
+    scheduler = _mamba_slot_release_scheduler(
+        monkeypatch,
+        num_blocks=8,
+        schedule_table=[(1, 1, 2), (2, 2, 1), (3, 16, 0)],
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, block_size=16, req_ids=["a"]
+    )
+    (req_d,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, block_size=16, req_ids=["d"]
+    )
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=1, block_size=16, req_ids=["b"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    scheduler.add_request(req_d)
+    output = scheduler.schedule()
+    # The formed batch of 2 sits at the table's K=1 tier: req_d admits
+    # with a real window; no release (the tier is not K=0).
+    assert req_d.request_id in output.num_scheduled_tokens
+    assert not kv_cache_manager.is_spec_released(req_d.request_id)
+    _model_output(scheduler, output, [[100], [100]])
+
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # The formed batch of 3 crosses to K=0; req_b's born-null row cannot
+    # allocate (the pool holds two full rows) — the admission stalls, and
+    # the release gate holds (the previous step's verdict was clean).
+    assert req_b.request_id not in output.num_scheduled_tokens
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    assert not kv_cache_manager.is_spec_released(req_d.request_id)
+    _model_output(scheduler, output, [[100], [100]])
+
+    output = scheduler.schedule()
+    # The stall opens the gate: both running rows release and req_b
+    # admits born-null in the same step.
+    assert kv_cache_manager.is_spec_released(req_a.request_id)
+    assert kv_cache_manager.is_spec_released(req_d.request_id)
+    assert (
+        mamba_manager.req_to_blocks[req_a.request_id][-2:]
+        == [kv_cache_manager.block_pool.null_block] * 2
+    )
+    assert (
+        mamba_manager.req_to_blocks[req_d.request_id][-2:]
+        == [kv_cache_manager.block_pool.null_block] * 2
+    )
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+    assert req_b.request_id in output.num_scheduled_tokens
+    _model_output(scheduler, output, [[100], [100], [100]])
+
+    output = scheduler.schedule()
+    # req_b finished: the formed batch drains to two rows, the table's
+    # tier rises to K=1 — the INTERMEDIATE rung — and both released rows
+    # promote together (their windows fit the risen tier's verdict).
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    assert not kv_cache_manager.is_spec_released(req_d.request_id)
+    for req in (req_a, req_d):
+        assert (
+            mamba_manager.req_to_blocks[req.request_id][-2:]
+            != [kv_cache_manager.block_pool.null_block] * 2
+        )
+        assert req.request_id in output.scheduled_cached_reqs.resumed_req_ids
+    assert output.num_spec_tokens_to_schedule == 1
+
+
+def test_slot_release_promotion_holds_when_batch_does_not_fit(monkeypatch):
+    """Structural guard: when the formed batch's end-state does not fit
+    the risen tier, the released row stays pinned and the step degrades
+    to K=0 — the batch keeps scheduling and admissions keep flowing
+    (born-null). A state where pinned rows could neither promote nor
+    release is structurally impossible."""
+    scheduler = _mamba_slot_release_scheduler(
+        monkeypatch,
+        num_blocks=7,
+        schedule_table=[(1, 1, 2), (2, 2, 1), (3, 16, 0)],
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=8, block_size=16, req_ids=["a"]
+    )
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=64, block_size=16, req_ids=["b"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    # Arrange the pin directly (the real release path is covered by the
+    # demand-gate test): req_a's window frees and the row pins.
+    assert kv_cache_manager.release_spec_blocks(req_a.request_id)
+
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # The formed batch of 2 rises to the table's K=1 tier, but the batch's
+    # end-state (req_a's window refill + req_b's full row) does not fit:
+    # the promotion holds, the pin stays, and the step degrades to K=0 —
+    # req_b still admits born-null and the batch schedules.
+    assert kv_cache_manager.is_spec_released(req_a.request_id)
+    assert output.num_spec_tokens_to_schedule == 0
+    assert set(output.num_scheduled_tokens) == {
+        req_a.request_id,
+        req_b.request_id,
+    }
+    assert kv_cache_manager.is_spec_released(req_b.request_id)
+
+
+def test_priced_admission_batch_aware_prior_pins_burst(monkeypatch):
+    """The admission tier is the table's answer for the batch being FORMED
+    (scheduled + waiting), not the staged running count: a burst whose
+    formed size lands in a K=0 table band is born pinned — the head rows
+    do not commit the expensive tier the tail cannot afford."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=100, schedule_table=[(1, 8, 2), (9, 16, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    reqs = create_requests(num_requests=10, num_tokens=16, max_tokens=4, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # The formed batch is 10 (the table's K=0 band): every row admits
+    # pinned at the K=0 tier, including the head rows that a staged
+    # count lookup would have run at K=2.
+    assert set(output.num_scheduled_tokens) == {req.request_id for req in reqs}
+    for req in reqs:
+        assert kv_cache_manager.is_spec_released(req.request_id)
+
+
+def _hybrid_priced_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    num_blocks: int,
+    schedule_table: list[tuple[int, int, int]],
+    max_num_batched_tokens: int = 8192,
+    scheduler_reserve_full_isl: bool = True,
+):
+    """A full-attention + mamba-align scheduler with a dynamic spec-tier
+    table and a tight shared pool, for the formed-batch uniform-tier
+    tests that need a non-mamba pool to bind."""
+    monkeypatch.setenv("VLLM_MAMBA_PRICED_ADMISSION", "1")
+    return create_scheduler(
+        max_num_seqs=16,
+        num_blocks=num_blocks,
+        block_size=16,
+        max_num_batched_tokens=max_num_batched_tokens,
+        scheduler_reserve_full_isl=scheduler_reserve_full_isl,
+        num_speculative_tokens=2,
+        num_speculative_tokens_per_batch_size=schedule_table,
+        kv_cache_spec=MambaSpec(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=2,
+        ),
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=2,
+                ),
+            ),
+        ],
+    )
+
+
+def test_uniform_tier_burst_admits_at_demoted_tier(monkeypatch):
+    """Formed-batch uniform tier, c32-style burst: the table's answer for
+    the formed batch does not fit the pool's end-state, so the step tier
+    is demoted until it does — the whole burst admits together at the
+    demoted tier instead of the head rows committing the expensive tier
+    and stranding the tail in a staggered queue."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=36, schedule_table=[(1, 128, 2)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    reqs = create_requests(num_requests=16, num_tokens=16, max_tokens=4, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # 16 rows need 64 blocks at the K=2 tier end-state and 32 at K=0
+    # (the windows are null row slots; each row's end state is its
+    # prompt plus its generation cap): the step tier demotes 2 -> 1 -> 0
+    # and the whole burst admits in one step at the demoted tier.
+    assert set(output.num_scheduled_tokens) == {req.request_id for req in reqs}
+    assert output.num_spec_tokens_to_schedule == 0
+    for req in reqs:
+        assert kv_cache_manager.is_spec_released(req.request_id)
+
+
+def test_uniform_tier_boundary_recovers_at_k0(monkeypatch):
+    """Formed-batch uniform tier, c11-style boundary: the formed batch
+    lands exactly on the table's K=0 band, so the whole batch admits at
+    K=0 and the boundary the staged count lookup stalled at is
+    recovered."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=24, schedule_table=[(1, 10, 2), (11, 128, 0)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    reqs = create_requests(num_requests=11, num_tokens=16, max_tokens=4, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # The formed batch of 11 is the table's K=0 band and its end-states
+    # (11 x 2 blocks) fit the pool: every row admits pinned at K=0 in
+    # one step — a staged count lookup would have run the head rows at
+    # the K=2 tier (counts 1-10) until the pool ran out.
+    assert set(output.num_scheduled_tokens) == {req.request_id for req in reqs}
+    assert output.num_spec_tokens_to_schedule == 0
+    for req in reqs:
+        assert kv_cache_manager.is_spec_released(req.request_id)
+
+
+def test_uniform_tier_attention_bound_demotes_at_bottom_out(monkeypatch):
+    """Formed-batch uniform tier, attention-bound long prompts: when NO
+    tier fits the formed batch's end-state (the shared pool binds, not
+    the mamba tier alone), the step tier demotes to K=0 — locking the
+    step at the table tier instead would leave rows pinned at tier 0
+    unable to promote (verdict-gated) or release (step-tier-gated).
+    Admission still prices the grown batch's END-STATE at the demoted
+    tier, so the demotion admits exactly the rows whose end-states fit —
+    no row past the verdict."""
+    scheduler = _hybrid_priced_scheduler(
+        monkeypatch, num_blocks=37, schedule_table=[(1, 128, 2)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    reqs = create_requests(num_requests=16, num_tokens=32, max_tokens=4, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # 16 rows need 128 blocks at the K=2 end-state and 96 at K=0 against
+    # a 37-block pool: no tier fits, so the step tier demotes to K=0 and
+    # admission prices the grown batch at that tier — 7 rows' end-states
+    # (attention + null-window mamba) fit the pool, the 8th row's does
+    # not and stalls. The admitted rows are born pinned at the K=0 tier.
+    assert set(output.num_scheduled_tokens) == {req.request_id for req in reqs[:7]}
+    assert output.num_spec_tokens_to_schedule == 0
+    for req in reqs[:7]:
+        assert kv_cache_manager.is_spec_released(req.request_id)
+    for req in reqs[7:]:
+        assert not kv_cache_manager.is_spec_released(req.request_id)
+
+
+def test_uniform_tier_bottom_out_prices_at_demoted_tier(monkeypatch):
+    """When no tier fits the formed batch (the bottom-out), the step
+    tier demotes to K=0 and the per-row admission prices the grown
+    batch's END-STATE at that tier: a row is admitted only while the
+    grown batch's end-state fits the free pool alongside the running
+    rows' remaining growth. A projection that priced only the waiting
+    row's prompt admits past the verdict, and the running row's decode
+    growth then exhausts the pool."""
+    scheduler = _mamba_priced_scheduler(
+        monkeypatch, num_blocks=6, schedule_table=[(1, 128, 2)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    reqs = create_requests(num_requests=6, num_tokens=16, max_tokens=4, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # 6 rows need 18 blocks at K>0 and 6 at K=0 against 5 free: no tier
+    # fits, the step tier demotes to K=0. Admission prices the grown
+    # batch at that tier: two rows' end-states fit the free pool (with
+    # the admission watermark), the third row's grown end-state does not
+    # — it stalls instead of admitting past the verdict.
+    assert set(output.num_scheduled_tokens) == {
+        reqs[0].request_id,
+        reqs[1].request_id,
+    }
+    assert output.num_spec_tokens_to_schedule == 0
+    for req in reqs[2:]:
+        assert not kv_cache_manager.is_spec_released(req.request_id)
+
+
+def test_uniform_tier_running_growth_gates_admission(monkeypatch):
+    """The running row's remaining end-state growth (its generation cap)
+    is reserved in the all-pool check, and at the bottom-out a waiting
+    row is admitted only when its end-state fits alongside that growth.
+    A projection that priced only the waiting row's prompt admits past
+    the verdict, and the running row's decode growth then exhausts the
+    pool the tier-loyal stall exists to prevent."""
+    scheduler = _hybrid_priced_scheduler(
+        monkeypatch, num_blocks=16, schedule_table=[(1, 128, 2)]
+    )
+    kv_cache_manager = scheduler.kv_cache_manager
+    mamba_manager = kv_cache_manager.coordinator.single_type_managers[1]
+    attn_manager = kv_cache_manager.coordinator.single_type_managers[0]
+    (req_a,) = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=96, block_size=16, req_ids=["a"]
+    )
+    scheduler.add_request(req_a)
+    output = scheduler.schedule()
+    assert not kv_cache_manager.is_spec_released(req_a.request_id)
+    _model_output(scheduler, output, [[100]])
+
+    (req_b,) = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=96, block_size=16, req_ids=["b"]
+    )
+    scheduler.add_request(req_b)
+    output = scheduler.schedule()
+    # req_a's remaining attention growth (5 blocks to its 128-token end
+    # state) plus req_b's end-state (8 attention + 4 mamba) exceed the
+    # free pool: no tier fits, the step tier demotes to K=0 (the running
+    # row drains there), and req_b's end-state does
+    # not fit alongside the growth at any tier — it stalls instead of
+    # admitting past the verdict, leaving req_a's decode growth funded.
+    assert set(output.num_scheduled_tokens) == {req_a.request_id}
+    assert output.num_spec_tokens_to_schedule == 0
+    assert not kv_cache_manager.is_spec_released(req_b.request_id)
+    assert req_b.request_id not in mamba_manager.req_to_blocks
+    assert req_b.request_id not in attn_manager.req_to_blocks
+
+
+def test_uniform_tier_refusal_gates_admission(monkeypatch):
+    """The batch-level refusal must gate ADMISSION itself: when no tier
+    fits the formed batch's end-state footprint, a waiting row whose
+    per-row footprint happens to fit the current free must still stall
+    once the grown batch no longer fits any tier. An ungated trickle
+    admits rows past the verdict on the shared hybrid pool: chunk-sized
+    per-row footprints keep fitting while the pool runs to zero free
+    with end-state growth pending, and a running row's chunk allocation
+    then fails inside the engine."""
+    scheduler = _hybrid_priced_scheduler(
+        monkeypatch,
+        num_blocks=112,
+        schedule_table=[(1, 8, 2), (9, 16, 1), (17, 128, 0)],
+        max_num_batched_tokens=128,
+        scheduler_reserve_full_isl=False,
+    )
+    reqs = create_requests(num_requests=6, num_tokens=320, max_tokens=32, block_size=16)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    # Per-row end state: 22 attention blocks (320+32 tokens) + 5 mamba
+    # (K=2 resident) = 27. Four rows fit the 112-block pool (108); a
+    # fifth pushes it to 135: no tier fits the grown batch, so admission
+    # must cap at 4 instead of trickling to six (whose 162 blocks of end
+    # state cannot exist). Chunked prefill (128-token chunks) keeps every
+    # per-row footprint small enough to fit the current free.
+    for _ in range(40):
+        output = scheduler.schedule()
+        if not output.num_scheduled_tokens:
+            break
+        _model_output(scheduler, output, [[100]] * len(output.num_scheduled_tokens))
+
+    assert len(scheduler.running) <= 4

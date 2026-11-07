@@ -1339,8 +1339,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None:
+                # Requests in resumed_req_ids re-establish their full block
+                # rows: the scheduler sends the whole row because block
+                # positions changed under the append-only runner row (e.g.
+                # the K=0 slot release/resume refilled mamba window
+                # positions). Preemption-resumes do not flow through here —
+                # they are re-added via add_requests with overwrite=True.
                 self.block_tables.append_block_ids(
-                    req_index, req_new_block_ids, overwrite=False
+                    req_index,
+                    req_new_block_ids,
+                    overwrite=req_id in reqs.resumed_req_ids,
                 )
 
         # Update CPU num_computed_prefill_tokens.
@@ -1496,7 +1504,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # combine_sampled_and_draft_tokens places a request's logits rows
             # at [query_end - num_logits, query_end). Fewer query rows than
             # that would silently select the preceding request's hidden states.
-            assert (num_scheduled_tokens_np >= num_logits).all()
+            if not (num_scheduled_tokens_np >= num_logits).all():
+                logger.warning(
+                    "num_logits assert: sched=%s draft=%s bonus=%s req_ids=%s",
+                    num_scheduled_tokens_np.tolist(),
+                    num_draft_tokens_per_req.tolist(),
+                    num_bonus_tokens,
+                    req_ids,
+                )
+                assert (num_scheduled_tokens_np >= num_logits).all()
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
