@@ -80,6 +80,12 @@ Related PRs:
 
 - <https://github.com/vllm-project/vllm/pull/8823>
 
+### OpenMP in `fork` mode
+
+libgomp, the OpenMP runtime that PyTorch uses, has no fork handler. A process forked while its parent has OpenMP worker threads hangs or crashes in its first OpenMP call. So in `fork` mode, importing `vllm` registers an `os.register_at_fork` hook. The hook joins those worker threads in the parent before every `os.fork()` in the process, including forks by an application that embeds vLLM. OpenMP recreates the threads at its next parallel region. This adds about 1 to 2 ms to each fork. In `spawn` mode the hook does nothing, and `subprocess` does not run it.
+
+The hook cannot help a process that uses OpenMP and forks before it imports `vllm`. In `fork` mode, a child of such a process hangs at its first fork. To avoid this, import `vllm` before you use OpenMP, or set `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
+
 ## Prior State in v1
 
 There was an environment variable to control whether multiprocessing is used in
