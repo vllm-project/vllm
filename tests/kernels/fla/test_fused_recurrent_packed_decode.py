@@ -28,6 +28,18 @@ pytestmark = pytest.mark.skipif(
         (1, 16, 64, torch.bfloat16, torch.float32),
         (9, 4, 12, torch.bfloat16, torch.float32),
         (1, 4, 12, torch.bfloat16, torch.bfloat16),
+        # Both sides of every per-arch (ROCm) launch-config batch switch
+        # (B <= 1, 2, 4 and 63) and large decode batches, for 2- and 4-byte states.
+        *[
+            (batch, 4, 8, dtype, state_dtype)
+            for batch in (1, 2, 4, 64, 128, 256, 512)
+            for dtype, state_dtype in (
+                (torch.float16, torch.float16),
+                (torch.bfloat16, torch.bfloat16),
+                (torch.float32, torch.float32),
+                (torch.bfloat16, torch.float32),
+            )
+        ],
     ],
 )
 def test_fused_recurrent_packed_decode_matches_reference(
