@@ -404,6 +404,7 @@ steps:
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
+  - vllm/model_executor/kernels/attention
   - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
@@ -423,6 +424,7 @@ steps:
       - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
       - vllm/v1/attention
       - vllm/model_executor/layers/attention
+      - vllm/model_executor/kernels/attention
       - tests/kernels/attention
       - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
       - vllm/models/minimax_m3/common/indexer.py
