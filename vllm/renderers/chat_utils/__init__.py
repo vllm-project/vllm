@@ -3,6 +3,8 @@
 
 from .chat_message import (
     has_non_text_content,
+    normalize_message_reasoning_content,
+    normalize_reasoning_content,
     parse_chat_message_content,
     parse_chat_message_content_parts,
     parse_chat_messages,
@@ -34,6 +36,8 @@ __all__ = [
     "MultiModalItemTracker",
     "AsyncMultiModalItemTracker",
     "has_non_text_content",
+    "normalize_message_reasoning_content",
+    "normalize_reasoning_content",
     "parse_chat_message_content",
     "parse_chat_message_content_parts",
     "parse_chat_messages",
