@@ -2,6 +2,24 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (H100) DeepSeek V4 PCP"
+  key: deepseek_v4-pcp
+  device: h100
+  num_devices: 4
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/models/deepseek_v4/
+  - vllm/models/deepseek_v41/
+  - vllm/model_executor/layers/fused_moe/runner/moe_runner.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backend.py
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/ops/sparse_swa.py
+  - vllm/v1/worker/gpu/
+  - tests/models/test_deepseek_v4_pcp.py
+  commands:
+  - pytest -v -s models/test_deepseek_v4_pcp.py
+
 - label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization
   automatic_shard: true

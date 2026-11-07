@@ -13,7 +13,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
-    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
     get_tp_group,
@@ -1098,14 +1097,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
-        local_input_ids = input_ids
-        if (
-            input_ids is not None
-            and self.parallel_config.prefill_context_parallel_size > 1
-            and not self.parallel_config.enable_expert_parallel
-        ):
-            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
-
         if decode_step is not None:
             return decode_step.run(
                 hidden_states,
@@ -1142,9 +1133,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
-                local_input_ids
-                if self.decoder_replay_layers.replay_batch is not None
-                else input_ids,
+                input_ids,
                 pre_mix,
                 post_mix,
                 res_mix,
@@ -1291,13 +1280,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         """Layers ``decoder_replay_start``.. on the given rows; returns their output,
         the last FFN's pre-mix and the aux hidden states they capture."""
         assert self.decoder_replay_layers is not None
-        if (
-            input_ids is not None
-            and self.parallel_config.prefill_context_parallel_size > 1
-            and not self.parallel_config.enable_expert_parallel
-            and self.decoder_replay_layers.replay_batch is not None
-        ):
-            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.decoder_replay_start, self.end_layer),

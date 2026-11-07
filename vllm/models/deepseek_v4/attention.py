@@ -64,6 +64,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.sparse_swa import insert_swa_kv
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -243,6 +244,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.compress_ratio = 1
         self.eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
+        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        if self.use_pcp:
+            # All PCP collectives must execute in the same stream order.
+            aux_stream_list = None
 
         # Padded Q head count is dictated by the platform subclass.
         self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
@@ -786,6 +791,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert positions.dtype == torch.int64
         cos_sin_cache = self.rotary_emb.cos_sin_cache
         cache_dtype = swa_kv_cache.dtype
+        slot_mapping = swa_metadata.slot_mapping
+        if self.use_pcp:
+            insert_swa_kv(
+                kv,
+                swa_kv_cache,
+                swa_metadata,
+                positions,
+                cos_sin_cache,
+                use_pcp=self.use_pcp,
+            )
+            slot_mapping = slot_mapping[:0]
 
         # kv is unchanged; attention reads kv solely via swa_kv_cache.
         if cache_dtype == torch.uint8:
@@ -799,7 +815,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 q,
                 kv,
                 swa_kv_cache_2d,
-                swa_metadata.slot_mapping,
+                slot_mapping,
                 positions,
                 cos_sin_cache,
                 self.padded_heads,
@@ -819,7 +835,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 q,
                 kv,
                 swa_kv_cache_3d,
-                swa_metadata.slot_mapping,
+                slot_mapping,
                 positions,
                 cos_sin_cache,
                 self.eps,
@@ -834,7 +850,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv,
             q_fp8,
             swa_kv_cache_3d,
-            swa_metadata.slot_mapping,
+            slot_mapping,
             positions,
             cos_sin_cache,
             self._flashinfer_fp8_kv_scale,

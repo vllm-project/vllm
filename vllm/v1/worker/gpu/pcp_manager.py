@@ -35,6 +35,8 @@ class PCPBatchMetadata:
     # [num_reqs], aligned with local request segments; requests may repeat.
     global_query_lens_np: np.ndarray
     global_seq_lens_cpu_upper_bound_np: np.ndarray
+    # Uniform block-table gather rows, including graph padding and empty ranks.
+    gather_num_reqs: int
     # [num_reqs_after_padding], set only under PCP+DCP.
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
@@ -192,11 +194,12 @@ class PCPManager:
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
             and getattr(model_config.hf_text_config, "model_type", None)
-            not in ("deepseek_v32", "glm_moe_dsa")
+            not in ("deepseek_v32", "glm_moe_dsa", "deepseek_v4")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2, "
+                "DeepSeek-V4, and GLM-5.2/5.3. "
+                "Set -cc.cudagraph_mode=NONE to disable graphs."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
@@ -495,6 +498,9 @@ class PCPManager:
         num_reqs_after_padding = self._resolve_num_reqs_after_padding(
             global_batch, padded_num_reqs, num_local_reqs
         )
+        gather_num_reqs = max(
+            1, padded_num_reqs or 0, max(len(segments) for segments in segments_by_rank)
+        )
         if num_reqs_after_padding > input_buffers.max_num_reqs:
             raise RuntimeError(
                 "PCP padded local request count exceeds the MRV2 input buffer size: "
@@ -694,6 +700,7 @@ class PCPManager:
             dcp_local_seq_lens=None,
             pcp=PCPBatchMetadata(
                 global_num_tokens=global_batch.num_tokens,
+                gather_num_reqs=gather_num_reqs,
                 global_query_lens_np=num_scheduled_tokens[
                     local_to_global_batch_req_idx_np
                 ],

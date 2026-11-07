@@ -545,6 +545,18 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     CUDA arches keep the FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        if backend not in (
+            None,
+            AttentionBackendEnum.FLASHMLA_SPARSE,
+            AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
+        ):
+            raise NotImplementedError(
+                "DeepSeek V4 PCP requires FlashMLA sparse attention."
+            )
+        if vllm_config.cache_config.cache_dtype != "fp8_ds_mla":
+            raise NotImplementedError("DeepSeek V4 PCP requires fp8_ds_mla KV cache.")
+        return DeepseekV4FlashMLAAttention
     device_capability = current_platform.get_device_capability()
     if backend in (
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
@@ -831,6 +843,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        if self.parallel_config.prefill_context_parallel_size > 1 and (
+            self.parallel_config.decode_context_parallel_size != 1
+            or self.parallel_config.pipeline_parallel_size != 1
+            or self.parallel_config.data_parallel_size != 1
+            or self.parallel_config.use_ubatching
+            or vllm_config.speculative_config is not None
+            or vllm_config.kv_transfer_config is not None
+            or vllm_config.cache_config.enable_prefix_caching
+            or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+        ):
+            raise NotImplementedError(
+                "DeepSeek V4 PCP requires DCP=PP=DP=1, no prefix caching, "
+                "speculation, KV transfer, microbatching, or MegaMoE."
+            )
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
