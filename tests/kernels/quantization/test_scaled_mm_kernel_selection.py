@@ -31,9 +31,13 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    PerTensorTorchFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
@@ -289,6 +293,42 @@ def test_cpu_kernel_accepts_all_configs():
         assert can_impl, (
             f"CPUInt8ScaledMMLinearKernel should accept config {config}: {reason}"
         )
+
+
+@pytest.mark.parametrize("is_rocm", [True, False], ids=["rocm", "not_rocm"])
+def test_torch_fp8_kernel_pads_weight_k_only_on_rocm(is_rocm, default_vllm_config):
+    """The torch FP8 kernels zero-pad an unaligned weight K to a multiple of 16
+    only on ROCm. Other platforms keep the weight as loaded."""
+    n, k = 64, 264
+    kernel = PerTensorTorchFP8ScaledMMLinearKernel(
+        FP8ScaledMMLinearLayerConfig(
+            weight_quant_key=kFp8StaticTensorSym,
+            activation_quant_key=kFp8DynamicTensorSym,
+            weight_shape=(n, k),
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+        ),
+        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
+    )
+    layer = torch.nn.Module()
+    # Loaded layout: the weight is the (K, N) view of an (N, K) tensor.
+    weight = torch.ones(n, k, dtype=torch.bfloat16).t()
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+
+    with patch(
+        "vllm.model_executor.kernels.linear.scaled_mm.pytorch.current_platform"
+    ) as platform_mock:
+        platform_mock.is_rocm.return_value = is_rocm
+        kernel.process_weights_after_loading(layer)
+
+    expected_k = 272 if is_rocm else k
+    assert layer.weight.shape == (expected_k, n), (
+        f"The weight shape is {tuple(layer.weight.shape)}, but it should be "
+        f"{(expected_k, n)}."
+    )
+    assert not layer.weight[k:].float().any(), (
+        "The padded rows of the weight are not all zero."
+    )
 
 
 @pytest.mark.skipif(
