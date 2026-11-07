@@ -79,8 +79,10 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         except AttributeError:
             return (
                 False,
-                f"PyTorch {torch.__version__} does not support "
-                "_dyn_quant_* 4bit ops. Install a newer version",
+                (
+                    f"PyTorch {torch.__version__} does not support "
+                    "_dyn_quant_* 4bit ops. Install a newer version"
+                ),
             )
 
         return mk.FusedMoEExperts.is_supported_config(

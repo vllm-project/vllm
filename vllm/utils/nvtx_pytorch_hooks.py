@@ -167,7 +167,7 @@ def construct_marker_dict_and_push(
     param_info = process_layer_params(module_obj)
     if param_info:
         marker_dict["StaticParams"] = param_info
-    nvtx.range_push("{}".format(marker_dict))
+    nvtx.range_push(f"{marker_dict}")
 
 
 class ResultHolder:
@@ -280,5 +280,5 @@ class PytHooks:
             if module not in self.module_to_name_map:
                 self.module_to_name_map[module] = name
             else:
-                raise ValueError("Module instance {} is not unique ".format(module))
+                raise ValueError(f"Module instance {module} is not unique ")
         return

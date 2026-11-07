@@ -364,7 +364,7 @@ def create_combined_plot(all_results):
         all_silu_v2_results,
         all_triton_results,
         config_labels,
-        config_x_axis,
+        _,
     ) in enumerate(all_results):
         ax = axes[idx]
 
@@ -470,7 +470,7 @@ print(f"Configurations: {len(configs)} configs")
 all_results = []
 
 # Run benchmarks for each strategy
-for id, strategy in enumerate(strategies):
+for strategy in strategies:
     print(f"\n{'=' * 60}")
     print(f"Testing strategy: {strategy_descriptions[strategy]}")
     print(f"{'=' * 60}")
