@@ -973,3 +973,442 @@ void shared_expert_int8_kernel_impl(
 
 INSTANTIATE_SHARED_EXPERT_INT8_TEMPLATE(at::BFloat16);
 INSTANTIATE_SHARED_EXPERT_INT8_TEMPLATE(at::Half);
+
+/// BF16/FP16 x INT8 VNNI GEMM for w13 (gate + up proj)
+/// Input A: [M, K] BF16/FP16 (unquantized activations)
+/// Weight B: [2N, K] INT8 VNNI packed with per-channel scales
+/// Output C: [M, N] BF16/FP16 (after SiLU and mul)
+template <typename scalar_t, int BLOCK_M, int BLOCK_N, CPUActMethod ACT = CPUActMethod::silu_and_mul>
+struct tinygemm_kernel_bf16_int8_vnni {
+  static inline void apply(
+      const scalar_t* __restrict__ A,
+      const int8_t* __restrict__ B0,
+      const int8_t* __restrict__ B1,
+      scalar_t* __restrict__ C,
+      const float* __restrict__ As,
+      const float* __restrict__ Bs0,
+      const float* __restrict__ Bs1,
+      const int32_t* __restrict__ Bcomp0,
+      const int32_t* __restrict__ Bcomp1,
+      int64_t K,
+      int64_t lda,
+      int64_t ldb,
+      int64_t ldc) {
+#if defined(CPU_CAPABILITY_AVX512)
+    constexpr int ROWS = BLOCK_M;
+    constexpr int COLS = BLOCK_N / 16;
+    static_assert(COLS % 2 == 0);
+
+    __m512i vb0[COLS];
+    __m512i vb1[COLS];
+    __m512i vc0[ROWS * COLS];
+    __m512i vc1[ROWS * COLS];
+    __m512i vcomp0[COLS];
+    __m512i vcomp1[COLS];
+    __m512 vas;
+    __m512 vbs0[COLS];
+    __m512 vbs1[COLS];
+
+    auto loadc = [&](auto i) {
+      vc0[i] = _mm512_set1_epi32(0);
+      vc1[i] = _mm512_set1_epi32(0);
+    };
+    Unroll<ROWS * COLS>{}(loadc);
+
+    const int64_t K2 = K >> 1;
+    const int64_t lda2 = lda >> 1;
+    const int64_t ldb4 = ldb;  // ldb * 4 >> 2;
+    // BF16 activations are loaded as __m512i (packed BF16 pairs)
+    // Each __m512i holds 16 BF16 values (8 pairs)
+    const int32_t* a_ptr = reinterpret_cast<const int32_t*>(A);
+    const int32_t* b0_ptr = reinterpret_cast<const int32_t*>(B0);
+    const int32_t* b1_ptr = reinterpret_cast<const int32_t*>(B1);
+
+    auto compute = [&](auto i, int64_t k) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+
+      if constexpr (col == 0) {
+        // Load BF16 A as packed BF16 pairs (__m512i)
+        // Each iteration processes 2 BF16 elements (1 pair) per row
+        // We load 16 BF16 values (8 pairs) into a __m512i
+        // For simplicity, broadcast one BF16 pair to all lanes
+        // In practice, we'd load a full vector, but for BLOCK_M=4 we can broadcast
+        // Since we process K2 iterations, each iteration handles 2 elements of K
+        vas = _mm512_set1_ps(
+            // Convert BF16 to float for scaling later
+            // The actual DPBSD will use BF16 pairs directly
+            __builtin_bitcast(float, a_ptr[row * lda2 + k]));
+      }
+      if constexpr (row == 0) {
+        // Load VNNI INT8 B (already packed as INT8 pairs)
+        vb0[col] = _mm512_loadu_si512(b0_ptr + k * ldb4 + col * 16);
+        vb1[col] = _mm512_loadu_si512(b1_ptr + k * ldb4 + col * 16);
+      }
+      // BF16 x INT8 dot product using VPDPBSD (_mm512_dpbsd_epi32)
+      // Accumulator: vc (int32)
+      // BF16 pairs: need to be in __m512i format
+      // INT8 pairs: VNNI packed in vb
+      // For now, convert the float back to BF16 pair for DPBSD
+      // We broadcast a single BF16 value as a pair (x, x)
+      __m512i bf16_pair = _mm512_cvtneps_pbh(vas);
+      vc0[i] = _mm512_dpbsd_epi32(vc0[i], bf16_pair, vb0[col]);
+      vc1[i] = _mm512_dpbsd_epi32(vc1[i], bf16_pair, vb1[col]);
+    };
+    for (int64_t k = 0; k < K2; ++k) {
+      Unroll<ROWS * COLS>{}(compute, k);
+    }
+
+    auto scalec = [&](auto i) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+
+      // load a scale (per-token)
+      if constexpr (col == 0) {
+        vas = _mm512_set1_ps(As[row]);
+      }
+      // load b scale and vcomp (per-channel)
+      if constexpr (row == 0) {
+        vbs0[col] = _mm512_loadu_ps(Bs0 + col * 16);
+        vbs1[col] = _mm512_loadu_ps(Bs1 + col * 16);
+        vcomp0[col] = _mm512_loadu_si512(Bcomp0 + col * 16);
+        vcomp1[col] = _mm512_loadu_si512(Bcomp1 + col * 16);
+      }
+      __m512 c0 = _mm512_cvtepi32_ps(_mm512_sub_epi32(vc0[i], vcomp0[col]));
+      __m512 c1 = _mm512_cvtepi32_ps(_mm512_sub_epi32(vc1[i], vcomp1[col]));
+      vc0[i] = _mm512_castps_si512(_mm512_mul_ps(_mm512_mul_ps(c0, vas), vbs0[col]));
+      vc1[i] = _mm512_castps_si512(_mm512_mul_ps(_mm512_mul_ps(c1, vas), vbs1[col]));
+    };
+    Unroll<ROWS * COLS>{}(scalec);
+
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    auto storec = [&](auto i) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+      if constexpr (col % 2 == 0) {
+        __m512 x0 = _mm512_castsi512_ps(vc0[row * COLS + col + 0]);
+        __m512 x1 = _mm512_castsi512_ps(vc0[row * COLS + col + 1]);
+        __m512 y0 = _mm512_castsi512_ps(vc1[row * COLS + col + 0]);
+        __m512 y1 = _mm512_castsi512_ps(vc1[row * COLS + col + 1]);
+        if constexpr (ACT == CPUActMethod::gelu_tanh_and_mul) {
+          x0 = _mm512_mul_ps(_mm512_rcp14_gelu_tanh_ps(x0), y0);
+          x1 = _mm512_mul_ps(_mm512_rcp14_gelu_tanh_ps(x1), y1);
+        } else {
+          x0 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x0), y0);
+          x1 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x1), y1);
+        }
+
+        bVec out_vec = convert_from_float_ext<scalar_t>(fVec(x0), fVec(x1));
+        out_vec.store(C + row * ldc + col * 16);
+      }
+    };
+    Unroll<ROWS * COLS>{}(storec);
+#else
+    TORCH_CHECK(false, "tinygemm_kernel_bf16_int8_vnni: requires AVX512");
+#endif
+  }
+};
+
+/// BF16/FP16 x INT8 VNNI GEMM for w2 (down proj)
+/// Input A: [M, N] BF16/FP16 (unquantized)
+/// Weight B: [K, N] INT8 VNNI packed with per-channel scales
+/// Output C: [M, K] float (accumulated in float)
+template <typename scalar_t, int BLOCK_M, int BLOCK_N>
+struct tinygemm_kernel_bf16_int8_vnni2 {
+  static inline void apply(
+      const scalar_t* __restrict__ A,
+      const int8_t* __restrict__ B,
+      float* __restrict__ C,
+      const float* __restrict__ As,
+      const float* __restrict__ Bs,
+      const int32_t* __restrict__ Bcomp,
+      int64_t K,
+      int64_t lda,
+      int64_t ldb,
+      int64_t ldc) {
+#if defined(CPU_CAPABILITY_AVX512)
+    constexpr int ROWS = BLOCK_M;
+    constexpr int COLS = BLOCK_N / 16;
+    static_assert(COLS % 2 == 0);
+
+    __m512i vb[COLS];
+    __m512i vc[ROWS * COLS];
+    __m512i vcomp[COLS];
+    __m512 vas;
+    __m512 vbs[COLS];
+
+    auto loadc = [&](auto i) { vc[i] = _mm512_set1_epi32(0); };
+    Unroll<ROWS * COLS>{}(loadc);
+
+    const int64_t K2 = K >> 1;
+    const int64_t lda2 = lda >> 1;
+    const int64_t ldb4 = ldb;
+    const int32_t* a_ptr = reinterpret_cast<const int32_t*>(A);
+    const int32_t* b_ptr = reinterpret_cast<const int32_t*>(B);
+
+    auto compute = [&](auto i, int64_t k) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+
+      if constexpr (col == 0) {
+        // Load BF16 A as float, convert to BF16 pair
+        vas = _mm512_set1_ps(
+            __builtin_bitcast(float, a_ptr[row * lda2 + k]));
+      }
+      if constexpr (row == 0) {
+        // Load VNNI INT8 B
+        vb[col] = _mm512_loadu_si512(b_ptr + k * ldb4 + col * 16);
+      }
+      // BF16 x INT8 dot product using VPDPBSD
+      __m512i bf16_pair = _mm512_cvtneps_pbh(vas);
+      vc[i] = _mm512_dpbsd_epi32(vc[i], bf16_pair, vb[col]);
+    };
+    for (int64_t k = 0; k < K2; ++k) {
+      Unroll<ROWS * COLS>{}(compute, k);
+    }
+
+    auto scalec = [&](auto i) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+
+      if constexpr (col == 0) {
+        vas = _mm512_set1_ps(As[row]);
+      }
+      if constexpr (row == 0) {
+        vbs[col] = _mm512_loadu_ps(Bs + col * 16);
+        vcomp[col] = _mm512_loadu_si512(Bcomp + col * 16);
+      }
+      __m512 c = _mm512_cvtepi32_ps(_mm512_sub_epi32(vc[i], vcomp[col]));
+      vc[i] = _mm512_castps_si512(_mm512_mul_ps(_mm512_mul_ps(c, vas), vbs[col]));
+    };
+    Unroll<ROWS * COLS>{}(scalec);
+
+    // Store as float (no activation, just scale)
+    for (int64_t row = 0; row < ROWS; ++row) {
+      for (int64_t col = 0; col < COLS; ++col) {
+        __m512 c = _mm512_castsi512_ps(vc[row * COLS + col]);
+        _mm512_storeu_ps(C + row * ldc + col * 16, c);
+      }
+    }
+#else
+    TORCH_CHECK(false, "tinygemm_kernel_bf16_int8_vnni2: requires AVX512");
+#endif
+  }
+};
+
+// INT8_W8A16: BF16/FP16 x INT8 VNNI GEMM implementation
+// Weights are INT8 VNNI packed, activations are unquantized BF16/FP16
+template <typename scalar_t>
+void fused_experts_int8_w8a16_kernel_impl(
+    scalar_t* __restrict__ output,
+    scalar_t* __restrict__ ic1,
+    scalar_t* __restrict__ ic2,
+    scalar_t* __restrict__ A_tmp,
+    float* __restrict__ C_tmp,
+    const scalar_t* __restrict__ input,
+    const int8_t* __restrict__ packed_w1,
+    const int8_t* __restrict__ packed_w2,
+    const float* __restrict__ w1s,
+    const float* __restrict__ w2s,
+    const float* __restrict__ topk_weights,
+    const int32_t* __restrict__ sorted_ids,
+    const int32_t* __restrict__ expert_ids,
+    const int32_t* __restrict__ offsets,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t E,
+    int64_t topk,
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func,
+    bool with_bias) {
+  constexpr int64_t BLOCK_M = block_size_m();
+  constexpr int64_t BLOCK_N = block_size_n();
+
+  // stage 1: ic1 = silu(input @ w13)
+  const int64_t MB = div_up(num_tokens_post_pad, BLOCK_M);
+  const int64_t NB = div_up(N, BLOCK_N);
+
+  // strides for w1: [E, 2N, K]
+  TORCH_CHECK(N % BLOCK_N == 0, "Fixme when N is not multiples of ", BLOCK_N);
+
+  // K and N are packed for int8
+  const int64_t packed_K = get_row_size<int8_t>(K);
+  const int64_t packed_N = get_row_size<int8_t>(N);
+
+  const int64_t stride_e = 2 * N * packed_K;
+  const int64_t stride_n = packed_K;
+
+  // Parallel on [MB, NB]
+  parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+    int tid = get_thread_num();
+    scalar_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
+    float* __restrict__ C = C_tmp + tid * BLOCK_M * BLOCK_N;
+
+    alignas(64) float As[BLOCK_M];
+
+    loop_2d<int8_t>(mb0, mb1, nb0, nb1, BLOCK_N * K * 2, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+      int64_t nb_upper = nb;
+      int64_t nb_lower = nb + NB;
+      int64_t n_size = std::min(N - nb * BLOCK_N, BLOCK_N);
+
+      int32_t expert_id = expert_ids[mb];
+      const int8_t* __restrict__ B0 = packed_w1 + expert_id * stride_e + nb_upper * BLOCK_N * stride_n;
+      const int8_t* __restrict__ B1 = packed_w1 + expert_id * stride_e + nb_lower * BLOCK_N * stride_n;
+      const float* __restrict__ Bs0 = w1s + expert_id * 2 * N + nb_upper * BLOCK_N;
+      const float* __restrict__ Bs1 = w1s + expert_id * 2 * N + nb_lower * BLOCK_N;
+
+      int64_t m_size = offsets[mb + 1] - offsets[mb];
+      if (m_size == 0) {
+        return;
+      }
+      const bool brg = can_use_brgemm<int8_t>(m_size, n_size);
+
+      if (nb_offset == 0) {
+        // Load A (no quantization needed for W8A16)
+        const int32_t* A_ids = sorted_ids + mb * BLOCK_M;
+        for (int64_t m = 0; m < m_size; ++m) {
+          int32_t index = A_ids[m] / topk;
+          copy_stub(A + m * K, input + index * K, K);
+        }
+      }
+
+      if (brg) {
+        // Use BRGEMM for w13
+        at::native::cpublas::brgemm(
+            /* M     */ m_size,
+            /* N     */ n_size,
+            /* K     */ K,
+            /* lda   */ K,
+            /* ldb   */ n_size,
+            /* ldc   */ BLOCK_N,
+            /* add_C */ false,
+            /* A     */ A,
+            /* B     */ B0,
+            /* C     */ C);
+
+        at::native::cpublas::brgemm(
+            /* M     */ m_size,
+            /* N     */ n_size,
+            /* K     */ K,
+            /* lda   */ K,
+            /* ldb   */ n_size,
+            /* ldc   */ BLOCK_N,
+            /* add_C */ false,
+            /* A     */ A,
+            /* B     */ B1,
+            /* C     */ C + BLOCK_M * BLOCK_N);
+
+        const int32_t* Bcomp0 = reinterpret_cast<const int32_t*>(B0 + block_size_n() * K);
+        const int32_t* Bcomp1 = reinterpret_cast<const int32_t*>(B1 + block_size_n() * K);
+
+        // Apply scales and SiLU + mul
+        const int64_t offset = offsets[mb];
+        if (act_func == CPUActMethod::gelu_tanh_and_mul) {
+          silu_and_mul<scalar_t, BLOCK_N, CPUActMethod::gelu_tanh_and_mul>(
+              ic1 + offset * N + nb * BLOCK_N, C, C + BLOCK_M * BLOCK_N, As, Bs0, Bs1, Bcomp0, Bcomp1, m_size, N);
+        } else {
+          silu_and_mul<scalar_t, BLOCK_N, CPUActMethod::silu_and_mul>(
+              ic1 + offset * N + nb * BLOCK_N, C, C + BLOCK_M * BLOCK_N, As, Bs0, Bs1, Bcomp0, Bcomp1, m_size, N);
+        }
+      } else {
+        // Fused GEMM + SiLU + mul using tinygemm
+        const int64_t offset = offsets[mb];
+        if (act_func == CPUActMethod::gelu_tanh_and_mul) {
+          tinygemm_kernel_bf16_int8_vnni<scalar_t, BLOCK_M, BLOCK_N, CPUActMethod::gelu_tanh_and_mul>::apply(
+              A, B0, B1, ic1 + offset * N + nb * BLOCK_N, As, Bs0, Bs1, Bcomp0, Bcomp1, K, K, n_size, N);
+        } else {
+          tinygemm_kernel_bf16_int8_vnni<scalar_t, BLOCK_M, BLOCK_N, CPUActMethod::silu_and_mul>::apply(
+              A, B0, B1, ic1 + offset * N + nb * BLOCK_N, As, Bs0, Bs1, Bcomp0, Bcomp1, K, K, n_size, N);
+        }
+      }
+    });
+  });
+
+  // stage 2: ic2 = ic1 @ w2
+  // w2: [E, K, N] as [E, OC, IC]
+  const int64_t OC = K;  // rename K as OC (output channels)
+  const int64_t IC = N;  // rename N as IC (input channels)
+  const int64_t MB2 = MB;
+  const int64_t NB2 = div_up(OC, BLOCK_N);
+  const int64_t stride_e2 = OC * packed_N;
+  const int64_t stride_oc = packed_N;
+
+  parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+    int tid = get_thread_num();
+    float* __restrict__ C = C_tmp + tid * BLOCK_M * BLOCK_N;
+
+    loop_2d<int8_t>(mb0, mb1, nb0, nb1, BLOCK_N * IC, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+      int64_t m_size = offsets[mb + 1] - offsets[mb];
+      if (m_size == 0) {
+        return;
+      }
+      int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
+      const bool brg = can_use_brgemm<int8_t>(m_size, n_size);
+
+      // A ptr from ic1 of [M * topk, N] in sorted order
+      const scalar_t* __restrict__ A = ic1 + offsets[mb] * N;
+      int32_t* __restrict__ A_ids = sorted_ids + mb * BLOCK_M;
+
+      // B shape [IC, n_size] in VNNI format
+      int32_t expert_id = expert_ids[mb];
+      const int8_t* __restrict__ B = packed_w2 + expert_id * stride_e2 + nb * BLOCK_N * stride_oc;
+      const float* __restrict__ Bs = w2s + expert_id * K + nb * BLOCK_N;
+
+      // Per-token scales for A (ic1)
+      alignas(64) float As[BLOCK_M];
+      if (nb_offset == 0) {
+        for (int64_t m = 0; m < m_size; ++m) {
+          int32_t index = A_ids[m] / topk;
+          // Compute scale for this row of ic1 (per-token)
+          // For BF16/FP16 activations, we use per-token scaling
+          As[m] = 1.0f;  // No quantization, so scale is 1.0
+        }
+      }
+
+      // 2.a gemm: C = A @ B
+      if (brg) {
+        at::native::cpublas::brgemm(
+            /* M     */ m_size,
+            /* N     */ n_size,
+            /* K     */ IC,
+            /* lda   */ IC,
+            /* ldb   */ n_size,
+            /* ldc   */ BLOCK_N,
+            /* add_C */ false,
+            /* A     */ A,
+            /* B     */ B,
+            /* C     */ C);
+
+        // Apply scales
+        const int32_t* Bcomp = reinterpret_cast<const int32_t*>(B + block_size_n() * IC);
+        scale_C<BLOCK_N>(C, C, As, Bs, Bcomp, m_size);
+      } else {
+        tinygemm_kernel_bf16_int8_vnni2<scalar_t, BLOCK_M, BLOCK_N>::apply(
+            A, B, C, As, Bs,
+            reinterpret_cast<const int32_t*>(B + block_size_n() * IC),
+            IC, IC, n_size, BLOCK_N);
+      }
+    });
+
+    // After all NB2 iterations for this MB, accumulate to output
+    if (tid == 0) {  // Only one thread per MB handles accumulation
+      for (int64_t nb = 0; nb < NB2; ++nb) {
+        int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
+        int32_t expert_id = expert_ids[mb0];
+        int64_t offset = offsets[mb0];
+        const float* topk_w = topk_weights + offset;
+        scalar_t* out_ptr = output + offset * K + nb * BLOCK_N;
+        const float* C_ptr = C + nb * BLOCK_N;
+
+        for (int64_t m = 0; m < (offsets[mb0 + 1] - offsets[mb0]); ++m) {
+          float weight = topk_w[m];
+          for (int64_t n = 0; n < n_size; ++n) {
+            out_ptr[m * K + n] += scalar_t(C_ptr[m * BLOCK_N + n] * weight);
+          }
+        }
+      }
+    }
+  });
+}

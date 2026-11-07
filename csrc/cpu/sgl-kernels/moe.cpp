@@ -831,6 +831,9 @@ static inline void check_moe_scales(
   if constexpr (quant == CPUQuantMethod::INT8_W8A8) {
     TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for int8 w8a8.");
     TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for int8 w8a8.");
+  } else if constexpr (quant == CPUQuantMethod::INT8_W8A16) {
+    TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for int8 w8a16.");
+    TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for int8 w8a16.");
   } else if constexpr (quant == CPUQuantMethod::FP8_W8A16) {
     TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for fp8 w8a16.");
     TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for fp8 w8a16.");
@@ -856,6 +859,8 @@ static inline void check_moe_scales(
     const std::optional<std::vector<int64_t>> block_size) {
   if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
     check_moe_scales<CPUQuantMethod::INT8_W8A8>(w1_scale, w2_scale, block_size);
+  } else if (moe_comp_method == CPUQuantMethod::INT8_W8A16) {
+    check_moe_scales<CPUQuantMethod::INT8_W8A16>(w1_scale, w2_scale, block_size);
   } else if (moe_comp_method == CPUQuantMethod::FP8_W8A16) {
     check_moe_scales<CPUQuantMethod::FP8_W8A16>(w1_scale, w2_scale, block_size);
   } else if (moe_comp_method == CPUQuantMethod::MXFP4) {
@@ -1054,11 +1059,14 @@ void fused_experts_cpu(
   int64_t buffer_size_nbytes =
       M * topk * N * 2 + M * topk * K * 2 +
       num_threads * BLOCK_M * K *
-          (moe_comp_method == CPUQuantMethod::INT8_W8A8 | moe_comp_method == CPUQuantMethod::INT4_W4A8
-               | moe_comp_method == CPUQuantMethod::FP8_W8A8 ? 1 : 2) +
+          (moe_comp_method == CPUQuantMethod::INT8_W8A8
+           | moe_comp_method == CPUQuantMethod::INT8_W8A16
+           | moe_comp_method == CPUQuantMethod::INT4_W4A8
+           | moe_comp_method == CPUQuantMethod::FP8_W8A8 ? 1 : 2) +
       num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
-  if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
+  if (moe_comp_method == CPUQuantMethod::INT8_W8A8
+      || moe_comp_method == CPUQuantMethod::INT8_W8A16) {
     buffer_size_nbytes += std::max(M * K, M * topk * N) + M * topk * sizeof(float);
   }
   if (moe_comp_method == CPUQuantMethod::FP8_W8A16 || moe_comp_method == CPUQuantMethod::MXFP4
@@ -1118,6 +1126,40 @@ void fused_experts_cpu(
           topk,
           num_tokens_post_pad,
           act_func);
+    } else if (moe_comp_method == CPUQuantMethod::INT8_W8A16) {
+      // INT8 weight-only (W8A16): INT8 VNNI packed weights, unquantized BF16/FP16 activations
+      scalar_t* __restrict__ A_tmp = (scalar_t*)((void*)(intermediate_cache2 + M * topk * K));
+      float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
+      bool with_bias = w1_bias.has_value();
+
+      auto w1s = w1_scale.value();
+      auto w2s = w2_scale.value();
+      TORCH_CHECK(w1s.numel() == E * 2 * N);
+      TORCH_CHECK(w2s.numel() == E * K);
+
+      fused_experts_int8_w8a16_kernel_impl<scalar_t>(
+          out_hidden_states.data_ptr<scalar_t>(),
+          intermediate_cache1,
+          intermediate_cache2,
+          A_tmp,
+          C_tmp,
+          hidden_states.data_ptr<scalar_t>(),
+          packed_w1.data_ptr<int8_t>(),
+          packed_w2.data_ptr<int8_t>(),
+          w1s.data_ptr<float>(),
+          w2s.data_ptr<float>(),
+          topk_weights_.data_ptr<float>(),
+          sorted_ids,
+          expert_ids,
+          offsets,
+          M,
+          N,
+          K,
+          E,
+          topk,
+          num_tokens_post_pad,
+          act_func,
+          with_bias);
     } else if (moe_comp_method == CPUQuantMethod::FP8_W8A16) {
       // here we just ignore C_tmp as it is not used
       scalar_t* __restrict__ A_tmp = (scalar_t*)((void*)(intermediate_cache2 + M * topk * K));
