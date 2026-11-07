@@ -459,3 +459,39 @@ def test_pp_mixed_precision_kv_cache():
         env,
         method="generate_close",
     )
+
+
+@create_new_process_for_each_test()
+def test_pp_granite4_vision_deepstack(num_gpus_available):
+    """A later PP stage must receive the deepstack features of its layers."""
+    if num_gpus_available < 2:
+        pytest.skip("Need at least 2 GPUs")
+    # With 4 layers, deepstack layers 0 and 3 land on different PP stages.
+    text_config = {
+        "num_hidden_layers": 4,
+        "hidden_size": 512,
+        "intermediate_size": 800,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+    }
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--load-format",
+        "dummy",
+        "--hf-overrides",
+        json.dumps({"text_config": text_config}),
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "4",
+        "--enforce-eager",
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    compare_two_settings(
+        "ibm-granite/granite-vision-4.1-4b",
+        [*common_args, "--pipeline-parallel-size", "2"],
+        common_args,
+        method="generate_with_image",
+    )
