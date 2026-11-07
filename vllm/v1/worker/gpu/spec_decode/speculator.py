@@ -17,6 +17,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.model_executor.models.utils import single_pp_stage
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -282,7 +283,8 @@ class DraftModelSpeculator(BaseSpeculator):
             ).keys()
         )
 
-        self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        with single_pp_stage():
+            self.model = self.load_draft_model(target_model, target_attn_layer_names)
         self._validate_local_argmax_reduction()
         if self.use_draft_logits:
             self._init_draft_logits(target_model)

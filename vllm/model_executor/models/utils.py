@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
 
@@ -957,6 +958,53 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
+@dataclass(frozen=True)
+class PPStage:
+    """The pipeline stage a model is built for."""
+
+    rank_in_group: int
+    world_size: int
+
+    @property
+    def is_first_rank(self) -> bool:
+        return self.rank_in_group == 0
+
+    @property
+    def is_last_rank(self) -> bool:
+        return self.rank_in_group == self.world_size - 1
+
+
+_single_pp_stage: ContextVar[bool] = ContextVar("single_pp_stage", default=False)
+
+
+@contextmanager
+def single_pp_stage() -> Iterator[None]:
+    """Build models as one whole pipeline stage.
+
+    A draft model runs whole on the last PP rank, so its stage is not this
+    rank's stage in the PP group.
+    """
+    token = _single_pp_stage.set(True)
+    try:
+        yield
+    finally:
+        _single_pp_stage.reset(token)
+
+
+def get_pp_stage() -> PPStage:
+    """Return the pipeline stage of the model being built.
+
+    Only valid during model construction. Store the result on the model
+    instead of calling this in `forward`.
+    """
+    if _single_pp_stage.get():
+        return PPStage(rank_in_group=0, world_size=1)
+    from vllm.distributed.parallel_state import get_pp_group
+
+    pp_group = get_pp_group()
+    return PPStage(pp_group.rank_in_group, pp_group.world_size)
+
+
 def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
     """Whether the last PP rank needs the target input embedding, for a
     hidden-state drafter that may reuse it (see `maybe_share_target_embed`)."""
@@ -990,12 +1038,12 @@ def make_layers(
         Tuple of (start_layer, end_layer, modules).
 
     """
-    from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
     from vllm.model_executor.offloader import get_offloader
 
+    pp_stage = get_pp_stage()
     start_layer, end_layer = get_pp_indices(
-        num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
+        num_hidden_layers, pp_stage.rank_in_group, pp_stage.world_size
     )
 
     modules = torch.nn.ModuleList(

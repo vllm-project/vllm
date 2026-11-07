@@ -10,7 +10,10 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.model_executor.model_loader.utils import (
+    get_draft_load_config,
+    get_model_cls,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.utils import next_power_of_2
@@ -110,6 +113,15 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
     ) -> nn.Module:
         spec = self.speculative_config
         assert spec is not None
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            draft_cls = get_model_cls(self.draft_model_config)
+            # Checked on the class itself: a subclass may use a decoder that
+            # reads the global PP group.
+            if not draft_cls.__dict__.get("supports_single_pp_stage", False):
+                raise NotImplementedError(
+                    f"Draft model {draft_cls.__name__} does not support "
+                    "pipeline parallelism."
+                )
         draft_vllm_config = replace(
             spec.apply_draft_overrides(self.vllm_config),
             model_config=self.draft_model_config,

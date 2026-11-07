@@ -10,7 +10,6 @@ from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -41,6 +40,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     _merge_multimodal_embeddings,
+    get_pp_stage,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -174,7 +174,7 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
                 )
             }
         )
-        if get_pp_group().is_first_rank:
+        if get_pp_stage().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,

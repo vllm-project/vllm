@@ -34,7 +34,7 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -72,6 +72,7 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_pp_stage,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -373,10 +374,11 @@ class LlamaModel(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
+        self.pp_stage = get_pp_stage()
 
         if (
-            get_pp_group().is_first_rank
-            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            self.pp_stage.is_first_rank
+            or (config.tie_word_embeddings and self.pp_stage.is_last_rank)
             or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
@@ -391,7 +393,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
-        if get_pp_group().is_last_rank:
+        if self.pp_stage.is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
@@ -411,7 +413,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
+        if self.pp_stage.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -425,7 +427,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
-        if get_pp_group().is_first_rank:
+        if self.pp_stage.is_first_rank:
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
@@ -440,7 +442,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
 
-        if not get_pp_group().is_last_rank:
+        if not self.pp_stage.is_last_rank:
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -480,6 +482,7 @@ class LlamaForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
+    supports_single_pp_stage = True
 
     def __init__(
         self,
@@ -499,7 +502,7 @@ class LlamaForCausalLM(
             layer_type=layer_type,
         )
 
-        if get_pp_group().is_last_rank:
+        if get_pp_stage().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
