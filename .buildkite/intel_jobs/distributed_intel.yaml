@@ -45,7 +45,8 @@ steps:
     - uname -r && cat /proc/cmdline
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
-    - 'cd tests && (while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
+    - cd tests
+    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
 
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 2"
   key: debug-xccl-repro-pidfd-2
@@ -64,7 +65,8 @@ steps:
     - uname -r && cat /proc/cmdline
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
-    - 'cd tests && (while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
+    - cd tests 
+    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
 
 - label: ":intel: (BMG) [DEBUG] xccl repro - pidfd - 3"
   key: debug-xccl-repro-pidfd-3
@@ -83,7 +85,8 @@ steps:
     - uname -r && cat /proc/cmdline
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
-    - 'cd tests && (while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
+    - cd tests
+    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
 
 - label: ":intel: (BMG) [DEBUG] xccl repro - sockets"
   key: debug-xccl-repro-sockets
@@ -103,4 +106,5 @@ steps:
     - uname -r && cat /proc/cmdline
     - env | grep -i "META_DATA" || true
     - pip install py-spy || true
-    - 'cd tests && (while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
+    - cd tests
+    - '(while sleep 15; do for p in $$(pgrep -f "VLLM::Worker"); do a=$$(ps -o etimes= -p $$p | tr -d " "); [ -n "$$a" ] && [ "$$a" -gt 90 ] && echo "=== WATCHDOG pid=$$p age=$${a}s ===" && py-spy dump --native -p $$p; done; done) & WD=$$!; pytest -v -s v1/shutdown; rc=$$?; kill $$WD; exit $$rc'
