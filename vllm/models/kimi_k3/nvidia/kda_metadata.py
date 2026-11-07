@@ -107,7 +107,8 @@ def _mamba_get_block_table_tensor(
     if mamba_cache_mode == "none":
         return block_table
 
-    assert block_table.is_cuda and seq_lens.is_cuda
+    device_type = current_platform.device_type
+    assert block_table.device.type == seq_lens.device.type == device_type
     num_requests = block_table.shape[0]
     num_state_slots = 1 + kv_cache_spec.num_speculative_blocks
     state_indices = torch.empty(
@@ -215,7 +216,7 @@ def stage_spec_decode_metadata(
     num_spec_decodes: int,
 ) -> None:
     """Stage speculative-decode metadata into CUDA-graph buffers."""
-    assert state_indices.is_cuda
+    assert state_indices.device.type == current_platform.device_type
     assert state_indices.ndim == 2
     batch_size, num_state_slots = staged_state_indices.shape
     BLOCK_ROWS = 32
