@@ -177,6 +177,49 @@ class TestGlobalMetadataStateAllocation:
         # allocate_pages uses all-or-nothing: 2 needed but only 1 available → []
         assert all(v == -1 for v in results.values()), f"Expected all -1, got {results}"
 
+    @pytest.mark.parametrize("cached_first", [True, False])
+    def test_mixed_batch_uses_capacity_only_for_misses(self, cached_first):
+        """A cache hit must not prevent an otherwise fitting new allocation."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+        cached_page = state.allocate_pages_for_keys(0, [("cached", "")])["cached"]
+        state.confirm_write_for_keys(0, [("cached", cached_page)])
+
+        keys = [("cached", ""), ("new", "")]
+        if not cached_first:
+            keys.reverse()
+        results = state.allocate_pages_for_keys(0, keys)
+
+        assert results["cached"] == cached_page
+        assert results["new"] >= 0
+        assert results["new"] != cached_page
+        assert state.rank_metadata[0].get_free_page_count() == 0
+
+    def test_insufficient_misses_preserve_cached_page_and_free_capacity(self):
+        """An oversized miss batch must not consume pages or invalidate hits."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+        cached_page = state.allocate_pages_for_keys(0, [("cached", "")])["cached"]
+        state.confirm_write_for_keys(0, [("cached", cached_page)])
+
+        results = state.allocate_pages_for_keys(
+            0, [("new_a", ""), ("cached", ""), ("new_b", "")]
+        )
+
+        assert results == {"new_a": -1, "cached": cached_page, "new_b": -1}
+        assert state.get_key_locations(0, ["cached"]) == [cached_page]
+        assert state.rank_metadata[0].get_free_page_count() == 1
+
+    def test_duplicate_new_key_consumes_one_page(self):
+        """The key-based allocation response must not orphan a duplicate's page."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+
+        results = state.allocate_pages_for_keys(0, [("new", ""), ("new", "")])
+
+        assert results == {"new": 0}
+        assert state.rank_metadata[0].get_free_page_count() == 1
+
     def test_confirm_write_releases_pages(self):
         """confirm_write_for_keys with pages_to_release returns them to pool."""
         state = GlobalMetadataState()
