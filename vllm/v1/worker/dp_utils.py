@@ -12,7 +12,7 @@ from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.worker.ubatch_utils import (
+from vllm.v1.worker.gpu.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,
 )
