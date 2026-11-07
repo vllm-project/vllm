@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+import regex as re
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
@@ -30,9 +33,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     nvfp4_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts import flashinfer_moe_ep as fi_experts
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
     epilogue_from_quant_config,
+    sm107_nvfp4_epilogue,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
@@ -63,6 +68,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -176,10 +182,30 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         parallel_config=SimpleNamespace(enable_dbo=False, enable_eplb=False),
     )
     monkeypatch.setattr(fi_ep, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
     monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
     return config
+
+
+@pytest.mark.parametrize(
+    "capability, supported, sm107",
+    [
+        (DeviceCapability(10, 0), True, False),
+        (DeviceCapability(10, 7), True, True),
+        (DeviceCapability(12, 0), False, False),
+        (None, False, False),
+    ],
+    ids=["sm100", "sm107", "sm120", "unknown"],
+)
+def test_device_gate_admits_sm107(monkeypatch, capability, supported, sm107):
+    monkeypatch.setattr(
+        fi_ep.current_platform, "get_device_capability", lambda: capability
+    )
+    assert fi_ep.supports_current_device() is supported
+    assert FlashInferMoeEpExperts._supports_current_device() is supported
+    assert fi_ep.is_sm107_device() is sm107
 
 
 def test_megakernel_requires_expert_parallel(megakernel_host):
@@ -210,6 +236,166 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
         _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
     )
     assert reason.endswith("EPLB")
+
+
+def test_sm107_admits_only_nvfp4_cutedsl(monkeypatch, megakernel_host):
+    """SM107 runs the CuTeDSL megakernel for NVFP4 checkpoints only."""
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    monkeypatch.setattr(fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: None)
+
+    cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    assert _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic) == (True, "")
+    for backend in (FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM):
+        supported, reason = _is_supported(_megakernel_moe(backend), kMxfp4Static, None)
+        assert not supported and "MXFP4 weights on this GPU" in reason
+
+
+def test_sm107_appends_flashinfer_gap_verbatim(monkeypatch, megakernel_host):
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    monkeypatch.setattr(
+        fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: "SM107 with FlashInfer X"
+    )
+    moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+    supported, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
+    assert not supported and reason.endswith("SM107 with FlashInfer X")
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    monkeypatch.setattr(
+        fi_ep,
+        "flashinfer_sm107_nvfp4_gap",
+        lambda: pytest.fail("SM100 must not probe FlashInfer for SM107"),
+    )
+    assert _is_supported(moe, kNvfp4Static, kNvfp4Dynamic) == (True, "")
+    assert _is_supported(moe, kMxfp4Static, None) == (True, "")
+
+
+def _fake_flashinfer(config_cls, version: str) -> SimpleNamespace:
+    moe_ep = SimpleNamespace(Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig=config_cls)
+    return SimpleNamespace(__version__=version, moe_ep=moe_ep)
+
+
+@dataclasses.dataclass
+class _Sm107ConfigV073:
+    apply_routing_weights_before_fc2: bool = True
+
+
+@dataclasses.dataclass
+class _Sm107ConfigV072:
+    apply_topk_in_fc1: bool = True
+
+
+@pytest.mark.parametrize(
+    "flashinfer, expected, unexpected",
+    [
+        (_fake_flashinfer(_Sm107ConfigV073, "0.7.3rc1"), None, None),
+        (
+            _fake_flashinfer(_Sm107ConfigV072, "0.7.2.post1"),
+            (
+                "SM107 with FlashInfer 0.7.2.post1",
+                "flashinfer-python>=0.7.3",
+                "vllm download-kernels",
+            ),
+            None,
+        ),
+        (
+            _fake_flashinfer(_Sm107ConfigV072, "0.7.3"),
+            ("SM107 with FlashInfer 0.7.3", "flashinfer-python>=0.7.3"),
+            None,
+        ),
+        (None, ("ModuleNotFoundError", "flashinfer.moe_ep"), ">=0.7.3"),
+    ],
+    ids=["v0.7.3rc1", "v0.7.2", "v0.7.3-old-field", "import-error"],
+)
+def test_sm107_flashinfer_probe(monkeypatch, flashinfer, expected, unexpected):
+    """The probe admits FlashInfer by the 0.7.3 config field, not its version."""
+    monkeypatch.setitem(sys.modules, "flashinfer", flashinfer)
+    monkeypatch.setitem(
+        sys.modules, "flashinfer.moe_ep", getattr(flashinfer, "moe_ep", None)
+    )
+    fi_ep.flashinfer_sm107_nvfp4_gap.cache_clear()
+    try:
+        gap = fi_ep.flashinfer_sm107_nvfp4_gap()
+    finally:
+        fi_ep.flashinfer_sm107_nvfp4_gap.cache_clear()
+    if expected is None:
+        assert gap is None
+    else:
+        assert gap is not None
+        assert all(part in gap for part in expected), gap
+        assert unexpected is None or unexpected not in gap
+
+
+def test_sm107_refuses_eplb(monkeypatch, megakernel_host):
+    megakernel_host.parallel_config.enable_eplb = True
+    monkeypatch.setattr(fi_ep, "flashinfer_sm107_nvfp4_gap", lambda: None)
+    moe = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 7))
+    _, reason = _is_supported(moe, kNvfp4Static, kNvfp4Dynamic)
+    assert reason.endswith("EPLB on SM107")
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert _is_supported(moe, kNvfp4Static, kNvfp4Dynamic) == (True, "")
+
+
+def test_sm107_epilogue_uses_checkpoint_activation_scales(monkeypatch):
+    """The layer maxima of the activation scales set the norm constants and
+    scale the alphas in place, so they keep aliasing the layer's tensors."""
+    monkeypatch.setattr(
+        fi_experts, "get_ep_group", lambda: SimpleNamespace(world_size=1)
+    )
+    g1 = torch.tensor([1e-4, 2e-4])
+    g2 = torch.tensor([3e-4, 4e-4])
+    g1_orig, g2_orig = g1.clone(), g2.clone()
+
+    epilogue = sm107_nvfp4_epilogue(
+        fi_ep.FlashInferMoeEpEpilogue(fc1_alpha=g1, fc2_alpha=g2),
+        torch.tensor([[1e-3, 1e-3], [4e-3, 4e-3]]),
+        torch.tensor([1e-4, 5e-4]),
+    )
+
+    assert epilogue.input_norm_const == pytest.approx(1 / 4e-3)
+    assert epilogue.fc1_alpha is not None and epilogue.fc2_alpha is not None
+    assert epilogue.fc1_alpha.data_ptr() == g1.data_ptr()
+    assert epilogue.fc2_alpha.data_ptr() == g2.data_ptr()
+    torch.testing.assert_close(epilogue.fc1_alpha, g1_orig * 4e-3, rtol=1e-6, atol=0)
+    torch.testing.assert_close(epilogue.fc2_alpha, g2_orig * 5e-4, rtol=1e-6, atol=0)
+    fc1_norm_const = epilogue.fc1_norm_const
+    assert fc1_norm_const is not None
+    assert fc1_norm_const.dtype == torch.float32 and fc1_norm_const.is_contiguous()
+    torch.testing.assert_close(fc1_norm_const, torch.full((2,), 1 / 5e-4))
+
+
+@pytest.mark.parametrize(
+    "w13_input_scale, w2_input_scale, match",
+    [
+        (
+            torch.tensor([[1e-3, float("nan")]]),
+            torch.tensor([1e-3]),
+            re.escape("got inf (w13) and 0.001"),
+        ),
+        (
+            torch.tensor([[1e-3, 1e-3]]),
+            torch.tensor([float("inf")]),
+            re.escape("and inf (w2)"),
+        ),
+        (torch.zeros(1, 2), torch.zeros(1), "activation input scales"),
+        (None, torch.tensor([1e-3]), "activation input scales"),
+    ],
+    ids=["nan", "inf", "all-zero", "missing"],
+)
+def test_sm107_epilogue_rejects_invalid_activation_scales(
+    monkeypatch, w13_input_scale, w2_input_scale, match
+):
+    monkeypatch.setattr(
+        fi_experts, "get_ep_group", lambda: SimpleNamespace(world_size=1)
+    )
+    epilogue = fi_ep.FlashInferMoeEpEpilogue(
+        fc1_alpha=torch.ones(1), fc2_alpha=torch.ones(1)
+    )
+    with pytest.raises(ValueError, match=match) as error:
+        sm107_nvfp4_epilogue(epilogue, w13_input_scale, w2_input_scale)
+    assert "activation input scales" in str(error.value)
 
 
 def test_megakernels_are_oracle_backends():
