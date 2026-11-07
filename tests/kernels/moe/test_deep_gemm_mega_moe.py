@@ -431,7 +431,7 @@ def test_deep_gemm_mega_moe_load_plan_is_direct_and_matches_cold_start(
 
 @pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
 def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
-    monkeypatch, weight_format
+    weight_format,
 ):
     """Layerwise reload processes the layer when its last checkpoint tensor
     arrives: not earlier (an over-count, which drops the later loads) and not
@@ -443,20 +443,14 @@ def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
     model.experts = _make_mega_moe_experts(4, 3, weight_format)
     _load_mega_moe_checkpoint_shuffled(model.experts, 3, seed=0)
     layerwise.record_metadata_for_reloading(model)
-    processed: list[str] = []
-    process = layerwise._layerwise_process
-
-    def spy(layer, info):
-        processed.append(type(layer).__name__)
-        return process(layer, info)
-
-    monkeypatch.setattr(layerwise, "_layerwise_process", spy)
     layerwise.initialize_layerwise_reload(model)
+    # Processing resets the layer's info, after which it cannot load.
+    info = layerwise.get_layerwise_info(model.experts)
     ckpt, shards = _mega_moe_checkpoint(model.experts, 3, seed=1)
     # Block scales last: an over-count of them would process the layer early.
     shards.sort(key=lambda shard: shard[0].endswith("weight_scale"))
     for name, loaded_weight, shard_id, expert_id in shards:
-        assert processed == []
+        assert info.can_load(), "processed before its last tensor"
         param = getattr(model.experts, name)
         param.weight_loader(
             param,
@@ -465,9 +459,8 @@ def test_deep_gemm_mega_moe_layerwise_reload_processes_after_the_last_tensor(
             shard_id=shard_id,
             expert_id=expert_id,
         )
-    assert processed == ["DeepGemmMegaMoEExperts"]
+    assert not info.can_load(), "not processed at its last tensor"
     layerwise.finalize_layerwise_reload(model, SimpleNamespace(quantization=None))
-    assert processed == ["DeepGemmMegaMoEExperts"]
     _assert_mega_moe_layout(model.experts, _expected_mega_moe_layout(ckpt, 4, 3))
     if weight_format.routed.has_global_scale:
         assert model.experts.l2_activation_scale == ckpt["w2_input_scale"].max().item()
@@ -508,7 +501,7 @@ def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
     )
     experts.process_weights_after_loading()
     assert experts.l2_activation_scale == 2.0
-    # Global scales are expert weights that EPLB moves.
+    # w2_input_scale is not moved; both w13_weight_scale_2 rows are.
     assert len(experts.get_expert_weights()) == 7
 
 
@@ -554,7 +547,9 @@ def test_deep_gemm_mega_moe_nvfp4_rejects_mismatched_l1_scales():
     experts.process_weights_after_loading()
     load("w1", 1.0)
     load("w3", 4.0)
-    with pytest.raises(ValueError, match="one L1 scale per expert"):
+    # Each lands in its own row; row 0 (w1) is the kernel's L1 alpha.
+    assert experts.w13_weight_scale_2[:, 0].tolist() == [1.0, 4.0]
+    with pytest.raises(ValueError, match=r"w1 weight_scale_2 1\.0 != w3 .* 4\.0"):
         experts.process_weights_after_loading()
 
 
