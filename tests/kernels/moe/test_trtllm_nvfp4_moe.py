@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+    NvFp4PerTokenInputHandoff,
     TrtLlmNvFp4ExpertsModular,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -44,6 +45,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+    quantize_nvfp4_per_token_input,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -133,6 +135,54 @@ def _make_trtllm_fp4_moe_kernel(
         ),
         experts,
     )
+
+
+def _to_trtllm_weights(
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    e: int,
+    n: int,
+    k: int,
+    is_gated_act: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shuffle ``make_test_quant_config`` NvFP4 weights and their (swizzled)
+    scales into the TRTLLM-Gen layout, updating ``quant_config``'s scales."""
+    quant_blocksize = 16
+    w1_scale_reference = quant_config.w1_scale
+    w2_scale_reference = quant_config.w2_scale
+    assert w1_scale_reference is not None
+    assert w2_scale_reference is not None
+    w1_scale_linear = torch.stack(
+        [
+            convert_swizzled_to_linear(scale, w1_q.size(1), k, quant_blocksize)
+            for scale in w1_scale_reference
+        ]
+    )
+    w2_scale_linear = torch.stack(
+        [
+            convert_swizzled_to_linear(scale, w2_q.size(1), n, quant_blocksize)
+            for scale in w2_scale_reference
+        ]
+    )
+    w1_q_for_kernel = w1_q
+    if is_gated_act:
+        w1_q_for_kernel, w1_scale_linear = reorder_w1w3_to_w3w1(
+            w1_q.clone(), w1_scale_linear
+        )
+    w1_q, w1_scale, w2_q, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
+        w1_q_for_kernel,
+        w2_q,
+        w1_scale_linear,
+        w2_scale_linear,
+        hidden_size=k,
+        intermediate_size=n,
+        num_experts=e,
+        is_gated_activation=is_gated_act,
+    )
+    quant_config._w1.scale = w1_scale
+    quant_config._w2.scale = w2_scale
+    return w1_q, w2_q
 
 
 ACTIVATION_CASES = [
@@ -243,35 +293,7 @@ def test_trtllm_fp4_moe_no_graph(
         w2_scale_reference = quant_config.w2_scale
         assert w1_scale_reference is not None
         assert w2_scale_reference is not None
-        w1_scale_linear = torch.stack(
-            [
-                convert_swizzled_to_linear(scale, w1_q.size(1), k, quant_blocksize)
-                for scale in w1_scale_reference
-            ]
-        )
-        w2_scale_linear = torch.stack(
-            [
-                convert_swizzled_to_linear(scale, w2_q.size(1), n, quant_blocksize)
-                for scale in w2_scale_reference
-            ]
-        )
-        w1_q_for_kernel = w1_q
-        if is_gated_act:
-            w1_q_for_kernel, w1_scale_linear = reorder_w1w3_to_w3w1(
-                w1_q.clone(), w1_scale_linear
-            )
-        w1_q, w1_scale, w2_q, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
-            w1_q_for_kernel,
-            w2_q,
-            w1_scale_linear,
-            w2_scale_linear,
-            hidden_size=k,
-            intermediate_size=n,
-            num_experts=e,
-            is_gated_activation=is_gated_act,
-        )
-        quant_config._w1.scale = w1_scale
-        quant_config._w2.scale = w2_scale
+        w1_q, w2_q = _to_trtllm_weights(w1_q, w2_q, quant_config, e, n, k, is_gated_act)
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
@@ -699,6 +721,108 @@ def test_trtllm_fp4_moe_deferred_finalize(
             router_weights=topk_weights,
             chunked=chunk_size is not None,
         )
+
+
+def _same_quantization(a, b) -> bool:
+    return all(
+        torch.equal(x.view(torch.uint8), y.view(torch.uint8)) for x, y in zip(a, b)
+    )
+
+
+@torch.inference_mode()
+def test_nvfp4_input_handoff_matches_only_its_own_input():
+    """A provided quantization is returned only for the very input it was
+    computed from: a view of it counts; another tensor, a slice, other strides
+    or another dtype over the same storage are quantized afresh."""
+    handoff = NvFp4PerTokenInputHandoff()
+    x = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+    pre = quantize_nvfp4_per_token_input(x)
+    with handoff.provide(x, pre):
+        assert handoff.quantize(x) is pre
+        assert handoff.quantize(x.view(64, 64)) is pre
+        for other in (x.clone(), x[:32], x.view(torch.float16)):
+            fresh = handoff.quantize(other)
+            assert fresh is not pre
+            assert _same_quantization(fresh, quantize_nvfp4_per_token_input(other))
+    assert handoff.quantize(x) is not pre
+    # Same pointer, shape and dtype, other strides (both contiguous).
+    row = x[:1]
+    alias = x.as_strided((1, 64), (1, 1))
+    pre_row = quantize_nvfp4_per_token_input(row)
+    with handoff.provide(row, pre_row):
+        assert handoff.quantize(alias) is not pre_row
+
+
+@pytest.mark.parametrize("m", [1, 16, 256])
+@torch.inference_mode()
+def test_trtllm_fp4_moe_prequantized_input(m: int, workspace_init):
+    """Per-token TRTLLM-Gen NvFP4 experts consume an input quantization made
+    ahead of the call on a side stream, and their output is bitwise the one
+    they compute when they quantize the input themselves."""
+    e, topk, n, k = 128, 8, 1024, 1024
+    dtype = torch.bfloat16
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        b = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_q, w2_q, quant_config = make_test_quant_config(
+            e, n, k, in_dtype=dtype, quant_dtype="nvfp4", is_scale_swizzled=False
+        )
+        w1_q, w2_q = _to_trtllm_weights(w1_q, w2_q, quant_config, e, n, k, True)
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = _make_trtllm_fp4_moe_kernel(
+            moe_config, quant_config, per_token_activation=True
+        )
+        experts = kernel.fused_experts
+        assert isinstance(experts, TrtLlmNvFp4ExpertsModular)
+        handoff = experts.input_handoff
+
+        def apply(x):
+            return kernel.apply(
+                hidden_states=x,
+                w1=w1_q,
+                w2=w2_q,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        expected_a, expected_b = apply(a), apply(b)
+        assert torch.isfinite(expected_a).all()
+        assert not torch.equal(expected_a, expected_b)
+
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            pre_a = quantize_nvfp4_per_token_input(a)
+            pre_b = quantize_nvfp4_per_token_input(b)
+        torch.cuda.current_stream().wait_stream(side)
+        with handoff.provide(a, pre_a):
+            assert torch.equal(apply(a), expected_a)
+        # The experts compute with the provided quantization, not their own.
+        with handoff.provide(a, pre_b):
+            assert torch.equal(apply(a), expected_b)
+            assert torch.equal(apply(a.clone()), expected_a)
 
 
 if __name__ == "__main__":

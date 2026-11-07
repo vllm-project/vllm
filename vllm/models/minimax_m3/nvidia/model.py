@@ -12,7 +12,8 @@ The MiniMax-M3-preview config selects a single set of branches:
       "index" attention branch.
 """
 
-from collections.abc import Iterable
+import contextlib
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
 import torch
@@ -49,6 +50,8 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MegaMoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+    NvFp4PerTokenInputHandoff,
+    TrtLlmNvFp4ExpertsBase,
     TrtLlmNvFp4ExpertsModular,
     TrtLlmNvFp4ExpertsMonolithic,
 )
@@ -134,7 +137,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer import is_flashinfer_autotuning
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import (
+    aux_stream,
+    current_stream,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -558,6 +565,10 @@ class MiniMaxM3MoE(nn.Module):
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
+        # The routed experts' input is quantized on the aux stream (see _route).
+        self._input_quant_stream = aux_stream() if current_platform.is_cuda() else None
+        if self._input_quant_stream is not None:
+            self._input_quant_events = (torch.cuda.Event(), torch.cuda.Event())
 
         self.shared_experts: MiniMaxM3MLP | None = None
         if self.use_mega_moe:
@@ -695,13 +706,87 @@ class MiniMaxM3MoE(nn.Module):
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
 
+    def _routed_input_handoff(
+        self, hidden_states: torch.Tensor
+    ) -> NvFp4PerTokenInputHandoff | None:
+        """The routed experts' NVFP4 input handoff if they quantize their input
+        per token themselves (TRTLLM-Gen) and receive ``hidden_states``
+        unchanged: no dispatch, all-gather, input transform or padding. Not
+        with dual-batch overlap, whose micro-batch threads would share this
+        layer's events and handoff. Checked per call: a weight reload may
+        rebuild a different kernel."""
+        if self.use_mega_moe or self._input_quant_stream is None:
+            return None
+        runner = self.experts
+        moe_kernel = getattr(runner.routed_experts.quant_method, "moe_kernel", None)
+        if moe_kernel is None:
+            return None
+        fused_experts = moe_kernel.fused_experts
+        moe_config = runner.moe_config
+        if (
+            not isinstance(fused_experts, TrtLlmNvFp4ExpertsBase)
+            or not fused_experts.expects_unquantized_inputs
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.shape[-1] != moe_config.hidden_dim
+            or moe_config.moe_parallel_config.use_all2all_kernels
+            or runner.do_naive_dispatch_combine
+            or moe_config.pcp_size > 1
+            or runner.routed_input_transform is not None
+            or runner.enable_dbo
+        ):
+            return None
+        return fused_experts.input_handoff
+
+    @contextlib.contextmanager
+    def _route(self, hidden_states: torch.Tensor) -> Iterator[torch.Tensor]:
+        """Yield the router logits; run the MoE call inside the block.
+
+        The router GEMM and the routed experts' NVFP4 input quantization both
+        read only ``hidden_states``, yet the experts quantize after routing. So
+        quantize on the aux stream while the router GEMM runs and hand the
+        result to the experts for the block.
+
+        Only while the call is being captured into a CUDA graph, where the
+        fork and join are recorded once and replayed for free. An eager
+        forward (a step above the largest captured size, or a run without
+        CUDA graphs) is host-bound, and the per-layer stream switch, event
+        record/wait and handoff cost more host time than the overlap saves on
+        the GPU, so there the experts quantize on the current stream as
+        before. The model is not torch.compiled (breakable CUDA graphs run
+        this Python at capture time and replay only the graphs), so the check
+        is evaluated on every call.
+        """
+        if not torch.cuda.is_current_stream_capturing():
+            yield self.gate(hidden_states)[0]
+            return
+        handoff = self._routed_input_handoff(hidden_states)
+        if handoff is None:
+            yield self.gate(hidden_states)[0]
+            return
+        stream = self._input_quant_stream
+        assert stream is not None
+        main_stream = current_stream()
+        fork, join = self._input_quant_events
+        fork.record(main_stream)
+        with torch.cuda.stream(stream):
+            fork.wait(stream)
+            quantized = handoff.quantize(hidden_states)
+            join.record(stream)
+        router_logits, _ = self.gate(hidden_states)
+        join.wait(main_stream)
+        # Allocated on the aux stream, read on the main one.
+        for t in quantized:
+            t.record_stream(main_stream)
+        with handoff.provide(hidden_states, quantized):
+            yield router_logits
+
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""
-        router_logits, _ = self.gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
-        shared_output, routed = _unpack(
-            self.experts._forward_impl(hidden_states, router_logits, hidden_states)
-        )
+        with self._route(hidden_states) as router_logits:
+            shared_output, routed = _unpack(
+                self.experts._forward_impl(hidden_states, router_logits, hidden_states)
+            )
         assert shared_output is not None
         assert isinstance(routed, UnfinalizedMoEOutput)
         return MoEOutput(routed=routed, shared_output=shared_output)
@@ -713,10 +798,10 @@ class MiniMaxM3MoE(nn.Module):
             return self._forward_mega_moe(hidden_states)
 
         # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        with self._route(hidden_states) as router_logits:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

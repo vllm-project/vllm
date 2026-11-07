@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import contextlib
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -38,6 +40,47 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
+
+NvFp4PerTokenInput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+class NvFp4PerTokenInputHandoff:
+    """Hands the experts an NVFP4 per-token quantization of their input that
+    was computed ahead of the MoE call (e.g. on a side stream overlapping the
+    router GEMM). Each TRTLLM-Gen NVFP4 experts instance owns one."""
+
+    def __init__(self) -> None:
+        # (input, quantize(input)) while a ``provide`` block is open.
+        self._entry: tuple[torch.Tensor, NvFp4PerTokenInput] | None = None
+
+    def quantize(self, hidden_states: torch.Tensor) -> NvFp4PerTokenInput:
+        """The experts' input quantization: the provided result if
+        ``hidden_states`` is the very tensor it was computed from (same
+        storage, shape, strides and dtype), a fresh one otherwise."""
+        entry = self._entry
+        if entry is not None:
+            x = entry[0]
+            if (
+                x.data_ptr() == hidden_states.data_ptr()
+                and x.shape == hidden_states.shape
+                and x.stride() == hidden_states.stride()
+                and x.dtype == hidden_states.dtype
+            ):
+                return entry[1]
+        return quantize_nvfp4_per_token_input(hidden_states)
+
+    @contextlib.contextmanager
+    def provide(self, hidden_states: torch.Tensor, quantized: NvFp4PerTokenInput):
+        """Within the block, ``quantize(hidden_states)`` returns ``quantized``,
+        which must be ``quantize(hidden_states)`` computed earlier. The caller
+        orders its producing stream before the MoE call."""
+        assert quantized[0].shape[0] == hidden_states.shape[0]
+        prev = self._entry
+        self._entry = (hidden_states, quantized)
+        try:
+            yield
+        finally:
+            self._entry = prev
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -82,6 +125,7 @@ class TrtLlmNvFp4ExpertsBase:
         self.per_token_activation = per_token_activation
         if per_token_activation and moe_config.activation == MoEActivation.SWIGLUSTEP:
             raise ValueError("SWIGLUSTEP requires per-tensor NVFP4 activation scales")
+        self.input_handoff = NvFp4PerTokenInputHandoff()
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -375,8 +419,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
         if self.expects_unquantized_inputs:
-            hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
+            hidden_states, block_scale, per_token_scale = self.input_handoff.quantize(
+                hidden_states
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
@@ -581,8 +625,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
         if self.expects_unquantized_inputs:
-            hidden_states, block_scale, per_token_scale = (
-                quantize_nvfp4_per_token_input(hidden_states)
+            hidden_states, block_scale, per_token_scale = self.input_handoff.quantize(
+                hidden_states
             )
         else:
             block_scale, per_token_scale = a1q_scale, None

@@ -301,6 +301,7 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/minimax_m3/
+  - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
   - vllm/cute_utils/
   - vllm/utils/flashinfer.py
   - tests/models/minimax_m3/
