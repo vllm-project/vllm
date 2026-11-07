@@ -701,6 +701,15 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        if mm_counts.get("audio", 0) <= 0:
+            return {}
+        return {"audio": self.get_num_audio_tokens()}
+
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
