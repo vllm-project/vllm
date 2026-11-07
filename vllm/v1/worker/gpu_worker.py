@@ -572,8 +572,6 @@ class Worker(WorkerBase):
             # Scratch holds no state across steps: discard it on sleep.
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
-        # Buffers the runner allocates at construction (e.g. the MTP drafter's
-        # hidden states) are runtime state: offload them on sleep.
         with self._maybe_get_memory_pool_context(tag="runtime"):
             self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
