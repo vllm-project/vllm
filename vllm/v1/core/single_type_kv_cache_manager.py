@@ -2232,6 +2232,8 @@ class HiSparseSourceManager(FullAttentionManager):
     back it, so each GPU-resident page can be written back and later reclaimed.
     """
 
+    supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
     coordinator: "HiSparseCoordinator | None" = None
     # The host tier keeps prefixes the device groups have already lost.
     retains_longer_hit = True

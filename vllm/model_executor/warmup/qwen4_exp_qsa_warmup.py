@@ -86,3 +86,12 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         "Warmed up Qwen4Exp QSA sparse attention kernels: %s.",
         attention_profiles,
     )
+    if owner.hisparse_cache is not None:
+        hot_profiles = warmup_qsa_sparse_paged_attention(
+            owner.hisparse_kv_view(owner.hisparse_cache.runtime.hot.attention_cache),
+            block_table_for(owner.layer_name),
+            num_query_heads=owner.num_heads,
+            selection_width=indexer.output_width,
+            physical_indices=True,
+        )
+        logger.info("Warmed up Qwen4Exp QSA HiSparse decode kernels: %s.", hot_profiles)

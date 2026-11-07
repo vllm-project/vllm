@@ -23,14 +23,22 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
+from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
-from vllm.v1.hisparse.runtime import _has_hisparse_ops
+from vllm.v1.hisparse.binding import (
+    allocate_hisparse_kv_caches,
+)
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    HiSparseRuntime,
+    _has_hisparse_ops,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -38,6 +46,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
+    SparseFullAttentionSpec,
+    UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -56,6 +66,7 @@ from vllm.v1.worker.utils import (
 )
 
 
+@pytest.mark.parametrize("sparse_full_attention", [False, True])
 @pytest.mark.parametrize(
     ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
     [
@@ -67,18 +78,37 @@ from vllm.v1.worker.utils import (
     ],
 )
 def test_get_kv_cache_spec_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+    monkeypatch,
+    enabled,
+    block_size,
+    main_sizes,
+    indexer_sizes,
+    expected,
+    sparse_full_attention,
 ):
-    """Resolve shared MLA geometry before planning; leave other specs alone."""
-    specs = {
-        "main": MLAAttentionSpec(
+    """Resolve sparse source/indexer geometry without changing compression."""
+    main_spec = (
+        SparseFullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=2,
+            head_size=32,
+            dtype=torch.bfloat16,
+            topk_buffer_width=35,
+        )
+        if sparse_full_attention
+        else MLAAttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
-        ),
+        )
+    )
+    compress_ratio = 4 if sparse_full_attention else 1
+    specs = {
+        "main": main_spec,
         "indexer": MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
+            tokens_per_state=compress_ratio,
             cache_role=SparseCacheRole.INDEXER,
         ),
         "dense": FullAttentionSpec(
@@ -99,11 +129,13 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
-    monkeypatch.setattr(
-        attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
-    )
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig() if enabled else None
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
     )
     if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
@@ -112,9 +144,37 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
 
     resolved = attn_utils.get_kv_cache_spec(config)
     assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["indexer"].tokens_per_state == compress_ratio
+    assert resolved["indexer"].num_states == expected // compress_ratio
+    if sparse_full_attention:
+        main = resolved["main"]
+        assert isinstance(main, SparseFullAttentionSpec)
+        assert main.topk_buffer_width == 35
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
+    if enabled:
+        resident = resolved["main.hisparse_resident"]
+        hot = resolved["main.hisparse_hot"]
+        assert isinstance(resident, HiSparseResidentSpec)
+        assert isinstance(hot, HiSparseHotSpec)
+        assert resident.block_size == hot.block_size == expected
+        assert (
+            resident.page_size_bytes
+            == hot.page_size_bytes
+            == (resolved["main"].page_size_bytes)
+        )
+        assert len(resolved) == len(specs) + 2
+        groups = attn_utils_module.get_hisparse_kv_cache_groups(config, resolved)
+        assert groups is not None
+        grouped_names = [name for group in groups for name in group.layer_names]
+        assert len(grouped_names) == len(set(grouped_names)) == len(resolved)
+        assert set(grouped_names) == set(resolved)
+    else:
+        assert resolved == {
+            name: customize_attention_spec(layers[name].get_attn_backend(), spec)
+            for name, spec in specs.items()
+        }
 
 
 def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
@@ -867,6 +927,119 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
     )
+
+
+def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
+    """The row copy data plane sees all heads' K/V without copying host storage."""
+    names = ["layer.0", "layer.1"]
+    resident_names = [f"{name}.hisparse_resident" for name in names]
+    hot_names = [f"{name}.hisparse_hot" for name in names]
+    spec = SparseFullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.bfloat16,
+        topk_buffer_width=2,
+    )
+    source_spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))
+    assert source_spec is not None
+    config = KVCacheConfig(
+        num_blocks=4,
+        hisparse_host_num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=192,
+                layers=names,
+                layer_stride=96,
+                block_stride=32,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=256,
+                layers=resident_names,
+                layer_stride=32,
+                block_stride=64,
+            ),
+            KVCacheTensor(
+                size=256,
+                layers=hot_names,
+                layer_stride=32,
+                block_stride=64,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(names, source_spec, host_resident=True),
+            KVCacheGroupSpec(
+                resident_names, HiSparseResidentSpec(block_size=2, page_size=32)
+            ),
+            KVCacheGroupSpec(
+                hot_names,
+                HiSparseHotSpec(block_size=2, page_size=32, blocks_per_request=2),
+            ),
+        ],
+    )
+    host_backing = torch.zeros(192, dtype=torch.int8)
+    host_pool = SimpleNamespace(
+        allocate=lambda size: host_backing,
+        registered=host_backing,
+        shared_region=None,
+    )
+    caches = allocate_hisparse_kv_caches(
+        config, torch.device("cpu"), KVCacheLayout.BLNHC, [2, 2, 2], host_pool
+    )
+    forward_context = {}
+    expected_rows = []
+    for index, name in enumerate(names):
+        # Distinct layer/block/token/head/K/V values in canonical attention
+        # views detect a silent head/token transpose in the row-copy view.
+        tagged_rows = (
+            torch.arange(48, dtype=torch.float32).view(3, 2, 2, 4) + index * 64
+        ).to(torch.bfloat16)
+        caches[name].copy_(tagged_rows.transpose(1, 2))
+        expected_rows.append(tagged_rows.view(6, 8))
+        # Binding itself is CPU-capable. Leave CUDA streams, events and LRU
+        # execution state uninitialized: this test does not execute offloading.
+        runtime = object.__new__(HiSparseRuntime)
+        runtime.row_width = 8
+        runtime.kv_dtype = torch.bfloat16
+        runtime.backend = CUDAHiSparseBackend()
+        forward_context[name] = SimpleNamespace(
+            hisparse_cache=HiSparseCacheHandle(runtime),
+            is_draft_layer=index == 1,
+        )
+    block_tables = SimpleNamespace(
+        input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
+        slot_mappings=[torch.arange(2, dtype=torch.int64)] * 3,
+    )
+
+    handles = attn_utils_module.bind_hisparse_kv_caches(
+        forward_context=forward_context,
+        kv_cache_config=config,
+        kv_caches=caches,
+        block_tables=block_tables,
+        host_pool=host_pool,
+    )
+
+    assert len(handles) == 2
+    residency = handles[0].residency
+    assert isinstance(residency, torch.Tensor)
+    assert residency.shape == (1, 1, 2)
+    assert torch.count_nonzero(residency).item() == 0
+    for index, (name, handle) in enumerate(zip(names, handles)):
+        assert handle.draft_layer == (index == 1)
+        assert caches[name].shape == (3, 2, 2, 4)
+        assert handle.runtime.host_cache.shape == (6, 8)
+        assert handle.runtime.host_cache.data_ptr() == caches[name].data_ptr()
+        torch.testing.assert_close(handle.runtime.host_cache, expected_rows[index])
+        assert handle.view is not None
+        assert handle.view.cache.shape == (4, 2, 8)
+        assert handle.view.cache.stride() == (32, 8, 1)
+        assert handle.runtime.hot.cache.stride() == (32, 8, 1)
+        assert handle.source_block_table is block_tables.input_block_tables[0]
+        assert handle.residency is not None
+        assert handle.residency is residency
+        assert handle.block_table is not None
+        assert handle.block_table.data_ptr() == residency[0].data_ptr()
 
 
 class _TableBuilder:

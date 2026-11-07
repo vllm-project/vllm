@@ -385,8 +385,12 @@ steps:
   source_file_dependencies:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
+  - vllm/config/vllm.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/kv_cache_interface.py
   - tests/models/qwen4_exp/
   commands:
     - >-

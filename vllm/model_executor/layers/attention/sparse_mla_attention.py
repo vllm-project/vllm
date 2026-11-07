@@ -55,6 +55,7 @@ from vllm.v1.attention.ops.shardq import ShardQMetadata, build_shardq_split
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
+    hisparse_staging_block_capacity,
 )
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
@@ -422,20 +423,14 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             staging_plan = None
             if self.vllm_config.attention_config.hisparse_config is not None:
-                prefill_seq_lens_cpu = seq_lens_cpu[
-                    num_decodes : num_decodes + num_prefills
-                ]
-                staging_block_capacity = int(
-                    (
-                        (prefill_seq_lens_cpu + self.kv_cache_spec.block_size - 1)
-                        // self.kv_cache_spec.block_size
-                    ).sum()
-                )
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
                     self.kv_cache_spec.block_size,
-                    staging_block_capacity,
+                    hisparse_staging_block_capacity(
+                        seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                        self.kv_cache_spec.block_size,
+                    ),
                 )
                 if chunked_context is not None:
                     block_table = staging_plan.block_table

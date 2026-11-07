@@ -30,10 +30,13 @@ configured, `MultiConnector` composes it with `HiSparseConnector`.
 
 `host_pool_gib` is configured on `HiSparseConnector` and is the usable
 host-cache capacity per data-parallel replica, not a node-wide memory budget.
-Tensor-parallel ranks hold replicated views of that logical cache. Those views
-may use private per-rank backing or one shared
-physical allocation without changing the configured capacity. Physical host
-memory consumption is therefore topology- and implementation-dependent. The
+MLA tensor-parallel ranks hold replicated views of that logical cache, using
+private per-rank backing or one shared physical allocation. QSA stores full K/V
+heads in private per-rank pools, with each rank writing its own shard. Its
+logical capacity counts each unique K/V head once; heads replicated when TP
+exceeds the K/V head count still consume physical memory in each rank's pool.
+Padding also contributes to physical allocation, not logical capacity. Physical
+host memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
@@ -44,6 +47,22 @@ steady-state maximum concurrency` line charges running requests that read from
 host only their active tail pages, plus one request being admitted at its full
 footprint. Host-pool metrics are listed in
 [Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
+## QSA models
+
+For Qwen4Exp QSA models, configuring `HiSparseConnector` enables main K/V
+offloading and selects Model Runner V2:
+
+```bash
+vllm serve QSA_MODEL \
+  --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+```
+
+The device layout resolves to `BLNHC`, so one copy row holds a token's K and V
+for every local K/V head. Compressed indexer keys, raw-key rings and recurrent
+state stay GPU-resident. With prefix caching, prefixes are reused at whole
+scheduler-page boundaries; matching tokens past the boundary are recomputed.
+P/D disaggregation and decode context parallelism are not supported for QSA.
 
 ## Ownership
 
@@ -68,8 +87,8 @@ sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
-For single-node MP tensor parallelism, every TP worker maps the same pinned host
-pool and uses the same block and layer offsets. MLA source KV is replicated
+For MLA with single-node MP tensor parallelism, every TP worker maps the same
+pinned host pool and uses the same block and layer offsets. Source KV is replicated
 across TP ranks, so this stores one physical copy instead of one copy per rank.
 TP rank 0 writes the shared host pool; peers wait on its IPC events before
 reading it. Other executor and parallel layouts retain private per-rank pools.
@@ -165,7 +184,7 @@ fused decode resolver described above.
 HiSparse does not keep a private CPU copy of indexer KV. The indexer remains a
 normal prefix-cacheable GPU cache group. If `OffloadingConnector` is configured
 with HiSparse, it stores and restores that group through the generic KV
-offloading path; HiSparse continues to own only the sparse MLA host tier.
+offloading path; HiSparse continues to own only the main sparse-attention host tier.
 
 The two prefix sources can have different hit lengths. When the HiSparse host
 prefix extends beyond the GPU-resident indexer prefix, the scheduler asks

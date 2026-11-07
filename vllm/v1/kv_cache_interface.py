@@ -713,6 +713,34 @@ class FullAttentionSpec(AttentionSpec):
         return merged_spec
 
 
+@dataclass(frozen=True, kw_only=True)
+class SparseFullAttentionSpec(FullAttentionSpec):
+    """Complete K/V history whose decode reads a sparse token selection.
+
+    Unlike MLA's replicated latent cache, these K/V heads are TP shards.
+    """
+
+    topk_buffer_width: int
+    """Maximum selected token slots, excluding a packed selection's count."""
+
+    @property
+    def is_index_group_leader(self) -> bool:
+        return True
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(
+            spec.topk_buffer_width == specs[0].topk_buffer_width for spec in specs
+        ), "Sparse full-attention layers must have the same selection width."
+        merged = FullAttentionSpec.merge(
+            [
+                replace_as(spec, FullAttentionSpec, drop=("topk_buffer_width",))
+                for spec in specs
+            ]
+        )
+        return replace_as(merged, cls, topk_buffer_width=specs[0].topk_buffer_width)
+
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return

@@ -116,6 +116,7 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
+    worker._in_step = True
     worker._submitted_mirror_layers = set()
     worker._draft_layers = ()
     worker._draft_mirror_pending = False
