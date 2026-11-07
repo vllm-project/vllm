@@ -41,6 +41,37 @@ Key points from the PyTorch security guide:
 - Messages are sent unencrypted
 - Connections are accepted from anywhere without checks
 
+#### Which deployments create a TCPStore rendezvous listener
+
+The guidance above applies wherever vLLM initializes `torch.distributed` over
+TCP. Not every deployment does. Since
+[#50999](https://github.com/vllm-project/vllm/pull/50999), the single-node
+executors rendezvous over a `file://` URI backed by
+`torch.distributed.FileStore`, so they create **no TCPStore rendezvous
+listener**. Other TCP services, such as the API server, are unaffected by this
+and are a separate concern.
+
+| Path | Rendezvous store |
+| --- | --- |
+| `UniProcExecutor`, `MultiprocExecutor` (single node) | `FileStore` |
+| Ray executors (multi-node) | `TCPStore` |
+| Data parallel coordination (`StatelessProcessGroup`) | `TCPStore` |
+| ROCm with AITER custom all-reduce, including single node | `TCPStore` |
+
+The ROCm exception is temporary: AITER's custom all-reduce asserts on
+`TCPStore` for its IPC metadata exchange, so those deployments keep the TCP
+rendezvous until AITER accepts a `FileStore`. See `aiter_requires_tcp_store()`
+in `vllm/utils/network_utils.py`.
+
+Multi-node deployments and ordinary data-parallel deployments therefore still
+create a TCP rendezvous listener, and the isolation recommendations below
+continue to apply to them in full.
+
+!!! note
+    #50999 is not in a stable release yet. It is present in `v0.27.2rc0` and
+    will first ship in the corresponding stable release. Deployments on
+    `v0.27.1` and earlier use the TCP rendezvous on every path.
+
 ## Security Recommendations
 
 ### 1. **Network Isolation:**
