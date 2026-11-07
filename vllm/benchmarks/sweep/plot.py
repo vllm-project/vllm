@@ -127,7 +127,31 @@ class PlotFilters(list[PlotFilterBase]):
         if not s:
             return cls()
 
-        return cls(PlotFilterBase.parse_str(e) for e in s.split(","))
+        expressions = []
+        quote: str | None = None
+        value_start: int | None = None
+        start = 0
+        for index, char in enumerate(s):
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char == ",":
+                expressions.append(s[start:index])
+                start = index + 1
+                value_start = None
+            elif value_start is None:
+                for op_key in PLOT_FILTERS:
+                    if s.startswith(op_key, index):
+                        value_start = index + len(op_key)
+                        break
+            elif char in ("'", '"') and not s[value_start:index].strip():
+                quote = char
+
+        if quote is not None:
+            raise ValueError(f"Unterminated quoted value in plot filter {s!r}")
+
+        expressions.append(s[start:])
+        return cls(PlotFilterBase.parse_str(e) for e in expressions)
 
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         for item in self:
@@ -602,6 +626,7 @@ class SweepPlotArgs:
             default="",
             help="A comma-separated list of statements indicating values to filter by. "
             "This is useful to remove outliers. "
+            "Quote values containing commas. "
             "Example: `max_concurrency<1000,max_num_batched_tokens<=4096` means "
             "plot only the points where `max_concurrency` is less than 1000 and "
             "`max_num_batched_tokens` is no greater than 4096.",
