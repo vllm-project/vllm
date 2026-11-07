@@ -89,7 +89,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/version` - Version information
 - `/load` - Server load metrics
 - `/v1/models` - List available models
-- `/health` - Health check
+- `/health` - Health check. Returns 503 if the engine is dead, during graceful shutdown (after SIGTERM, while `--shutdown-timeout` drains), or while an [endpoint plugin](../../design/endpoint_plugins.md#optional-lifecycle-methods) reports not ready
 
 ### Metrics APIs
 

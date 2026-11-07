@@ -4,13 +4,19 @@ import asyncio
 import json
 from argparse import Namespace
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
+from starlette.datastructures import State
 
 from vllm import envs
 from vllm.config.logging import LogFormatter
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.plugins.endpoint_plugins.interface import (
+    start_endpoint_plugins,
+    stop_endpoint_plugins,
+)
 from vllm.utils.gc_utils import freeze_gc_heap
 
 logger = init_logger(__name__)
@@ -72,6 +78,15 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
 _running_tasks: set[asyncio.Task] = set()
 
 
+class _ServingStop:
+    def __init__(self, name: str, serving: Any) -> None:
+        self.name = name
+        self.serving = serving
+
+    async def stop(self, state: State) -> None:
+        self.serving.shutdown()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -89,21 +104,23 @@ async def lifespan(app: FastAPI):
         else:
             task = None
 
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        freeze_gc_heap()
+        core_stops = [
+            _ServingStop(name, serving)
+            for name in ("openai_serving_transcription", "openai_serving_translation")
+            if hasattr(serving := getattr(app.state, name, None), "shutdown")
+        ]
         try:
+            await start_endpoint_plugins(
+                app.state, [*core_stops, *getattr(app.state, "endpoint_plugins", [])]
+            )
+            # Mark the startup heap as static so that it's ignored by GC.
+            # Reduces pause times of oldest generation collections.
+            freeze_gc_heap()
             yield
         finally:
             if task is not None:
                 task.cancel()
-            for attr_name in (
-                "openai_serving_transcription",
-                "openai_serving_translation",
-            ):
-                serving = getattr(app.state, attr_name, None)
-                if serving is not None and hasattr(serving, "shutdown"):
-                    serving.shutdown()
+            await stop_endpoint_plugins(app.state)
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
