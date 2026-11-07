@@ -24,12 +24,13 @@ def eager_walk(
     """The loop of DSparkSpeculator._sample_sequential (full vocabulary)."""
     prev = anchor
     for i in range(base.shape[1]):
-        logits = base[:, i] + F.linear(F.embedding(prev, w1), w2)
+        bias = F.linear(F.embedding(prev, w1), w2)
         if draft_logits is None:
-            tok = greedy_argmax(logits)
+            tok = greedy_argmax(base[:, i] + bias)
         else:
+            # The Gumbel kernel adds the bias, as the speculator does.
             tok = gumbel_sample(
-                logits,
+                base[:, i],
                 idx[:, i],
                 temperature,
                 seeds,
@@ -38,6 +39,7 @@ def eager_walk(
                 is_drafting=True,
                 logits_cache=draft_logits,
                 logits_cache_col=cols[i],
+                bias=bias,
             )
         tokens[:, i] = tok
         prev = tok
