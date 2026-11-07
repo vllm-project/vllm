@@ -371,7 +371,8 @@ class DequantGatherKCacheKernel(
         k_cache = cute.runtime.make_fake_tensor(
             Uint8,
             (cute.sym_int(), block_size, head_bytes),
-            stride=(cute.sym_int64(divisibility=32), head_bytes, 1),
+            # Packed MXFP8 blocks can have a 16B-aligned byte stride.
+            stride=(cute.sym_int64(divisibility=16), head_bytes, 1),
             assumed_align=32,
         )
         seq_lens = make_fake_tensor(Int32, (num_reqs,))
