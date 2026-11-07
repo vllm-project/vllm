@@ -38,8 +38,47 @@ python examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py --p
 
 Now you can send requests to the proxy server through port 8000.
 
-For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
-cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
+## Transfer modes
+
+`MooncakeConnector` uses `"transfer_mode": "request"` by default: P finishes prefill before transferring KV. Existing configurations keep this behavior.
+
+To transfer KV as layers and prefill chunks become ready, set `"transfer_mode": "layerwise"` in `kv_connector_extra_config` on both P and D:
+
+```bash
+# P
+vllm serve Qwen/Qwen2.5-7B-Instruct --enforce-eager --port 8010 \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer","kv_connector_extra_config":{"transfer_mode":"layerwise"}}'
+# D
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8020 \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"transfer_mode":"layerwise"}}'
+```
+
+Set the same mode on P and D at startup.
+
+For layerwise transfer, use a proxy that sends requests to P and D concurrently, such as the example proxy above. Configure P requests to generate one token.
+
+### Mode comparison
+
+| Behavior | `request` (default) | `layerwise` |
+| --- | --- | --- |
+| Transfer starts | After P finishes prefill and D provides destination buffers | As layers and prefill chunks become ready, once D provides destination buffers |
+| Transfer scheduling | Groups the request's KV across layers | Sends ready KV during prefill, with more scheduling and synchronization work |
+| Cached prefix | Transfers with the rest of the request's KV after prefill | Complete prefix blocks can transfer at step start |
+| Latency tradeoff | KV transfer follows prefill | KV transfer can overlap prefill; the benefit depends on compute time, transfer time, and scheduling overhead |
+
+In both modes, D starts decoding after all required KV transfers finish, and P keeps the source blocks until transfer completes.
+
+At the start of each step, P can send complete cached-prefix blocks, including blocks from earlier prefill chunks, once D provides its destination buffers. This behavior is enabled by default for layers whose cache regions all use `FullAttentionSpec` with one token per state, including ordinary MLA and indexer caches. Incomplete blocks wait for layer computation. Windowed and recurrent/ring states wait until their final state is ready.
+
+### Layerwise limits
+
+- Use fixed `kv_producer` and `kv_consumer` roles.
+- P supports eager or PIECEWISE execution; D also supports FULL decode graphs. Computation/transfer overlap requires per-layer save hooks after KV writes.
+- Cache layers must be individually addressable, with stable storage and distinguishable writers. Opaque packed rows, sleep/wake, and replacing registered KV storage are unsupported.
+- Set DCP to 1. PCP requires complete cache replicas and `"pcp_cache_mode": "replicated"` in `kv_connector_extra_config`.
+- Match P/D logical and kernel block sizes, dtype, cache layouts, and cache semantics. Recurrent/ring states also require equal TP sizes. Chunked-local attention is unsupported.
+
+For multimodal Encode-Prefill-Decode with encoder embeddings, see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
 ## Environment Variables
 
@@ -78,6 +117,8 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
 ### kv_connector_extra_config
 
+- **transfer_mode**: `"request"` (default) or `"layerwise"`. Set the same mode on P and D at startup.
+- **layerwise_send_timeout_margin_s**: Time P reserves before D's receive deadline (default: 10 seconds; finite and nonnegative). Size it to cover D-ready message transit and queue delay. P stops submitting new WRITEs within this margin; submitted WRITEs continue.
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
