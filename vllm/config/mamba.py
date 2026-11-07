@@ -43,7 +43,8 @@ class MambaConfig:
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.
     Uses random bits to unbias the rounding error, which can improve
-    numerical stability for long sequences."""
+    numerical stability for long sequences. The Triton backend requires
+    compute capability 10.0 on CUDA or gfx950 on ROCm."""
     stochastic_rounding_philox_rounds: int = 0
     """Number of Philox PRNG rounds for stochastic rounding random number
     generation. 0 uses the Triton default. Higher values improve randomness
@@ -85,13 +86,22 @@ class MambaConfig:
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 
-            if not current_platform.is_cuda():
+            if current_platform.is_rocm():
+                from vllm.platforms.rocm import on_gfx950
+
+                if not on_gfx950():
+                    raise ValueError(
+                        "Stochastic rounding for Mamba cache on ROCm requires "
+                        "gfx950 (MI350/MI355). Please do not specify "
+                        "`--enable-mamba-cache-stochastic-rounding`."
+                    )
+            elif not current_platform.is_cuda():
                 raise ValueError(
                     "Stochastic rounding for Mamba cache is only supported "
-                    "on NVIDIA CUDA platforms. Please do not specify  "
+                    "on NVIDIA CUDA and AMD gfx950 platforms. Please do not specify "
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
-            if (
+            elif (
                 self.backend == MambaBackendEnum.TRITON
                 and not current_platform.is_device_capability_family(100)
             ):

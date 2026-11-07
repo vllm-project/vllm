@@ -1263,3 +1263,23 @@ steps:
     tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
     tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
     tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+
+- label: ":amd: (MI355) Mamba SSM Kernels"
+  key: amd-mamba-ssm-kernels-mi355
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/config/mamba.py
+  - vllm/model_executor/layers/mamba/ops/mamba_ssm.py
+  - vllm/model_executor/layers/mamba/ops/selective_state_update_replayssm_output_only.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/mamba/test_mamba_ssm.py
+  - tests/kernels/mamba/test_replayssm_standard_decode_mamba2.py
+  - tests/kernels/mamba/utils.py
+  commands:
+  - pytest -v -s kernels/mamba/test_mamba_ssm.py kernels/mamba/test_replayssm_standard_decode_mamba2.py

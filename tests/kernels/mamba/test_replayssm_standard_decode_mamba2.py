@@ -33,6 +33,7 @@ import torch
 
 from tests.kernels.mamba.utils import (
     allocate_update_caches,
+    requires_triton_stochastic_rounding,
     selective_state_update_ref,
     selective_state_update_replayssm_output_only_ref,
 )
@@ -92,6 +93,7 @@ def _run_standard_decode(
     use_dt_bias: bool,
     desync_write_pos: bool = False,
     seed: int = 0,
+    philox_rounds: int | None = None,
 ) -> None:
     """Drive ``num_steps`` decode steps and check every path against the
     trusted recurrence. ``state_dtype`` is the recurrent-state precision;
@@ -202,6 +204,8 @@ def _run_standard_decode(
             is_flush=is_flush,
             max_cache_len=max_cache_len,
             out=out_cached,
+            enable_stochastic_rounding=philox_rounds is not None,
+            cache_philox_rounds=philox_rounds or 0,
         )
         selective_state_update_replayssm_output_only(
             state_cached, x, dt, A, B, C, bc_pre=bc_pre, **common
@@ -344,6 +348,26 @@ def test_replayssm_standard_decode_real_geometry(
         has_z=True,
         dt_softplus=True,
         use_dt_bias=True,
+    )
+
+
+@requires_triton_stochastic_rounding
+@pytest.mark.parametrize("philox_rounds", [0, 5])
+def test_replayssm_standard_decode_stochastic_rounding(philox_rounds: int):
+    _run_standard_decode(
+        state_dtype=torch.float16,
+        act_dtype=torch.bfloat16,
+        batch=4,
+        nheads=128,
+        headdim=64,
+        ngroups=8,
+        dstate=128,
+        max_cache_len=16,
+        num_steps=33,
+        has_z=True,
+        dt_softplus=True,
+        use_dt_bias=True,
+        philox_rounds=philox_rounds,
     )
 
 

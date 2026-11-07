@@ -1,9 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
+
+from vllm.platforms import current_platform
+
+
+def _supports_triton_stochastic_rounding() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100
+    )
+
+
+requires_triton_stochastic_rounding = pytest.mark.skipif(
+    not _supports_triton_stochastic_rounding(),
+    reason="Triton stochastic rounding needs compute capability 10.0 or gfx950.",
+)
 
 
 def selective_state_update_ref(

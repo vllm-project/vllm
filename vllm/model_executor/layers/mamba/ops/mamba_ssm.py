@@ -205,19 +205,35 @@ else:
         return dt
 
 
-@triton.jit
-def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
-    y = tl.inline_asm_elementwise(
-        asm="""{
+if current_platform.is_rocm():
+
+    @triton.jit
+    def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+        # gfx950 only. Rounds with rand[31:19]; cvt.rs.f16x2 uses [12:0] and [28:16].
+        y = tl.inline_asm_elementwise(
+            asm="v_cvt_sr_f16_f32 $0, $1, $2",
+            constraints="=v,v,v",
+            args=(x, rand),
+            dtype=tl.float16,
+            is_pure=True,
+            pack=1,
+        )
+        return y
+else:
+
+    @triton.jit
+    def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+        y = tl.inline_asm_elementwise(
+            asm="""{
 cvt.rs.f16x2.f32 $0, $2, $1, $3;
 }""",
-        constraints="=r,r,r,r,r",
-        args=(x, rand),
-        dtype=tl.float16,
-        is_pure=True,
-        pack=2,
-    )
-    return y
+            constraints="=r,r,r,r,r",
+            args=(x, rand),
+            dtype=tl.float16,
+            is_pure=True,
+            pack=2,
+        )
+        return y
 
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
