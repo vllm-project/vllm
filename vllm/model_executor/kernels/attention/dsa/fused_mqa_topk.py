@@ -34,20 +34,18 @@ FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 FUSED_MQA_TOPK_MAX_ROWS = 16384
 
 
-# SM90 (FlashTopK, measured on H200 with random and GLM-5.1 indexer inputs):
-# fused from 64K keys in the longest row for chunks of at least 4096 rows, from
-# 256K keys for smaller chunks, whose fixed per-call work dense outruns below.
-# A call works on FLASHTOPK_CHUNK_ROWS rows at a time, which bounds its
-# workspace (larger slices were no faster).
+# SM90 (FlashTopK, measured on H200 with random and GLM-5.1 indexer inputs; see
+# fused_mqa_topk_chunk). A call works on FLASHTOPK_CHUNK_ROWS rows at a time,
+# which bounds its workspace (larger slices were no faster).
 FLASHTOPK_MIN_KEYS = 1 << 16
-FLASHTOPK_MIN_KEYS_FEW_ROWS = 1 << 18
+FLASHTOPK_MIN_KEYS_ANY_ROWS = 1 << 18
 FLASHTOPK_CHUNK_ROWS = 4096
 
 
 def fused_mqa_topk_min_keys(topk: int) -> int:
     """Longest-row key count from which fused_mqa_topk beats the dense path
     (shorter chunks stay dense): on SM100f 32K, or 64K for top-2048; on SM90
-    FLASHTOPK_MIN_KEYS (FLASHTOPK_MIN_KEYS_FEW_ROWS below 4096 rows)."""
+    FLASHTOPK_MIN_KEYS."""
     if _flashtopk() is not None:
         return FLASHTOPK_MIN_KEYS
     return 1 << 16 if topk > 1024 else 1 << 15
@@ -137,12 +135,16 @@ def fused_mqa_topk_chunk(
     whole wave and makes the kernel slower than dense, unless dense needs more
     than one logits call (rows > dense_rows, its rows per call).
 
-    SM90 (FlashTopK) depends on the rows and keys only (see FLASHTOPK_MIN_KEYS).
+    SM90 (FlashTopK) has no waves to fill: it is faster from FLASHTOPK_MIN_KEYS
+    keys once dense needs more than one logits call, and from
+    FLASHTOPK_MIN_KEYS_ANY_ROWS keys in any case.
     """
     if _flashtopk() is not None:
-        few_rows = rows < FLASHTOPK_CHUNK_ROWS
-        min_keys = FLASHTOPK_MIN_KEYS_FEW_ROWS if few_rows else FLASHTOPK_MIN_KEYS
-        return max_seqlen_k >= min_keys and keys <= FUSED_MQA_TOPK_MAX_KEYS
+        return (
+            max_seqlen_k >= FLASHTOPK_MIN_KEYS
+            and keys <= FUSED_MQA_TOPK_MAX_KEYS
+            and (rows > dense_rows or max_seqlen_k >= FLASHTOPK_MIN_KEYS_ANY_ROWS)
+        )
     sms = _sm_count(torch.accelerator.current_device_index())
     last_wave = (-(-rows // _BLOCK_ROWS) - 1) % sms + 1  # blocks, 1..sms
     return (

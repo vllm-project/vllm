@@ -478,9 +478,7 @@ def _row_sets(out):
 def test_kpool_indexer_fused_matches_dense(monkeypatch):
     """GLM-5.3-Flash kpool indexer: the fused_mqa_topk kernel ranks the top-512 pools of
     a packed multi-request chunk like the dense logits + top-k path."""
-    # SM90 keeps chunks this small dense below 256K pools.
-    long_pools = 70000 if mqa_logits_use_mx_scales() else 1 << 18
-    inputs = _kpool_inputs(pool_lens=(20000, long_pools))
+    inputs = _kpool_inputs()
     # 192 rows take the kernel only when dense needs more than one logits
     # call, so shrink the budget below one call.
     fused_mqa_topk_out, calls = _run_kpool_indexer(
