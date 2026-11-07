@@ -1367,6 +1367,115 @@ def test_delimited_template_keeps_plain_content_and_tolerates_required_fields():
     )
 
 
+# Metadata proposed for Qwen3.6 in
+# https://huggingface.co/Qwen/Qwen3.6-27B/discussions/56
+QWEN3_6_RESPONSE_TEMPLATE: dict[str, Any] = {
+    "defaults": {"role": "assistant"},
+    "start_anchor": "<|im_start|>assistant\n",
+    "fields": {
+        "reasoning_content": {
+            "open": "<think>",
+            "close_pattern": r"</think>|(?=<tool_call>)",
+            "content": "text",
+        },
+        "tool_calls": {
+            "open_pattern": r"<tool_call>\s*<function=(?P<name>[^>\n]+)>",
+            "close_pattern": r"</tool_call>|(?=<tool_call>)",
+            "repeats": True,
+            "content": "xml-inline",
+            "content_args": {
+                "tag_pattern": r"<parameter=(?P<key>[^>\n]+)>\n?(?P<value>.*?)\n?"
+                r"(?:</parameter>|(?=<parameter=)|(?=</function>))"
+            },
+            "transform": {
+                "type": "function",
+                "function": {"name": "{name}", "arguments": "{content}"},
+            },
+        },
+        "content": {
+            "close": ["<|im_end|>", "<|endoftext|>"],
+            "content": "text",
+            "repeats": True,
+            "join": "",
+        },
+    },
+}
+
+
+@pytest.mark.parametrize("chunk_size", [1, 4, 1000])
+def test_reasoning_content_template_with_joined_content_is_served(chunk_size):
+    """Checkpoints name the reasoning field `reasoning_content`, as chat
+    templates read it, and may join repeated content."""
+    tokenizer = FakeTokenizer(
+        QWEN3_6_RESPONSE_TEMPLATE, prefix="<|im_start|>assistant\n<think>\n"
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="hf",
+        reasoning_parser_name="hf",
+        enable_auto_tools=True,
+        tokenizer=tokenizer,
+    )
+    assert parser_cls is not None
+    text = (
+        "plan</think>Checking.<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+    )
+    expected = ("plan", "Checking.", [("get_weather", {"city": "Paris"})])
+
+    parser = parser_cls(tokenizer, TOOLS)
+    parser.set_prompt_token_ids(PROMPT_TOKEN_IDS)
+    reasoning, content, calls = parser.parse(text, request(), enable_auto_tools=True)
+    assert (reasoning, content, normalize_calls(calls)) == expected
+    assert (
+        collect_stream(parser_cls(tokenizer, TOOLS), text, request(), chunk_size)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "<think>first</think>middle<think>second</think>done",
+            ("first second", "middle done"),
+        ),
+        ("<think>first</think><think></think>done", ("first ", "done")),
+    ],
+)
+@pytest.mark.parametrize("chunk_size", [1, 3, 1000])
+def test_join_separator_is_streamed_between_occurrences(text, expected, chunk_size):
+    template = {
+        "start_anchor": "<assistant>",
+        "fields": {
+            "thinking": {
+                "open": "<think>",
+                "close": "</think>",
+                "repeats": True,
+                "join": " ",
+            },
+            "content": {"repeats": True, "join": " "},
+        },
+    }
+    tokenizer = FakeTokenizer(template, prefix="<assistant>")
+
+    parser = ResponseTemplateParser(tokenizer, TOOLS, response_template=template)
+    assert parser.parse(text, request())[:2] == expected
+    parser = ResponseTemplateParser(tokenizer, TOOLS, response_template=template)
+    assert collect_stream(parser, text, request(), chunk_size)[:2] == expected
+
+
+def test_reasoning_content_and_thinking_alias_are_exclusive():
+    template = deepcopy(GEMMA4_RESPONSE_TEMPLATE)
+    template["fields"]["reasoning_content"] = {"open": "<think>", "close": "</think>"}
+
+    with pytest.raises(ValueError, match="legacy alias"):
+        ResponseTemplateParser(
+            FakeTokenizer(template),
+            TOOLS,
+            response_template=template,
+        )
+
+
 def test_separate_parse_calls_use_distinct_tool_call_ids():
     parser = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
