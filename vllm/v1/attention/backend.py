@@ -897,6 +897,10 @@ class AttentionImplBase(ABC, Generic[T]):
     def prepare_for_batch(self, attn_metadata: T | None) -> None:
         """Prepare implementation-specific state for the current batch."""
 
+    def fused_output_gate_supported(self) -> bool:
+        """Whether forward() accepts output_gate, writing out * sigmoid(gate)."""
+        return False
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""

@@ -454,6 +454,7 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
+        self.fuse_output_gate = self.impl.fused_output_gate_supported()
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
@@ -523,9 +524,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
+        output_gate: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """The KV cache is stored inside this class and is accessed via
-        `self.kv_cache`.
+        `self.kv_cache`. With `output_gate`, returns attention * sigmoid(gate).
 
         Attention metadata (`attn_metadata`) is set using a context manager in
         the model runner's `execute_model` method. It is accessed via forward
@@ -568,6 +570,10 @@ class Attention(nn.Module, AttentionLayerBase):
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
         kv_cache_dummy_dep = None
+        fused_gate = None
+        if output_gate is not None and self.fuse_output_gate:
+            fused_gate = output_gate.view(-1, self.num_heads, self.head_size_v)
+            output_gate = None
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.
             if (
@@ -586,6 +592,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 output,
                 self.layer_name,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_gate=fused_gate,
             )
         else:
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -606,7 +613,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 output,
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                output_gate=fused_gate,
             )
+        if output_gate is not None:
+            gate = output_gate.view(-1, self.num_heads, self.head_size_v)
+            output = output * torch.sigmoid(gate)
         return output.view(-1, hidden_size)
 
     def extra_repr(self) -> str:
@@ -808,6 +819,7 @@ def unified_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
+    output_gate: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -816,6 +828,7 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
+    gate_kwargs = {} if output_gate is None else {"output_gate": output_gate}
     self.impl.forward(
         self,
         query,
@@ -826,6 +839,7 @@ def unified_attention_with_output(
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
+        **gate_kwargs,
     )
 
 

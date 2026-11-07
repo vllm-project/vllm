@@ -1537,68 +1537,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     v_descale=v_descale,
                 )
             elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                _, num_heads, head_size = query.shape
-                num_blocks, block_size, num_kv_heads, _ = key_cache.shape
-                x = 16 // key_cache.element_size()
-                new_key_cache = key_cache.reshape(
-                    num_blocks, num_kv_heads, head_size // x, block_size, x
-                )
-                new_value_cache = value_cache.reshape(
-                    num_blocks, num_kv_heads, block_size // x, head_size, x
-                )
-
-                # This kernel derives block addresses arithmetically, so it
-                # only reads the right bytes when each side is a dense
-                # plane of pages.
-                assert new_key_cache.stride(0) == (
-                    num_kv_heads * head_size * block_size
-                ), (
-                    "paged_attention_common needs the K/V sides as dense "
-                    "planes; the resolved KV cache layout interleaves them "
-                    "within a block."
-                )
-                num_seqs = attn_metadata.seq_lens.shape[0]
-                max_num_partitions = (
-                    attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
-                ) // _PARTITION_SIZE_ROCM
-                tmp_out = torch.empty(
-                    (num_seqs, num_heads, max_num_partitions, head_size),
-                    dtype=query.dtype,
-                    device=query.device,
-                )
-                exp_sums = torch.empty(
-                    (num_seqs, num_heads, max_num_partitions),
-                    dtype=torch.float32,
-                    device=query.device,
-                )
-                max_logits = torch.empty_like(exp_sums)
-                # asm indexes this layer's dense scale buffer from build();
-                # the HIP kernel reads the per-tensor scale directly.
-                k_qscale_asm = v_qscale_asm = None
-                if attn_metadata.k_scale is not None:
-                    assert attn_metadata.v_scale is not None
-                    k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
-                    v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
-                rocm_aiter_ops.paged_attention_common(
-                    Q=query[:num_decode_tokens],
-                    K=new_key_cache,
-                    V=new_value_cache,
-                    tmp_out=tmp_out,
-                    max_logits=max_logits,
-                    exp_sums=exp_sums,
-                    max_seq_len=attn_metadata.max_seq_len,
-                    block_tables=attn_metadata.block_table[:num_decodes],
-                    context_lens=attn_metadata.seq_lens[:num_decodes],
-                    block_tables_stride0=attn_metadata.block_table[:num_decodes].stride(
-                        0
-                    ),
-                    scale=self.scale,
-                    K_QScale_hip=layer._k_scale,
-                    V_QScale_hip=layer._v_scale,
-                    K_QScale_asm=k_qscale_asm,
-                    V_QScale_asm=v_qscale_asm,
-                    out_=output[:num_decode_tokens],
-                    kv_cache_dtype=self.kv_cache_dtype,
+                self._decode_shuffle_layout(
+                    layer,
+                    query,
+                    key_cache,
+                    value_cache,
+                    output,
+                    attn_metadata,
+                    num_decodes,
+                    num_decode_tokens,
                 )
             else:
                 _, num_heads, head_size = query.shape
@@ -1652,6 +1599,77 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 )
 
         return output
+
+    def _decode_shuffle_layout(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: AiterFlashAttentionMetadata,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> None:
+        _, num_heads, head_size = query.shape
+        num_blocks, block_size, num_kv_heads, _ = key_cache.shape
+        x = 16 // key_cache.element_size()
+        new_key_cache = key_cache.reshape(
+            num_blocks, num_kv_heads, head_size // x, block_size, x
+        )
+        new_value_cache = value_cache.reshape(
+            num_blocks, num_kv_heads, block_size // x, head_size, x
+        )
+
+        # This kernel derives block addresses arithmetically, so it
+        # only reads the right bytes when each side is a dense
+        # plane of pages.
+        assert new_key_cache.stride(0) == (num_kv_heads * head_size * block_size), (
+            "paged_attention_common needs the K/V sides as dense "
+            "planes; the resolved KV cache layout interleaves them "
+            "within a block."
+        )
+        num_seqs = attn_metadata.seq_lens.shape[0]
+        max_num_partitions = (
+            attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
+        ) // _PARTITION_SIZE_ROCM
+        tmp_out = torch.empty(
+            (num_seqs, num_heads, max_num_partitions, head_size),
+            dtype=query.dtype,
+            device=query.device,
+        )
+        exp_sums = torch.empty(
+            (num_seqs, num_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=query.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+        # asm indexes this layer's dense scale buffer from build();
+        # the HIP kernel reads the per-tensor scale directly.
+        k_qscale_asm = v_qscale_asm = None
+        if attn_metadata.k_scale is not None:
+            assert attn_metadata.v_scale is not None
+            k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
+            v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
+        rocm_aiter_ops.paged_attention_common(
+            Q=query[:num_decode_tokens],
+            K=new_key_cache,
+            V=new_value_cache,
+            tmp_out=tmp_out,
+            max_logits=max_logits,
+            exp_sums=exp_sums,
+            max_seq_len=attn_metadata.max_seq_len,
+            block_tables=attn_metadata.block_table[:num_decodes],
+            context_lens=attn_metadata.seq_lens[:num_decodes],
+            block_tables_stride0=attn_metadata.block_table[:num_decodes].stride(0),
+            scale=self.scale,
+            K_QScale_hip=layer._k_scale,
+            V_QScale_hip=layer._v_scale,
+            K_QScale_asm=k_qscale_asm,
+            V_QScale_asm=v_qscale_asm,
+            out_=output[:num_decode_tokens],
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor

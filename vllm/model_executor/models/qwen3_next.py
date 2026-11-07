@@ -409,12 +409,14 @@ class Qwen3NextAttention(nn.Module):
         self,
         qkv: torch.Tensor,
         positions: torch.Tensor,
+        flat_gate: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
         split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
-        gating is disabled.
+        gating is disabled. With ``flat_gate=False`` the eager path returns
+        the gate as a [T, H, D] view instead of a flattened copy.
         """
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(
@@ -453,7 +455,8 @@ class Qwen3NextAttention(nn.Module):
             q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
             q, gate = torch.chunk(q_gate, 2, dim=-1)
             q = q.reshape(*orig_shape, -1)
-            gate = gate.reshape(*orig_shape, -1)
+            if flat_gate:
+                gate = gate.reshape(*orig_shape, -1)
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             gate = None
@@ -473,12 +476,14 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        attn_output = self.attn(q, k, v)
-        if gate is not None:
-            if not self.use_fused_output_gate:
-                attn_output = attn_output * torch.sigmoid(gate)
-            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+        q, k, v, gate = self._project_qkv_gate(
+            qkv, positions, flat_gate=self.use_fused_output_gate
+        )
+        if gate is None or not self.use_fused_output_gate:
+            attn_output = self.attn(q, k, v, output_gate=gate)
+        else:
+            attn_output = self.attn(q, k, v)
+            if get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
                 # Sigmoid gate, fused with o_proj's static FP8 input quant.
                 scale = self.o_proj.input_scale
                 attn_output = QuantizedActivation(

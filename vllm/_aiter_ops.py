@@ -2912,6 +2912,17 @@ class rocm_aiter_ops:
 
         return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def pa_decode_gluon_supports_output_gate(cls) -> bool:
+        """Probe whether the installed aiter pa_decode_gluon accepts `output_gate`."""
+        import inspect
+
+        from aiter.ops.triton.gluon.pa_decode_gluon import pa_decode_gluon
+
+        return "output_gate" in inspect.signature(pa_decode_gluon).parameters
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
