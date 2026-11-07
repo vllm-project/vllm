@@ -1111,6 +1111,10 @@ class FusedMoEParallelConfig:
         return self.all2all_backend == "passthrough"
 
     @property
+    def use_alltoall_batched_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "alltoall_batched"
+
+    @property
     def use_mori_epv1_kernels(self):
         if self.all2all_backend == "mori":
             return self.use_all2all_kernels and not self.mori_ep_v2
@@ -1475,6 +1479,7 @@ class FusedMoEConfig:
         if (
             conf.use_deepep_ll_kernels
             or conf.use_nixl_ep_kernels
+            or conf.use_alltoall_batched_kernels
             or self.moe_backend == "batched_triton"
         ):
             return FusedMoEActivationFormat.BatchedExperts
@@ -1640,6 +1645,10 @@ class FusedMoEConfig:
     @property
     def use_ag_rs_all2all_kernels(self):
         return self.moe_parallel_config.use_ag_rs_all2all_kernels
+
+    @property
+    def use_alltoall_batched_kernels(self):
+        return self.moe_parallel_config.use_alltoall_batched_kernels
 
     @property
     def use_nixl_ep_kernels(self):
