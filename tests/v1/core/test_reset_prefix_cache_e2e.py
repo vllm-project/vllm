@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
 PROMPTS = [
@@ -11,7 +13,8 @@ PROMPTS = [
 ]
 
 
-def test_reset_prefix_cache_e2e(monkeypatch):
+@pytest.mark.parametrize("keep_running_requests", [False, True])
+def test_reset_prefix_cache_e2e(monkeypatch, keep_running_requests: bool):
     # "spawn" is required for test to be deterministic
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     engine_args = EngineArgs(
@@ -48,7 +51,10 @@ def test_reset_prefix_cache_e2e(monkeypatch):
     preempted_results = {}
     while engine.has_unfinished_requests():
         if step_id == 10:
-            engine.reset_prefix_cache(reset_running_requests=True)
+            assert engine.reset_prefix_cache(
+                reset_running_requests=not keep_running_requests,
+                keep_running_requests=keep_running_requests,
+            )
 
         request_outputs = engine.step()
 
@@ -67,3 +73,14 @@ def test_reset_prefix_cache_e2e(monkeypatch):
             f"preempted_results['preempted_{i}'].outputs[0].text="
             f"{preempted_results['preempted_' + str(i)].outputs[0].text}"
         )
+
+    if keep_running_requests:
+        # Prefixes cached before the reset can no longer be hit.
+        engine.add_request("after_reset", PROMPTS[3], sampling_params)
+        after_reset_results = []
+        while engine.has_unfinished_requests():
+            for request_output in engine.step():
+                if request_output.finished:
+                    after_reset_results.append(request_output)
+        assert len(after_reset_results) == 1
+        assert after_reset_results[0].num_cached_tokens == 0

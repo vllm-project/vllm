@@ -219,7 +219,10 @@ class SchedulerInterface(ABC):
 
     @abstractmethod
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         """Reset the prefix cache for KV cache.
 
@@ -231,6 +234,11 @@ class SchedulerInterface(ABC):
                 will only reset the KV prefix cache when there is no running request
                 taking KV cache.
             reset_connector: If True, also reset any KV connector state.
+            keep_running_requests: If True, reset even while requests are
+                running, without preempting them. Their blocks stay allocated
+                but can no longer be hit, and blocks they fill afterwards are
+                cached as usual. Not suitable after weight updates. Cannot be
+                combined with reset_running_requests.
 
         """
         raise NotImplementedError
