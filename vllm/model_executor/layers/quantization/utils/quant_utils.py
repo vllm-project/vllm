@@ -315,6 +315,9 @@ kInt8Dynamic32Sym = QuantKey(torch.int8, kDynamic32Scale, symmetric=True)
 kLutBStaticCodebook = ScaleDesc(torch.float8_e4m3fn, True, GroupShape(8, 64))
 kLutBStatic = QuantKey(torch.uint8, kLutBStaticCodebook, symmetric=True)
 
+# NF12 uses a per-matrix exponent base rather than a multiplicative scale.
+kNf12 = QuantKey(torch.bfloat16, ScaleDesc(torch.uint8, True, GroupShape.PER_TENSOR))
+
 # INT4 W4A8 quantization keys
 
 # For group-wise quantization (e.g., group_size=128)

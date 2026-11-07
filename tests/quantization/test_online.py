@@ -2440,6 +2440,151 @@ def test_online_quantization_loads_real_weights(
 
 
 @pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="NF12 requires CUDA SM80 or newer.",
+)
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B", GRANITE_MODEL_NAME])
+def test_online_nf12_generation_matches_bf16(
+    model_name, vllm_runner, monkeypatch
+) -> None:
+    """Compare dense and MoE generation log probabilities with BF16."""
+    from tests.models.utils import check_logprobs_close
+    from vllm.model_executor.layers.quantization.online.nf12 import (
+        Nf12OnlineLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.nf12_moe import (
+        Nf12OnlineMoEMethod,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    prompts = ["The capital of France is", "One plus one equals"]
+    runner_kwargs = dict(
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=64,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.4,
+        kv_cache_memory_bytes=256 * 1024**2,
+        enable_prefix_caching=False,
+        seed=0,
+    )
+    with vllm_runner(model_name, **runner_kwargs) as llm:
+        reference = llm.generate_greedy_logprobs(prompts, max_tokens=8, num_logprobs=5)
+
+    with vllm_runner(model_name, quantization="nf12", **runner_kwargs) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, Nf12OnlineLinearMethod
+            )
+            assert model.lm_head.weight.dtype == torch.bfloat16
+            assert model.model.embed_tokens.weight.dtype == torch.bfloat16
+            if model_name == GRANITE_MODEL_NAME:
+                moe = layer.block_sparse_moe
+                assert isinstance(moe.experts._quant_method, Nf12OnlineMoEMethod)
+                assert isinstance(moe.gate.quant_method, UnquantizedLinearMethod)
+
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy_logprobs(prompts, max_tokens=8, num_logprobs=5)
+
+    check_logprobs_close(
+        outputs_0_lst=reference,
+        outputs_1_lst=outputs,
+        name_0="BF16",
+        name_1="NF12",
+        always_check_logprobs=True,
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="NF12 requires CUDA SM80 or newer.",
+)
+@pytest.mark.parametrize("output_size,input_size", [(64, 64), (65, 64), (64, 65)])
+@torch.inference_mode()
+def test_online_nf12_linear_matches_exact_bf16(
+    default_vllm_config, dist_init, output_size, input_size
+) -> None:
+    """Aligned weights encode; unsupported shapes keep the BF16 calculation."""
+    from vllm.model_executor.layers.quantization.online.nf12 import (
+        Nf12OnlineLinearMethod,
+    )
+
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    config = OnlineQuantizationConfig(quant_config_args(linear="nf12"))
+    with set_default_torch_dtype(torch.bfloat16), torch.device("cuda"):
+        layer = ColumnParallelLinear(
+            input_size,
+            output_size,
+            bias=True,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            disable_tp=True,
+        )
+        weight = (
+            torch.arange(output_size * input_size).reshape(output_size, input_size) % 3
+            - 1
+        ).to(torch.bfloat16) / 8
+        bias = (torch.arange(output_size) % 3).to(torch.bfloat16) / 8
+        x = (torch.arange(3 * input_size).reshape(3, input_size) % 3 - 1).to(
+            torch.bfloat16
+        ) / 8
+        layer.weight.weight_loader(layer.weight, weight)
+        layer.bias.weight_loader(layer.bias, bias)
+        layer.quant_method.process_weights_after_loading(layer)
+    if (output_size, input_size) == (64, 64):
+        assert isinstance(layer.quant_method, Nf12OnlineLinearMethod)
+        assert layer.weight.dtype != torch.bfloat16
+    else:
+        assert layer.weight.dtype == torch.bfloat16
+        assert torch.equal(layer.weight, weight)
+    expected = torch.nn.functional.linear(x, weight, bias)
+    actual, _ = layer(x)
+    # Products and sums of these small dyadic values are exactly representable.
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="NF12 requires CUDA SM80 or newer.",
+)
+@torch.inference_mode()
+def test_online_nf12_preserves_fp32_router(default_vllm_config, dist_init) -> None:
+    """An NF12-compatible gate shape still uses the original FP32 logits path."""
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    config = OnlineQuantizationConfig(quant_config_args(linear="nf12"))
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    with torch.device("cuda"):
+        reference = GateLinear(
+            64,
+            16,
+            params_dtype=torch.bfloat16,
+            out_dtype=torch.float32,
+            return_bias=False,
+        )
+        layer = GateLinear(
+            64,
+            16,
+            params_dtype=torch.bfloat16,
+            out_dtype=torch.float32,
+            quant_config=config,
+            return_bias=False,
+        )
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        weight = torch.randn(16, 64, dtype=torch.bfloat16, generator=generator)
+        x = torch.randn(3, 64, dtype=torch.bfloat16, generator=generator)
+    for gate in (reference, layer):
+        default_weight_loader(gate.weight, weight)
+        gate.quant_method.process_weights_after_loading(gate)
+    actual = layer(x)
+    assert isinstance(layer.quant_method, UnquantizedLinearMethod)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, reference(x), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )

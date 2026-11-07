@@ -1,6 +1,6 @@
 # Quantization
 
-Quantization trades off model precision for smaller memory footprint, allowing large models to be run on a wider range of devices.
+Most quantization formats trade model precision for a smaller memory footprint, allowing large models to run on a wider range of devices. [NF12](online.md#nf12) instead losslessly compresses BF16 weights for CUDA inference.
 
 !!! tip
     To get started with quantization, see [LLM Compressor](llm_compressor/README.md), a library for optimizing models for deployment with vLLM that supports FP8, INT8, INT4, and other quantization formats.
@@ -18,6 +18,7 @@ The following are the supported quantization formats for vLLM:
     - [INT8 W8A8](llm_compressor/int8_w8a8.md)
 - [NVIDIA Model Optimizer](modelopt.md)
 - [Online Quantization](online.md)
+    - [NF12 lossless BF16 weight encoding](online.md#nf12)
 - [AMD Quark](quark.md)
 - [Quantized KV Cache](quantized_kvcache.md)
 - [TorchAO](torchao.md)

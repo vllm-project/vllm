@@ -93,6 +93,11 @@ steps:
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - tests/quantization/test_keep_param_objects.py
+  - tests/quantization/test_online.py
+  - vllm/config/quantization.py
+  - vllm/model_executor/layers/quantization/__init__.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
+  - requirements/cuda.txt
   - tests/model_executor/model_loader/test_reload_moe_kernels.py
   - tests/benchmarks/test_forward_cli.py
   - vllm/benchmarks/forward/
@@ -119,6 +124,7 @@ steps:
       tests/quantization/test_keep_param_objects.py
       tests/model_executor/model_loader/test_reload_moe_kernels.py
       tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
+    - pytest -v -s tests/quantization/test_online.py -k nf12
   mirror:
     amd:
       automatic_shard: true

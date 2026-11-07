@@ -31,3 +31,6 @@ tokenspeed-mla==2.0.3; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
 humming-kernels[cu13]==0.1.19
+
+# Lossless BF16 weight packing and kernels
+nf12==1.0.0
