@@ -282,7 +282,10 @@ def matmul_descriptor_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -295,7 +298,7 @@ def matmul_persistent(
     K, N = b.shape
     dtype = a.dtype
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=a.device, dtype=out_dtype or dtype)
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -778,6 +781,24 @@ def mm_batch_invariant(a, b, bias=None):
     return matmul_persistent(a, b, bias=bias)
 
 
+def mm_dtype_batch_invariant(a, b, out_dtype, *, out=None):
+    # Same dtype checks as ATen's CUDA mm.dtype / mm.dtype_out.
+    if a.dtype != b.dtype:
+        raise RuntimeError("input dtypes must be the same")
+    if out_dtype != a.dtype and not (
+        out_dtype == torch.float32 and a.dtype in (torch.float16, torch.bfloat16)
+    ):
+        raise RuntimeError(
+            "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs"
+        )
+    if out is not None and out.dtype != out_dtype:
+        raise RuntimeError(
+            "out_dtype must be the same as the dtype of the provided out tensor"
+        )
+    result = matmul_persistent(a, b, out_dtype=out_dtype)
+    return result if out is None else out.copy_(result)
+
+
 def matmul_batch_invariant(a, b, *, out=None):
     # torch.matmul can handle various dimensions
     # For 2D x 2D, it's the same as mm
@@ -1132,6 +1153,67 @@ def linear_batch_invariant(input, weight, bias=None):
     return output.view(*input.shape[:-1], output.shape[-1])
 
 
+def dequantize_gptq_weight(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    num_bits: int,
+    group_size: int,
+    zero_bias: int,
+) -> torch.Tensor:
+    """Unpack a symmetric GPTQ weight (no act-order) to ``scales.dtype``.
+
+    ``qweight`` is in the checkpoint layout: ``[K // pack_factor, N]`` int32
+    with ``pack_factor`` consecutive input rows packed into each element,
+    lowest bits first. Returns ``(q - zero_bias) * scale`` of shape ``[K, N]``.
+    """
+    packed_rows, output_size = qweight.shape
+    pack_factor = 32 // num_bits
+    input_size = packed_rows * pack_factor
+    if group_size == -1:
+        group_size = input_size
+    num_groups = input_size // group_size
+    assert scales.shape == (num_groups, output_size), (
+        f"Unexpected GPTQ scales shape {tuple(scales.shape)} for "
+        f"K={input_size}, N={output_size}, group_size={group_size}"
+    )
+
+    shifts = (
+        torch.arange(pack_factor, device=qweight.device, dtype=torch.int32) * num_bits
+    )
+    mask = (1 << num_bits) - 1
+    unpacked = (qweight.unsqueeze(1) >> shifts.view(1, -1, 1)) & mask
+    weight = unpacked.to(scales.dtype) - zero_bias
+    weight = weight.view(num_groups, group_size, output_size) * scales.unsqueeze(1)
+    return weight.view(input_size, output_size)
+
+
+def gptq_linear_batch_invariant(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    num_bits: int,
+    group_size: int,
+    zero_bias: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """GPTQ linear without Marlin: the Marlin GEMM picks its tiling and K-split
+    from the number of tokens, so dequantize the checkpoint weight and use the
+    batch-invariant matmul instead."""
+    weight = dequantize_gptq_weight(
+        qweight,
+        scales,
+        num_bits=num_bits,
+        group_size=group_size,
+        zero_bias=zero_bias,
+    )
+    output = matmul_batch_invariant(x, weight.to(x.dtype))
+    if bias is not None:
+        output.add_(bias)
+    return output
+
+
 @triton.jit
 def _fixed_order_sum_kernel(
     src_ptr,  # (WORLD_SIZE, numel) gathered contributions, rank-major
@@ -1322,6 +1404,10 @@ def enable_batch_invariant_mode():
             # invariant; install the triton persistent matmul overrides for
             # mm/addmm/matmul/linear.
             _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::mm.dtype", mm_dtype_batch_invariant, key)
+            _batch_invariant_LIB.impl(
+                "aten::mm.dtype_out", mm_dtype_batch_invariant, key
+            )
             _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::mm.out", mm_out_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::addmm.out", addmm_out_batch_invariant, key)
@@ -1390,9 +1476,6 @@ def enable_batch_invariant_mode():
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-    # Only the 1-stage kernel has a size- and rank-independent reduction order.
-    os.environ["VLLM_CUSTOM_ALLREDUCE_ALGO"] = "1stage"
-
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
     if current_platform.is_rocm():
@@ -1424,6 +1507,10 @@ def override_envs_for_invariance():
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
+    import torch._inductor.config as inductor_config
+
+    if hasattr(inductor_config, "batch_invariant"):
+        inductor_config.batch_invariant = True
 
 
 def init_batch_invariance():

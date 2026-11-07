@@ -7,16 +7,22 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
+from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
+from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
     NgramHashState,
     ParallelEngramEmbedding,
 )
+from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _reference_engram_post_wkv(
@@ -51,7 +57,9 @@ def _reference_engram_post_wkv(
     return (h + gate.unsqueeze(-1) * value.unsqueeze(-2)).to(hidden_states.dtype)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "num_tokens,num_kv_tokens,hc_mult,dim,tp_size,tp_rank,use_mask",
     [
@@ -144,6 +152,193 @@ def test_fused_engram_post_wkv_matches_reference(
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU required")
+@pytest.mark.parametrize(
+    "num_tokens,hc_mult,dim,tp_size,use_mask",
+    [
+        (5, 4, 5120, 4, True),
+        (3, 4, 5120, 2, False),
+        (1, 4, 96, 4, False),
+        (7, 2, 96, 2, True),
+        (0, 4, 96, 4, False),
+    ],
+)
+def test_sharded_engram_post_wkv_matches_reference(
+    num_tokens, hc_mult, dim, tp_size, use_mask, monkeypatch
+):
+    """Each rank's dim slice of the keys and value, exchanged as value slices
+    plus gate partial sums, gives the full-projection update on every rank."""
+    torch.manual_seed(0)
+    device = "cuda"
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device=device
+    )
+    kv = torch.randn(
+        num_tokens, (hc_mult + 1) * dim, dtype=torch.bfloat16, device=device
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    token_mask = None
+    if use_mask:
+        token_mask = torch.arange(num_tokens, device=device) % 2 == 0
+    eps = 1e-20
+    clamp_value = 1e-6
+    expected = _reference_engram_post_wkv(
+        hidden_states, kv, q_weight, k_weight, token_mask, eps, clamp_value, 0
+    )
+
+    module = RocmEngram.__new__(RocmEngram)
+    torch.nn.Module.__init__(module)
+    module.dim = dim
+    module.hc_mult = hc_mult
+    module.eps = eps
+    module.clamp_value = clamp_value
+    module.kv_shards = tp_size
+    module.q_weight = torch.nn.Parameter(q_weight, requires_grad=False)
+    module.k_weight = torch.nn.Parameter(k_weight, requires_grad=False)
+
+    # MergedColumnParallelLinear's layout: rank r holds columns
+    # [r * width, (r + 1) * width) of every key and of the value.
+    width = dim // tp_size
+    parts = kv.view(num_tokens, hc_mult + 1, tp_size, width)
+    local_kv = [
+        parts[:, :, rank].reshape(num_tokens, (hc_mult + 1) * width)
+        for rank in range(tp_size)
+    ]
+
+    sent: list[torch.Tensor] = []
+
+    def record(x, dim):
+        assert dim == 0
+        sent.append(x.clone())
+        return torch.cat([x] * tp_size)
+
+    def exchange(x, dim):
+        assert dim == 0 and len(sent) == tp_size
+        return torch.cat(sent)
+
+    for gather in (record, exchange):
+        monkeypatch.setattr(rocm_engram_ops, "tensor_model_parallel_all_gather", gather)
+        for rank in range(tp_size):
+            monkeypatch.setattr(
+                rocm_engram_ops,
+                "get_tensor_model_parallel_rank",
+                lambda rank=rank: rank,
+            )
+            actual = module._post_wkv(
+                hidden_states, local_kv[rank], token_mask, num_tokens
+            )
+            if gather is exchange:
+                assert actual.shape == hidden_states.shape
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+def _checkpoint_tensor(param: torch.Tensor) -> torch.Tensor:
+    if param.dtype == torch.float8_e4m3fn:
+        return (torch.randn(param.shape) * 4).to(param.dtype)
+    if param.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        return torch.randint(118, 124, param.shape, dtype=torch.uint8).view(param.dtype)
+    return (torch.randn(param.shape) * 0.05).to(param.dtype)
+
+
+@pytest.mark.skipif(
+    not rocm_engram_ops._shards_engram_gate(),
+    reason="sharded Engram gate platforms only",
+)
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_sharded_engram_loads_and_matches_tp1(tp_size, quantized, monkeypatch):
+    """The model's `wkv`, loaded from one fused checkpoint weight on each rank,
+    lays out the columns the gate kernels read and matches TP1."""
+    num_tokens, hc_mult, dim = 6, 4, 256
+    config = SimpleNamespace(hidden_size=dim, hc_mult=hc_mult, rms_norm_eps=1e-6)
+    layout = SimpleNamespace(max_ngram_size=3, n_heads=2, head_dim=64)
+    n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
+    quant_config = None
+    if quantized:
+        quant_config = DeepseekV4FP8Config.from_config(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [32, 32],
+                "scale_fmt": "ue8m0",
+            }
+        )
+
+    torch.manual_seed(0)
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device="cuda"
+    )
+    rows = torch.randn(
+        num_tokens, n_hash_cols, layout.head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    hash_ids = torch.zeros(num_tokens, n_hash_cols, dtype=torch.int32, device="cuda")
+    token_mask = torch.arange(num_tokens, device="cuda") % 3 != 1
+
+    monkeypatch.setattr(RocmEngram, "_create_embedding", lambda *args: None)
+    monkeypatch.setattr(RocmEngram, "_init_staging", lambda *args: None)
+    monkeypatch.setattr(RocmEngram, "embed", lambda self, hash_ids: rows)
+
+    def set_rank(size, rank):
+        tp = SimpleNamespace(world_size=size, rank_in_group=rank)
+        monkeypatch.setattr(parallel_state, "_TP", tp)
+
+    def build(size, rank, checkpoint=None):
+        set_rank(size, rank)
+        with (
+            set_current_vllm_config(VllmConfig()),
+            set_default_torch_dtype(torch.bfloat16),
+            torch.device("cuda"),
+        ):
+            engram = RocmEngram(config, quant_config, layout, 0, False, "engram")
+        params = dict(engram.wkv.named_parameters())
+        if checkpoint is None:
+            checkpoint = {name: _checkpoint_tensor(p) for name, p in params.items()}
+        for name, param in params.items():
+            param.weight_loader(param, checkpoint[name].cuda())
+        engram.wkv.quant_method.process_weights_after_loading(engram.wkv)
+        engram.q_weight.data.copy_(q_weight)
+        engram.k_weight.data.copy_(k_weight)
+        return engram, checkpoint
+
+    reference, checkpoint = build(1, 0)
+    assert reference.kv_shards == 1
+    expected_kv = reference.wkv(rows.flatten(-2))
+    expected = reference(hidden_states, hash_ids, token_mask)
+
+    width = dim // tp_size
+    parts = expected_kv.view(num_tokens, hc_mult + 1, tp_size, width)
+    ranks = [build(tp_size, rank, checkpoint)[0] for rank in range(tp_size)]
+    for rank, engram in enumerate(ranks):
+        assert engram.kv_shards == tp_size
+        set_rank(tp_size, rank)
+        torch.testing.assert_close(
+            engram.wkv(rows.flatten(-2)),
+            parts[:, :, rank].flatten(1),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+
+    sent: list[torch.Tensor] = []
+
+    def record(x, dim):
+        sent.append(x.clone())
+        return torch.cat([x] * tp_size)
+
+    def exchange(x, dim):
+        return torch.cat(sent)
+
+    for gather in (record, exchange):
+        monkeypatch.setattr(rocm_engram_ops, "tensor_model_parallel_all_gather", gather)
+        for rank, engram in enumerate(ranks):
+            set_rank(tp_size, rank)
+            actual = engram(hidden_states, hash_ids, token_mask)
+            if gather is exchange:
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
 def _hash_state(use_slot_cache: bool) -> NgramHashState:
     state = NgramHashState.__new__(NgramHashState)
     torch.nn.Module.__init__(state)
@@ -184,6 +379,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(4, 64, 1)
     assert state.ensure_cache()
     profiling_cache = state._cache
+    assert profiling_cache is not None
     profiling_cache.fill_(7)
     assert state.ensure_cache()
     assert state._cache is profiling_cache
@@ -192,6 +388,7 @@ def test_engram_cache_follows_kv_cache_binding(num_blocks):
     state.swa_cache_module.kv_cache = torch.empty(num_blocks, 64, 1)
     assert state.ensure_cache()
     assert state._cache is not profiling_cache
+    assert state._cache is not None
     assert state._cache.shape == (num_blocks * 64,)
     assert torch.count_nonzero(state._cache) == 0
 
@@ -249,7 +446,9 @@ def _reference_hashes(
     return torch.tensor(result, dtype=torch.int32)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("query_len", [1, 17, 257])
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided_slots", [False, True])
@@ -431,7 +630,9 @@ def _hash_ids(requests, tables_meta, block_table, cache=None, capture=False):
     return [out[a:b] for a, b in zip(starts, starts[1:])]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("runner", ["v2_window_only", "v1_prompt_window_plus_cache"])
 @pytest.mark.parametrize("capture", [False, True])
 def test_lookback_window_reproduces_single_instance(runner, capture):
@@ -501,7 +702,9 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
     assert not torch.equal(unseeded[0][0], reference[0][len(prompts[0])])
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("pcp", [False, True])
 def test_v2_model_state_gathers_lookback_window(pcp):
     """The window is gathered on device from the runner's token history."""
@@ -535,6 +738,7 @@ def test_v2_model_state_gathers_lookback_window(pcp):
         positions=torch.tensor([8, 0, 6, 5] if pcp else [8, 0, 6], device="cuda"),
     )
     window = state.prepare_inputs(input_batch, req_states)["lookback_token_ids"]
+    assert window is not None
     expected = [
         [22, 21, 16],
         [-1, -1, -1],
@@ -571,6 +775,7 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer.head_start = 0
     layer.cpu_offload = cpu_offload
     layer.dp_shared_memory = False
+    layer.peer_rows = 0
     layer.part_num_embeddings = rows
     # A window strictly inside the table, so unowned rows are exercised too.
     layer.vocab_start_idx, layer.vocab_end_idx = rows // 4, rows // 4 + rows // 2
@@ -595,6 +800,25 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
+)
+def test_engram_meta_initialization_does_not_allocate_host_tables(
+    dist_init, cpu_offload, use_thp
+):
+    """Encoder-only language-model placeholders must not allocate host storage."""
+    with torch.device("meta"):
+        layer = ParallelEngramEmbedding(
+            36, 64, (17, 19), cpu_offload=cpu_offload, use_thp=use_thp
+        )
+
+    assert layer.weight.is_meta and layer.weight_scale_inv.is_meta
+    assert layer.weight.shape == (36, 64)
+    assert layer.weight_scale_inv.shape == (36, 2)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize(
     "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
 )
 def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
@@ -605,7 +829,8 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
     monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: dp_size)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     with pytest.raises(AssertionError, match="ranks without hash heads"):
-        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
+        # GPU tables at TP1 shard rows across DP instead of heads.
+        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads, cpu_offload=True)
 
 
 @pytest.mark.skipif(
@@ -696,7 +921,9 @@ def test_engram_head_shards_reconstruct_checkpoint(
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_engram_lookup_reuses_jit_across_token_shapes():
     """Runtime token counts and launch grids must share one JIT variant."""
     layer = _make_embedding(cpu_offload=False)
@@ -752,9 +979,12 @@ def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens
     assert torch.equal(out, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+@pytest.mark.parametrize("use_thp", [False, True])
 @pytest.mark.parametrize("register_fails", [False, True])
-def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
+def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp):
     """Huge-page tables and their pinned fallback both give exact lookup rows."""
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
@@ -765,13 +995,14 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
     rows, dim = 32769, 64
     with torch.device("cuda"):
         layer = ParallelEngramEmbedding(
-            rows, dim, (rows,), cpu_offload=True, use_thp=True
+            rows, dim, (rows,), cpu_offload=True, use_thp=use_thp
         )
     assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
     same_storage = layer.weight.untyped_storage().data_ptr() == (
         layer.weight_scale_inv.untyped_storage().data_ptr()
     )
-    assert same_storage != register_fails
+    registered = (use_thp or current_platform.is_rocm()) and not register_fails
+    assert same_storage == registered
     layer.weight.data.fill_(2)
     layer.weight_scale_inv.data.fill_(127)
     ids = torch.tensor(
@@ -785,7 +1016,7 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_shared_prefetch_stream_waits_per_layer():
+def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
     """Consuming a layer must not wait for later layers on the shared stream."""
     stream = torch.cuda.Stream()
     modules = []
@@ -801,12 +1032,24 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
         modules.append(module)
     hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
     modules[0].prepare_embeddings(hashes[:, 0])
-    with torch.cuda.stream(stream):
-        torch.cuda._sleep(100_000_000)  # ~50 ms ahead of the second lookup
     modules[1].prepare_embeddings(hashes[:, 1])
-    rows = modules[0].embed(hashes[:, 0])
+
+    # Independent CUDA streams can serialize; check the requested dependency
+    # instead of assuming the second lookup is still running at a given time.
+    waits = []
+    wait_event = torch.cuda.Stream.wait_event
+
+    def record_wait_event(consumer, event):
+        waits.append((consumer, event))
+        return wait_event(consumer, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda.Stream, "wait_event", record_wait_event)
+        rows = modules[0].embed(hashes[:, 0])
+
+    assert modules[0]._prefetch_done is not None
+    assert waits == [(torch.cuda.current_stream(), modules[0]._prefetch_done)]
     torch.cuda.current_stream().synchronize()
-    assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
         layer.weight.cuda(),
@@ -819,7 +1062,9 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
     torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("cpu_offload", [None, False])
 def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
     """Default offload uses pinned storage and the given stream; False uses HBM."""
@@ -865,7 +1110,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         streams.append(torch.cuda.current_stream())
         lookup(ids, out, background=background)
 
-    layer.lookup = track_lookup
+    monkeypatch.setattr(layer, "lookup", track_lookup)
     main = torch.cuda.current_stream()
     ids = torch.randint(
         layer.vocab_start_idx,
@@ -889,7 +1134,9 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         assert streams == [main]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize(
     "cpu_offload,delay",
     [(False, None), (True, None), (True, "producer"), (True, "lookup")],
@@ -1072,7 +1319,9 @@ def _engram_tp_worker(rank, tp_size, port):
 
 
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 def test_engram_head_collectives_survive_graph_breaks():
     """All-gather preserves head order and local SP tokens across graph replay."""
     from vllm.utils.network_utils import get_open_port

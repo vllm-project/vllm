@@ -1,0 +1,244 @@
+meta:
+  title: "MiniMax-M2"
+  slug: "minimax-m2"
+  provider: "MiniMax"
+  description: "MiniMax M2 MoE language model (230B total / 10B active) for coding, agent toolchains, and long-context reasoning — native FP8 checkpoint, with an NVFP4 variant for Blackwell"
+  date_added: 2025-10-26
+  date_updated: 2026-05-11
+  tasks:
+    - text
+  performance_headline: "Open-source MoE with strong SWE-Bench and Terminal-Bench performance, 196K context"
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "MiniMaxAI/MiniMax-M2"
+  min_vllm_version: "0.11.1"
+  architecture: moe
+  parameter_count: "230B"
+  active_parameters: "10B"
+  context_length: 196608
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+dependencies:
+  - note: "Optional: DeepGEMM FP8 MoE kernels for throughput (skip on B200 — known FlashInfer FP8 MoE error)"
+    command: "export VLLM_USE_DEEP_GEMM=1"
+    optional: true
+
+features:
+  tool_calling:
+    description: "MiniMax M2 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "minimax_m2"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "MiniMax M2 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "minimax_m2"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 276
+    description: "Native FP8 checkpoint — 4x H200/H20/H100 or 4x A100/A800 for weights, plus KV cache headroom"
+  nvfp4:
+    model_id: "RedHatAI/MiniMax-M2-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 138
+    description: "NVFP4 (4-bit) quantized weights — requires Blackwell (B200/B300); roughly half the VRAM of the FP8 checkpoint"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    # First launch JIT-compiles AITER kernels (CK FP8 MoE, RMSNorm, activation);
+    # expect a slow cold start on MI300X/MI325X/MI350X/MI355X.
+    extra_args:
+      - "--tensor-parallel-size"
+      - "2"
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+
+strategy_overrides:
+  single_node_tp:
+    # Pure TP=8 fails on the FP8 block-quantized gate_up weights:
+    # intermediate_size / 8 = 192 is not divisible by block_n = 128.
+    # Pin TP=4 on 8-GPU nodes; for full-node utilization use
+    # single_node_tep (TP+EP) or single_node_dep (DP+EP).
+    tp: 4
+
+guide: |
+  ## Overview
+
+  [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) is an advanced MoE language
+  model from [MiniMax](https://www.minimax.io/). Highlights:
+
+  - Superior intelligence — #1 among open-source models globally on math, science, coding, tool use
+  - Advanced coding — multi-file edits, run-fix loops, test-validated repairs (SWE-Bench, Terminal-Bench)
+  - Agent performance — plans and executes complex toolchains across shell, browser, and code
+  - Efficient design — 10B active / 230B total for low latency and high throughput
+  - 196K context length per sequence
+
+  ## Prerequisites
+
+  - **OS:** Linux
+  - **Python:** 3.10 - 3.13
+  - **NVIDIA:** compute capability >= 7.0; ~220 GB for weights + 240 GB per 1M context tokens
+  - **AMD:** MI300X / MI325X / MI350X / MI355X with ROCm 7.0+
+
+  ### Install vLLM (NVIDIA, stable)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (NVIDIA, nightly)
+
+  If you hit corrupted output, upgrade to a nightly after commit
+  `cf3eacfe58fa9e745c2854782ada884a9f992cf7`:
+
+  ```bash
+  uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ### Docker (NVIDIA, dedicated M2 image)
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:minimax27 MiniMaxAI/MiniMax-M2 \
+        --tensor-parallel-size 4 \
+        --tool-call-parser minimax_m2 \
+        --reasoning-parser minimax_m2 \
+        --enable-auto-tool-choice \
+        --trust-remote-code
+  ```
+
+  ## Launching the Server
+
+  ### NVIDIA — TP4 (4x H200/H20/H100 or 4x A100/A800)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2 \
+    --tensor-parallel-size 4 \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice \
+    --trust-remote-code
+  ```
+
+  Pure TP8 is not supported. For >4 GPUs use DP+EP or TP+EP:
+
+  ### TP4+EP (recommended for H100)
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice
+  ```
+
+  ### DP8+EP
+
+  ```bash
+  vllm serve MiniMaxAI/MiniMax-M2 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice
+  ```
+
+  ### AMD ROCm — TP2
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve MiniMaxAI/MiniMax-M2 \
+    --tensor-parallel-size 2 \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2 \
+    --enable-auto-tool-choice \
+    --trust-remote-code
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model MiniMaxAI/MiniMax-M2 \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 2048 \
+    --random-output 1024 \
+    --max-concurrency 10 \
+    --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - **MiniMax QK norm fusion:** Latest vLLM applies the fusion automatically at
+    runtime when the fused CUDA op is available; older vLLM builds used an
+    explicit `fuse_minimax_qk_norm` compile pass.
+  - **Corrupted output on stable release:** Upgrade to a nightly after commit
+    `cf3eacfe58fa9e745c2854782ada884a9f992cf7`.
+  - **DeepGEMM:** vLLM uses DeepGEMM by default; install via
+    [install_deepgemm.sh](https://github.com/vllm-project/vllm/blob/main/tools/install_deepgemm.sh)
+    when missing.
+  - **AITER first launch:** AMD initial launch JIT-compiles CK-based FP8 MoE, RMSNorm,
+    and activation kernels. Subsequent launches use cached kernels.
+
+  ## Quantized Variant (NVFP4)
+
+  [`RedHatAI/MiniMax-M2-NVFP4`](https://huggingface.co/RedHatAI/MiniMax-M2-NVFP4) is an NVFP4 (4-bit)
+  checkpoint — roughly half the VRAM of the native FP8 checkpoint. Select the **nvfp4** variant
+  above (it sets `--kv-cache-dtype fp8`; on vLLM v0.28.0+ the FlashInfer NVFP4 MoE
+  kernels are selected automatically), or pass the repo id
+  directly to `vllm serve`. NVFP4 requires a Blackwell GPU (compute capability 10.0+).
+
+  ## References
+
+  - [Model card](https://huggingface.co/MiniMaxAI/MiniMax-M2)
+  - [NVFP4 variant](https://huggingface.co/RedHatAI/MiniMax-M2-NVFP4)
+  - [MiniMax](https://www.minimax.io/)
+  - [vLLM PR #43410 (automatic MiniMax QK norm fusion)](https://github.com/vllm-project/vllm/pull/43410)

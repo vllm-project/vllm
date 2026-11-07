@@ -1,0 +1,134 @@
+meta:
+  title: "HunyuanOCR"
+  slug: "hunyuan-ocr"
+  provider: "Hunyuan (Tencent)"
+  description: "Tencent Hunyuan end-to-end OCR expert VLM (~1B) for online OCR serving with an OpenAI-compatible API"
+  date_added: 2025-11-25
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Compact 1B end-to-end OCR VLM from the Hunyuan native multimodal family"
+  related_recipes: []
+
+model:
+  model_id: "tencent/HunyuanOCR"
+  min_vllm_version: "0.12.0"
+  architecture: dense
+  parameter_count: "1B"
+  active_parameters: "1B"
+  context_length: 32768
+  base_args:
+    - "--no-enable-prefix-caching"
+    - "--mm-processor-cache-gb"
+    - "0"
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Full precision BF16 — single-GPU deployment"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) is a leading end-to-end OCR
+  expert VLM powered by Hunyuan's native multimodal architecture. This recipe covers
+  online serving with the OpenAI-compatible API.
+
+  ## Prerequisites
+
+  - **vLLM version:** latest stable
+  - **Hardware:** single GPU (1B model)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Launching the Server
+
+  ```bash
+  vllm serve tencent/HunyuanOCR \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0
+  ```
+
+  ### Configuration Tips
+
+  - Use greedy sampling (`temperature=0.0`) or low temperature for optimal OCR accuracy.
+  - OCR tasks generally do not benefit from prefix caching or image reuse; disabling
+    them (as above) removes hashing/caching overhead.
+  - Adjust `--max-num-batched-tokens` for throughput based on your hardware.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  messages = [
+      {"role": "system", "content": ""},
+      {
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/chat-ui/tools-dark.png"}},
+              {
+                  "type": "text",
+                  "text": (
+                      "Extract all information from the main body of the document image "
+                      "and represent it in markdown format, ignoring headers and footers. "
+                      "Tables should be expressed in HTML format, formulas in the document "
+                      "should be represented using LaTeX format, and the parsing should be "
+                      "organized according to the reading order."
+                  )
+              }
+          ]
+      }
+  ]
+
+  response = client.chat.completions.create(
+      model="tencent/HunyuanOCR",
+      messages=messages,
+      temperature=0.0,
+      extra_body={"top_k": 1, "repetition_penalty": 1.0},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **Accuracy:** Use `temperature=0.0` and `top_k=1` for deterministic OCR output.
+  - **Application-oriented prompts:** See the [official model card](https://huggingface.co/tencent/HunyuanOCR#%F0%9F%92%AC-application-oriented-prompts)
+    for prompts tuned to various document parsing tasks.
+
+  ## References
+
+  - [Model card](https://huggingface.co/tencent/HunyuanOCR)

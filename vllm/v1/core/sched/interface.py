@@ -147,6 +147,12 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def has_request(self, request_id: str) -> bool:
+        """Returns True if the scheduler holds the request, including an open
+        streaming-input session waiting for its next input."""
+        raise NotImplementedError
+
+    @abstractmethod
     def finish_requests(
         self,
         request_ids: str | Iterable[str] | None,

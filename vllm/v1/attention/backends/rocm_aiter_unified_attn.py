@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms.rocm import on_gfx1250
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -29,11 +28,13 @@ from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import set_triton_ptr_range
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -86,6 +87,12 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         return head_size >= 32
+
+    @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        # The cache is split with `split(head_size)` over a 2*head_size page, so
+        # V can be narrower than K but not wider.
+        return head_size_v <= head_size
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
@@ -332,6 +339,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 unified_attention as triton_unified_attention,
             )
 
+            set_triton_ptr_range(kv_cache, key_cache, value_cache)
             descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
             triton_unified_attention(
                 q=query[:num_actual_tokens],

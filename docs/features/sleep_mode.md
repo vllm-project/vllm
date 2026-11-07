@@ -11,14 +11,33 @@ Key benefits:
 - **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
 
 !!! note
-    This feature is now supported on CUDA and ROCm platform.
+    This feature is now supported on CUDA, ROCm and XPU platforms.
 
 !!! note
     For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
 ## Sleep levels
 
-Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since nothing is backed up, restore the weights after waking up with `collective_rpc("reload_weights")`.
+Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard the model parameters and the KV cache, and back up the rest of what the model allocated on the GPU while loading, like rope scaling tensors, in CPU memory. The content of the parameters and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to update the model's weights, where the previous weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since the parameters are not backed up, restore them after waking up with `collective_rpc("reload_weights")`.
+
+### What level 2 keeps
+
+Level 2 discards only what is rebuilt on wake, which is what the weight update writes.
+
+| State | After a level-2 wake, before the update |
+| --- | --- |
+| Parameters | Undefined, unless selected by `sleep_preserve_parameter_names` |
+| Anything else allocated while the model loads: buffers, plain attributes, tensors held in closures, pointer tables | Kept, at the same address |
+| Tensors derived from weights | Kept with their old values until post-load processing refreshes them |
+| KV cache and workspace scratch | Contents undefined |
+
+This is the same on CUDA, ROCm and XPU.
+
+**If you send weights to a sleeping engine,** send every parameter that isn't selected by `sleep_preserve_parameter_names`, including the ones that didn't change. `collective_rpc("reload_weights")` does this from the checkpoint. With DeepSeek V4.1, send `engram.wkv`: only the Engram embedding table weights and scales can be left out.
+
+**If you write a kernel,** state built during model loading needs nothing special, whether or not it is registered as a buffer. A tensor computed from weights must be recomputed in post-load processing (see `refill_derived`), or it goes stale after an update. Take per-step scratch from the workspace manager, so that it isn't backed up.
+
+**Host memory** is what non-parameter state takes, plus any preserved parameters. For example, DeepSeek-V4.1-Flash at TP 4 frees 80 GiB per GPU and backs up 2.35 GiB per rank. An allocation that mixes parameters with other tensors is backed up whole.
 
 ## Usage
 
@@ -44,7 +63,7 @@ llm.wake_up()
 
 ```python
 # Sleep level 2
-# Put the engine to sleep (level=2: discard both weights and KV cache)
+# Put the engine to sleep (level=2: discard parameters and KV cache)
 llm.sleep(level=2)
 
 # Reallocate weights memory only
@@ -88,9 +107,9 @@ training. It covers two use cases:
 Target patterns match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
-Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
-wake-up restores them in place and releases the backups. CPU parameters need no
-copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
+Level-2 sleep backs up selected GPU parameters to CPU memory; weights wake-up
+restores them in place. CPU parameters need no copy. Allow enough host memory
+for backups. Level-1 behavior is unchanged.
 
 The trainer must omit these parameters from updates, and reload/post-processing
 must preserve their values and storage (including avoiding replacement with meta
@@ -169,6 +188,24 @@ llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True
 
 or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
 
+#### Choosing a sleep-mode backend
+
+`sleep_mode_backend` selects how GPU memory is freed and restored. The default
+is the built-in `cumem` backend. Plugins can register other backends with
+`SleepModeBackendFactory.register_backend` from a `vllm.general_plugins` entry
+point, and you select one by name:
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_backend="my_backend")
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-backend my_backend`.
+
+An unregistered name is not caught at startup; it fails the first time the
+backend is used, such as on the first sleep. CUDA graph offloading and
+`release_kv_cache_memory()` have their own backend requirements, described
+above.
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
@@ -224,3 +261,134 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ## Limitation
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
+
+## Experimental CUDA checkpoint executor
+
+This capability is experimental and disabled by default. Selecting the executor
+below checkpoints each CUDA worker after ordinary level-1 sleep,
+then restores all workers before waking allocator-managed memory. This preserves
+the remaining CUDA state, including captured graph executable objects, without
+recapturing graphs. Ordinary level-1 semantics still apply: KV cache contents are
+discarded. This is not a durable application checkpoint or model switching API.
+
+Set `VLLM_USE_V2_MODEL_RUNNER=1` before starting the engine:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "Qwen/Qwen3-0.6B",
+    enable_sleep_mode=True,
+    distributed_executor_backend=(
+        "vllm.v1.executor.cuda_checkpoint_executor.CUDACheckpointExecutor"
+    ),
+)
+llm.sleep(level=1)
+llm.wake_up()
+```
+
+This experimental implementation requires Linux, NVIDIA driver checkpoint APIs,
+and dedicated worker processes. It uses an external helper to call
+`cuCheckpointProcessLock`, `cuCheckpointProcessCheckpoint`,
+`cuCheckpointProcessRestore`, and `cuCheckpointProcessUnlock`. CPU threads remain
+alive, but worker CUDA calls cannot execute while checkpointed. The helper uses
+the same process namespace and user as the executor. Driver permission and
+resource restrictions still apply; see the
+[CUDA checkpoint API documentation](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-driver-api/group__CUDA__CHECKPOINT.html).
+
+The initial validation used NVIDIA H20 with driver 580.126.09, NCCL 2.29.7,
+and FlashInfer 0.6.18.post1. See [PR #58183](https://github.com/vllm-project/vllm/pull/58183)
+for versioned test results and communication performance comparisons. Support
+for other GPU, driver, and communication-library combinations is not established.
+
+Only single-node tensor parallelism is accepted. Tensor parallel sizes 1, 2,
+and 4 have been GPU-tested; other sizes remain unvalidated. Use
+`VLLM_USE_V2_MODEL_RUNNER=1`, the standard GPU worker and the `cumem` sleep
+backend. Pipeline, data, context and expert parallelism, external cache or
+weight transfer, custom worker classes, and sleep level 2 are rejected before
+worker startup (sleep level 2 is rejected when requested). Worker extensions
+that allocate additional CUDA IPC resources are outside the validated scope.
+Level 0 remains
+a scheduler pause and does not perform a CUDA checkpoint.
+
+For tensor parallel sizes greater than 1, use NCCL 2.29.7 or later with memory
+suspension support, set `enable_nccl_comm_suspend=True`, and pass
+`disable_custom_all_reduce=True`. The following explicit configuration retains
+NCCL GPU peer-to-peer or legacy shared-memory communication, selected by NCCL.
+`NCCL_P2P_DISABLE` and `NCCL_SHM_DISABLE` need not be set when communicator
+suspension is enabled. NCCL CUDA host-memory allocation remains disabled; it
+is not equivalent to legacy shared-memory transport. Before driver checkpoint,
+ordinary worker
+sleep suspends NCCL mappings; worker wake restores them at their reserved
+addresses. The executor checks each rank's actual suspension state.
+
+```bash
+export NCCL_IB_DISABLE=1
+export NCCL_CUMEM_ENABLE=1 NCCL_CUMEM_HOST_ENABLE=0 NCCL_NVLS_ENABLE=0
+export VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_USE_NCCL_SYMM_MEM=0
+export VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=0
+export VLLM_ALLREDUCE_USE_FLASHINFER=1
+export VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+```
+
+FlashInfer must provide stable-address workspace `checkpoint_prepare` and
+`checkpoint_restore` methods. The executor calls existing worker hooks around
+the driver checkpoint. Disabling standalone FlashInfer all-reduce with
+`VLLM_ALLREDUCE_USE_FLASHINFER=0` does not disable the compiler
+`fuse_allreduce_rms` pass, which can allocate FlashInfer workspaces independently.
+When that pass is enabled, the same backend restriction and workspace hooks
+apply. A configuration using only NCCL must also disable that compiler pass.
+The FlashInfer `mnnvl` backend is not accepted, and the NCCL suspend configuration
+requires NVLS to be disabled. Live multicast
+allocations can block the combined sleep/checkpoint flow even on newer
+user-mode drivers. Keep these restrictions when upgrading the driver. The
+helper must use the same user-mode driver as the workers; mixed versions are
+unsupported. Performance costs of the restrictions must be measured against
+the workload's default communication
+configuration; retaining GPU peer-to-peer communication alone does not establish
+unchanged inference performance.
+
+A more restrictive Socket-only configuration is also accepted without
+`enable_nccl_comm_suspend`: set `NCCL_P2P_DISABLE=1`, `NCCL_SHM_DISABLE=1`,
+`NCCL_CUMEM_ENABLE=0`, and
+`VLLM_ALLREDUCE_USE_FLASHINFER=0`, retaining the other communication restrictions
+above. This configuration is primarily useful for compatibility comparisons.
+Do not create additional CUDA IPC resources or fall back to an independently
+created PyTorch NCCL process group while using the checkpoint executor.
+
+Provide host memory for both the ordinary weight backup and the driver's
+remaining CUDA state backup. Restore needs sufficient free GPU memory; release
+any temporary GPU workload before waking. Checkpoint and restore add latency to
+ordinary sleep/wake. The helper itself can retain a small driver allocation, so
+worker offload does not imply a zero device-wide memory reading.
+
+All ranks are locked before any is checkpointed. All ranks are restored before
+any is unlocked. Operations within each stage run concurrently across workers.
+The whole stage has a 30-second response deadline (each lock also has a
+10-second driver timeout). Worker sleep/wake and FlashInfer workspace
+hooks have a 120-second response deadline. Failure terminates the workers rather than
+serving with a partially restored rank set; restart the engine after failure.
+Shutdown terminates the dedicated worker and helper processes without restoring
+their CUDA state or requiring free GPU memory for the model.
+
+Repeated level-1 sleep is idempotent. A first partial wake, such as
+`wake_up(tags=["weights"])`, restores the **whole CUDA process** before restoring
+the selected allocator tags. It cannot selectively restore graph or driver
+state. Ordinary worker RPCs are rejected while checkpointed. A checkpointed
+worker cannot execute another model until restored.
+
+Serialize sleep, wake, pause, and resume calls across all clients, including
+while level-1 sleep is draining requests. Wait for each call to complete before
+issuing the next. A partial wake does not automatically resume scheduling; wake
+all allocator tags before explicitly resuming or submitting new inference.
+Do not use an explicit resume call to bypass sleeping memory.
+
+If EngineCore exits during a management call, the client may remain waiting even
+after the workers terminate. Use an external timeout and restart the failed
+engine; a timeout does not establish that the operation completed. Do not retry
+control operations on an engine whose checkpoint outcome is unknown.
+
+As with the ordinary executor, `sleep()` is a no-op while weights remain asleep.
+For example, after `wake_up(tags=["kv_cache"])`, another `sleep()` does not
+checkpoint the process again. Wake the remaining weights before starting a new
+full sleep/checkpoint cycle.
