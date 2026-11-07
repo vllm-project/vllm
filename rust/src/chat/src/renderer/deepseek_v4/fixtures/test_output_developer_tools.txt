@@ -22,7 +22,7 @@ Otherwise, output directly after </think> with tool calls or final response.
 
 ### Available Tool Schemas
 
-{"name": "lookup", "parameters": {"type": "object"}}
+{"name": "lookup", "description": null, "parameters": {"type": "object"}}
 
 You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
 <｜Assistant｜><think></think>answer<｜end▁of▁sentence｜>

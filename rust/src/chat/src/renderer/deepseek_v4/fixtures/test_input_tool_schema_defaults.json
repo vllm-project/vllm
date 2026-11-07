@@ -1,0 +1,23 @@
+{
+  "messages": [{"role": "user", "content": "question"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {"name": "missing_description", "parameters": {"type": "object"}}
+    },
+    {
+      "type": "function",
+      "function": {"name": "null_description", "description": null, "parameters": {"type": "object"}, "strict": false}
+    },
+    {
+      "type": "function",
+      "function": {"name": "empty_description", "description": "", "parameters": {"type": "object"}, "strict": true}
+    },
+    {
+      "type": "function",
+      "function": {"name": "with_description", "description": "Look up a value", "parameters": {"type": "object"}}
+    }
+  ],
+  "template_kwargs": {"thinking": true},
+  "reasoning_effort": "low"
+}

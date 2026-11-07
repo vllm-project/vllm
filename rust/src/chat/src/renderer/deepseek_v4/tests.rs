@@ -88,6 +88,27 @@ fn renders_developer_tools_like_hf_python() {
 }
 
 #[test]
+fn tool_schema_defaults_match_python_across_deepseek_dialects() {
+    let request = fixture_request("test_input_tool_schema_defaults.json");
+    let v4 = DeepSeekV4ChatRenderer::default();
+    let v41 = DeepSeekV41ChatRenderer::default();
+    let cases: [(&dyn ChatRenderer, ExpectFile); 2] = [
+        (
+            &v4,
+            expect_file!["fixtures/test_output_tool_schema_defaults_v4.txt"],
+        ),
+        (
+            &v41,
+            expect_file!["fixtures/test_output_tool_schema_defaults_v41.txt"],
+        ),
+    ];
+    for (renderer, expected) in cases {
+        let prompt = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+        expected.assert_eq(&prompt);
+    }
+}
+
+#[test]
 fn drop_thinking_removes_developer_before_last_user() {
     let request = thinking_request(vec![
         ChatMessage::developer("old instruction", None),
