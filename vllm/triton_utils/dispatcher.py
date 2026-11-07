@@ -57,7 +57,7 @@ def _is_triton_kernel(obj: Any) -> bool:
 class KernelOverride:
     """Stand in for a Triton kernel, routing launches to a non-Triton `impl`.
 
-    Used by :func:`register_kernels` for implementations that are not
+    Used by `register_kernels` for implementations that are not
     themselves Triton kernels (plain callables, grid-remapping launchers);
     Triton kernel implementations are swapped in directly and never wrapped.
 

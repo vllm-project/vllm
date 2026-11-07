@@ -106,7 +106,7 @@ class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
     Construct once after KV caches are allocated to precompute segment
-    addresses, then call :meth:`zero_block_ids` each step to zero
+    addresses, then call `zero_block_ids` each step to zero
     newly-allocated blocks.
     """
 

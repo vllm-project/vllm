@@ -695,7 +695,7 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     is a Python `SyntaxError`, so the whole call would be dropped. Rename `from=` to
     `from_pyreservedkw_=` (outside string literals only, and only in keyword-argument
     position: preceded by `(` or `,` and followed by a single `=`), parse, then restore
-    the original name with :func:`restore_reserved_kwarg_names`.
+    the original name with `restore_reserved_kwarg_names`.
 
     Returns (rewritten_text, changed). Keyword *values* (`x=True`) and
     keywords inside string arguments are never touched.
@@ -753,7 +753,7 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
 
 
 def restore_reserved_kwarg_names(arguments: dict) -> dict:
-    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+    """Undo `rename_reserved_kwargs` on a decoded arguments dict.
 
     Only keys that carry the rename suffix *and* whose stem is a Python
     keyword are restored, making this an exact inverse of the rename.

@@ -654,7 +654,7 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
     dcp_world_size`) rather than across every rank, so each rank in a group
     holds the whole group's heads, letting decode skip the query all-gather.
 
-    :meth:`forward` returns the group's full head set. :meth:`_local_view`
+    `forward` returns the group's full head set. `_local_view`
     extracts this rank's TP shard for prefill.
     """
 

@@ -280,7 +280,7 @@ def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
 def remove_noop_reshapes(gm: fx.GraphModule) -> None:
     """Drop reshape ops whose output shape equals their input shape.
 
-    Companion to :func:`fold_consecutive_reshapes`. `make_fx` records a
+    Companion to `fold_consecutive_reshapes`. `make_fx` records a
     reshape to the shape the input already has; the compiled graph has already
     dropped it, so the pattern only matches once we drop it too.
     """

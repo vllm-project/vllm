@@ -63,7 +63,7 @@ _CK_MAX_HEAD_DIM = 256
 class UltraQuantAttentionBackend(TurboQuantAttentionBackend):
     """Standalone backend for the `ultraquant_4bit` KV-cache dtype.
 
-    Subclasses :class:`TurboQuantAttentionBackend` for the shared metadata and
+    Subclasses `TurboQuantAttentionBackend` for the shared metadata and
     cache-layout plumbing, and overrides identity, spec, impl, block size, and
     capabilities so no UltraQuant knowledge lives in the TurboQuant backend.
     """
@@ -111,7 +111,7 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
     """UltraQuant 4-bit KV-cache attention (FP4 E2M1 + UE8M0, rotated K).
 
     Overrides the init, on-device setup, store, decode, and prefill/continuation
-    seams of :class:`TurboQuantAttentionImpl`; the shared `forward` /
+    seams of `TurboQuantAttentionImpl`; the shared `forward` /
     `do_kv_cache_update` orchestration and metadata handling are inherited.
     """
 

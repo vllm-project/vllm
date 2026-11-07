@@ -89,7 +89,7 @@ def _build_drop_info(
 
 class StreamingParserEngine:
     """Consumes `(delta_text, delta_token_ids)` pairs and produces a
-    stream of :class:`SemanticEvent` instances.
+    stream of `SemanticEvent` instances.
 
     This is the main entry point for streaming parsing.
     Create one per request (it is stateful).

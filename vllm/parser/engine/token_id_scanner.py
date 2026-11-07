@@ -33,7 +33,7 @@ class TokenIDScanner:
 
     Before text-based lexing happens, the scanner checks each token ID in the delta
     against a mapping of `{token_id: terminal_name}`. Matched tokens are emitted as
-    :class:`PreLexedTerminal` items; everything else is grouped into :class:`TextChunk`
+    `PreLexedTerminal` items; everything else is grouped into `TextChunk`
     items for the incremental lexer to process.
 
     When a terminal's text is not yet in `delta_text` (held back by the detokenizer),

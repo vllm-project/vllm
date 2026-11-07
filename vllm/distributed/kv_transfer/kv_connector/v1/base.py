@@ -560,7 +560,7 @@ class KVConnectorBase_V1(ABC):
     ) -> dict[CacheHitSource, int]:
         """Split `num_external_tokens` by the cache tier that supplied them.
 
-        Called after :meth:`update_state_after_alloc`, so the load plan is known. Counts
+        Called after `update_state_after_alloc`, so the load plan is known. Counts
         must sum to `num_external_tokens`; a mismatch is reported as
         `external_unspecified`. Only non-zero counts are included.
 

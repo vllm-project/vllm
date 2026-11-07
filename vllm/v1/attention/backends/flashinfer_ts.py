@@ -17,7 +17,7 @@ Verified numerically equal to the same data repacked into compact planes.
 Sliding window. `prims_ts` rejects `window_left >= 0` unless the mask is causal, so a
 non-causal windowed layer cannot be expressed directly. The query block always sits at
 the end of the sequence, so the symmetric window reduces to a suffix, and we hand the
-kernel a block table restricted to the window's pages (see :func:`_restrict_to_window`).
+kernel a block table restricted to the window's pages (see `_restrict_to_window`).
 Because the restriction is page aligned, each query token sees up to `page_size - 1`
 extra tokens at the old edge, and all query tokens share one window start rather than
 each having its own (`max_query_len - 1` tokens of drift).

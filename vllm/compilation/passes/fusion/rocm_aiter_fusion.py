@@ -1353,7 +1353,7 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     `fused_qk_rmsnorm` HIP kernel.
 
     The FP8 attention path is also handled via
-    :class:`MLADualRMSPerTokenQuantPattern` or :class:`MLADualRMSGroupQuantPattern`,
+    `MLADualRMSPerTokenQuantPattern` or `MLADualRMSGroupQuantPattern`,
     which fuse the q-latent RMSNorm + FP8 per-token/group quant together with
     the kv-latent RMSNorm into `fused_mla_dual_rms_norm_<per_token|group>_quant`
     backed by aiter's `fused_qk_rmsnorm_<per_token|group>_quant` HIP kernel.

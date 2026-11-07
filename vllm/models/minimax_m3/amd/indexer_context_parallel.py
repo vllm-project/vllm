@@ -68,7 +68,7 @@ class IndexerCPDecode:
     and shapes derived from the batch would be baked into the graph.
 
     The buffers are scratch for a single call, so one instance serves every
-    indexer layer on a rank (see :func:`get_shared_cp_decode`).
+    indexer layer on a rank (see `get_shared_cp_decode`).
     """
 
     def __init__(
@@ -199,7 +199,7 @@ _SHARED_CP_DECODE: dict[tuple, IndexerCPDecode] = {}
 
 
 def get_shared_cp_decode(**kwargs) -> IndexerCPDecode:
-    """One :class:`IndexerCPDecode` per rank and geometry, shared by all layers.
+    """One `IndexerCPDecode` per rank and geometry, shared by all layers.
 
     Each of M3's sparse layers has its own indexer, and a private buffer set per layer
     would hold ~57 idle copies. The buffers are written and consumed within one indexer
@@ -219,7 +219,7 @@ def get_shared_cp_decode(**kwargs) -> IndexerCPDecode:
 class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
     """Triton indexer with context-parallel decode scoring for ROCm.
 
-    Decode runs through :class:`IndexerCPDecode`. Prefill uses the base Triton
+    Decode runs through `IndexerCPDecode`. Prefill uses the base Triton
     kernels.
 
     CUDAGraph: v2 FULL capture records the model with `cudagraph_runtime_mode=NONE` (see

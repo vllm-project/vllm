@@ -150,8 +150,8 @@ def shard_sequence_parallel_mlp(
 ) -> bool:
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
-    Opt-in via `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`; see :class:`KimiMLP` for
-    the trade-off and :mod:`vllm.envs` for when it is worth enabling.
+    Opt-in via `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`; see `KimiMLP` for
+    the trade-off and `vllm.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
     if not (use_sequence_parallel and eligible and enabled):

@@ -133,7 +133,7 @@ def is_mcp_tool_by_namespace(
 ) -> bool:
     """Determine if a tool call is an MCP tool based on recipient prefix.
 
-    Inverse of :func:`is_function_recipient` — everything that is not
+    Inverse of `is_function_recipient` — everything that is not
     a function call is an MCP tool.
     """
     if recipient is None:

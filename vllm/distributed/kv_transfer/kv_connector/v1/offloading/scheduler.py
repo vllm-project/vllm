@@ -2584,7 +2584,7 @@ class OffloadingConnectorScheduler:
 
         Yields:
             `BlockStored` or `BlockRemoved` events corresponding to
-            the underlying :class:`OffloadingEvent` stream.
+            the underlying `OffloadingEvent` stream.
 
         """
         # Drain the manager eagerly, inside the region. manager.take_events() is

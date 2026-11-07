@@ -96,7 +96,7 @@ class KVCacheDTypeHandler(Protocol):
         ...
 
     def quant_mode(self) -> KVQuantMode:
-        """The :class:`KVQuantMode` used by generic kernels.
+        """The `KVQuantMode` used by generic kernels.
 
         Return an existing mode to reuse generic kernel paths, or `KVQuantMode.CUSTOM`
         when the backend fully self-manages kernel dispatch.

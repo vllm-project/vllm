@@ -203,7 +203,7 @@ def recover_newlines(text: str | None) -> str | None:
 
 
 class MiniCPMVOutputNormalizer:
-    """Apply :class:`EscapedNewlineNormalizer` to a whole stream.
+    """Apply `EscapedNewlineNormalizer` to a whole stream.
 
     Reasoning and content are tracked separately so that a half-written escape
     at the end of a reasoning chunk does not swallow the first characters of
@@ -348,7 +348,7 @@ class MiniCPMVParser(Qwen3Parser):
 class MiniCPMVUnifiedParser(DelegatingParser):
     """MiniCPM-V serving parser: the adapters plus newline recovery.
 
-    Recovery cannot live in :class:`MiniCPMVParser`: the serving stack drives
+    Recovery cannot live in `MiniCPMVParser`: the serving stack drives
     the reasoning/tool adapters, never `ParserEngine.parse` /
     `ParserEngine.parse_delta`, so a rewrite applied there would only be
     visible to callers that construct the engine directly.

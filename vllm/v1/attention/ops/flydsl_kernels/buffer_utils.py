@@ -18,7 +18,7 @@ def buffer_view(tensor, elem, unit_elems=1, base_byte_offset=None):
     """Buffer view of a kernel tensor argument, indexed in `elem` elements.
 
     `view[i]` loads or stores one element. With `unit_elems > 1`,
-    :func:`load_vec` / :func:`store_vec` access `unit_elems` consecutive
+    `load_vec` / `store_vec` access `unit_elems` consecutive
     elements starting at any element index `i`.
     """
     it = fx.get_iter(tensor)

@@ -39,7 +39,7 @@ TOOL_STRING = "<tool_call>"  # granite 3.1 (plain text)
 
 def _granite_arg_converter(raw_args: str, partial: bool) -> str:
     """Carve the `arguments` object out of a `{"name":..,"arguments":{..}}`
-    array element (see :func:`extract_json_member_object`)."""
+    array element (see `extract_json_member_object`)."""
     span = extract_json_member_object(raw_args, "arguments")
     if span is None:
         return "" if partial else "{}"

@@ -241,7 +241,7 @@ def fused_kda_chunk(
         checkpoint_offsets: int32 `[N]` token offsets, each relative to its sequence's
             first query token, at which to snapshot the recurrent state. `0` disables
             the export for that sequence. A non-zero offset must be a multiple of
-            :data:`KDA_CHECKPOINT_ALIGNMENT`; the kernel skips any that is not, so the
+            `KDA_CHECKPOINT_ALIGNMENT`; the kernel skips any that is not, so the
             caller has to filter rather than rely on the store happening.
         checkpoint_state_indices: optional int32 `[N]` destination row per
             sequence. A negative row disables the export for that sequence.

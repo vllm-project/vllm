@@ -36,7 +36,7 @@ def is_hip_gdn_supported(
     value: torch.Tensor,
     cu_seqlens: torch.Tensor | None,
 ) -> bool:
-    """Whether :func:`chunk_gdn_hip_fwd` can serve this call.
+    """Whether `chunk_gdn_hip_fwd` can serve this call.
 
     Mirrors every shape and dtype the kernel asserts on, so an unsupported
     call falls back to the Triton kernels instead of raising.

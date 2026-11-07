@@ -22,7 +22,7 @@ routing kernel with precomputed ids and an 8-token tile:
       [4 + 2C, 4 + 2C + 8 M)   padded row -> token (GEMM1 only)
       [4 + 2C + 8 M, + C)      tile -> GEMM1 items done (the ready words), zero
 
-  where `M` is :func:`max_tiles` (the most tiles any routing of the call's
+  where `M` is `max_tiles` (the most tiles any routing of the call's
   slots needs) and `C` is `M` rounded up to a multiple of four. GEMM1
   counts up the ready words and GEMM2 waits on them
   (`routed_expert_gemm_cute.py`), so a record serves one GEMM1 and GEMM2
@@ -41,7 +41,7 @@ counts, no scans. Above two levels, one warp first sums each bitmap word's
 counts over the levels and prefixes them over the words, so a slot reads its
 expert's word's prefix instead of summing every level's words.
 
-:class:`RoutedExpertRoute` builds the record from precomputed ids in one CTA
+`RoutedExpertRoute` builds the record from precomputed ids in one CTA
 (64 threads per level, at most 1,024; above 16 levels a thread takes two
 slots); the fused front builds it with the same helpers.
 """
@@ -111,8 +111,8 @@ def clear_scratch(
     levels: cutlass.Constexpr[int] = 1,
 ):
     """Zero the expert bitmap's `levels` levels and the per-expert row
-    masks (not the word prefix, which :func:`build_record` writes whole); a
-    block barrier must separate it from :func:`build_record`."""
+    masks (not the word prefix, which `build_record` writes whole); a
+    block barrier must separate it from `build_record`."""
     for word in cutlass.range(
         thread, MAX_EXPERTS * mask_words_for(levels), threads, unroll=1
     ):
@@ -130,7 +130,7 @@ def zero_record(
     thread: Int32,
     threads: cutlass.Constexpr[int],
 ):
-    """Zero the record; :func:`build_record`'s block barrier orders it before
+    """Zero the record; `build_record`'s block barrier orders it before
     that function's stores."""
     for word in cutlass.range(
         thread, record_words(rows, top_k, experts), threads, unroll=1

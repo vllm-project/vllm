@@ -434,7 +434,7 @@ def supports_norm_residual_norm(
     branch: torch.Tensor,
     stream: torch.Tensor,
 ) -> bool:
-    """Whether :func:`fused_norm_residual_norm_fwd` can serve this boundary."""
+    """Whether `fused_norm_residual_norm_fwd` can serve this boundary."""
     if not (branch.is_cuda and stream.is_cuda):
         return False
     if branch.shape != stream.shape or branch.ndim < 2:

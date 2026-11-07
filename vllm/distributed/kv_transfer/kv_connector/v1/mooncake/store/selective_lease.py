@@ -50,8 +50,8 @@ class _RecordOperation(Protocol):
 class SelectiveLookupLease:
     """Leases only the keys a prefix-lookup hit will load.
 
-    The lookup probes its candidates with :meth:`probe`, computes the hit as
-    usual, and passes it through :meth:`lease_hit`.
+    The lookup probes its candidates with `probe`, computes the hit as
+    usual, and passes it through `lease_hit`.
     """
 
     def __init__(

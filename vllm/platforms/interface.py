@@ -384,7 +384,7 @@ class Platform:
         Platforms whose Triton kernels need replacement implementations
         (e.g. CPU fallbacks when the Triton-CPU backend is unavailable)
         override this method and call
-        :func:`vllm.triton_utils.dispatcher.register_kernels`
+        `vllm.triton_utils.dispatcher.register_kernels`
         with their overrides. It runs during model runner init, before any
         kernel launch. The default implementation does nothing.
         """
@@ -1494,7 +1494,7 @@ class Platform:
         The builder supplies grouping (`get_kv_cache_groups`) and tensor placement
         (`get_kv_cache_config_from_groups`). Vendors may override this to return a
         platform-specific builder. The default builder honors a model implementing
-        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`; a
+        `SupportsKVCacheGrouping`; a
         builder that overrides `get_kv_cache_groups` owns grouping and bypasses that
         model hook unless it calls `super()`.
 

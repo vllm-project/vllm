@@ -141,7 +141,7 @@ def _try_get_optimal_ssm_config_cached(
     cache_dtype: str,
     is_blackwell: bool,
 ) -> tuple[int, int]:
-    """Cached resolution. See :func:`try_get_optimal_ssm_config`."""
+    """Cached resolution. See `try_get_optimal_ssm_config`."""
     effective_batch = batch * nheads
     configs = get_ssm_configs(headdim, dstate, cache_dtype)
     if configs:

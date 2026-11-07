@@ -684,7 +684,7 @@ class DynamicVideoBackend(VideoBackend):
 
     Samples at `fps` up to `max_duration` seconds, falling back to uniform sampling
     across the full duration when the video is longer than `max_duration`. Codec is
-    selectable the same way as :class:`VideoBackend`.
+    selectable the same way as `VideoBackend`.
     """
 
     _sampling_suffix: ClassVar[str] = "_dynamic"

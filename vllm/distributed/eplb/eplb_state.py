@@ -226,7 +226,7 @@ class EplbModelState:
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
     Per-ubatch scalar int32 tensors holding the number of real (non-padding)
-    tokens.  Allocated once in :meth:`EplbState.add_model` so that device
+    tokens.  Allocated once in `EplbState.add_model` so that device
     pointers remain stable across CUDA-graph replays.  The router kernel
     indexes this list with `dbo_current_ubatch_id()`.
     """
@@ -273,12 +273,12 @@ class EplbState:
         self.should_record_tensor: torch.Tensor | None = None
         """
         Shared scalar bool tensor for all layers.  Every
-        :class:`EplbLayerState` holds a reference to the **same** object so
-        a single ``.fill_()`` updates all layers at once.  Allocated on the
-        first call to :meth:`_propagate_shared_tensors`.
+        `EplbLayerState` holds a reference to the **same** object so
+        a single `.fill_()` updates all layers at once.  Allocated on the
+        first call to `_propagate_shared_tensors`.
         """
         self._should_record_value: bool | None = None
-        """Last value written to ``should_record_tensor``."""
+        """Last value written to `should_record_tensor`."""
         self._pending_balancedness: deque[
             tuple[int, int, torch.Event, list[tuple[str, torch.Tensor]]]
         ] = deque()
@@ -772,13 +772,13 @@ class EplbState:
         model: "MixtureOfExperts",  # type: ignore[name-defined]
         num_unpadded_tokens_tensors: list[torch.Tensor],
     ) -> None:
-        """Propagate shared tensors to every :class:`EplbLayerState`.
+        """Propagate shared tensors to every `EplbLayerState`.
 
         Allocates `should_record_tensor` on the first call and then assigns both it and
-        `num_unpadded_tokens_tensors` to every MoE layer's :class:`EplbLayerState`. All
+        `num_unpadded_tokens_tensors` to every MoE layer's `EplbLayerState`. All
         layers reference the **same** objects so a single update is visible everywhere.
 
-        Must be called after :meth:`model.set_eplb_state` so that each
+        Must be called after `model.set_eplb_state` so that each
         layer's `eplb_state` is already populated.
         """
         layer_states = [
@@ -1239,7 +1239,7 @@ class EplbLayerState:
     """
     Shared scalar bool tensor controlling whether to accumulate expert load
     metrics during this forward pass.  All layers reference the **same**
-    tensor object, which is owned and updated by :class:`EplbState`.
+    tensor object, which is owned and updated by `EplbState`.
 
     Set to `False` for the first `step_interval - window_size` steps of
     each rearrangement period: those steps would be overwritten in the
@@ -1248,7 +1248,7 @@ class EplbLayerState:
     """
     num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
     """
-    Reference to the parent :class:`EplbModelState`'s tensor list so the
+    Reference to the parent `EplbModelState`'s tensor list so the
     router can read the correct per-[u]batch unpadded token count.
     """
 

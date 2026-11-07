@@ -225,7 +225,7 @@ def mhc_fused_post_pre_delayed_rms_norm_aiter(
     norm_eps: float,
     residual_out: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """:func:`mhc_pre_delayed_aiter` with the RMSNorm of the collapse folded in:
+    """`mhc_pre_delayed_aiter` with the RMSNorm of the collapse folded in:
     `layer_input` comes back normalised with `norm_weight` / `norm_eps`."""
     from vllm._aiter_ops import rocm_aiter_ops
 

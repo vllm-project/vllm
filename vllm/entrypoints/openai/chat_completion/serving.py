@@ -443,7 +443,7 @@ class OpenAIServingChat(GenerateBaseServing):
         return request.messages[-1]["role"]
 
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
-        """Construct the response :class:`ChatMessage` for the non-streaming path.
+        """Construct the response `ChatMessage` for the non-streaming path.
 
         Subclasses can swap in a specialized `ChatMessage` subclass (e.g.
         `CohereServingChatV2` returning `CohereChatMessage`) without duplicating the
@@ -458,11 +458,11 @@ class OpenAIServingChat(GenerateBaseServing):
         *,
         parser: Parser | None,
     ) -> ChatMessage:
-        """Subclass hook to enrich a fully-constructed :class:`ChatMessage`.
+        """Subclass hook to enrich a fully-constructed `ChatMessage`.
 
         Default is a no-op. Subclasses that need to surface parser-side extras (e.g.
-        :class:`CohereServingChatV2` reading grounding citations off the reasoning
-        parser and populating :class:`CohereChatMessage.citations`) override this to
+        `CohereServingChatV2` reading grounding citations off the reasoning
+        parser and populating `CohereChatMessage.citations`) override this to
         inspect `parser` and mutate/replace `message`.
         """
         return message

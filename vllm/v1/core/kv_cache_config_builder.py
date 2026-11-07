@@ -25,11 +25,11 @@ class KVCacheConfigBuilder(ABC):
 
     Subclasses normally inherit from `DefaultKVCacheConfigBuilder` and override only the
     hooks they need. The cross-worker planning flow
-    (:func:`vllm.v1.core.kv_cache_planning.get_kv_cache_configs`) is Core-owned; this
+    (`vllm.v1.core.kv_cache_planning.get_kv_cache_configs`) is Core-owned; this
     builder supplies the placement decisions: how layers are split into groups and how a
     group list is materialized into tensors for a given block count. Grouping
     coordination lives in `DefaultKVCacheConfigBuilder` (a model implementing
-    :class:`~vllm.model_executor.models.interfaces. SupportsKVCacheGrouping` owns its
+    ` SupportsKVCacheGrouping` owns its
     grouping there); a platform that replaces the builder fully owns its own grouping.
     """
 
@@ -45,7 +45,7 @@ class KVCacheConfigBuilder(ABC):
         Core rejects a result that does not put each layer in exactly one group.
 
         The default builder honors a model's
-        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`
+        `SupportsKVCacheGrouping`
         declaration here before falling back to the default grouping; a
         platform-specific builder decides its own grouping.
         """
@@ -88,7 +88,7 @@ def get_kv_cache_config_builder(
     """Resolve the builder selected by the current platform.
 
     Resolution priority is owned by the platform hook
-    (:meth:`vllm.platforms.interface.Platform.get_kv_cache_config_builder_cls`).
+    (`vllm.platforms.interface.Platform.get_kv_cache_config_builder_cls`).
     Builders are stateless (every method takes `vllm_config`), so a fresh
     instance is returned per call and engines with different configs in the
     same process always get the correct builder.

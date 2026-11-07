@@ -244,7 +244,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             Tuple of (async_save, kv_transfer_params) where async_save is
             True if the request is being saved/sent asynchronously and blocks
             should not be freed until the request_id is returned from
-            :meth:`get_finished`. kv_transfer_params is an optional dict of
+            `get_finished`. kv_transfer_params is an optional dict of
             KVTransferParams to be included in the request outputs.
 
         """

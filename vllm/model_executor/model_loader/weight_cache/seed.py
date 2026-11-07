@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Daemon-to-daemon seeding over an authenticated JSON channel.
 
-A :class:`Seedable` is one kind of state a daemon can seed to or from a peer
+A `Seedable` is one kind of state a daemon can seed to or from a peer
 daemon: warmup caches today, weight shards later. The target names what it
 wants by kind and key fields; the source resolves the key to a payload; the
 target validates and installs it:

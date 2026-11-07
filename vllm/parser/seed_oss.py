@@ -13,7 +13,7 @@ strings and the turn-boundary tokens differ::
     <|im_end|>   -> <seed:eos>
 
 `<function=...>` and `<parameter=...>` are byte-identical, so the entire transition
-table and `_qwen3_arg_converter` are inherited from :class:`Qwen3Parser` unchanged.
+table and `_qwen3_arg_converter` are inherited from `Qwen3Parser` unchanged.
 """
 
 from __future__ import annotations

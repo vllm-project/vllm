@@ -214,7 +214,7 @@ class KimiK3ToolParser(ToolParser):
         }
 
     def _decode_call(self, attrs: str, body: str) -> ToolCall | None:
-        """Decode one `call` block into a :class:`ToolCall`.
+        """Decode one `call` block into a `ToolCall`.
 
         `attrs` is the text between `<|open|>call ` and `<|sep|>` (carries
         `tool=` / `index=`); `body` is the sequence of `argument` blocks.

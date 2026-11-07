@@ -4,8 +4,8 @@
 
 A single P2PSession per remote peer handles BOTH directions of the P2P
 protocol on one ControlConnection: it can request blocks from the peer
-("client" role, in :mod:`.client`) AND serve blocks to the peer
-("server" role, in :mod:`.server`). This module is the thin coordinator
+("client" role, in `.client`) AND serve blocks to the peer
+("server" role, in `.server`). This module is the thin coordinator
 that owns the connection, the handshake, send-gating, and the message
 dispatch — each parsed message is forwarded to the corresponding role.
 

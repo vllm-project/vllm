@@ -87,13 +87,13 @@ shuffled for 128-row epilogue tiles: in each block of 32, shuffled row
 `s0 + 8 * s1` (`s0 < 8`, `s1 < 4`) holds row `4 * s0 + s1`. Their
 scales are in the 128x4 layout the kernel reads for A.
 
-GEMM1 (:class:`RoutedExpertGemm1`) gathers each tile's tokens from the
+GEMM1 (`RoutedExpertGemm1`) gathers each tile's tokens from the
 routed input (`record[4 + 2C + 8c + r]`, the token of tile row `r`) and
 multiplies them by the tile's expert: clamped SwiGLU of the interleaved
 up/gate rows, quantized to MXFP8 (H and its block scales). The epilogue's
 arithmetic follows the GEMM1 kernel from Cake (vllm-project/vllm#59725).
 
-GEMM2 (:class:`RoutedExpertGemm2`) reads token tile `c` of the intermediate
+GEMM2 (`RoutedExpertGemm2`) reads token tile `c` of the intermediate
 H, the contiguous rows `8c .. 8c + 7`, and writes BF16 rows of the output in
 the same permuted order. H's block scales use the layout the kernel reads for
 B: one 128-row scale atom per 8-row tile, of which rows 0-7 are used

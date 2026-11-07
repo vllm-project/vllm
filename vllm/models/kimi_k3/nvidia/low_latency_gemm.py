@@ -3,15 +3,15 @@
 """Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103/SM107.
 
 Dispatch is purely by local `(N, K)` shape and token count `M` — the module
-name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
+name plays no role. Each measured shape maps to a `ProjectionSpec`
 holding the winning backend per token count. The static part of the decision is
 resolved once per module at install time into a small `{M: call}` plan, so the
 per-forward path is a single dict lookup.
 
 The supported capabilities carry separate measured tables:
-:data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
-:data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
-:data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
+`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
+`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
+`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
 genuinely differ between the parts, so the tables must not be merged. SM107
 (Rubin) reuses the SM103 table: the plan was validated end-to-end on SM107
 hardware, but apart from 3584x7168 the per-M crossovers have not been
@@ -914,7 +914,7 @@ def try_low_latency_gemm(
     """Run the shape-selected low-latency kernel, or None to fall back.
 
     Resolves the plan from the shape table on each call; production installs a
-    precomputed plan (see :func:`enable_kimi_k3_low_latency_gemm`) and does not
+    precomputed plan (see `enable_kimi_k3_low_latency_gemm`) and does not
     use this path.
     """
     if envs.VLLM_BATCH_INVARIANT or not _runtime_ok(x, weight):
@@ -1046,8 +1046,8 @@ def enable_kimi_k3_low_latency_gemm(
 
     Modules are matched purely by type, an exactly-unquantized method, and a
     local `(N, K)` present in the current device's measured table
-    (:data:`KIMI_K3_PROJECTIONS` on SM103 and SM107,
-    :data:`KIMI_K3_PROJECTIONS_SM100` on SM100, :data:`KIMI_K3_PROJECTIONS_SM90`
+    (`KIMI_K3_PROJECTIONS` on SM103 and SM107,
+    `KIMI_K3_PROJECTIONS_SM100` on SM100, `KIMI_K3_PROJECTIONS_SM90`
     on SM90).
     """
     if dtype != torch.bfloat16:

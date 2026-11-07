@@ -60,7 +60,7 @@ def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
-    Layer-level hooks call :meth:`capture` inside the forward pass. Routing
+    Layer-level hooks call `capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
 
     The device buffer uses `int32`. Stable snapshots use the narrowest dtype

@@ -76,7 +76,7 @@ class PluggableLayer(nn.Module):
     these sub-layers following a generalized invocation sequence. Also, it is stateful
     and may hold parameters or buffers.
 
-    Unlike :class:`CustomOp`, PluggableLayer does NOT provide per-platform
+    Unlike `CustomOp`, PluggableLayer does NOT provide per-platform
     `forward_*` dispatch. Instead, it supports out-of-tree (OOT) replacement
     of the entire layer class at instantiation time, allowing customized
     initialization and submodule composition.
@@ -156,7 +156,7 @@ class CustomOp(nn.Module):
 
     def forward_native(self, *args, **kwargs):
         """PyTorch-native implementation; OOT plugins override via
-        :meth:`forward_oot`."""
+        `forward_oot`."""
         raise NotImplementedError
 
     def forward_oot(self, *args, **kwargs):

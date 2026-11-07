@@ -11,10 +11,10 @@ Exposes two routes:
 The Cohere v2 protocol models are sourced from the official `cohere` Python SDK
 (`pip install cohere`). To keep that an *optional* dependency for vLLM, the
 SDK-dependent imports - and the route handlers themselves - are gated on a one-shot
-probe at module load. If the SDK isn't installed, :func:`attach_router` becomes a no-op
+probe at module load. If the SDK isn't installed, `attach_router` becomes a no-op
 (with an info log) and vLLM continues to boot normally.
 
-Even when the SDK is installed, :func:`attach_router` also requires
+Even when the SDK is installed, `attach_router` also requires
 `VLLM_ENABLE_COHERE_API=1` in the environment before it will expose the chat route. The
 render route additionally requires scale-out endpoints to be enabled, i.e.
 `--enable-scale-out` or `--tokens-only`. These gates keep unrelated deployments from
@@ -165,7 +165,7 @@ if _SDK_AVAILABLE:
 
         The Cohere counterpart to `POST /v1/chat/completions/render`. The v2 body goes
         through the same conversion `/cohere/v2/chat` uses and is then handed to the
-        shared :class:`ServingRender`, so the returned `GenerateRequest` carries the
+        shared `ServingRender`, so the returned `GenerateRequest` carries the
         prompt tokens and sampling params the chat endpoint would have sent to the
         engine.
         """
@@ -207,16 +207,16 @@ if _SDK_AVAILABLE:
     class CohereErrorEnvelopeMiddleware(BaseHTTPMiddleware):
         """Rewrite vLLM error bodies into the Cohere `{message, id}` shape.
 
-        The endpoint handler above already returns :class:`CohereError` for errors it
+        The endpoint handler above already returns `CohereError` for errors it
         owns, but globally-registered exception handlers (e.g.
-        :func:`validation_exception_handler` for pydantic body errors,
-        :func:`http_exception_handler`, engine error handlers) fire *before* the handler
+        `validation_exception_handler` for pydantic body errors,
+        `http_exception_handler`, engine error handlers) fire *before* the handler
         runs and produce vLLM's internal `ErrorResponse` shape
         (`{"error": {"message": ...}}`). That shape doesn't match the `CohereError`
         schema advertised on the route's OpenAPI `responses`, so clients (and
         schema-conformance tests like `test_openai_schema.py`) would see a mismatch on
         those paths. This middleware normalises any error body on `/cohere/*` responses
-        to :class:`CohereError`.
+        to `CohereError`.
         """
 
         async def dispatch(self, request: Request, call_next):

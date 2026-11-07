@@ -13,13 +13,13 @@
 The module tree mirrors the Transformers `RadioModel` (`embeddings` and an
 `encoder.layer` stack of `norm1`/`attention`/`layer_scale1`/`norm2`/
 `mlp`/`layer_scale2` blocks). The vLLM-specific deviations are the fused
-`attention.qkv` (a :class:`~vllm.model_executor.layers.linear.QKVParallelLinear`
+`attention.qkv` (a `QKVParallelLinear`
 for TP/quantization, vs the split `query`/`key`/`value` in HF) and running
 input normalization in the processor instead of an `input_conditioner` module;
-the attention backend and MLP reuse vLLM's :class:`MMEncoderAttention` and
-:class:`~vllm.model_executor.models.intern_vit.InternMLP`. `load_weights` maps
+the attention backend and MLP reuse vLLM's `MMEncoderAttention` and
+`InternMLP`. `load_weights` maps
 both native Transformers and legacy remote-code checkpoint keys onto this tree
-via :data:`hf_to_vllm_mapper`.
+via `hf_to_vllm_mapper`.
 """
 
 import math
@@ -484,7 +484,7 @@ class RadioLayer(nn.Module):
     """RADIO transformer block, mirroring the Transformers `RadioLayer`
     (`norm1` / `attention` / `layer_scale1` / `norm2` / `mlp` /
     `layer_scale2`). `drop_path` is an inference-time `Identity`; the MLP
-    reuses :class:`InternMLP` (`fc1`/`fc2`, matching `RadioMLP`)."""
+    reuses `InternMLP` (`fc1`/`fc2`, matching `RadioMLP`)."""
 
     def __init__(
         self,
@@ -525,7 +525,7 @@ class RadioLayer(nn.Module):
 
 class RadioVisionEncoder(nn.Module):
     """RADIO encoder stack, mirroring the Transformers `RadioEncoder` module
-    tree (a `layer` ModuleList of :class:`RadioLayer`)."""
+    tree (a `layer` ModuleList of `RadioLayer`)."""
 
     def __init__(
         self,
@@ -712,7 +712,7 @@ class RadioModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load RADIO checkpoint weights, remapping legacy remote-code and
         native Transformers keys onto this module tree via
-        :data:`hf_to_vllm_mapper`."""
+        `hf_to_vllm_mapper`."""
         if isinstance(weights, dict):
             weights = weights.items()
         # Keep only tensors belonging to the RADIO tower (legacy ``radio_model.*``

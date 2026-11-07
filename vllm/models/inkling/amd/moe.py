@@ -5,14 +5,14 @@
 Overfit to the served checkpoint: sigmoid gate (+ selection bias) top-k over the routed
 experts, log-sigmoid renormalization over the k routed + S shared "sink" logits, scaled
 by route_scale * global_scale. The routed top-k goes through vLLM's MoERunner (which
-handles TP/EP); the sink experts run in :class:`InklingSinkExperts` -- replicated across
+handles TP/EP); the sink experts run in `InklingSinkExperts` -- replicated across
 EP ranks (every token activates every sink) and always bf16 (the checkpoint excludes
 every `shared_experts` from quantization).
 
 MXFP4 routed experts reuse vLLM's Quark OCP MXFP4 fused-MoE method; excluded (bf16)
 layers fall back to the unquantized method. The checkpoint's fused stacked tensors
 (interleaved gate/up rows, `.scale` / `.scale2` / `.input_amax` aux tensors) are
-translated to the standard per-expert loads in :meth:`InklingMoE.load_expert_weight`.
+translated to the standard per-expert loads in `InklingMoE.load_expert_weight`.
 """
 
 from __future__ import annotations

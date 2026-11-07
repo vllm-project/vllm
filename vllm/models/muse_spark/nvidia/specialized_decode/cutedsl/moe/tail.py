@@ -903,7 +903,7 @@ class MoETail:
     """The MoE tail of one executor: its Lamport mailbox and compiled kernels.
 
     Built once, collectively over the TP group, before CUDA graph capture. Every
-    MoE layer binds its post-expert norm with :meth:`bind`; the layers share the
+    MoE layer binds its post-expert norm with `bind`; the layers share the
     mailbox (their calls are sequential on every rank, as the stock workspace's
     are). `tp` >= 2 (multicast); `capacity` rows per call at most.
     """

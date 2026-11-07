@@ -425,11 +425,11 @@ def _schema_dict_from_structured_outputs(
 def _melody_sources_to_vllm(
     sources: list[Source], position_to_source: PositionToSource | None
 ) -> list[CitationSource]:
-    """Resolve melody `Source` addresses into :class:`CitationSource` objects.
+    """Resolve melody `Source` addresses into `CitationSource` objects.
 
     Melody reports each source as `(tool_call_index, tool_result_indices)`.
     `position_to_source` is built by
-    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
+    `vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
     and forwarded through `chat_template_kwargs`; each index fans out to one
     resolved source, and unresolved positions are skipped. Without a map (a
     request that did not come through the Cohere v2 handler) every source is
@@ -449,7 +449,7 @@ def _melody_sources_to_vllm(
 def _melody_citations_to_vllm(
     citations: list[FilterCitation], position_to_source: PositionToSource | None
 ) -> list[Citation] | None:
-    """Convert melody `FilterCitation` objects into :class:`Citation`.
+    """Convert melody `FilterCitation` objects into `Citation`.
 
     Citations whose sources all fail to resolve are still returned with `sources=[]`;
     the serving layer drops them so the fail-closed policy lives in one place.

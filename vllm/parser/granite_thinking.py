@@ -4,7 +4,7 @@
 
 Granite 4.2 uses the same tool call and reasoning format as Nemotron V3
 (`<think>`/`</think>` + `<tool_call>` XML).  This config reuses
-:class:`NemotronV3Parser` with two Granite-specific behaviors:
+`NemotronV3Parser` with two Granite-specific behaviors:
 
 1. Strip leading newlines from content — the Granite chat template writes
    `\\n</think>\\n`, so the first content character is always `\\n`.
@@ -46,7 +46,7 @@ class GraniteThinkingParser(NemotronV3Parser):
     leading-newline stripping on content after `</think>`.
 
     The `reasoning_ended` property is overridden to delay the reasoning-to-content
-    transition reported to :class:`~vllm.parser.abstract_parser.DelegatingParser` until
+    transition reported to `DelegatingParser` until
     the template's leading newline has been consumed. Without this delay,
     `DelegatingParser.parse_delta` passes newline tokens through a raw pass-through path
     that bypasses the engine's `_events_to_delta` (and therefore our stripping logic).

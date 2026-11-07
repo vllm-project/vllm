@@ -7,11 +7,11 @@ instead of single-vector representations or cross-encoder concatenation.
 
 This module provides:
 
-- :class:`ColBERTMixin` — mixin that adds ColBERT late-interaction support
+- `ColBERTMixin` — mixin that adds ColBERT late-interaction support
   to any embedding model.
-- :class:`ColBERTModel` — ColBERT with BERT backbone (original architecture).
-- :class:`ColBERTModernBertModel` — ColBERT with ModernBERT backbone.
-- :class:`ColBERTJinaRobertaModel` — ColBERT with Jina XLM-RoBERTa backbone.
+- `ColBERTModel` — ColBERT with BERT backbone (original architecture).
+- `ColBERTModernBertModel` — ColBERT with ModernBERT backbone.
+- `ColBERTJinaRobertaModel` — ColBERT with Jina XLM-RoBERTa backbone.
 
 Reference: https://arxiv.org/abs/2004.12832
 """
@@ -46,9 +46,9 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
 
     1. Inherit from both `ColBERTMixin` and `nn.Module`.
     2. In `__init__`: call `super().__init__()`, then
-       :meth:`_init_colbert_components`, then create `self.model`
-       (the backbone) and `self.pooler` via :meth:`_build_colbert_pooler`.
-    3. In `load_weights`: use :meth:`_load_colbert_weights` to separate
+       `_init_colbert_components`, then create `self.model`
+       (the backbone) and `self.pooler` via `_build_colbert_pooler`.
+    3. In `load_weights`: use `_load_colbert_weights` to separate
        the ColBERT projection weight, then delegate the rest to the backbone.
     """
 

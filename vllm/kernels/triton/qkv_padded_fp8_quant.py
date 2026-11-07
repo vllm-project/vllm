@@ -160,7 +160,7 @@ def quantize_fp8_maybe_pad_head_dim(
     """Quantize a 3D/4D tensor to FP8, padding head_dim to a multiple of 16
     only when needed.
 
-    Accepts (S, H, D) or (B, S, H, D) input. Uses `fp8_quant` (a :class:`QuantFP8`
+    Accepts (S, H, D) or (B, S, H, D) input. Uses `fp8_quant` (a `QuantFP8`
     CustomOp) when head_dim is already aligned to 16 (no padding); otherwise falls back
     to a stride-aware Triton kernel that pads head_dim to a multiple of 16.
     """

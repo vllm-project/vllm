@@ -466,7 +466,7 @@ class TorchProfilerWrapper(WorkerProfiler):
 
 
 class ProtonProfilerWrapper(WorkerProfiler):
-    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+    """Worker profiler backed by `triton.profiler` (Proton)."""
 
     def __init__(
         self,

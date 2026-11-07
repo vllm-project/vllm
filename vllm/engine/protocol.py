@@ -255,7 +255,7 @@ class EngineClient(ABC):
                   and return partial results with "abort" reason (default).
                 - `"wait"`: Wait for in-flight requests to complete.
                 - `"keep"`: Freeze requests in queue; they resume on
-                  :meth:`resume_generation`.
+                  `resume_generation`.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 

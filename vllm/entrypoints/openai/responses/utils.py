@@ -98,10 +98,10 @@ _CUSTOM_TOOL_INPUT_HEAD = encode_custom_tool_input("")[:-2]
 def extend_custom_tool_input_prefix(
     arguments: str, payload: str, end: int
 ) -> tuple[str, int] | None:
-    """:func:`decode_custom_tool_input_prefix` of *arguments*, decoding only
+    """`decode_custom_tool_input_prefix` of *arguments*, decoding only
     `arguments[end:]`. *payload* and *end* come from the previous call on a
     prefix of *arguments* (`""` and 0 at first). Returns None when the
-    arguments do not start as :func:`encode_custom_tool_input` writes them,
+    arguments do not start as `encode_custom_tool_input` writes them,
     or once the payload string closes; only a full decode is exact then."""
     if not end:
         if not arguments.startswith(_CUSTOM_TOOL_INPUT_HEAD):

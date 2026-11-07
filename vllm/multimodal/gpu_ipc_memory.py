@@ -6,7 +6,7 @@ When multimodal media is decoded on the GPU in the API-server (frontend) process
 decoded buffers compete for the same device memory that the engine reserves for weights,
 activations, and the KV cache. To keep the frontend's GPU usage within a sequestered
 budget (see `MultiModalConfig.mm_ipc_gpu_memory_gb`), decode paths acquire the number of
-bytes they need from a process-global :class:`MultiModalGPUMemoryPool` before allocating
+bytes they need from a process-global `MultiModalGPUMemoryPool` before allocating
 on the device and release them once the device memory is freed.
 
 The pool is a simple byte-counting semaphore: `acquire` blocks until enough
@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 
 
 class MultiModalGPUMemoryLease:
-    """A handle for bytes acquired from a :class:`MultiModalGPUMemoryPool`.
+    """A handle for bytes acquired from a `MultiModalGPUMemoryPool`.
 
     Releasing is idempotent and the lease doubles as a context manager so the
     budget is returned even if the decode raises.

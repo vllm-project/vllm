@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Parser engine base that handles both reasoning and tool call
-extraction with a single :class:`StreamingParserEngine`.
+extraction with a single `StreamingParserEngine`.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ class ToolCallSlot:
 
 
 class ParserEngine(Parser):
-    """A :class:`Parser` backed by a single declarative engine config.
+    """A `Parser` backed by a single declarative engine config.
 
     Subclasses set the `ParserEngineConfig` in `__init__` to define the
     complete output format for a model (reasoning + tool calls).
@@ -257,7 +257,7 @@ class ParserEngine(Parser):
         )
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
+        """See `ReasoningParser.adjust_initial_state_from_prompt`."""
         return
 
     def finish_streaming(self) -> DeltaMessage | None:
@@ -448,7 +448,7 @@ class ParserEngine(Parser):
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct parameter types using the tool schema.
 
-        String values are coerced via :func:`coerce_to_schema_type`. Nested objects and
+        String values are coerced via `coerce_to_schema_type`. Nested objects and
         arrays are recursed into when the schema defines `properties` or `items`.
         Without a schema, values stay as strings.
         """
@@ -651,7 +651,7 @@ class ParserEngine(Parser):
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from reasoning-stripped content.
 
-        Unlike :meth:`extract_tool_calls` which re-parses the full model
+        Unlike `extract_tool_calls` which re-parses the full model
         output, this method starts the parser engine in `CONTENT` state
         so it can parse content that has already had reasoning stripped.
         """

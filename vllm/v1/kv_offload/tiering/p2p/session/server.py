@@ -454,10 +454,10 @@ class ServerRole:
     ) -> None:
         """Enqueue a LookupMsg from a symmetric-P2P consumer.
 
-        Dispatch runs during `session.poll()` where the :class:`ParentManager` handle is
+        Dispatch runs during `session.poll()` where the `ParentManager` handle is
         not available, so this only records the raw request. It is resolved — querying
         the tiering manager and emitting the aggregated `LookupRespMsg` — by the next
-        :meth:`serve_external_requests`, the sole window in which parent calls are
+        `serve_external_requests`, the sole window in which parent calls are
         valid.
         """
         logger.debug(
@@ -517,11 +517,11 @@ class ServerRole:
         For each key not already definitively resolved, query `parent.lookup` and record
         the outcome on `lookup`: HIT / MISS land in `resolved` and clear `pending`;
         HIT_PENDING / RETRY park in `pending` for a later serve. Newly-HIT keys are
-        pinned in one batch via :meth:`_pin_and_register_hits` and also returned (for
+        pinned in one batch via `_pin_and_register_hits` and also returned (for
         caller logging).
 
-        Shared by the first-sighting pass (:meth:`_process_inbound_lookup`)
-        and the re-poll pass (:meth:`_resolve_pending_lookups`); callers pass
+        Shared by the first-sighting pass (`_process_inbound_lookup`)
+        and the re-poll pass (`_resolve_pending_lookups`); callers pass
         a de-duplicated `keys` collection.
         """
         new_hits: list[OffloadKey] = []
@@ -555,8 +555,8 @@ class ServerRole:
         For each key, query the tiering manager via `parent.lookup` and pin any HITs
         immediately via `parent.create_store_job` (plumbed into the existing
         `add_stored_blocks` matching path so the eventual FetchMsg finds them).
-        HIT_PENDING / RETRY keys park in :class:`_ActiveLookup` for re-polling by
-        :meth:`_resolve_pending_lookups`.
+        HIT_PENDING / RETRY keys park in `_ActiveLookup` for re-polling by
+        `_resolve_pending_lookups`.
 
         The outbound `LookupRespMsg` is deferred until every key has settled to HIT or
         MISS (or the batch-level `deadline` fires, forcing any stragglers to MISS). One
@@ -631,13 +631,13 @@ class ServerRole:
     ) -> None:
         """Re-poll a request's deferred LookupMsg keys; finalize when ready.
 
-        Walks every parked :class:`_ActiveLookup` for `kv_request_id` and re-calls
+        Walks every parked `_ActiveLookup` for `kv_request_id` and re-calls
         `parent.lookup` per still-pending key, moving HIT/MISS results into `resolved`.
         If `deadline` has passed, remaining `pending` keys are force-resolved to MISS so
         the consumer can fall back instead of waiting on a stuck producer. Newly-HIT
         keys are pinned via `parent.create_store_job` in one call per affected lookup.
         Lookups whose `pending` empties out get their aggregated LookupRespMsg sent by
-        :meth:`_finalize_lookup`.
+        `_finalize_lookup`.
         """
         st = self._requests.get(kv_request_id)
         if st is None or not st.lookups:

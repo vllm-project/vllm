@@ -1362,9 +1362,9 @@ class SupportsTranscription(Protocol):
     Transcription models that require an explicit language detection step
     (e.g. Whisper needs a separate forward pass to predict the language
     token) should set this to `True` and implement
-    :meth:`get_language_detection_prompt` and
-    :meth:`parse_language_detection_output` and
-    :meth:`get_language_token_ids`.
+    `get_language_detection_prompt` and
+    `parse_language_detection_output` and
+    `get_language_token_ids`.
     """
 
     no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
@@ -1855,7 +1855,7 @@ class SupportsEncoderCudaGraph(Protocol):
     capture/replay.
 
     Models implement these methods to provide the
-    :class:`EncoderCudaGraphManager` with all model-specific logic
+    `EncoderCudaGraphManager` with all model-specific logic
     (input handling, metadata computation, forward pass) without the
     manager needing to know model internals.
     """

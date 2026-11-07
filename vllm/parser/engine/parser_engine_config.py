@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Declarative configuration for model tool-call and reasoning formats.
 
-Each model format is described by a :class:`ParserEngineConfig` that specifies:
+Each model format is described by a `ParserEngineConfig` that specifies:
 
 * **terminals** – literal strings or regex patterns that delimit the format
   (e.g. `<tool_call>`, `</think>`).
@@ -11,7 +11,7 @@ Each model format is described by a :class:`ParserEngineConfig` that specifies:
 * **transitions** – a state machine mapping
   `(state, terminal) → (new_state, events_to_emit)` that drives semantic
   event generation during streaming.
-* **content_events** – what :class:`EventType` to emit for plain content
+* **content_events** – what `EventType` to emit for plain content
   (non-terminal text) in each state.
 """
 

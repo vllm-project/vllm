@@ -3,6 +3,8 @@
 """Lint and fix docstring style that matters once docstrings render as Markdown.
 
 - Code spans use single backticks: ``x`` is rewritten to `x` in place.
+- Python Sphinx roles become code spans of the text Sphinx would display, e.g.
+  :class:`~vllm.LLM` is rewritten to `LLM`. Other roles must be fixed by hand.
 - `[a][b]` is a reference link that mkdocs-autorefs tries to resolve, so shapes
   and indexing written outside code spans produce broken cross-references:
 
@@ -11,7 +13,7 @@
       [LLM][vllm.LLM]       # OK: intended cross-reference
       [int][]               # OK: stdlib cross-reference
 
-Both rules read docstrings as source text, one Markdown paragraph at a time, and
+All rules read docstrings as source text, one Markdown paragraph at a time, and
 skip code blocks, so reported line numbers point at the offending line.
 """
 
@@ -33,6 +35,16 @@ REF_LINK = re.compile(
     r"(?<!\\)\[((?:[^\[\]]|\[[^\[\]]*\])+)\](?: |\n[ \t]*)?\[([^\[\]]*)\]"
 )
 REF_DEF = re.compile(r"^\s*\[([^\]]+)\]:\s", re.MULTILINE)
+# A Sphinx role directly before a code span, e.g. :class: or :py:meth:
+ROLE = re.compile(r"(?<![\w:`]):((?:[a-z]+:)?[a-z]+):$")
+# Explicit title, e.g. :meth:`generate <vllm.LLM.generate>`
+TITLED_ROLE = re.compile(r"\s*(.*?)\s*<[^<>]+>\s*", re.DOTALL)
+PY_ROLES = {
+    f"{domain}{role}"
+    for domain in ("", "py:")
+    for role in ("attr", "class", "const", "data", "exc", "func", "meth", "mod",
+                 "obj", "type")
+}  # fmt: skip
 QUOTE = re.compile(r"""^[rRuU]?("{3}|'{3}|"|')""")
 # Fully qualified Python paths, e.g. `vllm.LLM` or `torch.Tensor`
 TARGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+")
@@ -131,8 +143,9 @@ def code_spans(text: str) -> Iterator[tuple[int, int, int]]:
 def docstrings(tree: ast.Module, rendered_only: bool) -> list[ast.Constant]:
     """Docstring constants; `rendered_only` keeps what mkdocstrings shows.
 
-    That is module, class, function and attribute docstrings, including under
-    `if`/`try`/`with` blocks, but not inside function bodies.
+    That is module, class, function and attribute docstrings (including
+    `self.x` in `__init__`), under `if`/`try`/`with` blocks too, but not other
+    docstrings inside function bodies.
     """
     found: dict[int, ast.Constant] = {}
 
@@ -143,7 +156,9 @@ def docstrings(tree: ast.Module, rendered_only: bool) -> list[ast.Constant]:
         body = getattr(node, "body", [])
         if body and isinstance(body[0], ast.Expr) and is_str(body[0].value):
             found[id(body[0].value)] = body[0].value
-        if isinstance(node, (ast.Module, ast.ClassDef)):
+        if isinstance(node, (ast.Module, ast.ClassDef)) or (
+            isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        ):
             scope(body)
 
     def scope(body: list[ast.stmt]) -> None:
@@ -204,11 +219,24 @@ def segment(lines: list[str], node: ast.Constant) -> tuple[str, list[str], str] 
     return head, body, tail
 
 
-def fix_backticks(
+def role_text(content: str) -> str:
+    """The text Sphinx displays for a role's content, e.g. `~a.B` -> `B`."""
+    if titled := TITLED_ROLE.fullmatch(content):
+        return titled.group(1).strip()
+    content = content.strip().lstrip("!")
+    return content[1:].rsplit(".", 1)[-1] if content.startswith("~") else content
+
+
+def fix_code_spans(
     filepath: str, source: str, tree: ast.Module
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
+    """Rewrite ``code`` and Python Sphinx roles as `code`.
+
+    Returns the new source, the fixes made and the roles left for a human.
+    """
     lines = source.split("\n")
-    fixed: set[int] = set()
+    fixed: dict[int, str] = {}
+    unfixable = []
     for node in docstrings(tree, rendered_only=False):
         if (parts := segment(lines, node)) is None:
             continue
@@ -220,18 +248,32 @@ def fix_backticks(
             out, pos = [], 0
             for start, end, width in code_spans(text):
                 content = text[start + width : end - width]
-                if width == 2 and "`" not in content:
+                lineno = node.lineno + a + text.count("\n", 0, start)
+                if "`" in content:
+                    continue
+                if role := ROLE.search(text, pos, start):
+                    if role.group(1) not in PY_ROLES or "\n" in content:
+                        unfixable.append(
+                            f"{filepath}:{lineno}: `{role.group()}` Sphinx role in "
+                            "a docstring; use Markdown instead"
+                        )
+                        continue
+                    out += [text[pos : role.start()], "`", role_text(content), "`"]
+                    fixed[lineno] = "rewrote :role:`code` as `code`"
+                elif width == 2:
                     out += [text[pos:start], "`", content, "`"]
-                    pos = end
-                    fixed.add(node.lineno + a + text.count("\n", 0, start))
+                    fixed.setdefault(lineno, "rewrote ``code`` as `code`")
+                else:
+                    continue
+                pos = end
             if pos:
                 body[a:b] = "".join([*out, text[pos:]]).split("\n")
         body = [line + "\r" * cr for line, cr in zip(body, crs)]
         body[0] = head + body[0]
         body[-1] += tail
         lines[node.lineno - 1 : node.end_lineno] = body
-    msg = "rewrote ``code`` as `code` in a docstring"
-    return "\n".join(lines), [f"{filepath}:{n}: {msg}" for n in sorted(fixed)]
+    fixes = [f"{filepath}:{n}: {m} in a docstring" for n, m in sorted(fixed.items())]
+    return "\n".join(lines), fixes, unfixable
 
 
 def crossref_violations(filepath: str, source: str, tree: ast.Module) -> list[str]:
@@ -283,12 +325,12 @@ def main() -> int:
         # A lone \r is a line break to `ast` but not to `str.split("\n")`
         if re.search(r"\r(?!\n)", source):
             continue
-        new_source, fixes = fix_backticks(filepath, source, tree)
+        new_source, fixes, unfixable = fix_code_spans(filepath, source, tree)
         if fixes:
             with open(filepath, "wb") as f:
                 f.write(bom + new_source.encode("utf-8"))
             source, tree = new_source, ast.parse(new_source, filename=filepath)
-        failures += fixes + crossref_violations(filepath, source, tree)
+        failures += fixes + unfixable + crossref_violations(filepath, source, tree)
     print("\n".join(failures), end="\n" if failures else "")
     return 1 if failures else 0
 

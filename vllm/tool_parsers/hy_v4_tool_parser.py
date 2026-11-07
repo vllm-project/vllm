@@ -350,7 +350,7 @@ class HYV4ToolExtractor:
     delegated to the module-level utilities above.
 
     Streaming has two entry paths sharing one incremental argument parser, selected by
-    the `guided` flag of :meth:`extract_tool_calls_streaming`: normal / auto tool choice
+    the `guided` flag of `extract_tool_calls_streaming`: normal / auto tool choice
     detects markers on atomic token ids so ordinary `<` in content is never withheld,
     while structural-tag guided decoding detects them on the string level because the
     grammar may split a marker across sub-word tokens.
@@ -955,7 +955,7 @@ def _tools_to_plain(tools) -> list[ToolSchema] | None:
 
 
 class HYV4ToolParser(ToolParser):
-    """vLLM adapter around :class:`HYV4ToolExtractor`.
+    """vLLM adapter around `HYV4ToolExtractor`.
 
     Converts the extractor's plain dicts to vLLM protocol objects, mints
     tool-call ids, and mirrors `prev_tool_call_arr` /

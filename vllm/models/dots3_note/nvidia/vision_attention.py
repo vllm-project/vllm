@@ -225,7 +225,7 @@ class VisionAttention(_VisionAttentionBase):
 
 
 class VisionAttentionV2(_VisionAttentionBase):
-    """Eager attention per varlen segment (lower peak memory than :class:`VisionAttention`)."""
+    """Eager attention per varlen segment (lower peak memory than `VisionAttention`)."""
 
     def forward(
         self,

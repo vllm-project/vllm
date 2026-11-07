@@ -131,7 +131,7 @@ class VocabParallelMarkovHead(DSparkMarkovHead):
 
     def align_vocab_shard(self) -> None:
         """Back the rank's unquantized `markov_w2` rows with storage padded
-        by zero rows to a 16-byte multiple, read by :meth:`local_bias`.
+        by zero rows to a 16-byte multiple, read by `local_bias`.
 
         cuBLAS picks its GEMV kernel by shape; the padded shard keeps the
         replicated head's sums, an unaligned one does not.

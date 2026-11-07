@@ -27,7 +27,7 @@
 """Fused MoE front of the DeepSeek-V4.1 low-batch routed experts in CuTe DSL.
 
 Between the router GEMM and the first routed-expert GEMM, the stock path runs
-three kernels; :class:`RoutedExpertFront` replaces them with one launch:
+three kernels; `RoutedExpertFront` replaces them with one launch:
 
 1. the DSv4 top-k (vLLM's Triton `_dsv4_topk_kernel`, `dsv4_topk.py`):
    per row, `score = sqrt(softplus(logit))` (softplus(x) = x above 20, else

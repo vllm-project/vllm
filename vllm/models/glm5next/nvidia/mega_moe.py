@@ -30,7 +30,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
     1x32. Loading writes each weight shard straight into the kernel layout and
     stages its block scale in `*_weight_scale_inv`. Once a load is complete,
     the model's `process_weights_after_loading` calls
-    :meth:`requantize_block_fp8`, which rounds every newly loaded shard to the
+    `requantize_block_fp8`, which rounds every newly loaded shard to the
     kernel scales in place. The shared expert is fused the same way.
     """
 

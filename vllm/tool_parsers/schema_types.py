@@ -81,7 +81,7 @@ def _schema_types(
 
 
 def parameter_types(tools: Iterable[Any] | None) -> dict[str, ParameterTypes]:
-    """Map tool name to :data:`ParameterTypes`, for Chat or flat Responses tools."""
+    """Map tool name to `ParameterTypes`, for Chat or flat Responses tools."""
     types: dict[str, ParameterTypes] = {}
     for tool in tools or []:
         function = getattr(tool, "function", None) or tool

@@ -7,7 +7,7 @@ Mirrors the Rust frontend's native Inkling renderer
 token ids — Inkling has no Jinja chat template and no faithful text form.
 
 The encoding logic lives in `inkling_encoding.py` behind a narrow "OpenAI messages +
-tools -> token ids" call; see the swap-point comment in :meth:`InklingRenderer._render`
+tools -> token ids" call; see the swap-point comment in `InklingRenderer._render`
 for adopting a standalone Inkling input-processing library (mistral-common style) later.
 """
 

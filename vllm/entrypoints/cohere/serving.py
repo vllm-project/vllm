@@ -5,15 +5,15 @@
 """Cohere Chat v2 API serving handler.
 
 Implements `POST /cohere/v2/chat` by translating the incoming Cohere v2 request into a
-standard :class:`ChatCompletionRequest` and delegating to :class:`OpenAIServingChat`.
+standard `ChatCompletionRequest` and delegating to `OpenAIServingChat`.
 The actual prompt rendering is handled by vLLM's renderer pipeline (`vllm.renderers`):
 
 - For Cohere Command-family models, set `--tokenizer-mode cohere` and the
-  :class:`vllm.renderers.cohere.CohereRenderer` will template the request via the
+  `vllm.renderers.cohere.CohereRenderer` will template the request via the
   `cohere_melody` library (`render_cmd3` / `render_cmd4`) and surface citations through
-  the Cohere-scoped :class:`CohereChatMessage` / :class:`CohereDeltaMessage` subclasses
-  (see :mod:`vllm.entrypoints.cohere.cohere_chat_message`).
-- For any other model the default Jinja-based :class:`HfRenderer` is used,
+  the Cohere-scoped `CohereChatMessage` / `CohereDeltaMessage` subclasses
+  (see `vllm.entrypoints.cohere.cohere_chat_message`).
+- For any other model the default Jinja-based `HfRenderer` is used,
   and the endpoint behaves as a plain v2-shaped wrapper around chat
   completions.
 """
@@ -152,7 +152,7 @@ class ContentBlockType(StrEnum):
 
     `THINKING` and `TEXT` are the documented Cohere v2 content-block
     type discriminators on the wire. `TOOL_CALL` is reserved for the
-    internal stream state machine (see :class:`_StreamState`) when a
+    internal stream state machine (see `_StreamState`) when a
     tool call is the currently open block; it is never serialized.
     """
 
@@ -185,11 +185,11 @@ def _map_finish_reason(
 class _CitablePosition(NamedTuple):
     """One entry in melody's citation numbering scheme, resolved to wire shape.
 
-    Populated by :meth:`CohereServingChatV2._walk_citable_positions` (the single source
+    Populated by `CohereServingChatV2._walk_citable_positions` (the single source
     of truth for melody's numbering rule) and consumed by both the inbound
-    (:meth:`CohereServingChatV2._build_doc_id_to_prompt_position`, which drives citation
+    (`CohereServingChatV2._build_doc_id_to_prompt_position`, which drives citation
     resolution on the request side) and outbound
-    (:meth:`CohereServingChatV2._build_position_to_source`, whose result is forwarded to
+    (`CohereServingChatV2._build_position_to_source`, whose result is forwarded to
     the reasoning parser via `chat_template_kwargs[POSITION_TO_SOURCE_KEY]`) helpers --
     so the numbering rule only lives in one place.
 
@@ -216,17 +216,17 @@ class CohereServingChatV2(OpenAIServingChat):
     """Handler for the Cohere Chat v2 API (`POST /cohere/v2/chat`).
 
     The handler is intentionally thin: it converts the v2 request into a
-    :class:`ChatCompletionRequest` (preserving Cohere-specific fields such as
+    `ChatCompletionRequest` (preserving Cohere-specific fields such as
     `documents`, `safety_mode` and `citation_options` via `chat_template_kwargs`) and
     delegates to the underlying chat completion machinery. All Cohere-specific
-    templating happens in the renderer (:class:`vllm.renderers.cohere.CohereRenderer`)
+    templating happens in the renderer (`vllm.renderers.cohere.CohereRenderer`)
     when the engine is started with `--tokenizer-mode cohere`.
 
     Citations flow through `CohereChatMessage` / `CohereDeltaMessage`
-    subclasses (see :mod:`vllm.entrypoints.cohere.cohere_chat_message`) so
-    the OpenAI-shared :class:`ChatMessage` / :class:`DeltaMessage` keep
+    subclasses (see `vllm.entrypoints.cohere.cohere_chat_message`) so
+    the OpenAI-shared `ChatMessage` / `DeltaMessage` keep
     their declared schemas unchanged. Non-streaming responses pick up
-    the subclass by overriding :meth:`_create_chat_message`; streaming
+    the subclass by overriding `_create_chat_message`; streaming
     deltas are emitted directly by the Cohere reasoning parser.
     """
 
@@ -331,7 +331,7 @@ class CohereServingChatV2(OpenAIServingChat):
         Exposed for callers that need the converted request without
         running generation - notably the render endpoint
         (`POST /cohere/v2/chat/render`), which hands the result to
-        :meth:`vllm.entrypoints.scale_out.render.serving.ServingRender.render_chat_request`
+        `vllm.entrypoints.scale_out.render.serving.ServingRender.render_chat_request`
         so that Cohere requests tokenize through exactly the same path
         as `/v1/chat/completions/render`.
         """
@@ -348,12 +348,12 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> dict[str, Any]:
         """Keep this handler's internal entries out of the engine hop.
 
-        Overrides :meth:`OpenAIServingChat._engine_chat_template_kwargs`. The reserved
-        keys in :data:`_API_SERVER_ONLY_TEMPLATE_KWARGS` exist only to hand request-side
+        Overrides `OpenAIServingChat._engine_chat_template_kwargs`. The reserved
+        keys in `_API_SERVER_ONLY_TEMPLATE_KWARGS` exist only to hand request-side
         state to the API-server-side parser and renderer; the engine-core-side reasoning
         parser (used for structured-output reasoning-end gating) never reads them. They
         also can't survive the trip: `POSITION_TO_SOURCE_KEY` holds
-        :class:`CitationSource` models, and msgpack -- which encodes
+        `CitationSource` models, and msgpack -- which encodes
         `reasoning_parser_kwargs` on the way to the engine core -- has no native
         encoding for Pydantic models, so forwarding them fails the request with a
         `TypeError`.
@@ -662,7 +662,7 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> None:
         """Forward Cohere-specific request fields into `chat_template_kwargs`.
 
-        The :class:`vllm.renderers.cohere.CohereRenderer` consumes these kwargs to drive
+        The `vllm.renderers.cohere.CohereRenderer` consumes these kwargs to drive
         `cohere_melody.render_cmd3` / `render_cmd4`. Other renderers ignore unknown
         kwargs, so this is also a no-op for non-cohere `--tokenizer-mode` settings.
         """
@@ -777,7 +777,7 @@ class CohereServingChatV2(OpenAIServingChat):
         """Single-pass implementation of melody's citation numbering rule.
 
         Mirrors `PromptRenderIds::from_messages` in `melody/src/templating/util.rs`.
-        Emits one :class:`_CitablePosition` per document-bearing slot melody assigns
+        Emits one `_CitablePosition` per document-bearing slot melody assigns
         while rendering the prompt:
 
         * **Bucket numbering.** Bucket `0` is reserved for the top-level `documents`
@@ -788,7 +788,7 @@ class CohereServingChatV2(OpenAIServingChat):
         * **Per-bucket result-index slots.** Consumed by *every* content item, not just
           documents -- a text block occupies a slot too, and the source at that slot
           carries an id-less `tool_output` payload synthesized via
-          :meth:`_text_to_tool_output_payload`, matching the cohere api's behavior for
+          `_text_to_tool_output_payload`, matching the cohere api's behavior for
           text-only tool content. Strings and empty contents each consume exactly one
           slot because the cohere renderer wraps them into a single text block before
           handing the message off to melody. Multiple tool messages sharing a
@@ -799,13 +799,13 @@ class CohereServingChatV2(OpenAIServingChat):
           addressing; tool document blocks contribute their single `document.id` when
           present. The `ids` tuple is empty for slots that are only reachable
           positionally (text-only tool content, docs without a client-provided id) --
-          those slots still have a fully-populated :class:`InternalCitationSource`, just
+          those slots still have a fully-populated `InternalCitationSource`, just
           no client-visible id to cite them by.
 
-        Ids alone key the inbound helper (:meth:`_build_doc_id_to_prompt_position`,
+        Ids alone key the inbound helper (`_build_doc_id_to_prompt_position`,
         which drives request-side citation resolution); the resolved
-        :class:`InternalCitationSource` (with `type` / `id` / payload) keys the outbound
-        helper (:meth:`_build_position_to_source`, whose result is forwarded to the
+        `InternalCitationSource` (with `type` / `id` / payload) keys the outbound
+        helper (`_build_position_to_source`, whose result is forwarded to the
         reasoning parser via `chat_template_kwargs[POSITION_TO_SOURCE_KEY]`).
 
         Cohere's on-wire semantics -- `ToolSource.id` and `DocumentSource.id` both carry
@@ -936,12 +936,12 @@ class CohereServingChatV2(OpenAIServingChat):
         """Map every citable document id to its `(bucket, result_index)`.
 
         Inbound helper: converts request-side citation `source.id` refs into melody's
-        numeric `FilterCitation` addressing (see :meth:`_sdk_citation_to_melody`).
+        numeric `FilterCitation` addressing (see `_sdk_citation_to_melody`).
         First-seen-id wins so an explicit id on a top-level document takes precedence
-        over the `doc_{idx}` fallback that :meth:`_walk_citable_positions` also emits
+        over the `doc_{idx}` fallback that `_walk_citable_positions` also emits
         for the same slot.
 
-        Thin wrapper over :meth:`_walk_citable_positions`; the
+        Thin wrapper over `_walk_citable_positions`; the
         numbering rule lives there.
         """
         doc_positions: dict[str, tuple[int, int]] = {}
@@ -1105,9 +1105,9 @@ class CohereServingChatV2(OpenAIServingChat):
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Route response construction through the citation-carrying subclass.
 
-        Overrides :meth:`OpenAIServingChat._create_chat_message` so every non-streaming
+        Overrides `OpenAIServingChat._create_chat_message` so every non-streaming
         construction site in the base full-generator produces a
-        :class:`CohereChatMessage`. That lets :meth:`_finalize_response_message` below
+        `CohereChatMessage`. That lets `_finalize_response_message` below
         set citations on `message.citations` directly, without relying on
         `extra="allow"` attribute injection.
         """
@@ -1121,10 +1121,10 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> ChatMessage:
         """Copy grounding citations off the unified parser onto the message.
 
-        :class:`vllm.parser.cohere_command.CohereCommandParser` caches the citations
+        `vllm.parser.cohere_command.CohereCommandParser` caches the citations
         produced by its most recent unary `parse` call on `last_unary_citations`. We
-        surface them here on :class:`CohereChatMessage` so downstream response
-        conversion can pick them up without the base :class:`OpenAIServingChat` having
+        surface them here on `CohereChatMessage` so downstream response
+        conversion can pick them up without the base `OpenAIServingChat` having
         to know about citations.
         """
         # ``_create_chat_message`` above guarantees the concrete type at
@@ -1144,11 +1144,11 @@ class CohereServingChatV2(OpenAIServingChat):
     def _extract_citations_if_any(self, msg: Any) -> list[Citation] | None:
         """Coerce `CohereChatMessage.citations` into the Cohere v2 wire shape.
 
-        :class:`CohereChatMessage` carries a `citations: list[vllm...Citation] | None`
-        field populated by :meth:`_finalize_response_message` (which reads it off the
+        `CohereChatMessage` carries a `citations: list[vllm...Citation] | None`
+        field populated by `_finalize_response_message` (which reads it off the
         unified parser's `last_unary_citations` cache). Sources are already fully
-        resolved by the parser (see :func:`_melody_sources_to_vllm` in
-        :mod:`vllm.parser.cohere_command`) using the position map forwarded via
+        resolved by the parser (see `_melody_sources_to_vllm` in
+        `vllm.parser.cohere_command`) using the position map forwarded via
         `chat_template_kwargs`. This method's remaining job is:
 
         * Drop citations whose sources all failed to resolve (empty `sources` list) --
@@ -1156,7 +1156,7 @@ class CohereServingChatV2(OpenAIServingChat):
         * Rewrite `THINKING_CONTENT` -> `PLAN` for non-reasoning models, since
           `_chat_completion_to_v2` surfaces `msg.reasoning` as `tool_plan` on the same
           `is_reasoning_model` flag.
-        * Coerce to :class:`cohere.types.Citation` for the wire.
+        * Coerce to `cohere.types.Citation` for the wire.
         """
         raw = getattr(msg, "citations", None)
         if not raw:
@@ -1171,7 +1171,7 @@ class CohereServingChatV2(OpenAIServingChat):
     def _to_wire_citation(self, citation: Any) -> Citation | None:
         """Coerce one parser-produced citation into the SDK wire shape.
 
-        Accepts both :class:`InternalCitation` instances (what the unary path receives
+        Accepts both `InternalCitation` instances (what the unary path receives
         directly from the parser via `last_unary_citations`) and plain `dict` payloads
         (what the streaming path sees, because `DeltaMessage.citations` is an untyped
         extras field on the OpenAI wire protocol and dict shapes survive
@@ -1233,14 +1233,14 @@ class CohereServingChatV2(OpenAIServingChat):
 
         Outbound helper: forwarded to the reasoning parser via
         `chat_template_kwargs[POSITION_TO_SOURCE_KEY]` so
-        :func:`_melody_sources_to_vllm` can attach real document ids / types / payloads
+        `_melody_sources_to_vllm` can attach real document ids / types / payloads
         to each melody source it emits. Each entry carries the fully-resolved wire-shape
         info: `type` (`"document"` for the reserved top-level bucket 0, `"tool"` for any
         tool-call bucket), `id` (explicit doc id, the `doc_{idx}` fallback, or `None`
         for id-less sources), and `document` / `tool_output` payload -- matching the
         cohere api's `Source` shape.
 
-        Thin wrapper over :meth:`_walk_citable_positions`; the
+        Thin wrapper over `_walk_citable_positions`; the
         numbering rule lives there.
         """
         return {
@@ -1328,13 +1328,13 @@ class CohereServingChatV2(OpenAIServingChat):
         """Collect the original v2 tool-message content blocks so the
         renderer can apply its v2 → melody mapping.
 
-        Builds the map that :meth:`_apply_cohere_template_kwargs` stashes under
-        :data:`TOOL_MESSAGE_V2_CONTENT_KEY` for the renderer to consume (see the
-        constant definition in :mod:`vllm.renderers.cohere` for why the map exists).
+        Builds the map that `_apply_cohere_template_kwargs` stashes under
+        `TOOL_MESSAGE_V2_CONTENT_KEY` for the renderer to consume (see the
+        constant definition in `vllm.renderers.cohere` for why the map exists).
         Walks `request.messages` -- not the OpenAI-shape messages built by
-        :meth:`_convert_messages` -- because that flattening step already threw away the
+        `_convert_messages` -- because that flattening step already threw away the
         structural distinction between text and document blocks. Each surviving block is
-        :meth:`~pydantic.BaseModel.model_dump`'d to a plain dict so the forwarded map
+        `model_dump`'d to a plain dict so the forwarded map
         carries no Pydantic instances (msgpack- / general-serialization-safe on
         principle even though internal underscore-prefixed keys are filtered before
         crossing the engine-core boundary).
@@ -1342,7 +1342,7 @@ class CohereServingChatV2(OpenAIServingChat):
         Only emits an entry for a tool message whose content is a
         non-empty list of blocks; a bare-string tool message renders
         fine through the default text-block path in
-        :func:`vllm.renderers.cohere._content_blocks`, so no forwarded
+        `vllm.renderers.cohere._content_blocks`, so no forwarded
         blocks are needed there. Returns an empty dict when there is
         nothing to forward, so the caller can use truthiness to decide
         whether to stash the key at all.
@@ -1639,13 +1639,13 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> list[str]:
         """Emit `citation-start` / `citation-end` events for a delta.
 
-        The reasoning parser populates :class:`CohereDeltaMessage.citations` (see
-        :mod:`vllm.entrypoints.cohere.cohere_chat_message`) with sources whose `id` /
+        The reasoning parser populates `CohereDeltaMessage.citations` (see
+        `vllm.entrypoints.cohere.cohere_chat_message`) with sources whose `id` /
         `type` / `document` / `tool_output` are already resolved against the request's
-        document context (see :func:`_melody_sources_to_vllm` in the parser). This
+        document context (see `_melody_sources_to_vllm` in the parser). This
         method only coerces to the SDK wire shape, applies the `THINKING_CONTENT` ->
         `PLAN` rewrite for non-reasoning models, and drops citations whose sources
-        didn't resolve -- the shared :meth:`_to_wire_citation` handles all three.
+        didn't resolve -- the shared `_to_wire_citation` handles all three.
         """
         events: list[str] = []
         for c in citations:

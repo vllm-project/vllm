@@ -45,7 +45,7 @@ def o_fused_permutation(
 def o_fused_chunk_permutation(
     heads_per_group: int = WV_GROUP_SIZE, head_dim: int = HEAD_DIM
 ) -> torch.Tensor:
-    """Per-32-element-chunk form of :func:`o_fused_permutation`, for scales."""
+    """Per-32-element-chunk form of `o_fused_permutation`, for scales."""
     return o_fused_permutation(heads_per_group, head_dim)[::O_CHUNK] // O_CHUNK
 
 

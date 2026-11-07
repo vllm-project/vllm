@@ -4373,8 +4373,8 @@ class BFCLDataset(HuggingFaceDataset):
       - downloads the selected per-category files via `hf_hub_download`
         and interleaves rows round-robin so sampling is balanced
       - translates BFCL function schemas to OpenAI tool format
-      - sets :attr:`SampleRequest.chat_messages` directly and attaches `tools` /
-        `tool_choice` via :attr:`SampleRequest.request_overrides`, producing
+      - sets `SampleRequest.chat_messages` directly and attaches `tools` /
+        `tool_choice` via `SampleRequest.request_overrides`, producing
         production-alike tool calling traffic when used with an `openai-chat` backend
     """
 
@@ -4396,7 +4396,7 @@ class BFCLDataset(HuggingFaceDataset):
     }
 
     def load_data(self) -> None:
-        """Defer loading to :meth:`sample` where categories are known."""
+        """Defer loading to `sample` where categories are known."""
         self.data = None
 
     def _resolve_categories(self, categories: list[str] | None) -> list[str]:

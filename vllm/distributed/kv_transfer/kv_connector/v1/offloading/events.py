@@ -4,7 +4,7 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size. For complete
-chunks, :class:`OffloadingEventsTracker` builds `BlockStored` from the
+chunks, `OffloadingEventsTracker` builds `BlockStored` from the
 originating request data carried by the raw event. A store may describe multiple
 blocks, and removals still expand to those block hashes using captured
 metadata. Partial tails also use captured metadata. Opt-in via
@@ -163,10 +163,10 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Builds complete stores from request context and expands removals.
 
-    The scheduler calls :meth:`record_store` from `_build_store_jobs` and
-    :meth:`record_lookup` for allocated primary-tier hits while the `Request` is
+    The scheduler calls `record_store` from `_build_store_jobs` and
+    `record_lookup` for allocated primary-tier hits while the `Request` is
     available. Unallocated and missing lookups add no state. Entries remain until
-    the final observed residency removal or :meth:`reset`.
+    the final observed residency removal or `reset`.
     """
 
     def __init__(
@@ -371,7 +371,7 @@ class OffloadingEventsTracker:
 
         Yields:
             `BlockStored` or `BlockRemoved` events corresponding to
-            the underlying :class:`OffloadingEvent` stream.
+            the underlying `OffloadingEvent` stream.
 
         """
         removed_keys: set[OffloadKey] = set()
@@ -416,7 +416,7 @@ class OffloadingEventsTracker:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
         per-block `block_size`. A recurrent group's chunk is reduced to
-        its state checkpoint (see :func:`_as_state_checkpoint`)."""
+        its state checkpoint (see `_as_state_checkpoint`)."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0

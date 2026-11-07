@@ -37,7 +37,7 @@ class PluggableLayer(nn.Module):
     these sub-layers following a generalized invocation sequence. Also, it is stateful
     and may hold parameters or buffers.
 
-    Unlike :class:`CustomOp`, PluggableLayer does NOT provide per-platform
+    Unlike `CustomOp`, PluggableLayer does NOT provide per-platform
     `forward_*` dispatch. Instead, it supports out-of-tree (OOT) replacement
     of the entire layer class at instantiation time, allowing customized
     initialization and submodule composition.

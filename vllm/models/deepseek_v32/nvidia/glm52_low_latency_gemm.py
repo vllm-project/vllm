@@ -3,8 +3,8 @@
 """GLM-5.2 decode GEMM selection for unquantized BF16 on SM100/SM103/SM107.
 
 Dispatch is by local `(N, K)` weight shape and token count `M`.
-:data:`GLM52_PROJECTIONS` was measured on B300 (SM103), :data:`GLM52_PROJECTIONS_SM107`
-on VRNVL72 (SM107) and :data:`GLM52_PROJECTIONS_SM100` on B200 (SM100). The SM107 table
+`GLM52_PROJECTIONS` was measured on B300 (SM103), `GLM52_PROJECTIONS_SM107`
+on VRNVL72 (SM107) and `GLM52_PROJECTIONS_SM100` on B200 (SM100). The SM107 table
 also covers the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
 projections, which run as BF16 GEMMs at decode batch sizes.
 """

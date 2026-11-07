@@ -65,7 +65,7 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def resolve_rank_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
-    """The per-rank variant of :func:`resolve_flashinfer_autotune_file`."""
+    """The per-rank variant of `resolve_flashinfer_autotune_file`."""
     from vllm.distributed.parallel_state import get_world_group
 
     path = resolve_flashinfer_autotune_file(runner)
@@ -113,7 +113,7 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
 def resolve_flashinfer_autotune_v2_root() -> Path | None:
     """Placement root for FlashInfer's managed autotune store.
 
-    Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
+    Unlike `resolve_flashinfer_autotune_file`, no vLLM-side identity
     (config hash, flashinfer version, arch) is folded into the path: the
     managed store keys entries per op and hashes the software/hardware
     environment itself. `None` selects FlashInfer's default root.

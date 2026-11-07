@@ -300,7 +300,7 @@ def _maybe_add_docs_url(cls: Any) -> str:
 def _expand_json_human_readable_numbers(val: str) -> str:
     """Expand human-readable number suffixes in a JSON string.
 
-    Based on :func:`human_readable_int` so that the `k/m/g/t` (decimal) and `K/M/G/T`
+    Based on `human_readable_int` so that the `k/m/g/t` (decimal) and `K/M/G/T`
     (binary) conventions work out the box. Also works inside JSON config arguments such
     as `--kv-transfer-config '{"cpu_bytes_to_use": 80m}'`.
 
@@ -641,7 +641,7 @@ class EngineArgs:
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
     """User-facing quantization configuration. Carries per-layer-kind
     QuantSpecs (linear, moe) and ignore patterns; see
-    :class:`QuantizationConfigArgs`. Auto-populated from the matching online
+    `QuantizationConfigArgs`. Auto-populated from the matching online
     shorthand when `quantization` is one of the values in
     `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization

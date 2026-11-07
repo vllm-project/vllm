@@ -263,7 +263,7 @@ class Nemotron3_5TranscribeConfig(PreTrainedConfig):
 
     Reads the checkpoint's NeMo SpeechLM `config.json` (see the module
     docstring). The decoder config becomes `text_config`; the audio tower
-    settings become `audio_config` (see :func:`resolve_audio_config`).
+    settings become `audio_config` (see `resolve_audio_config`).
 
     `nemo_speechlm` is NeMo's model type for all its SpeechLM checkpoints; the
     architecture name selects Nemotron-3.5-Transcribe.

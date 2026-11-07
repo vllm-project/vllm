@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KDA prefill backend selection for ROCm.
 
-The Kimi-K3 KDA layer calls :func:`chunk_kda_prefill`, which either runs the fused HIP
+The Kimi-K3 KDA layer calls `chunk_kda_prefill`, which either runs the fused HIP
 kernels in `kda_chunk` or falls back to the vendored Triton chunk path.
 """
 
@@ -80,7 +80,7 @@ def chunk_kda_prefill(
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
             snapshots, letting a later prefix-cache hit resume from a mamba
-            block boundary. See :func:`fused_kda_chunk`.
+            block boundary. See `fused_kda_chunk`.
         checkpoint_offsets: per-sequence token offset to snapshot at, `0` for none.
         checkpoint_state_indices: optional per-sequence destination row.
         state_cache: the paged recurrent state. The fused backend reads and

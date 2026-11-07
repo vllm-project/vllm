@@ -6,10 +6,10 @@ This module hosts the thin facade classes that vLLM's KV-connector layer
 instantiates. Almost all the real work lives in the per-mode scheduler
 and worker classes; the connector classes here only forward calls.
 
-* :class:`NixlBaseConnector` – common logic shared by pull and push.
-* :class:`NixlPullConnector` – pull-based (READ) KV transfer.
-* :class:`NixlPushConnector` – push-based (WRITE) KV transfer.
-* `NixlConnector` – backward-compatible alias for :class:`NixlPullConnector`.
+* `NixlBaseConnector` – common logic shared by pull and push.
+* `NixlPullConnector` – pull-based (READ) KV transfer.
+* `NixlPushConnector` – push-based (WRITE) KV transfer.
+* `NixlConnector` – backward-compatible alias for `NixlPullConnector`.
 """
 
 from typing import TYPE_CHECKING, Any

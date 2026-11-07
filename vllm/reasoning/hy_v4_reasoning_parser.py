@@ -244,7 +244,7 @@ def build_reasoning_extractor(
 
 
 class HYV4ReasoningParser(ReasoningParser):
-    """vLLM adapter around :class:`HYV4ReasoningExtractor`.
+    """vLLM adapter around `HYV4ReasoningExtractor`.
 
     Decides `thinking` from the request's `reasoning_effort` and converts
     the extractor's `ReasoningDelta` to `DeltaMessage`.

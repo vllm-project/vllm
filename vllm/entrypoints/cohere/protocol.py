@@ -10,7 +10,7 @@ avoid re-declaring the schema. We only own three things locally:
    `ClientV2.chat` takes the body as kwargs), with vLLM-specific
    extensions (`kv_transfer_params` / `chat_template_kwargs`).
 2. The non-streaming response envelope (the SDK exposes the message
-   shape via :class:`AssistantMessageResponse` but no full response
+   shape via `AssistantMessageResponse` but no full response
    wrapper).
 3. The streaming discriminated union (the SDK exports each event type individually but
    not as a combined `Annotated[Union[...], discriminator]`).
@@ -301,9 +301,9 @@ class CohereLogprobItem(BaseModel):
 class CohereChatV2Response(BaseModel):
     """Cohere Chat v2 non-streaming response body.
 
-    Wraps the SDK :class:`AssistantMessageResponse` (the message shape) in the
+    Wraps the SDK `AssistantMessageResponse` (the message shape) in the
     documented v2 response envelope (`id`, `finish_reason`, `usage`, `logprobs`). The
-    single constructor in :class:`CohereServingChatV2._chat_completion_to_v2` is
+    single constructor in `CohereServingChatV2._chat_completion_to_v2` is
     responsible for supplying a non-empty `id` (falling back to a synthesized one if the
     upstream response is missing it) to this model.
     """

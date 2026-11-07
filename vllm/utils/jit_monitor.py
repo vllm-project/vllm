@@ -53,7 +53,7 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     """Enable JIT compilation monitoring after warmup.
 
     Call once per worker process at the end of
-    :func:`compile_or_warm_up_model`. After activation every monitored kernel
+    `compile_or_warm_up_model`. After activation every monitored kernel
     compilation or autotuning benchmark that happens during inference will be
     logged as a warning or raised as an error, depending on `mode`.
 

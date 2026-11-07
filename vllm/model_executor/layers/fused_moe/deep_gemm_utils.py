@@ -38,7 +38,7 @@ def compute_aligned_M_and_alignment(
     index by block size (e.g. `M_sum // block_m`) or assert workspace alignment must use
     the returned `alignment_used`, not their original `alignment` argument.
 
-    Prefer this over the int-returning :func:`compute_aligned_M` when the
+    Prefer this over the int-returning `compute_aligned_M` when the
     GEMM call site needs to wrap itself in `mk_alignment_scope` or
     otherwise reason about the actual per-expert padding.
     """
@@ -90,10 +90,10 @@ def compute_aligned_M(
 ) -> int:
     """Return `M_sum` only (backward-compat wrapper).
 
-    Equivalent to :func:`compute_aligned_M_and_alignment`'s first return value. Existing
+    Equivalent to `compute_aligned_M_and_alignment`'s first return value. Existing
     downstream callers and the warmup path that only size a workspace use this. Call
     sites that need the actual per-expert alignment (to wrap GEMMs in
-    `mk_alignment_scope`) should use :func:`compute_aligned_M_and_alignment` instead.
+    `mk_alignment_scope`) should use `compute_aligned_M_and_alignment` instead.
     """
     M_sum, _ = compute_aligned_M_and_alignment(
         M, num_topk, local_num_experts, alignment, expert_tokens_meta

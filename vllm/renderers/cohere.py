@@ -11,10 +11,10 @@ The renderer's client surface is `chat_template_kwargs` (vLLM's
 generic passthrough for template-time inputs). It is fed by two
 different code paths, which speak different vocabularies:
 
-1. :class:`vllm.entrypoints.cohere.serving.CohereServingChatV2` -- translates a native
+1. `vllm.entrypoints.cohere.serving.CohereServingChatV2` -- translates a native
    `Cohere Chat v2 request <https://docs.cohere.com/reference/chat>`__ into
    `chat_template_kwargs`.
-2. :class:`OpenAIServingChat` -- forwards whatever the client puts in
+2. `OpenAIServingChat` -- forwards whatever the client puts in
    `request.chat_template_kwargs` directly, without translation.
 
 Accordingly the renderer accepts keys from both vocabularies.
@@ -66,7 +66,7 @@ resolves `{{ reasoning_effort }}` inside cmd3 / cmd4 templates.
 
 Citations produced by Cohere models are surfaced through the Cohere-scoped
 `CohereChatMessage.citations` / `CohereDeltaMessage.citations` fields (see
-:mod:`vllm.entrypoints.cohere.cohere_chat_message`), populated by the `cohere2`
+`vllm.entrypoints.cohere.cohere_chat_message`), populated by the `cohere2`
 reasoning parser. The base OpenAI `ChatMessage` / `DeltaMessage` keep their declared
 schemas unchanged; the response envelope declares them as `SerializeAsAny[...]` so the
 subclass fields survive JSON serialization.
@@ -503,14 +503,14 @@ def _conversation_to_melody_messages(
 
     `messages_citations` is an optional index-keyed lookup of per-message citations from
     the request, populated by `CohereServingChatV2` under the
-    :data:`MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values must already be in
+    `MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values must already be in
     melody's `FilterCitation` dict shape (see
     `CohereServingChatV2._sdk_citation_to_melody`).
 
     `tool_message_v2_content` is an optional index-keyed lookup of the original Cohere
     v2 tool-message content blocks (as plain dicts), populated by `CohereServingChatV2`
-    under the :data:`TOOL_MESSAGE_V2_CONTENT_KEY` entry. When set for a given index, its
-    blocks -- run through :func:`_v2_tool_content_to_melody_block` to apply the v2 →
+    under the `TOOL_MESSAGE_V2_CONTENT_KEY` entry. When set for a given index, its
+    blocks -- run through `_v2_tool_content_to_melody_block` to apply the v2 →
     melody mapping -- replace the block list this function would otherwise derive from
     `msg["content"]`. This lets the renderer own the v2-shape → melody-shape conversion
     for the structured `document` blocks cohere v2 allows on tool messages (which don't

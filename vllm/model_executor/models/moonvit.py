@@ -281,7 +281,7 @@ class Rope2DPosEmb(nn.Module):
         self,
         grid_hws_list: list[list[int]] | list[tuple[int, int]],
     ) -> torch.Tensor:
-        """List-based variant of :meth:`get_freqs_cis_by_seqlens`.
+        """List-based variant of `get_freqs_cis_by_seqlens`.
 
         Accepts a Python list of `(h, w)` pairs so callers that already
         operate outside the captured CUDA graph can avoid materializing a
@@ -613,7 +613,7 @@ def patch_merger_packed(
     gather_idx: torch.Tensor,
     merge_kernel_size: tuple[int, int],
 ) -> torch.Tensor:
-    """CUDA-graph-safe equivalent of :func:`patch_merger`.
+    """CUDA-graph-safe equivalent of `patch_merger`.
 
     Uses a precomputed index tensor to gather the per-token reshape +
     permute that `patch_merger` does inside a Python loop. The output is
@@ -629,7 +629,7 @@ def _build_merge_gather_idx(
     grid_hws_list: list[list[int]] | list[tuple[int, int]],
     merge_kernel_size: tuple[int, int],
 ) -> np.ndarray:
-    """Build the per-token gather indices used by :func:`patch_merger_packed`.
+    """Build the per-token gather indices used by `patch_merger_packed`.
 
     For each item with grid (h, w) and merge kernel (kh, kw), the output
     block at position (nh, nw) gathers the kh*kw input tokens at rows
@@ -790,7 +790,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
         pixel_values (torch.Tensor): The input pixel values.
         grid_hw (torch.Tensor): The grid height and width.
         encoder_metadata: Optional precomputed metadata produced by
-            :meth:`prepare_encoder_metadata`. When provided every `.tolist()` call in
+            `prepare_encoder_metadata`. When provided every `.tolist()` call in
             the forward path is skipped, the returned tensor is the packed
             `(sum(new_h*new_w), kh*kw, hidden_size)` form (suitable for CUDA graph
             capture/replay), and `grid_hw` is unused. When `None` the legacy path runs

@@ -9,7 +9,7 @@ matmuls of the base implementation into a single call.
 `zentorch_sdpa` does not return a usable log-sum-exp, so requests that need
 one (context chunks, prefix/suffix merge) are delegated to the base backend.
 
-Availability is reported through :meth:`is_available`, so the prefill selector
+Availability is reported through `is_available`, so the prefill selector
 gates this backend once at selection time rather than per attention call.
 """
 

@@ -1745,7 +1745,7 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
 
     Subclasses override only the hooks they need. The planning flow and its invariants
     (`num_gpu_blocks_override`, null-block reservation, auto-fit, admission checks,
-    cross-rank convergence) stay in the Core-owned :func:`get_kv_cache_configs`.
+    cross-rank convergence) stay in the Core-owned `get_kv_cache_configs`.
     """
 
     def get_kv_cache_groups(

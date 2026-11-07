@@ -43,7 +43,7 @@ At a low-batch attention boundary the output projection `wo_b` (FlashInfer's
 publish kernel of `BoundaryAllReduce` reads it back and multicasts it into the
 Lamport mailbox before the consumer can collect the peers' contributions.
 
-:class:`PublishingMxfp8Linear` runs the same GEMM, with the tactic FlashInfer's
+`PublishingMxfp8Linear` runs the same GEMM, with the tactic FlashInfer's
 autotuner selected for the plain call, but its epilogue also does the publish kernel's
 work: every output value goes, rounded to BF16 with negative zero cleared, into this
 rank's slot of the mailbox generation `stage_state[0]` on all ranks (`multimem.st`), and
@@ -72,7 +72,7 @@ Addresses. The mailbox multicast address, the stage-state address, the rank,
 the TP size, the mailbox capacity and the hidden size are compile-time
 constants of each compiled kernel: each publisher serves one
 `BoundaryAllReduce`, whose buffers live as long as it does. Kernels compile
-per tactic, before CUDA graph capture (:meth:`PublishingMxfp8Linear.precompile`).
+per tactic, before CUDA graph capture (`PublishingMxfp8Linear.precompile`).
 """
 
 from __future__ import annotations

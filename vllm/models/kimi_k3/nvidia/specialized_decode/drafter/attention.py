@@ -487,7 +487,7 @@ def folded_decode(
     `kv_cache`: `[pages, page_size, kv_lora_rank + rope]`; `block_table` /
     `seq_lens` (/ `dcp_tot_seq_lens`): per request. Returns `[R * k, H,
     kv_lora_rank]` and, with `return_lse`, `[R * k, H]`. `backend` forces
-    a FlashInfer backend (benchmarks); by default :func:`fold_plan` picks."""
+    a FlashInfer backend (benchmarks); by default `fold_plan` picks."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     rows, heads, dim = q.shape

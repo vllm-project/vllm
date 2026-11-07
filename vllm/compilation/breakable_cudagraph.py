@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Breakable CUDA graph capture/replay.
 
-This is an alternative to :class:`CUDAGraphWrapper` that replaces vLLM's
+This is an alternative to `CUDAGraphWrapper` that replaces vLLM's
 torch.compile-based FX graph splitting with runtime stream-capture
 breaks.
 
@@ -78,7 +78,7 @@ def eager_break_during_capture(fn: F) -> F:
     for the breakable cudagraph capture.
 
     When the decorated function is invoked outside of a
-    :class:`BreakableCUDAGraphCapture` context, it executes normally.
+    `BreakableCUDAGraphCapture` context, it executes normally.
 
     When invoked inside a capture context, it ends the current cudagraph
     segment, runs the function eagerly on the capture stream, records the
@@ -131,7 +131,7 @@ def eager_break_during_capture(fn: F) -> F:
 
 
 class BreakableCUDAGraphCapture:
-    """Stream-capture context that supports eager breaks via :meth:`add_eager`.
+    """Stream-capture context that supports eager breaks via `add_eager`.
 
     Usage::
 
@@ -252,8 +252,8 @@ class _BreakableEntry:
 
 
 class BreakableCUDAGraphWrapper:
-    """Drop-in replacement for :class:`CUDAGraphWrapper` that uses
-    :class:`BreakableCUDAGraphCapture` instead of a single monolithic
+    """Drop-in replacement for `CUDAGraphWrapper` that uses
+    `BreakableCUDAGraphCapture` instead of a single monolithic
     `torch.cuda.graph()` capture.
 
     Same dispatch contract as `CUDAGraphWrapper`:

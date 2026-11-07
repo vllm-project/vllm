@@ -97,7 +97,7 @@ class WeightsMapper:
         return result[0] if result is not None else None
 
     def _map_name(self, key: str) -> str | None:
-        """Backward-compatible alias for :meth:`map_name`."""
+        """Backward-compatible alias for `map_name`."""
         return self.map_name(key)
 
     def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:

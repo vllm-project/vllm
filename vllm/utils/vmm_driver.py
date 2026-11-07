@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ctypes bindings for the CUDA (`cuMem*`) and HIP (`hipMem*`) virtual memory
-management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
+management APIs, used by `vllm.utils.extensible_tensor.ExtensibleTensor`.
 """
 
 from __future__ import annotations

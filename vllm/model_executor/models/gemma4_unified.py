@@ -227,7 +227,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
     Inherits multimodal embedding routing, PLE handling, bidirectional
     attention helpers, language-model forward, LoRA, and pipeline-parallel
-    support from :class:`Gemma4ForConditionalGeneration`.  Overrides only:
+    support from `Gemma4ForConditionalGeneration`.  Overrides only:
 
       * `__init__` — builds the encoder-free vision embedder instead of
         SigLIP/audio towers (LightOnOCR-style: `nn.Module.__init__` +

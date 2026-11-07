@@ -4,7 +4,7 @@
 
 Currently used by the Qwen3.5 attention path (`attn_output_gate` with NeoX-style partial
 RoPE). The unfused reference sequence is `split -> GemmaRMSNorm -> RoPE -> gate chunk`;
-this collapses it into a single Triton launch. See :func:`fused_qk_rmsnorm_rope_gate`.
+this collapses it into a single Triton launch. See `fused_qk_rmsnorm_rope_gate`.
 """
 
 import torch

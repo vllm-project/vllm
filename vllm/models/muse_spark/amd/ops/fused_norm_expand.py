@@ -73,7 +73,7 @@ def fused_rmsnorm_expand(
 
 
 def take_expanded(hidden_states: torch.Tensor, repeats: int) -> torch.Tensor | None:
-    """The `[T * repeats, D]` buffer behind a :func:`fused_rmsnorm_expand`
+    """The `[T * repeats, D]` buffer behind a `fused_rmsnorm_expand`
     result, or `None` if `hidden_states` is not one."""
     out = getattr(hidden_states, _EXPANDED_ATTR, None)
     if (

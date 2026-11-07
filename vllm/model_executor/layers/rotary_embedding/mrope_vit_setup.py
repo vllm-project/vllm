@@ -102,7 +102,7 @@ class VitMropeSetup(PluggableLayer):
 
     Stateless: the caller's inv_freq buffers are passed per call. OOT platforms replace
     the whole layer via `@VitMropeSetup.register_oot` with a subclass overriding
-    :meth:`forward` (e.g. to retune the kernel tiling for their hardware).
+    `forward` (e.g. to retune the kernel tiling for their hardware).
     """
 
     def forward(
@@ -173,7 +173,7 @@ def vit_mrope_setup(
     grid_thw: list[list[int]],
     spatial_merge_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compatibility wrapper around :class:`VitMropeSetup`."""
+    """Compatibility wrapper around `VitMropeSetup`."""
     return VitMropeSetup()(
         inv_freq_t, inv_freq_h, inv_freq_w, grid_thw, spatial_merge_size
     )

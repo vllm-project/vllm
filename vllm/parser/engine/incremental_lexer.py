@@ -31,8 +31,8 @@ class LexToken:
 class LexerShape:
     """Immutable pre-computed data derived from terminal definitions.
 
-    Created once per :class:`ParserEngineConfig` and shared across all
-    :class:`IncrementalLexer` instances that use the same config.
+    Created once per `ParserEngineConfig` and shared across all
+    `IncrementalLexer` instances that use the same config.
     """
 
     __slots__ = (

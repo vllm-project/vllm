@@ -4745,7 +4745,7 @@ def rocm_sparse_attn_decode_bf16(
         ragged_indices: Flattened per-query KV slots.
         ragged_indptr: Segment offsets into `ragged_indices`, `[sq + 1]`.
         num_splits: KV splits per query, from
-            :func:`rocm_sparse_decode_bf16_num_splits`.
+            `rocm_sparse_decode_bf16_num_splits`.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (

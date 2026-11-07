@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Daemon warmup caches, seeded daemon-to-daemon over the shared transport.
 
-Each warmup-cache object (currently only :class:`FlashInferWarmupCache`)
+Each warmup-cache object (currently only `FlashInferWarmupCache`)
 drives its own warmup pass on the daemon; the seeding flow itself
-(:class:`seed.SeedTransport`) is shared with future kinds such as weight
+(`seed.SeedTransport`) is shared with future kinds such as weight
 shards. A target daemon installs its rank-matched cache before tuning, so
 both the daemon's own warmup and the later engine start skip re-tuning. The
 disk layout is the index: a request names the cache by the same key the

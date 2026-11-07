@@ -246,7 +246,7 @@ class RoutedExpertGemm:
         `x`: BF16 router input [rows, 5120]; `logits`: FP32 router logits
         [rows, 384]; `input_ids`: [rows] int32 or int64, read only with image
         routing; `is_padding`: bool [rows], rows no expert computes (ids -1,
-        weights 0), as the router's padding mask (:func:`padding_mask`).
+        weights 0), as the router's padding mask (`padding_mask`).
         """
         config = self.front_config
         assert config is not None

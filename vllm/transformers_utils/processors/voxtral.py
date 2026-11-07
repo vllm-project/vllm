@@ -60,15 +60,15 @@ class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
     def fetch_audio(self, audio_url_or_urls, sampling_rate=None):
         """HF-compatible duck-typed `fetch_audio`.
 
-        Mirrors :meth:`transformers.SequenceFeatureExtractor.fetch_audio` so
-        :class:`transformers.ProcessorMixin.prepare_inputs_layout` works on this
+        Mirrors `transformers.SequenceFeatureExtractor.fetch_audio` so
+        `transformers.ProcessorMixin.prepare_inputs_layout` works on this
         duck-typed feature extractor.
 
         Accepts the same shapes as `SequenceFeatureExtractor.fetch_audio`:
 
         * `np.ndarray` / `torch.Tensor` — returned as-is.
         * `list[float]` — returned as-is (a single audio sample).
-        * `str` URL or path — delegated to :func:`transformers.audio_utils.load_audio`.
+        * `str` URL or path — delegated to `transformers.audio_utils.load_audio`.
         * `list` of any of the above — recursed element-wise.
 
         `ProcessorMixin.prepare_inputs_layout` always passes already-decoded

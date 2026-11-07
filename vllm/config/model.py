@@ -280,7 +280,7 @@ class ModelConfig:
     determine the data type of the weights."""
     quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
     """User-facing quantization configuration. Carries per-layer-kind specs
-    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    (linear, moe) and ignore patterns; see `QuantizationConfigArgs`.
     Auto-populated from the matching online shorthand when `quantization` is
     one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False

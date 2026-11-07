@@ -179,7 +179,7 @@ def mistral_config(
     reasoning_encoding: Literal["special_token", "text", "none"],
     name: str = "mistral",
 ) -> ParserEngineConfig:
-    """Return a :class:`ParserEngineConfig` for the Mistral output format.
+    """Return a `ParserEngineConfig` for the Mistral output format.
 
     Args:
         reasoning_encoding: Reasoning token format. `"special_token"` – v13+
@@ -190,7 +190,7 @@ def mistral_config(
         name: Name embedded in the returned config (used for debugging).
 
     Returns:
-        A frozen :class:`ParserEngineConfig` with `initial_state=CONTENT`.
+        A frozen `ParserEngineConfig` with `initial_state=CONTENT`.
 
     """
     if reasoning_encoding == "special_token":

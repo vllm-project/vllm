@@ -1010,14 +1010,14 @@ class AsyncLLM(EngineClient):
         All mode handling (abort / wait / keep) and cache clearing is done
         in the engine. In `abort` and `wait` mode, new requests are rejected
         with `RetryableRequestError` from when the pause starts until
-        :meth:`resume_generation`; `keep` accepts and queues them.
+        `resume_generation`; `keep` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
                 - `"abort"`: Abort all in-flight requests immediately (default).
                 - `"wait"`: Wait for in-flight requests to complete.
                 - `"keep"`: Freeze requests in queue; they resume on
-                  :meth:`resume_generation`.
+                  `resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to `False` to preserve cache for faster resume.
 
@@ -1036,7 +1036,7 @@ class AsyncLLM(EngineClient):
         await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
-        """Resume generation after :meth:`pause_generation`."""
+        """Resume generation after `pause_generation`."""
         await self.engine_core.resume_scheduler_async()
 
     async def is_paused(self) -> bool:

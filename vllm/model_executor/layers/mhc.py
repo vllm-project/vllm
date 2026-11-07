@@ -309,7 +309,7 @@ class MHCPreOp(CustomOp):
 class MHCPreDelayedOp(CustomOp):
     """MHC pre block using the pre-mix carried from the previous sublayer.
 
-    Same gates as :class:`MHCPreOp`, but the stream collapse applies the caller's
+    Same gates as `MHCPreOp`, but the stream collapse applies the caller's
     `pre_mix` and this sublayer's pre-mix is returned for the next sublayer seam.
 
     Passing `sublayer_out` / `post_layer_mix` / `comb_res_mix` also applies the

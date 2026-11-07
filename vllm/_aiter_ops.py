@@ -4894,7 +4894,7 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """MHC pre using the pre-mix carried from the previous sublayer.
 
-        Same gates as :meth:`mhc_pre`, but the stream collapse applies the caller's
+        Same gates as `mhc_pre`, but the stream collapse applies the caller's
         `pre_mix` instead of the one computed here, and the one computed here is
         returned for the next sublayer seam. AITER has no single kernel for that shape,
         so drive its two stages directly: `mhc_pre_big_fuse` still produces the post and
@@ -5041,7 +5041,7 @@ class rocm_aiter_ops:
         norm_eps: float,
         residual_out: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """:meth:`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
+        """`mhc_pre_delayed` with the RMSNorm of the collapse folded in.
 
         Runs aiter's fused Triton kernel `mhc_fused_post_pre_delayed_rmsnorm`; the
         returned `layer_input` is already normalised with `norm_weight` / `norm_eps`.

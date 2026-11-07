@@ -5,7 +5,7 @@
 `LongcatFlashNgramForCausalLM` is LongCat-Flash (MLA dual-attention + zero-expert MoE +
 YaRN) plus an n-gram embedding input layer: each position's embedding fuses the token
 embedding with hashed embeddings of the preceding `n` tokens. That per-request token
-history is isolated in a Model-Runner-V2 :class:`LongcatNgramModelState` (mirroring
+history is isolated in a Model-Runner-V2 `LongcatNgramModelState` (mirroring
 `DiffusionGemmaModelState`), so `get_model_state_cls` makes the model MRV2-only.
 """
 
@@ -49,7 +49,7 @@ class NgramEmbedding(nn.Module):
     """Token embedding fused with hashed n-gram embeddings.
 
     TP-sharded: the `k*(n-1)` per-embedder tables are concatenated into one
-    :class:`VocabParallelEmbedding` (`oe_embedder`) with per-embedder offsets,
+    `VocabParallelEmbedding` (`oe_embedder`) with per-embedder offsets,
     and the projections are stacked into one `oe_projection` applied with a
     single `bmm`. Hashing math is ported from the HF reference.
     """
@@ -167,7 +167,7 @@ class NgramEmbedding(nn.Module):
 
 
 class FlashNgramModel(FlashModel):
-    """FlashModel whose input embedding is an :class:`NgramEmbedding`."""
+    """FlashModel whose input embedding is an `NgramEmbedding`."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)

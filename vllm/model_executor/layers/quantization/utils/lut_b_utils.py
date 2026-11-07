@@ -43,7 +43,7 @@ def pack_lut_b_indices(indices: torch.Tensor) -> torch.Tensor:
 
 
 def unpack_lut_b_indices(packed: torch.Tensor) -> torch.Tensor:
-    """Inverse of :func:`pack_lut_b_indices`."""
+    """Inverse of `pack_lut_b_indices`."""
     if packed.shape[-1] % 3 != 0:
         raise ValueError("The number of packed bytes must be divisible by 3")
 
