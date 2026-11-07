@@ -19,6 +19,11 @@ from .item_tracker import (
     BaseMultiModalItemTracker,
     MultiModalItemTracker,
 )
+from .rendered_roles import (
+    assert_chat_template_rendered_messages,
+    message_has_nonempty_payload,
+    roles_rendered_by_chat_template,
+)
 from .tool_call import get_tool_call_id_type, make_tool_call_id
 from .types import *
 from .types import __all__ as all_types
@@ -39,4 +44,7 @@ __all__ = [
     "parse_chat_messages",
     "parse_chat_messages_async",
     "PROMPT_EMBEDS_PLACEHOLDER_TOKEN",
+    "assert_chat_template_rendered_messages",
+    "message_has_nonempty_payload",
+    "roles_rendered_by_chat_template",
 ]
