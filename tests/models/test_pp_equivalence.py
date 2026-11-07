@@ -47,13 +47,12 @@ MINIMAL_PP_ARCH_LIST = [
 
 # Architectures that fail on main. A fix removes its entry; `strict` fails the
 # test once the fix lands.
-# TODO(prototype): link the fix PRs or issues marked TBD.
 KNOWN_PP_DEFECTS: dict[str, str] = {
     "Ernie4_5_MoeForCausalLM": "No embedding to tie on the last stage; fixed by #65983",
     "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
-    "GPTBigCodeForCausalLM": "Later stages add position embeddings again; TBD",
+    "GPTBigCodeForCausalLM": "Later stages add position embeddings again; see #66290",
     "GraniteMoeHybridForCausalLM": "Loads other stages' layers; fixed by #66007",
-    "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; TBD",
+    "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
 }
 # The reduced configs keep each model's leading dense layers, which can fill a
 # whole stage; these models expect an MoE layer on every stage, as real configs
