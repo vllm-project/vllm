@@ -1,0 +1,667 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""The Hopper executor's sparse-MLA decode
+(``specialized_decode/hopper/sparse_mla.py``) against the stock FlashMLA decode
+it replaces, on the FlashMLA SM90 kernel, eagerly and replayed from a CUDA
+graph. Needs one SM90 GPU; under a minute.
+
+Run: pytest -v tests/models/deepseek_v41/nvidia/specialized_decode/test_hopper.py
+"""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.models.deepseek_v41.nvidia import flashmla
+from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import sparse_mla
+from vllm.platforms import current_platform
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="needs an SM90 GPU",
+)
+
+DEVICE = torch.device("cuda")
+GROUPS = 2  # SWA KV-cache groups; layer i is in group i % GROUPS.
+# (compress_ratio, kv source, index source) per layer: two runs of index
+# sources per ratio, each run spanning both groups.
+LAYOUT = (
+    (0, None, None),
+    (0, None, None),
+    (2, 2, 2),
+    (2, 2, 2),
+    (2, 2, 4),
+    (2, 2, 4),
+    (1, 6, 6),
+    (1, 6, 6),
+    (1, 6, 8),
+    (1, 6, 8),
+)
+SEQ_LENS = (300, 2000)
+ROWS = 6  # DSpark: 6 verify rows a request
+TOKENS = ROWS * len(SEQ_LENS)
+# Padded heads; a TP4 rank's 16 local heads are the first.
+HEADS, LOCAL_HEADS, HEAD_DIM, WINDOW, TOP_K = 64, 16, 512, 128, 512
+# Cache pages of 64 entries, as on SM90: a compressed page holds 64 * ratio
+# tokens.
+PAGE = 64
+
+
+def _v4_cache(blocks: int, block_size: int, generator) -> torch.Tensor:
+    """A V4 (584 B a token) FP8 cache of finite values: each block holds its
+    data rows (448 e4m3 NoPE values, 64 BF16 RoPE values), then its scale rows
+    (7 e8m0 scales and a pad byte)."""
+
+    def randn(*shape):
+        return torch.randn(*shape, generator=generator, device=DEVICE)
+
+    nope = randn(blocks, block_size, 448).clamp(-6, 6).to(torch.float8_e4m3fn)
+    rope = randn(blocks, block_size, 64).to(torch.bfloat16)
+    scales = torch.randint(
+        125, 130, (blocks, block_size, 8), generator=generator, device=DEVICE
+    ).to(torch.uint8)
+    scales[..., 7] = 0
+    data = torch.cat([nope.view(torch.uint8), rope.view(torch.uint8)], dim=-1)
+    block = torch.cat([data.flatten(1), scales.flatten(1)], dim=-1)
+    return block.view(blocks, block_size, 584)
+
+
+class Step:
+    """One pure-decode step of ``LAYOUT``'s layers on random caches."""
+
+    def __init__(self, seed: int):
+        g = torch.Generator(device=DEVICE).manual_seed(seed)
+        self.generator = g
+        positions = torch.cat(
+            [torch.arange(n - ROWS, n, device=DEVICE) for n in SEQ_LENS]
+        )
+        swa_lens = (positions + 1).clamp(max=WINDOW).to(torch.int32)
+        self.topk = torch.zeros(TOKENS, TOP_K, dtype=torch.int32, device=DEVICE)
+        self.layers: list[DeepseekV4FlashMLAAttention] = []
+        self.by_layer: dict = {}
+        self.groups = []
+        for _ in range(GROUPS):
+            cache = _v4_cache(16, PAGE, g)
+            # Each group's own SWA slots, -1 past the window.
+            slots = torch.stack(
+                [torch.randperm(16 * PAGE, generator=g, device=DEVICE)[:WINDOW]]
+                * TOKENS
+            ).to(torch.int32)
+            columns = torch.arange(WINDOW, device=DEVICE)
+            slots[columns >= swa_lens[:, None]] = -1
+            self.groups.append(
+                SimpleNamespace(
+                    num_decodes=len(SEQ_LENS),
+                    num_prefills=0,
+                    num_decode_tokens=TOKENS,
+                    max_decode_query_len=ROWS,
+                    is_valid_token=torch.ones(TOKENS, dtype=torch.bool, device=DEVICE),
+                    token_to_req_indices=torch.arange(
+                        len(SEQ_LENS), dtype=torch.int32, device=DEVICE
+                    ).repeat_interleave(ROWS),
+                    decode_swa_indices=slots.unsqueeze(1),
+                    decode_swa_lens=swa_lens,
+                    kv_cache=cache,
+                )
+            )
+        self.compressed = {}
+        for kv_source in {kv for _, kv, _ in LAYOUT if kv is not None}:
+            ratio = LAYOUT[kv_source][0]
+            self.compressed[kv_source] = (
+                _v4_cache(64, PAGE, g),
+                SimpleNamespace(
+                    block_size=PAGE * ratio,
+                    block_table=torch.randperm(64, generator=g, device=DEVICE)
+                    .view(2, 32)
+                    .to(torch.int32),
+                ),
+            )
+            self.by_layer[f"layers.{kv_source}"] = self.compressed[kv_source][1]
+        for layer_id, (ratio, kv_source, index_source) in enumerate(LAYOUT):
+            group = self.groups[layer_id % GROUPS]
+            layer = object.__new__(DeepseekV4FlashMLAAttention)
+            layer.compress_ratio = ratio
+            layer.n_local_heads, layer.padded_heads = LOCAL_HEADS, HEADS
+            layer.index_source_layer_id = index_source
+            layer.compressed_cache_prefix = (
+                None if kv_source is None else f"layers.{kv_source}"
+            )
+            layer.topk_indices_buffer = self.topk
+            layer.scale = HEAD_DIM**-0.5
+            layer.attn_sink = torch.randn(HEADS, generator=g, device=DEVICE)
+            prefix = f"layers.{layer_id}.swa_cache"
+            layer.swa_cache_layer = SimpleNamespace(
+                prefix=prefix, kv_cache=group.kv_cache
+            )
+            if kv_source is not None:
+                cache = self.compressed[kv_source][0]
+                layer._compressed_kv_cache = lambda cache=cache: cache  # type: ignore[method-assign,misc]
+            self.by_layer[prefix] = group
+            self.layers.append(layer)
+        self.q = torch.empty(
+            len(LAYOUT), TOKENS, HEADS, HEAD_DIM, dtype=torch.bfloat16, device=DEVICE
+        )
+        self.sources = {i: torch.empty_like(self.topk) for _, _, i in LAYOUT if i}
+        self.refresh()
+
+    def refresh(self) -> None:
+        """New queries and new top-k indices from every index source: like the
+        indexer, the first min(512, compressed length) entries of each row are
+        distinct valid indices."""
+        g = self.generator
+        self.q.copy_(torch.randn(self.q.shape, generator=g, device=DEVICE))
+        for source, topk in self.sources.items():
+            ratio = LAYOUT[source][0]
+            topk.fill_(-1)
+            for row in range(TOKENS):
+                valid = SEQ_LENS[row // ROWS] // ratio
+                count = min(TOP_K, valid)
+                picks = torch.randperm(valid, generator=g, device=DEVICE)[:count]
+                topk[row, :count] = picks.to(torch.int32)
+
+    def fresh_plans(self) -> None:
+        """What a metadata build gives each group: empty per-type plans."""
+        for group in self.groups:
+            group.tile_sched_swaonly = sparse_mla.get_mla_metadata()[0]
+            group.tile_sched_c1a = sparse_mla.get_mla_metadata()[0]
+            group.tile_sched_c2a = sparse_mla.get_mla_metadata()[0]
+
+    def forward(self, decode: "sparse_mla.FlashMlaDecode | None") -> torch.Tensor:
+        """Every layer's attention output in model order, on ``decode`` (None:
+        the stock decode); each index source first writes its top-k."""
+        self.fresh_plans()
+        out = torch.zeros_like(self.q)
+        context = ForwardContext(
+            {}, self.by_layer, {}, cudagraph_runtime_mode=CUDAGraphMode.FULL
+        )
+        with override_forward_context(context):
+            if decode is not None:
+                decode.tables.reset()
+            for layer_id, layer in enumerate(self.layers):
+                if layer_id in self.sources:
+                    self.topk.copy_(self.sources[layer_id])
+                if decode is not None:
+                    decode.run(layer, self.q[layer_id], out[layer_id])
+                    continue
+                kv_source = LAYOUT[layer_id][1]
+                layer._forward_decode(
+                    q=self.q[layer_id],
+                    kv_cache=None
+                    if kv_source is None
+                    else layer._compressed_kv_cache(),
+                    swa_metadata=self.by_layer[layer.swa_cache_layer.prefix],
+                    attn_metadata=(
+                        None if kv_source is None else self.compressed[kv_source][1]
+                    ),
+                    swa_only=kv_source is None,
+                    output=out[layer_id],
+                )
+        return out
+
+
+def _count_plans(monkeypatch, module) -> list:
+    """The plans ``module``'s decode launches pass, in launch order."""
+    plans: list = []
+    launch = module.flash_mla_with_kvcache
+
+    def counted(**kwargs):
+        plans.append(kwargs["tile_scheduler_metadata"])
+        return launch(**kwargs)
+
+    monkeypatch.setattr(module, "flash_mla_with_kvcache", counted)
+    return plans
+
+
+@pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
+def test_shared_plans_and_tables_match_the_stock_decode(monkeypatch, graph):
+    """Every layer's output equals the stock decode's bit for bit, on one plan
+    per layer type for both SWA groups (the stock decode plans each type once
+    per group) and one global top-k table per index source; a CUDA graph of
+    the step replays on new queries and top-k indices."""
+    step = Step(seed=0)
+    stock_plans = _count_plans(monkeypatch, flashmla)
+    shared_plans = _count_plans(monkeypatch, sparse_mla)
+    builds: list = []
+    compute = sparse_mla.compute_global_topk_indices_and_lens
+
+    def counted_compute(*args, **kwargs):
+        builds.append(args)
+        return compute(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sparse_mla, "compute_global_topk_indices_and_lens", counted_compute
+    )
+    decode = sparse_mla.FlashMlaDecode(sparse_mla.FlashMlaTables(step.layers))
+
+    expected = step.forward(None)
+    assert len({id(plan) for plan in stock_plans}) == 3 * GROUPS
+    if not graph:
+        actual = step.forward(decode)
+    else:
+        step.forward(decode)  # compile
+        torch.accelerator.synchronize()
+        cuda_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(cuda_graph):
+            actual = step.forward(decode)
+        step.refresh()
+        expected = step.forward(None)
+        cuda_graph.replay()
+    assert len({id(plan) for plan in shared_plans[-len(LAYOUT) :]}) == 3
+    assert len(builds) == (2 if graph else 1) * len(step.sources)
+    assert torch.isfinite(expected).all()
+    assert torch.equal(actual, expected)
+
+
+# ------------------------------------------------------------- dense FP8 GEMMs
+
+# Per seam: (N, K) per TP4 rank.
+DENSE_SHAPES = {
+    "wqa_wkv": (1792, 5120),
+    "wq_b": (8192, 1280),
+    "index_wq_b": (4096, 1280),
+    "wo_b": (5120, 2048),
+    "shared_gate_up": (1152, 5120),
+    "shared_down": (5120, 576),
+}
+
+
+def _mxfp8_weight(n: int, k: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """A random FP8 weight and UE8M0 scales per 32 k, alike over 32 rows as in
+    the checkpoint."""
+    g = torch.Generator(device=DEVICE).manual_seed(seed)
+    w = torch.randn(n, k, generator=g, device=DEVICE).mul(100).clamp(-448, 448)
+    scales = torch.randint(
+        110, 122, (-(-n // 32), k // 32), generator=g, device=DEVICE
+    ).to(torch.uint8)
+    return w.to(torch.float8_e4m3fn), scales.repeat_interleave(32, 0)[:n].contiguous()
+
+
+def _dequant(w: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    scale = torch.exp2(scales.float() - 127)
+    return (w.float().unflatten(-1, (-1, 32)) * scale.unsqueeze(-1)).flatten(-2)
+
+
+def _humming_linear(
+    w: torch.Tensor, scales: torch.Tensor, parts: list[int] | None = None
+):
+    """``w`` (output ``parts``) as the stock SM90 Humming W8A16 linear holds
+    it: the weight and scales and the Humming kernel's config and locks."""
+    from torch import nn
+
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        convert_linear_layer_to_humming_standard,
+        get_humming_linear_compute_config,
+        prepare_humming_linear_layer_config,
+        quant_key_to_input_schema,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+    from vllm.utils.humming import create_humming_locks
+
+    n, k = w.shape
+    layer = nn.Module()
+    layer.input_size_per_partition = layer.input_size = k
+    layer.output_partition_sizes = parts or [n]
+    layer.params_dtype = torch.bfloat16
+    layer.has_bias = False
+    layer.weight = nn.Parameter(w.clone(), requires_grad=False)
+    layer.weight_scale = nn.Parameter(
+        scales.clone().view(torch.float8_e8m0fnu), requires_grad=False
+    )
+    convert_linear_layer_to_humming_standard(
+        layer=layer, name_map={"weight": "weight", "weight_scale": "weight_scale"}
+    )
+    config = prepare_humming_linear_layer_config(
+        layer,
+        {
+            "quant_method": "humming",
+            "dtype": "float8e4m3",
+            "scale_dtype": "float8e8m0",
+            "group_size": 32,
+            "weight_scale_type": "group",
+        },
+        input_schema=quant_key_to_input_schema(kMxfp8Dynamic),
+    )
+    return layer, SimpleNamespace(
+        layer_config=config,
+        compute_config=get_humming_linear_compute_config(),
+        locks=create_humming_locks(DEVICE),
+    )
+
+
+def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
+    return ((a.float() - b.float()).norm() / b.float().norm()).item()
+
+
+@pytest.mark.parametrize("seam", list(DENSE_SHAPES))
+def test_dense_calls_match_the_stock_linear(seam):
+    """Every row count a seam serves: its call (CuTe DSL or tuned Humming, as
+    dispatched) against an FP32 product of the exact dequantized weight, and
+    against the stock Humming linear; strided rows as the executor passes
+    them; the CuTe calls are deterministic."""
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        apply_humming_linear,
+    )
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import dense
+
+    n, k = DENSE_SHAPES[seam]
+    w, scales = _mxfp8_weight(n, k, seed=n + k)
+    layer, humming = _humming_linear(w, scales)
+    linear = dense.DenseFp8Linear(seam, layer.weight, layer.weight_scale, n, k, humming)
+    reference_weight = _dequant(w, scales)
+    served = [m for m in range(1, dense.MAX_ROWS + 1) if linear.serves(m)]
+    assert served == list(range(1, max(dense.DISPATCH[seam]) + 1))
+    assert not linear.serves(max(dense.DISPATCH[seam]) + 1)
+    g = torch.Generator(device=DEVICE).manual_seed(0)
+    for m in served:
+        x = torch.randn(m, k + 64, generator=g, device=DEVICE).bfloat16()[:, :k]
+        want = x.float() @ reference_weight.t()
+        got = linear(x)
+        stock = apply_humming_linear(
+            layer,
+            x,
+            skip_bias_add=True,
+            layer_config=humming.layer_config,
+            compute_config=humming.compute_config,
+            locks=humming.locks,
+        )
+        assert _rel(got, want) < 5e-3, (m, _rel(got, want))
+        assert _rel(got, stock) < 8e-3, (m, _rel(got, stock))
+        if isinstance(dense.choice(seam, m), dense.Cute):
+            assert torch.equal(linear(x), got), m
+
+
+# ---------------------------------------------------------------- low-batch MoE
+
+MOE_HIDDEN, MOE_INTER = 5120, 576
+# (experts, top-k): the backbone's layers, and a smaller layer (the kernel
+# takes the layer's expert count and top-k).
+MOE_SHAPES = ((384, 6), (128, 3))
+FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _mxfp4_dequant(w: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    lut = torch.tensor(FP4_VALUES + tuple(-v for v in FP4_VALUES), device=DEVICE)
+    values = torch.stack([lut[(w & 0xF).long()], lut[(w >> 4).long()]], -1)
+    scale = torch.exp2(scales.float() - 127).unsqueeze(-1)
+    return (values.flatten(-2).unflatten(-1, (-1, 32)) * scale).flatten(-2)
+
+
+def _stock_moe(num_experts: int, top_k: int):
+    """A stock Humming W4A8 MoE layer (MXFP4 experts, block-FP8 activations)
+    of one TP4 rank's shapes, on random checkpoint-format weights."""
+    from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as oracle
+    from vllm.model_executor.layers.quantization.mxfp4 import (
+        Mxfp4Config,
+        Mxfp4MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    class Config(Mxfp4Config):
+        def _make_moe_method(self, moe):
+            return Mxfp4MoEMethod(moe, activation_key=kMxfp8Dynamic)
+
+    oracle._user_moe_activation_override = lambda: None
+    g = torch.Generator(device=DEVICE).manual_seed(0)
+
+    def randint(low, high, *shape):
+        return torch.randint(
+            low, high, shape, generator=g, device=DEVICE, dtype=torch.uint8
+        )
+
+    shapes = (num_experts, 2 * MOE_INTER)
+    w13 = randint(0, 256, *shapes, MOE_HIDDEN // 2)
+    s13 = randint(120, 123, *shapes, MOE_HIDDEN // 32)
+    w2 = randint(0, 256, num_experts, MOE_HIDDEN, MOE_INTER // 2)
+    s2 = randint(121, 124, num_experts, MOE_HIDDEN, MOE_INTER // 32)
+    with torch.device(DEVICE):
+        layer = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=MOE_HIDDEN,
+            intermediate_size=MOE_INTER,
+            params_dtype=torch.bfloat16,
+            renormalize=True,
+            quant_config=Config(),
+            tp_size=1,
+            dp_size=1,
+            prefix="layers.0.experts",
+            swiglu_limit=10.0,
+            activation="silu",
+        )
+    experts = layer.routed_experts
+    with torch.no_grad():
+        for name, value in (("w13_weight", w13), ("w13_weight_scale", s13)):
+            p = getattr(experts, name)
+            p.zero_()
+            half = p.shape[1] // 2
+            p[:, :MOE_INTER, : value.shape[2]].copy_(value[:, :MOE_INTER])
+            p[:, half : half + MOE_INTER, : value.shape[2]].copy_(value[:, MOE_INTER:])
+        for name, value in (("w2_weight", w2), ("w2_weight_scale", s2)):
+            p = getattr(experts, name)
+            p.zero_()
+            p[:, : value.shape[1], : value.shape[2]].copy_(value)
+    layer._quant_method.process_weights_after_loading(experts)
+    reference = (_mxfp4_dequant(w13, s13), _mxfp4_dequant(w2, s2))
+    return layer, reference
+
+
+def _routing(logits: torch.Tensor, bias: torch.Tensor, top_k: int):
+    """DeepSeek-V4 routing: sqrt-softplus scores, top-k of score + bias,
+    renormalized, times 1.5."""
+    scores = torch.nn.functional.softplus(logits).sqrt()
+    ids = (scores + bias).topk(top_k, dim=-1).indices
+    weights = scores.gather(1, ids)
+    return ids.int(), (weights / weights.sum(-1, keepdim=True) * 1.5).float()
+
+
+def _finalize(routed) -> torch.Tensor:
+    """``AllReduceMHC.finalize``'s top-k sum on one rank."""
+    rows = routed.gemm2_permuted[routed.expanded_idx_to_permuted_idx.long()]
+    return (rows.float() * routed.expert_weights.unsqueeze(-1)).sum(1)
+
+
+def _moe_ffn(num_experts: int, top_k: int, bias: torch.Tensor):
+    """A ``DeepseekV4MoE`` stand-in on a stock Humming W4A8 MoE and a W8A16
+    shared expert, with the routed experts' FP32 reference weights and the
+    shared expert's Humming linears."""
+    layer, reference = _stock_moe(num_experts, top_k)
+    gate_up_w, gate_up_s = _mxfp8_weight(2 * MOE_INTER, MOE_HIDDEN, seed=3)
+    down_w, down_s = _mxfp8_weight(MOE_HIDDEN, MOE_INTER, seed=4)
+    gate_up = _humming_linear(gate_up_w, gate_up_s, [MOE_INTER, MOE_INTER])
+    down = _humming_linear(down_w, down_s)
+    ffn = SimpleNamespace(
+        experts=layer,
+        n_activated_experts=top_k,
+        scoring_func="sqrtsoftplus",
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        swiglu_limit=10.0,
+        use_native_mega_moe=False,
+        image_sentinel_lo=0,
+        shared_experts=SimpleNamespace(gate_up_proj=gate_up[0], down_proj=down[0]),
+        gate=SimpleNamespace(e_score_correction_bias=bias, bias_vl=None, tid2eid=None),
+    )
+    return ffn, reference, (gate_up, down)
+
+
+def _moe_reference(x, ids, weights, w13, w2) -> torch.Tensor:
+    """The routed experts' FP32 output, intermediate rounded to BF16."""
+    want = torch.zeros(x.shape[0], MOE_HIDDEN, device=DEVICE)
+    for k in range(ids.shape[1]):
+        for e in ids[:, k].unique().tolist():
+            rows = (ids[:, k] == e).nonzero().squeeze(1)
+            h = x[rows].float() @ w13[e].t()
+            a = torch.nn.functional.silu(h[:, :MOE_INTER].clamp(max=10.0))
+            a = (a * h[:, MOE_INTER:].clamp(-10.0, 10.0)).bfloat16().float()
+            want[rows] += (a @ w2[e].t()) * weights[rows, k, None]
+    return want
+
+
+@pytest.mark.parametrize(
+    "num_experts,top_k", MOE_SHAPES, ids=[f"e{e}k{k}" for e, k in MOE_SHAPES]
+)
+def test_low_batch_moe_matches_the_stock_moe(
+    dist_init, workspace_init, num_experts, top_k
+):
+    """The low-batch MoE kernel's unfinalized output, reduced as the
+    boundary's finalize reduces it, against the stock Humming W4A8 MoE on the
+    same routing at the row counts the executor serves, dense and entry mode,
+    routed from logits and from given top-k; its in-kernel routing against
+    the DeepSeek-V4 routing; and its fused shared expert against the stock
+    W8A16 shared expert MLP; for the backbone's shape and a smaller one."""
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        apply_humming_linear,
+    )
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import moe
+
+    config = VllmConfig(kernel_config=KernelConfig(moe_backend="humming"))
+    with set_current_vllm_config(config):
+        g = torch.Generator(device=DEVICE).manual_seed(1)
+        bias = torch.randn(num_experts, generator=g, device=DEVICE) * 0.05
+        ffn, (w13, w2), (gate_up, down) = _moe_ffn(num_experts, top_k, bias)
+        layer = ffn.experts
+        by_logits = moe.HopperLowBatchMoE.of(ffn)
+        # Hash-routed: the kernel takes given top-k ids.
+        ffn.gate.tid2eid = torch.zeros(1)
+        by_ids = moe.HopperLowBatchMoE.of(ffn)
+        assert by_logits is not None and by_ids is not None
+        act = SiluAndMulWithClamp(10.0)
+        assert not by_logits.serves(moe.MAX_ROWS + 1)
+        for m in (1, 2, 6, 8, 9, 12, 16, 17, 24, 48, 96, 120, 144):
+            assert by_logits.serves(m)
+            x = torch.randn(m, MOE_HIDDEN, generator=g, device=DEVICE).bfloat16()
+            logits = torch.randn(m, num_experts, generator=g, device=DEVICE)
+            ids, weights = _routing(logits, bias, top_k)
+            with set_forward_context(None, config, num_tokens=m):
+                stock = layer._quant_method.apply(
+                    layer.routed_experts, x, weights, ids, None, None
+                ).float()
+            want = _moe_reference(x, ids, weights, w13, w2)
+            stock_error = _rel(stock, want)
+            assert stock_error < 6e-2, m
+
+            routed, shared = by_logits(x, router_logits=logits)
+            got = _finalize(routed)
+            kernel_ids = by_logits.workspace.ids[: m * top_k].view(m, top_k)
+            assert torch.equal(kernel_ids.sort(-1).values, ids.sort(-1).values), m
+            assert torch.allclose(
+                routed.expert_weights.sort(-1).values,
+                weights.sort(-1).values,
+                atol=1e-5,
+            ), m
+            assert _rel(got, want) < 1.25 * stock_error, m
+
+            routed, _ = by_ids(x, topk_ids=ids, topk_weights=weights)
+            assert _rel(_finalize(routed), want) < 1.25 * stock_error, m
+
+            if m <= moe.SHARED_MAX_ROWS:
+                assert shared is not None
+                stock_shared = x
+                for (linear, humming), f in ((gate_up, act), (down, None)):
+                    stock_shared = apply_humming_linear(
+                        linear,
+                        stock_shared,
+                        skip_bias_add=True,
+                        layer_config=humming.layer_config,
+                        compute_config=humming.compute_config,
+                        locks=humming.locks,
+                    )
+                    stock_shared = f(stock_shared) if f else stock_shared
+                assert _rel(shared, stock_shared) < 1e-2, (
+                    m,
+                    _rel(shared, stock_shared),
+                )
+            else:
+                assert shared is None
+
+
+# ------------------------------------------------------------------ mHC pre
+
+MHC_ROWS = (1, 6, 12, 24, 48, 96, 144, 192)
+
+
+def _mhc_layer(seed: int) -> SimpleNamespace:
+    """The decoder-layer attributes the mHC pre reads: both seams' FP32 ``fn``
+    / scale / base and norms, random."""
+    g = torch.Generator(device=DEVICE).manual_seed(seed)
+
+    def randn(*shape, scale=1.0):
+        return torch.randn(*shape, generator=g, device=DEVICE) * scale
+
+    def norm():
+        weight = (1 + randn(MOE_HIDDEN, scale=0.1)).bfloat16()
+        return SimpleNamespace(weight=weight, variance_epsilon=1e-6)
+
+    layer = SimpleNamespace(
+        attn_norm=norm(),
+        ffn_norm=norm(),
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+        hc_post_alpha=2.0,
+        hc_sinkhorn_iters=20,
+        hc_mult=4,
+    )
+    for seam in ("attn", "ffn"):
+        setattr(layer, f"hc_{seam}_fn", randn(24, 4 * MOE_HIDDEN, scale=0.01))
+        setattr(layer, f"hc_{seam}_scale", 0.5 + randn(3, scale=0.1).abs())
+        setattr(layer, f"hc_{seam}_base", randn(24, scale=0.1))
+    return layer
+
+
+@pytest.mark.parametrize("first", [False, True], ids=["carried", "first"])
+def test_mhc_pre_matches_torch(first):
+    """The executor's mHC pre (the CuTe DSL mixes in place of the DeepGEMM
+    prenorm GEMM, the stock epilogue) against ``mhc_pre_delayed_torch`` at
+    every step size the executor serves, in chunks of 64 rows: the
+    coefficients on the side stream and the normalized layer input on the
+    caller's, with the carried pre-mix or (``first``) stream zero."""
+    from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.hopper import mhc
+
+    layer = _mhc_layer(seed=3)
+    assert mhc.SeamPre.applies(layer)
+    seam = mhc.SeamPre(layer, ffn=False)
+    seam.warm_up(list(MHC_ROWS), first=True)
+    side = torch.cuda.Stream()
+    g = torch.Generator(device=DEVICE).manual_seed(5)
+    for m in MHC_ROWS:
+        residual = (
+            torch.randn(m, 4, MOE_HIDDEN, generator=g, device=DEVICE) * 2
+        ).bfloat16()
+        pre = None if first else torch.rand(m, 4, generator=g, device=DEVICE)
+        post, comb, x, next_pre = seam(residual, pre, side)
+        torch.cuda.current_stream().wait_stream(side)
+        want = mhc_pre_delayed_torch(
+            residual,
+            layer.hc_attn_fn,
+            layer.hc_attn_scale,
+            layer.hc_attn_base,
+            layer.rms_norm_eps,
+            layer.hc_eps,
+            layer.hc_eps,
+            layer.hc_post_alpha,
+            layer.hc_sinkhorn_iters,
+            pre_mix=pre,
+        )
+        collapsed = want[2].float()
+        want_x = (
+            collapsed
+            * torch.rsqrt(collapsed.square().mean(-1, keepdim=True) + 1e-6)
+            * layer.attn_norm.weight.float()
+        )
+        # TF32 products, as the DeepGEMM prenorm GEMM's: within 5e-4 of FP32.
+        for got, ref in zip((post, comb, next_pre), (want[0], want[1], want[3])):
+            assert _rel(got, ref) < 5e-4, (m, _rel(got, ref))
+        assert _rel(x, want_x) < 1e-2, (m, _rel(x, want_x))

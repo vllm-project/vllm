@@ -657,6 +657,19 @@ steps:
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
 
+- label: ":nvidia: (H200) DeepSeek-V4.1 Hopper Specialized Decode Kernels"
+  key: dsv41-hopper-specialized-decode-h200
+  timeout_in_minutes: 30
+  device: h200
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/nvidia/specialized_decode/hopper/
+  - vllm/models/deepseek_v41/nvidia/ops/cute_dsl/all_reduce_mhc.py
+  - vllm/model_executor/kernels/mhc/
+  - tests/models/deepseek_v41/nvidia/specialized_decode/test_hopper.py
+  commands:
+  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_hopper.py
+
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd
   automatic_shard: true

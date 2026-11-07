@@ -81,8 +81,11 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     spec = vllm_config.speculative_config
     compilation = vllm_config.compilation_config
     cudagraph_mode = compilation.cudagraph_mode
+    hopper = current_platform.is_device_capability(90)
     requirements = {
-        "a GB300 (SM103) GPU": current_platform.is_device_capability(103),
+        "a GB300 (SM103), H100 or H200 (SM90) GPU": (
+            hopper or current_platform.is_device_capability(103)
+        ),
         "tensor parallel size 4 without pipeline, data, expert or context "
         "parallelism or micro-batching": (
             parallel.tensor_parallel_size == 4
@@ -99,11 +102,26 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and not spec.enable_adaptive_verification
         ),
         "the FLASHINFER_MLA_SPARSE_DSV41 attention backend, an fp8 KV cache "
-        "and the MXFP4 indexer with sparse logits": (
+        "and the MXFP4 indexer with sparse logits": hopper
+        or (
             attention.backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV41
             and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
             and attention.indexer_kv_dtype == "mxfp4"
             and attention.indexer_sparse_logits
+        ),
+        "on Hopper, the FlashMLA sparse attention with its fp8_ds_mla KV cache": (
+            not hopper
+            or (
+                attention.backend
+                in (
+                    None,
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                    AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
+                    AttentionBackendEnum.FLASHMLA_SPARSE_DSV41,
+                )
+                and vllm_config.cache_config.cache_dtype
+                in ("auto", "fp8", "fp8_ds_mla")
+            )
         ),
         "FULL CUDA graphs for decode batches only (FULL_AND_PIECEWISE or "
         "FULL_DECODE_ONLY)": (
@@ -124,9 +142,9 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and vllm_config.kv_transfer_config is None
             and not envs.VLLM_BATCH_INVARIANT
         ),
-        "DeepGEMM and NVLink multicast for the fused all-reduce + mHC": (
-            supports_mhc_overlap(vllm_config) and supports_mhc_all_reduce(vllm_config)
-        ),
+        "NVLink multicast for the fused all-reduce + mHC (and off Hopper, "
+        "DeepGEMM)": supports_mhc_all_reduce(vllm_config)
+        and (hopper or supports_mhc_overlap(vllm_config)),
     }
     return [need for need, ok in requirements.items() if not ok]
 

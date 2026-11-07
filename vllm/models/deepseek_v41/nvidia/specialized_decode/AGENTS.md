@@ -1,7 +1,8 @@
 # DeepSeek-V4.1 specialized decode (NVIDIA)
 
-A decode executor for small decode batches of DeepSeek-V4.1 on GB300, enabled
-with `--additional-config '{"decode_backend": "latency_specialized"}'` (the
+A decode executor for small decode batches of DeepSeek-V4.1 on GB300, and on
+Hopper (`hopper/`, see its `AGENTS.md`), enabled with
+`--additional-config '{"decode_backend": "latency_specialized"}'` (the
 default, `auto`, keeps the stock decode). With it off, the model runs exactly as
 without this package. The executor runs the target model; the DSpark draft
 model keeps its stock paths.
@@ -12,7 +13,8 @@ model keeps its stock paths.
 target model is built. Any deployment other than the one below raises at
 startup on every TP rank with the missing requirements:
 
-- GPU: GB300 (SM103).
+- GPU: GB300 (SM103), or H100/H200 (SM90) with the differences in
+  `hopper/AGENTS.md`.
 - Parallelism: TP=4; no pipeline, data, expert or context parallelism, no
   micro-batching.
 - Speculative decoding: DSpark, without adaptive verification.
@@ -84,6 +86,7 @@ forward runs the stock layers, which the executor does not modify.
 | `embedding/` | The embedding and first-layer hc streams from a replicated table |
 | `engram/` | The Engram WKV ahead of the decoder layers |
 | `logits/` | The low-batch LM head and the logits gather |
+| `hopper/` | The Hopper (SM90) executor and its kernels |
 
 ## Paths
 
