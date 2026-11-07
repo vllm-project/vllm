@@ -1687,14 +1687,15 @@ def _fp16_partial_linear(
 ) -> torch.Tensor:
     """FP32-accumulated x @ weight.T, times ``scale``, cast to FP16.
 
-    torch.mm has no BF16 -> FP16 output, hence the FP32 output and the cast.
+    torch.mm has no BF16 -> FP16 output, hence the FP32 output and the cast;
+    bias and scale are applied in place to keep one FP32 buffer at the peak.
     Values beyond the FP16 range become inf, as in the quantized kernels.
     """
     out = torch.mm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=torch.float32)
     if bias is not None:
-        out = out + bias.float()
+        out.add_(bias)
     if scale != 1.0:
-        out = out * scale
+        out.mul_(scale)
     return out.to(torch.float16).view(*x.shape[:-1], weight.shape[0])
 
 
