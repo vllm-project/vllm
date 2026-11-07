@@ -631,11 +631,13 @@ def test_online_quantization(
         "block_sparse_moe" if architecture == "MiniMaxM3SparseForCausalLM" else "mlp"
     )
     assert _online_quantization_logs(caplog_vllm) == [
-        "Quantizing 2 layers of types: "
-        f"{parent_name}.{shared_expert_name}.down_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4); "
-        f"{parent_name}.{shared_expert_name}.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
+        (
+            "Quantizing 2 layers of types: "
+            f"{parent_name}.{shared_expert_name}.down_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4); "
+            f"{parent_name}.{shared_expert_name}.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        )
     ]
 
 
@@ -968,8 +970,10 @@ def test_fse_online_quantization_routed_shared(
     quantized = []
     if routed_target in targets:
         quantized += [
-            f"block_sparse_moe.experts: 1 "
-            f"(from targets: {routed_target}, {targets[routed_target]})"
+            (
+                f"block_sparse_moe.experts: 1 "
+                f"(from targets: {routed_target}, {targets[routed_target]})"
+            )
         ]
     if shared_target in targets:
         quantized += [
@@ -1207,9 +1211,11 @@ def test_online_gate_up_proj_target_disables_fse(
     assert not moe.is_fused_shared_expert_enabled
     assert moe.shared_experts is not None
     assert _online_quantization_logs(caplog_vllm) == [
-        "Quantizing 1 layers of types: "
-        "mlp.shared_experts.gate_up_proj: 1 "
-        f"(from targets: {target_pattern}, mxfp4)"
+        (
+            "Quantizing 1 layers of types: "
+            "mlp.shared_experts.gate_up_proj: 1 "
+            f"(from targets: {target_pattern}, mxfp4)"
+        )
     ]
     # The untargeted down_proj is unquantized: its keys do not match.
     [warning] = _fse_warnings(caplog_vllm)

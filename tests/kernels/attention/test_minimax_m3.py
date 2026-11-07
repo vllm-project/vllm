@@ -2374,6 +2374,44 @@ def test_main_cache_layout_contract():
         assert set(order) == set(range(len(order)))
 
 
+def test_sparse_metadata_build_does_not_sync():
+    """Building the prefill metadata reads only host-side lengths: it must not
+    wait for queued GPU work (it runs while the previous step executes)."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.models.minimax_m3.common.sparse_attention import (
+        MiniMaxM3SparseMetadataBuilder,
+    )
+
+    device = torch.device(current_platform.device_type)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+    )
+    builder = MiniMaxM3SparseMetadataBuilder(spec, ["layer.0"], vllm_config, device)
+    batch = BatchSpec(seq_lens=[300, 2000, 129, 4096], query_lens=[1, 1, 129, 700])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        md = builder.build(0, common)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    assert md.num_decodes == 2 and md.num_prefills == 2
+    assert md.prefill is not None
+    assert md.prefill.cu_seqlens_k.tolist() == [0, 129, 129 + 4096]
+    assert md.prefill.total_kv_blocks == 2 + 32
+
+
 @pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.LBHNC])
 def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
     """Build the exact separate and packed page-16 views used by the model."""
@@ -2925,7 +2963,7 @@ def _build_decode_inputs(
         dtype=torch.int32,
     )
     token_id = 0
-    for req_id, seq_len in enumerate(seq_lens_list):
+    for seq_len in seq_lens_list:
         for local_q in range(decode_query_len):
             query_pos = seq_len - decode_query_len + local_q
             current_block = query_pos // BLOCK_SIZE

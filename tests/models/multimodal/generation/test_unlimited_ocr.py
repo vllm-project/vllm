@@ -6,6 +6,12 @@ from PIL import Image, ImageDraw, ImageFont
 
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
+from vllm.platforms import current_platform
+
+# Should be fixed by https://github.com/vllm-project/vllm/pull/66031
+pytestmark = pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Unlimited-OCR-2 DASH attention is CUDA-only"
+)
 
 
 def _attention_class_names(model):
