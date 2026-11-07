@@ -306,6 +306,22 @@ steps:
   - tests/models/minimax_m3/
   commands:
     - pytest -v -s models/minimax_m3 --ignore=models/minimax_m3/amd_specialized_decode
+  mirror:
+    amd:
+      label: ":amd: (MI355) MiniMax-M3 Model Tests"
+      automatic_shard: true
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/minimax_m3/
+      - vllm/transformers_utils/configs/minimax_m3.py
+      - vllm/model_executor/models/config.py
+      - tests/models/minimax_m3/
+      - vllm/platforms/rocm.py
 
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
