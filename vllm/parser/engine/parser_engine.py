@@ -7,7 +7,8 @@ extraction with a single :class:`StreamingParserEngine`.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -265,6 +266,15 @@ class ParserEngine(Parser):
         if events or self._deferred_content:
             return self._events_to_delta(events, finished=True)
         return None
+
+    @contextmanager
+    def _skip_arg_deltas(self) -> Iterator[None]:
+        stream_arg_deltas = self._stream_arg_deltas
+        self._stream_arg_deltas = False
+        try:
+            yield
+        finally:
+            self._stream_arg_deltas = stream_arg_deltas
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         prompt_closed = initial_state is None and self._prompt_closes_reasoning
@@ -634,16 +644,17 @@ class ParserEngine(Parser):
             )
         self._reset()
         self._streaming_initialized = True
-        result = self.extract_tool_calls_streaming(
-            previous_text="",
-            current_text=model_output,
-            delta_text=model_output,
-            previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[],
-            request=request,
-        )
-        finish_delta = self.finish_streaming()
+        with self._skip_arg_deltas():
+            result = self.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=model_output,
+                delta_text=model_output,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=request,
+            )
+            finish_delta = self.finish_streaming()
         return self._build_extracted_result(result, finish_delta)
 
     def extract_tool_calls_from_content(
@@ -819,7 +830,8 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events, finished=True)
+        with self._skip_arg_deltas():
+            delta = self._events_to_delta(events, finished=True)
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
