@@ -73,6 +73,46 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+def _check_legacy_function_fields(data: dict) -> None:
+    """Reject the legacy ``functions``/``function_call`` request fields.
+
+    vLLM only supports the modern ``tools``/``tool_choice`` API. The legacy
+    fields are not part of the request model, so they would otherwise land in
+    ``model_extra`` and be silently ignored, answering the client's tool
+    request with ordinary text. OpenAI treats ``[]`` and ``null`` as omitted,
+    and ``"auto"`` as the default, so those carry no tool instruction and are
+    accepted. ``"none"`` is a real "do not call tools" instruction whenever
+    ``tools`` is set, which would otherwise be dropped, so it is rejected
+    there too.
+    """
+    functions = data.get("functions")
+    if functions is not None and functions != []:
+        raise VLLMValidationError(
+            "The legacy `functions` field is not supported. Use `tools` instead.",
+            parameter="functions",
+            value=functions,
+        )
+    function_call = data.get("function_call")
+    if function_call == "none":
+        # Without tools there is nothing to suppress, so this is a no-op;
+        # with tools it changes behavior that would otherwise be dropped.
+        if not data.get("tools"):
+            return
+        raise VLLMValidationError(
+            "The legacy `function_call` field is not supported when `tools` "
+            'is set. Use `tool_choice: "none"` instead.',
+            parameter="function_call",
+            value=function_call,
+        )
+    if function_call not in (None, "auto"):
+        raise VLLMValidationError(
+            "The legacy `function_call` field is not supported. "
+            "Use `tool_choice` instead.",
+            parameter="function_call",
+            value=function_call,
+        )
+
+
 class ChatMessage(OpenAIBaseModel):
     role: str
     content: str | None = None
@@ -973,6 +1013,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_legacy_function_fields(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+        if not isinstance(data, dict):
+            return data
+        _check_legacy_function_fields(data)
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_tool_usage(cls, data):
         if isinstance(data, ValueError):
             raise data
@@ -1220,6 +1270,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             data = data.model_dump(exclude_unset=True)
         if not isinstance(data, dict):
             return data
+        _check_legacy_function_fields(data)
         if data.get("use_beam_search"):
             raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "

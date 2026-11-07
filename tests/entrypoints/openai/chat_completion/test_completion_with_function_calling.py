@@ -480,6 +480,66 @@ async def test_inconsistent_tool_choice_and_tools(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "extra_body, param",
+    [
+        ({"functions": [tools[0]["function"]]}, "functions"),
+        ({"function_call": {"name": "get_current_weather"}}, "function_call"),
+        (
+            {
+                "functions": [tools[0]["function"]],
+                "function_call": {"name": "get_current_weather"},
+            },
+            "functions",
+        ),
+    ],
+)
+async def test_legacy_function_fields_rejected(
+    client: openai.AsyncOpenAI, extra_body: dict, param: str
+):
+    """Legacy ``functions``/``function_call`` are unsupported and must be
+    rejected instead of being silently dropped, which would answer the tool
+    request with ordinary text. Uses the same real server as the modern
+    ``tools`` tests below."""
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "What is the weather?"}],
+            max_completion_tokens=64,
+            extra_body=extra_body,
+        )
+    error = excinfo.value
+    assert error.status_code == 400
+    assert error.param == param
+    assert "legacy" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_tools_still_work_with_legacy_validator(client: openai.AsyncOpenAI):
+    """The new rejection must not disturb a modern tool request on a real
+    server; ``function_call: "none"`` alongside ``tools`` is a suppressed tool
+    request and is rejected, while a normal ``tools`` call still succeeds."""
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+            max_completion_tokens=64,
+            tools=tools,
+            extra_body={"function_call": "none"},
+        )
+    assert excinfo.value.param == "function_call"
+
+    completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+        max_completion_tokens=64,
+        tools=tools,
+        tool_choice="auto",
+    )
+    assert completion.choices[0].message is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "tool_choice",
     ["required", {"type": "function", "function": {"name": "get_current_weather"}}],
 )
