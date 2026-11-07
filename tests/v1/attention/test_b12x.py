@@ -16,6 +16,7 @@ from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.b12x import get_b12x_paged_attention
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends import b12x
 from vllm.v1.attention.backends.b12x import (
     B12xPagedAttentionBackend,
@@ -25,6 +26,8 @@ from vllm.v1.attention.backends.b12x import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.worker.utils import select_common_block_size
 
 
 def _require_b12x_paged_attention() -> None:
@@ -163,9 +166,68 @@ def test_b12x_attention_uses_two_plane_nhd_cache() -> None:
     assert not B12xPagedAttentionBackend.supports_block_size(32)
 
 
+def test_b12x_attention_accepts_multiples_of_its_kernel_pages() -> None:
+    """Hybrid mamba/attention alignment can raise the manager block size well
+    above the b12x page sizes (e.g. 2176); the worker then splits each block
+    into kernel pages, so the backend must accept any multiple of them.
+    """
+    assert B12xPagedAttentionBackend.supports_block_size(2176)
+    assert select_common_block_size(2176, [B12xPagedAttentionBackend]) == 128
+    assert select_common_block_size(192, [B12xPagedAttentionBackend]) == 64
+    assert not B12xPagedAttentionBackend.supports_block_size(96)
+
+
 def test_b12x_attention_hybrid_cache_capacity_includes_expansion() -> None:
     assert _max_page_table_width(4096, 128, 4096, False) == 32
     assert _max_page_table_width(4096, 128, 4096, True) == 64
+
+
+def _worker_kernel_block_table_width(
+    max_model_len: int, block_size: int, kernel_block_size: int
+) -> int:
+    """Row length of the block table the worker hands to ``forward()``: the
+    manager block table (``AttentionGroup.create_metadata_builders``), with
+    every entry expanded into ``block_size // kernel_block_size`` kernel pages.
+    """
+    width = get_block_table_width(cdiv(max_model_len, block_size), block_size)
+    return width * (block_size // kernel_block_size)
+
+
+@pytest.mark.parametrize("max_model_len", [1000, 4000, 4096, 40960])
+@pytest.mark.parametrize("block_size", [64, 128, 192, 256, 320, 2176])
+def test_b12x_attention_plan_capacity_fits_expanded_block_table(
+    max_model_len: int, block_size: int
+) -> None:
+    """A manager block that is a multiple of a kernel page (block_size 192,
+    or 2176 from hybrid alignment) is split into kernel pages by the worker,
+    so the page table it passes is wider than ``cdiv(max_model_len, page)``.
+    The plans must be sized for that expanded table.
+    """
+    kernel_block_size = select_common_block_size(
+        block_size, [B12xPagedAttentionBackend]
+    )
+    expected = _worker_kernel_block_table_width(
+        max_model_len, block_size, kernel_block_size
+    )
+    for is_hybrid in (False, True):
+        capacity = _max_page_table_width(
+            max_model_len, kernel_block_size, 2048, is_hybrid, block_size
+        )
+        assert capacity >= expected, (max_model_len, block_size, is_hybrid)
+
+
+def test_b12x_attention_plan_capacity_examples() -> None:
+    # Qwen3-0.6B, --block-size 192, --max-model-len 4096: 22 manager blocks,
+    # each 3 kernel pages of 64 tokens. Sizing from the page alone gave 64.
+    assert _max_page_table_width(4096, 64, 2048, False, 192) == 66
+    # The worker aligns the block table to 128 tokens, so a model length that
+    # is not a multiple of it needs one more 64-token page than cdiv() gives.
+    assert _max_page_table_width(4000, 64, 2048, False, 64) == 64
+    assert _max_page_table_width(4000, 64, 2048, False) == 64
+    # The manager block is unknown or not a multiple of the page: size for
+    # whole pages, as before.
+    assert _max_page_table_width(4096, 128, 2048, False, 16) == 32
+    assert _max_page_table_width(4096, 128, 2048, False, 192) == 32
 
 
 def test_b12x_attention_runtime_page_size_comes_from_cache() -> None:

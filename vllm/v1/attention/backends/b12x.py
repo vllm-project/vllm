@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     is_quantized_kv_cache,
 )
+from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -61,16 +62,31 @@ _B12X_SUPPORTED_KV_CACHE_DTYPES: tuple[CacheDType, ...] = (
 
 def _max_page_table_width(
     max_model_len: int,
-    block_size: int,
+    page_size: int,
     max_num_batched_tokens: int,
     is_hybrid: bool,
+    block_size: int | None = None,
 ) -> int:
-    width = max(cdiv(max(max_model_len, 1), block_size), 1)
+    """Page-table capacity the plans for ``page_size`` must accept.
+
+    The worker sizes its block table for the KV manager block (``block_size``)
+    and, when that block is larger than the kernel page, expands every entry
+    into ``block_size // page_size`` kernel pages. Mirror that expansion so the
+    table handed to ``forward()`` always fits the plan.
+    """
+    if block_size is None or block_size % page_size != 0:
+        # The manager block is not known yet (the platform applies
+        # get_preferred_block_size() after the model is built) or it is not
+        # split into this page size: the worker then addresses whole pages.
+        block_size = page_size
+    num_blocks = cdiv(max(max_model_len, 1), block_size)
+    width = get_block_table_width(num_blocks, block_size) * (block_size // page_size)
+    width = max(width, 1)
     if is_hybrid:
         # Hybrid cache setup can enlarge the storage block after attention
         # layers are initialized. Its expansion into kernel-sized blocks adds
         # at most one storage block of trailing page-table capacity.
-        width += cdiv(max_num_batched_tokens, block_size)
+        width += cdiv(max_num_batched_tokens, page_size)
     return width
 
 
@@ -189,10 +205,6 @@ class B12xPagedAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return list(_B12X_SUPPORTED_PAGE_SIZES)
-
-    @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
-        return block_size is None or int(block_size) in _B12X_SUPPORTED_PAGE_SIZES
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
@@ -413,12 +425,16 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
         max_num_seqs = int(scheduler_config.max_num_seqs)
         max_model_len = int(model_config.max_model_len)
         self._max_num_seqs = max_num_seqs
+        # Read through vllm_config: #62265 drops the cache_config local above.
+        configured_block_size = vllm_config.cache_config.block_size
+        block_size = int(configured_block_size) if configured_block_size else None
         max_page_table_widths = {
             page_size: _max_page_table_width(
                 max_model_len,
                 page_size,
                 max_batched,
                 model_config.is_hybrid,
+                block_size,
             )
             for page_size in _B12X_SUPPORTED_PAGE_SIZES
         }
