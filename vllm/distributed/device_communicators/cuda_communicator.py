@@ -102,6 +102,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             QuickAllReduce,
         )
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
+        from vllm.distributed.device_communicators.xgmi_island_all_reduce import (
+            IslandAllReduce,
+        )
 
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
@@ -206,6 +209,26 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # On ROCm, 'use_custom_allreduce==True' means it must currently be
             # an MI300 series.
             self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+
+        # CDNA2 only, the one family this was measured on. It stays disabled unless
+        # the GPUs form two XGMI islands, so fully connected groups keep the flat
+        # paths. It picks the algorithm by tensor size, so the reduction order is
+        # not batch invariant. It splits the group with dist.new_group, which
+        # stateless groups do not support.
+        self.island_ar_comm: IslandAllReduce | None = None
+        if (
+            unique_name.split(":")[0] == "tp"
+            and tcp_store_group is None
+            and self.world_size in IslandAllReduce.SUPPORTED_WORLD_SIZES
+            and current_platform.is_rocm()
+            and not envs.VLLM_BATCH_INVARIANT
+        ):
+            from vllm.platforms.rocm import get_cdna_version
+
+            if get_cdna_version() == 2:
+                self.island_ar_comm = IslandAllReduce(
+                    self.cpu_group, self.device, self.ranks
+                )
 
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
@@ -326,6 +349,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
             "AITER_CUSTOM",
+            "ISLAND",
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
@@ -370,6 +394,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and not self.aiter_ar_comm.disabled
         ):
             enabled_ar_backends.append("AITER_CUSTOM")
+        if self.island_ar_comm is not None and not self.island_ar_comm.disabled:
+            enabled_ar_backends.append("ISLAND")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
@@ -431,6 +457,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = aiter_ar_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        island_ar_comm = self.island_ar_comm
+        if island_ar_comm is not None and not island_ar_comm.disabled:
+            out = island_ar_comm.all_reduce(input_)
+            if out is not None:
+                return out
         ca_comm = self.ca_comm
         if (
             ca_comm is not None
@@ -865,6 +896,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.island_ar_comm is not None:
+            self.island_ar_comm.destroy()
+            self.island_ar_comm = None
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None

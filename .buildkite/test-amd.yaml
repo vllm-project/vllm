@@ -208,6 +208,7 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s distributed/test_xgmi_island_all_reduce.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 #----------------------------------------------------------  mi250 · kernels  ----------------------------------------------------------#
