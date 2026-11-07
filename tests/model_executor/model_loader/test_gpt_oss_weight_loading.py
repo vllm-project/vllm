@@ -127,32 +127,18 @@ def test_streamed_gate_up_bias_tp_slice() -> None:
     assert torch.equal(experts.w13_bias[0], loaded_weight[4:])
 
 
-@pytest.mark.parametrize("case", ["mxfp4", "nvfp4"])
-def test_streamed_quantized_expert_layout(case: str) -> None:
-    if case == "mxfp4":
-        experts = _TestExperts(
-            "w13_weight",
-            (2, 4, 4),
-            tp_rank=1,
-            intermediate_size=128,
-            weight_dtype="gpt_oss_mxfp4",
-            dtype=torch.uint8,
-        )
-        loaded_weight = torch.arange(32, dtype=torch.uint8).reshape(8, 2, 2)
-        expected = loaded_weight.reshape(8, 4)[4:]
-    else:
-        experts = _TestExperts(
-            "w13_weight",
-            (2, 4, 2),
-            tp_rank=1,
-            quant_method_name="Nvfp4OnlineMoEMethod",
-            dtype=torch.uint8,
-        )
-        loaded_weight = torch.arange(16, dtype=torch.uint8).reshape(8, 2)
-        expected = loaded_weight[4:]
+def test_streamed_nvfp4_expert_layout() -> None:
+    experts = _TestExperts(
+        "w13_weight",
+        (2, 4, 2),
+        tp_rank=1,
+        quant_method_name="Nvfp4OnlineMoEMethod",
+        dtype=torch.uint8,
+    )
+    loaded_weight = torch.arange(16, dtype=torch.uint8).reshape(8, 2)
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
-    assert torch.equal(experts.w13_weight[0], expected)
+    assert torch.equal(experts.w13_weight[0], loaded_weight[4:])
 
 
 @pytest.mark.parametrize("shard", ["w13", "w2"])

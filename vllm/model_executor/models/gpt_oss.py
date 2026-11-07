@@ -205,6 +205,9 @@ class GptOssRoutedExperts(RoutedExperts):
 
     def _narrow_for_rank(self, loaded_weight: torch.Tensor, dim: int) -> torch.Tensor:
         """This rank's slice of dim ``dim``, as the full-checkpoint loader splits it."""
+        length = loaded_weight.shape[dim]
+        if length == 1:  # not partitioned (e.g. a channelwise w2 scale)
+            return loaded_weight
         moe = self.moe_config
         tp_size = moe.moe_parallel_config.tp_size
         tp_rank = moe.moe_parallel_config.tp_rank
@@ -212,9 +215,6 @@ class GptOssRoutedExperts(RoutedExperts):
         mx = getattr(self.quant_method, "weight_dtype", "") in _MXFP4_WEIGHT_DTYPES
         blocks = moe.intermediate_size // (OCP_MX_BLOCK_SIZE if mx else 1)
         per_rank = cdiv(blocks, tp_size)
-        length = loaded_weight.shape[dim]
-        if length == 1:  # not partitioned (e.g. a channelwise w2 scale)
-            return loaded_weight
         start = min(tp_rank * per_rank, blocks) * length // blocks
         end = min((tp_rank + 1) * per_rank, blocks) * length // blocks
         return loaded_weight.narrow(dim, start, end - start)
@@ -262,16 +262,10 @@ class GptOssRoutedExperts(RoutedExperts):
         weight_name: str,
         shard_id: str,
     ) -> None:
-        is_w13 = shard_id == "gpt_oss_w13"
-        is_weight = weight_name.endswith(("_weight", "_weight_packed"))
-        is_partitioned_scale = weight_name.endswith("_weight_scale")
-
-        if is_weight:
+        if weight_name.endswith(("_weight", "_weight_packed")):
             loaded_weight = loaded_weight.reshape(loaded_weight.shape[0], -1)
-
-        if is_weight or is_partitioned_scale:
-            loaded_weight = self._narrow_for_rank(loaded_weight, 0 if is_w13 else -1)
-
+        dim = 0 if shard_id == "gpt_oss_w13" else -1
+        loaded_weight = self._narrow_for_rank(loaded_weight, dim)
         self._copy_to_expert(expert_data, loaded_weight)
 
     @typing.overload
