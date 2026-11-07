@@ -766,7 +766,10 @@ class ModelConfig:
                 self.tokenizer_mode = "alpamayo2_super"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "KimiK3ForConditionalGeneration":
+            elif arch in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
@@ -2166,8 +2169,12 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
-        # Check for embedding_size set by model config
-        # (e.g., Voyage models, embedding gemma-2)
+        # Check for embedding_size set by model config (e.g., Voyage models).
+        override = getattr(self.hf_config, "embedding_size", None)
+        if override is not None:
+            return override
+
+        # Check for embedding_dim set by model config (e.g., embedding gemma-2).
         emb_dim = getattr(self.hf_text_config, "embedding_dim", None)
         if emb_dim is None:
             emb_dim = getattr(self.hf_config, "embedding_dim", None)
