@@ -12,6 +12,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -40,7 +41,7 @@ P = ParamSpec("P")
 
 # Head sizes the fused kernel fused_qk_norm_rope_cache_pts_quant_shuffle() supports
 # Other sizes hard-abort, so skip those layers.
-SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
+SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256, 512)
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +59,10 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     rms_norm_eps: float,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    v_norm: bool,
     layer_name: LayerNameType,
+    q_out_fp8: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
@@ -76,11 +80,16 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             is_neox,
             kv_cache,
             layer_slot_mapping,
+            v_norm,
+            q_out_fp8,
+            q_scale,
         )
     else:
         # Profiling/dummy run: define q_out/k_out (consumed by attention).
         q_out.zero_()
         k_out.zero_()
+        if q_out_fp8 is not None:
+            q_out_fp8.zero_()
 
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -95,7 +104,10 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
     rms_norm_eps: float,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    v_norm: bool,
     layer_name: LayerNameType,
+    q_out_fp8: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
@@ -103,7 +115,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_fake(
 direct_register_custom_op(
     op_name="fused_qk_norm_rope_and_unified_kv_cache_update",
     op_func=fused_qk_norm_rope_and_unified_kv_cache_update_impl,
-    mutates_args=["q_out", "k_out"],
+    mutates_args=["q_out", "k_out", "q_out_fp8"],
     fake_impl=fused_qk_norm_rope_and_unified_kv_cache_update_fake,
 )
 
@@ -211,6 +223,7 @@ class QkNormRopeKvCachePattern:
         eps: float,
         is_neox: bool,
         quant_query: bool,
+        v_norm: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -220,11 +233,17 @@ class QkNormRopeKvCachePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.quant_query = quant_query
+        self.v_norm = v_norm
         self.encoded_layer_name = _encode_layer_name(self.layer_name)
         self.query_quant_group_shape = (
             layer.query_quant.group_shape
             if layer.query_quant is not None
             else GroupShape.PER_TENSOR
+        )
+        # Static per-tensor Q quant is folded into the fused kernel when the
+        # installed AITER supports it; otherwise Q is quantized separately.
+        self.fuse_query_quant = self.query_quant_group_shape.is_per_tensor() and bool(
+            rocm_aiter_ops.qk_norm_rope_cache_supports_q_fp8()
         )
 
         self.q_size = self.num_heads * self.head_size
@@ -282,6 +301,9 @@ class QkNormRopeKvCachePattern:
         q_rope = q_rope.view(-1, self.num_heads, self.head_size)
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        if self.v_norm:
+            # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
+            v = vllm.ir.ops.rms_norm(v, None, self.eps)
         dummy = torch.ops.vllm.unified_kv_cache_update(
             k_rope, v, self._get_layer_name(layer_name)
         )
@@ -323,7 +345,10 @@ class QkNormRopeKvCachePattern:
             rms_norm_eps=self.eps,
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
+            v_norm=self.v_norm,
             layer_name=self._get_layer_name(layer_name),
+            q_out_fp8=None,
+            q_scale=None,
         )
         return results[0], results[1], results[2], v
 
@@ -390,6 +415,9 @@ class QkNormRopeKvCachePattern:
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        if self.v_norm:
+            # Weightless V-norm (e.g. Gemma4 v_norm, has_weight=False).
+            v = vllm.ir.ops.rms_norm(v, None, self.eps)
         dummy = torch.ops.vllm.unified_kv_cache_update(
             k_rope, v, self._get_layer_name(layer_name)
         )
@@ -423,6 +451,41 @@ class QkNormRopeKvCachePattern:
         )
         _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+
+        if self.fuse_query_quant:
+            # The fused kernel fp8-quantizes Q with the same q_scale the replaced
+            # quant op consumed, so we skip the separate scaled_quant. The bf16
+            # q_out is still written by the kernel but goes unused here.
+            q_out_fp8 = torch.empty(
+                qkv.shape[0],
+                self.num_heads,
+                self.head_size,
+                device=qkv.device,
+                dtype=current_platform.fp8_dtype(),
+            )
+            results = auto_functionalized(
+                self.FUSED_OP,
+                q_out=q_out,
+                k_out=k_out,
+                qkv=qkv,
+                positions=positions,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                rms_norm_eps=self.eps,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                v_norm=self.v_norm,
+                layer_name=self._get_layer_name(layer_name),
+                q_out_fp8=q_out_fp8,
+                q_scale=q_scale,
+            )
+            # results = [dummy, q_out, k_out, q_out_fp8]
+            q_fp8 = results[3].view(-1, self.q_size)
+            # Static per-tensor scale is an unchanged input; return it as the scale
+            # output the pattern exposes (the separate quant op's scale write-back).
+            return results[0], q_fp8, results[2], v, q_scale
+
+        # Per-head/group form or older AITER: re-quantize the bf16 Q separately.
         results = auto_functionalized(
             self.FUSED_OP,
             q_out=q_out,
@@ -434,10 +497,11 @@ class QkNormRopeKvCachePattern:
             rms_norm_eps=self.eps,
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
+            v_norm=self.v_norm,
             layer_name=self._get_layer_name(layer_name),
+            q_out_fp8=None,
+            q_scale=None,
         )
-        # Re-apply the same quant form on the kernel's bf16 q_out; the fused
-        # operation does not quantize Q.
         q_fp8_flat = results[1].view(-1, self.q_size)
         q_fp8, q_scale_out = self._quantize_query(q_fp8_flat, q_scale)
         if q_scale_out is None:
@@ -464,6 +528,50 @@ class QkNormRopeKvCachePattern:
 
         view_to_reshape(gm)
 
+    @staticmethod
+    def _pin_split_sizes(pattern, sizes: list[int]) -> None:
+        """Restore literal qkv split sizes in a search pattern.
+
+        Walks the PatternExpr tree and replaces the (wildcarded) size list of
+        each ``aten.split_with_sizes`` node with the concrete ``sizes`` so that
+        different attention shapes produce distinct, non-duplicate patterns.
+        """
+        seen: set[int] = set()
+
+        def is_split(p) -> bool:
+            fns = getattr(p, "fns", None)
+            if fns is None:
+                return False
+            fns = fns if isinstance(fns, (list, tuple)) else [fns]
+            return any(
+                "split_with_sizes" in str(getattr(fn, "_name", fn)) for fn in fns
+            )
+
+        def walk(p) -> None:
+            if id(p) in seen:
+                return
+            seen.add(id(p))
+            if is_split(p):
+                args = list(p.args)
+                if len(args) >= 2 and isinstance(args[1], list):
+                    args[1] = list(sizes)
+                    p.args = tuple(args)
+                    # _TargetArgsExpr precomputes flat_args_kwargs at __init__ and
+                    # matching uses that, not .args -- recompute after mutating.
+                    p.flat_args_kwargs = p.flatten(p.args, p.kwargs)
+            for coll in (getattr(p, "outputs", None), getattr(p, "args", None)):
+                if not coll:
+                    continue
+                for a in coll:
+                    if hasattr(a, "args") or hasattr(a, "outputs") or hasattr(a, "fns"):
+                        walk(a)
+                    elif isinstance(a, (list, tuple)):
+                        for x in a:
+                            if hasattr(x, "args") or hasattr(x, "fns"):
+                                walk(x)
+
+        walk(pattern)
+
     def _extra_check(self, match: pm.Match) -> bool:
         return True
 
@@ -480,11 +588,23 @@ class QkNormRopeKvCachePattern:
         inputs = self.get_inputs()
         argnames = [*inspect.signature(pattern).parameters.keys()]
         search_gm = trace_fn(pattern, inputs)
+        # Ignore int/SymInt so the concrete traced batch dim (and dynamic-shape
+        # SymInts) match the graph's symbolic batch as wildcards.
         search_fn_pattern = pm.fx_to_pattern(
             search_gm,
             ignore_types=(int, torch.SymInt),
             argnames=argnames,
         )
+        # With a wildcard layer_name input (VLLM_USE_LAYERNAME), the only thing
+        # distinguishing this layer's shape (e.g. Gemma4 sliding-256 vs full-512)
+        # from another is the qkv split sizes -- but ignore_types just wildcarded
+        # them, collapsing the two shapes into a duplicate pattern. Restore the
+        # split sizes as literals so each shape stays a distinct, correctly
+        # replaced pattern while the batch dim remains a wildcard.
+        if _USE_LAYERNAME:
+            self._pin_split_sizes(
+                search_fn_pattern, [self.q_size, self.k_size, self.v_size]
+            )
 
         pm.register_replacement(
             pattern,
@@ -865,7 +985,13 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
-        patterns_registered = False
+        # When _USE_LAYERNAME, layer_name is a wildcard pattern input, so every
+        # layer of the same shape produces an identical search pattern. Register
+        # each distinct shape once to avoid duplicate patterns while still
+        # covering heterogeneous models (e.g. Gemma4's sliding head_dim 256 and
+        # full head_dim 512 attention layers).
+        registered_shapes: set[tuple[int, int, int, int]] = set()
+
         for _, layer in attn_layers.items():
             supports_rope = layer.impl.fused_qk_norm_rope_kvcache_supported()
             supports_mrope = (
@@ -898,23 +1024,28 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             # interleaved V cache, including layers whose patterns are not
             # registered separately below.
             layer.impl.set_interleaved_v_cache()
-            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so
-            # homogeneous attention layers produce duplicate search patterns.
-            # As in the other LayerName-aware fusion passes, one supported
-            # layer registers all shape/style variants for the model.
-            if _USE_LAYERNAME and patterns_registered:
-                continue
-            patterns_registered = True
+            shape_key = (
+                layer.num_heads,
+                layer.num_kv_heads,
+                layer.head_size,
+                layer.head_size_v,
+            )
+            if _USE_LAYERNAME:
+                if shape_key in registered_shapes:
+                    continue
+                registered_shapes.add(shape_key)
             if supports_rope:
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
                         for quant_q in [False, True]:
-                            QkNormRopeKvCachePattern(
-                                layer=layer,
-                                eps=epsilon,
-                                is_neox=neox,
-                                quant_query=quant_q,
-                            ).register(self.patterns)
+                            for v_norm in [False, True]:
+                                QkNormRopeKvCachePattern(
+                                    layer=layer,
+                                    eps=epsilon,
+                                    is_neox=neox,
+                                    quant_query=quant_q,
+                                    v_norm=v_norm,
+                                ).register(self.patterns)
             if supports_mrope:
                 for section, is_interleaved in self.mrope_configs:
                     rotary_dim = 2 * sum(section)
