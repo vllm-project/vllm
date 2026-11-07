@@ -4,6 +4,8 @@ import argparse
 import contextlib
 import json
 import multiprocessing
+import os
+import signal
 import threading
 import time
 import weakref
@@ -164,6 +166,30 @@ def get_engine_client_zmq_addr(
     return get_tcp_uri(host, port)
 
 
+def _run_owned_process(
+    target: Callable[..., None], parent_pid: int, *args: Any, **kwargs: Any
+) -> None:
+    """Run a frontend subprocess only while its launching process is alive."""
+    finished = threading.Event()
+
+    def monitor_parent() -> None:
+        while not finished.wait(1):
+            if os.getppid() != parent_pid:
+                # The launcher can no longer enforce its cleanup deadline.
+                # Allow normal signal handling, then bound even a stuck drain.
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+                os._exit(1)
+
+    threading.Thread(
+        target=monitor_parent, name="FrontendParentMonitor", daemon=True
+    ).start()
+    try:
+        target(*args, **kwargs)
+    finally:
+        finished.set()
+
+
 class APIServerProcessManager:
     """Manages a group of API server processes.
 
@@ -246,9 +272,16 @@ class APIServerProcessManager:
                     client_config["tensor_queue"] = tensor_queue
 
                 proc = spawn_context.Process(
-                    target=target_server_fn or run_api_server_worker_proc,
+                    target=_run_owned_process,
                     name=f"ApiServer_{i}",
-                    args=(listen_address, sock, args, client_config),
+                    args=(
+                        target_server_fn or run_api_server_worker_proc,
+                        os.getpid(),
+                        listen_address,
+                        sock,
+                        args,
+                        client_config,
+                    ),
                 )
                 self.processes.append(proc)
                 proc.start()

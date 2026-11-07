@@ -250,12 +250,17 @@ class APIOnlyServerManager:
         api_server_count: int,
         base_server_args: list,
         tp_size: int = TP_SIZE,
+        *,
+        api_port: int = 8000,
+        rpc_port: int = 13345,
     ):
         self.model_name = model_name
         self.dp_size = dp_size
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
+        self.api_port = api_port
+        self.rpc_port = rpc_port
         self.servers: list[tuple[RemoteOpenAIServer, list[str]] | None] = [None] * 2
         self.server_threads: list[threading.Thread] = []
 
@@ -272,13 +277,13 @@ class APIOnlyServerManager:
                 "--tensor-parallel-size",
                 str(self.tp_size),
                 "--port",
-                "8000",
+                str(self.api_port),
                 "--api-server-count",
                 str(self.api_server_count),
                 "--data-parallel-address",
                 "127.0.0.1",
                 "--data-parallel-rpc-port",
-                "13345",
+                str(self.rpc_port),
             ]
         )
 
@@ -293,10 +298,13 @@ class APIOnlyServerManager:
                 str(self.dp_size),  # All engines on this node
                 "--tensor-parallel-size",
                 str(self.tp_size),
+                # RemoteOpenAIServer checks the API endpoint for readiness.
+                "--port",
+                str(self.api_port),
                 "--data-parallel-address",
                 "127.0.0.1",
                 "--data-parallel-rpc-port",
-                "13345",
+                str(self.rpc_port),
             ]
         )
 

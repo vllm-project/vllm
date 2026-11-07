@@ -32,6 +32,8 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - vllm/utils/flashinfer.py
+  - vllm/v1/utils.py
+  - vllm/v1/engine/coordinator.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
   - tests/entrypoints/common
