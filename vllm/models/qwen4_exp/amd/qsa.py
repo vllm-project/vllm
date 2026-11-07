@@ -38,6 +38,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImplBase,
     AttentionType,
+    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.ops import rocm_octave
@@ -52,7 +53,11 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
-from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
+from ..common.qsa import (
+    Qwen4ExpQSAMetadata,
+    Qwen4ExpQSAMetadataBuilder,
+    host_prefill_layout,
+)
 from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .qsa_indexer import QSAIndexer
@@ -76,7 +81,8 @@ _OCTAVE_SINK_ENTRIES = 2048
 
 
 class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
-    """Reserve the Octave workspace for ROCm QSA."""
+    """ROCm QSA metadata: reserves the Octave workspace, and adds the host
+    prefill layout that AITER's FlyDSL sparse prefill plans on."""
 
     def __init__(
         self,
@@ -86,6 +92,16 @@ class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        from .ops import qsa_flydsl_prefill as flydsl
+
+        # AITER's FlyDSL sparse prefill plans on the host lengths of the steps
+        # it can take: a bf16 cache, and enough rows.
+        self.prefill_layout_min_rows = (
+            flydsl.FLYDSL_PREFILL_MIN_ROWS
+            if kv_cache_spec.dtype == torch.bfloat16
+            and flydsl.flydsl_prefill_available()
+            else None
+        )
         # Layers run one after another, so they share one set of Octave
         # split-KV partials; reserve it before the workspace is locked.
         if kv_cache_spec.kv_quant_mode.is_octave and is_workspace_manager_initialized():
@@ -98,6 +114,18 @@ class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
                 * (kv_cache_spec.head_size + 2)
             )
             current_workspace_manager().get_simultaneous(((numel,), torch.float32))
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Qwen4ExpQSAMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        min_rows = self.prefill_layout_min_rows
+        if min_rows is not None and common_attn_metadata.num_actual_tokens >= min_rows:
+            metadata.prefill_layout = host_prefill_layout(common_attn_metadata)
+        return metadata
 
 
 _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (
@@ -297,6 +325,24 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             self._slocks,
         )
 
+    def kv_cache_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """K and V of a bf16 or fp8 cache as ``[pages, page_size, kv_heads,
+        head_size]`` views: the two halves of each token's K|V record."""
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache = canonicalize_singleton_dim_strides(key_cache)
+        value_cache = canonicalize_singleton_dim_strides(value_cache)
+        if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            assert key_cache.dtype == torch.uint8, (
+                "fp8 KV cache must be uint8 storage; a config mismatch would "
+                "silently double the view's shape"
+            )
+            fp8_dtype = current_platform.fp8_dtype()
+            key_cache = key_cache.view(fp8_dtype)
+            value_cache = value_cache.view(fp8_dtype)
+        return key_cache, value_cache
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -341,17 +387,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
                 self._stags,
             )
             return output
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        key_cache = canonicalize_singleton_dim_strides(key_cache)
-        value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            assert key_cache.dtype == torch.uint8, (
-                "fp8 KV cache must be uint8 storage; a config mismatch would "
-                "silently double the view's shape"
-            )
-            fp8_dtype = current_platform.fp8_dtype()
-            key_cache = key_cache.view(fp8_dtype)
-            value_cache = value_cache.view(fp8_dtype)
+        key_cache, value_cache = self.kv_cache_views(kv_cache)
         if query.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA requires BF16 queries")
         if key_cache.dtype != torch.bfloat16 and (
@@ -373,6 +409,7 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             attn_metadata.block_table,
             token_to_req,
             output[:num_tokens],
+            prefill_layout=attn_metadata.prefill_layout,
         )
         return output
 
