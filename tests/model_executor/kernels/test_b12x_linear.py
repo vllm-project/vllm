@@ -862,11 +862,20 @@ def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
     assert kwargs == {"out_dtype": torch.bfloat16}
 
 
-def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
+def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(
+    monkeypatch, default_vllm_config
+):
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = []
     calls = []
-    packed_weight = object()
+    plans: list[types.SimpleNamespace] = []
+    packed_weight = types.SimpleNamespace(
+        in_features=128,
+        padded_in_features=128,
+        out_features=48,
+        global_scale_kind="multiplier",
+    )
 
     def pack_weight(weight, scale, *, recipe, global_scale):
         assert weight is layer.weight
@@ -875,8 +884,14 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
         assert global_scale is layer.weight_global_scale
         return packed_weight
 
-    def mm(source, weight, *, required_mode):
+    def plan_regimes(query, *, exact_m, a16_max_tokens):
+        assert a16_max_tokens == 0
+        plans.append(types.SimpleNamespace(handle=len(plans), token_counts=exact_m))
+        return plans[-1]
+
+    def mm(source, weight, *, plan, required_mode):
         assert weight is packed_weight
+        assert plan is plans[-1]
         assert required_mode == "a16"
         assert source.dtype == torch.bfloat16
         assert source.is_contiguous()
@@ -890,7 +905,12 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
     monkeypatch.setattr(
         b12x_mod,
         "_import_b12x_blockscaled",
-        lambda: types.SimpleNamespace(pack_weight=pack_weight, mm=mm),
+        lambda: types.SimpleNamespace(
+            pack_weight=pack_weight,
+            mm=mm,
+            plan_regimes=plan_regimes,
+            BlockscaledQuery=types.SimpleNamespace,
+        ),
     )
     monkeypatch.setattr(
         b12x_mod,
@@ -908,6 +928,9 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
     kernel = object.__new__(B12xNvFp4W4A16LinearKernel)
     kernel.process_weights_after_loading(layer)
     assert layer.b12x_warmup_provider is kernel
+    # A reload with unchanged shapes keeps the prepared plan.
+    kernel.process_weights_after_loading(layer)
+    assert len(plans) == 1
     kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16).compile()
     assert [source.shape[0] for source in calls] == [1, 8]
 
@@ -919,21 +942,8 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
         kernel.apply_weights(layer, x.float())
 
 
-@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
-@torch.inference_mode()
-def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
-    monkeypatch, default_vllm_config, m, n, k
-) -> None:
-    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
-
-    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
-    if not supported:
-        pytest.skip(reason)
-
-    def reject_activation_quantization(*args, **kwargs):
-        pytest.fail("W4A16 must not quantize activations")
-
-    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+def _nvfp4_w4a16_layer(n, k):
+    """A random NVFP4 W4A16 layer and its decoded fp32 weight."""
     torch.manual_seed(17)
     codes = torch.randint(0, 16, (n, k), device="cuda")
     scales = (2.0 ** torch.randint(-2, 2, (n, k // 16), device="cuda")).to(
@@ -952,6 +962,210 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         device="cuda",
     )
     decoded = lut[codes] * scales.float().repeat_interleave(16, dim=1) * 0.125
+    return layer, decoded
+
+
+@pytest.mark.parametrize("a16_max_tokens", [None, 8])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_does_not_prepare_after_first_call(
+    monkeypatch, default_vllm_config, a16_max_tokens
+) -> None:
+    """Every serving token count is planned at load time.
+
+    A b12x preparation evicts programs no prepared plan retains, including
+    routed-MoE kernels compiled earlier in the same forward, which then fails
+    CUDA graph capture. Only the first (profile run) call may prepare.
+    """
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    import b12x.preparation.session as session
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    default_vllm_config.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = a16_max_tokens
+    k = 256
+    layer, decoded = _nvfp4_w4a16_layer(256, k)
+    kernel = B12xNvFp4W4A16LinearKernel(None)
+    kernel.process_weights_after_loading(layer)
+    scheduler = default_vllm_config.scheduler_config
+    capacity = max(
+        scheduler.max_num_batched_tokens, scheduler.max_num_scheduled_tokens or 0, 8
+    )
+    source = torch.zeros(capacity, k, device="cuda", dtype=torch.bfloat16)
+    kernel.apply_weights(layer, source)
+
+    prepared = []
+    prepare_default = session.prepare_default
+
+    def record_prepare(request):
+        prepared.append(request)
+        return prepare_default(request)
+
+    monkeypatch.setattr(session, "prepare_default", record_prepare)
+    for m in (8, 4, 2, 1, 3, 40, capacity + 5):
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        expected = torch.cat(
+            [
+                _nvfp4_activation_reference(chunk, decoded)
+                if a16_max_tokens and chunk.shape[0] > a16_max_tokens
+                else (chunk.double() @ decoded.double().T).bfloat16()
+                for chunk in x.split(capacity)
+            ]
+        )
+        actual = kernel.apply_weights(layer, x)
+        torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+    assert not prepared
+
+
+def _nvfp4_activation_reference(x, decoded):
+    """Reference output for NVFP4 activations scaled by amax(x), times ``decoded``."""
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+        ref_nvfp4_quant,
+    )
+
+    global_scale = 6.0 * 448.0 / x.abs().max().float()
+    codes, block_scale = ref_nvfp4_quant(x, global_scale, 16)
+    dequant = (
+        codes.view(*block_scale.shape, 16) * (block_scale / global_scale)[..., None]
+    )
+    return (dequant.view_as(x).double() @ decoded.double().T).bfloat16()
+
+
+@pytest.mark.parametrize("magnitude", [1.0, 64.0])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
+    default_vllm_config, magnitude
+) -> None:
+    """Passes above ``b12x_nvfp4_w4a16_a16_max_tokens`` rows use NVFP4 activations
+    and smaller passes keep BF16 ones, decided at execution time under
+    torch.compile: a branch in traced code would be fixed for every size."""
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    kernel_config = default_vllm_config.kernel_config
+    k = 256
+    layer, decoded = _nvfp4_w4a16_layer(256, k)
+    reference, _ = _nvfp4_w4a16_layer(256, k)
+    kernel = B12xNvFp4W4A16LinearKernel(None)
+    kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = 8
+    kernel.process_weights_after_loading(layer)
+    kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = None
+    kernel.process_weights_after_loading(reference)
+    capacity = layer.b12x_nvfp4_plan_query.num_tokens
+    for target in (layer, reference):
+        kernel.apply_weights(
+            target, torch.zeros(capacity, k, device="cuda", dtype=torch.bfloat16)
+        )
+
+    counter = CompileCounterWithBackend("inductor")
+    run = torch.compile(
+        lambda x: kernel.apply_weights(layer, x),
+        backend=counter,
+        fullgraph=True,
+        dynamic=True,
+    )
+    for m in (4, 40, 8, 9):
+        x = magnitude * torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        actual = run(x)
+        a16 = kernel.apply_weights(reference, x)
+        if m <= 8:
+            torch.testing.assert_close(actual, a16, atol=0, rtol=0)
+        else:
+            expected = _nvfp4_activation_reference(x, decoded)
+            torch.testing.assert_close(
+                actual, expected, atol=0.005 * magnitude, rtol=0.01
+            )
+            assert not torch.allclose(actual, a16, atol=0.005 * magnitude, rtol=0.01)
+    assert counter.frame_count == 1
+    zeros = torch.zeros(40, k, device="cuda", dtype=torch.bfloat16)
+    assert torch.equal(run(zeros), torch.zeros(40, 256, device="cuda").bfloat16())
+
+    packed = layer.b12x_nvfp4_packed_weight
+    # SchemaCheckMode compares inputs with allclose, which CUDA does not
+    # implement for float8. The numerical tests above guard input mutation.
+    torch.library.opcheck(
+        torch.ops.vllm.b12x_nvfp4_w4a16_linear.default,
+        (
+            torch.randn(40, k, device="cuda", dtype=torch.bfloat16),
+            packed.values,
+            packed.scale_mma,
+            packed.global_scale,
+            packed.global_scale_kind,
+            packed.in_features,
+            layer.b12x_nvfp4_plan.handle,
+            8,
+        ),
+        test_utils="test_faketensor",
+    )
+
+
+@pytest.mark.parametrize(
+    "setting,match",
+    [
+        ("capture_sizes", "largest CUDA graph capture size 8"),
+        ("decoder_replay_sizes", "largest CUDA graph capture size 16"),
+        ("data_parallel", "does not support data parallelism"),
+        ("elastic_ep", "does not support data parallelism"),
+        ("encoder_cudagraphs", "encoder CUDA graphs"),
+        ("prompt_embeds", "client-supplied prompt or multimodal embeddings"),
+        ("mm_embeds", "client-supplied prompt or multimodal embeddings"),
+    ],
+)
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_a16_max_tokens_rejects_unsafe_rows(
+    default_vllm_config, setting, match
+) -> None:
+    """Padded rows are uninitialized and must not reach the shared scale."""
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    config = default_vllm_config
+    config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    config.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = (
+        4 if setting == "capture_sizes" else 8
+    )
+    config.parallel_config.data_parallel_size = 2 if setting == "data_parallel" else 1
+    config.parallel_config.enable_elastic_ep = setting == "elastic_ep"
+    config.compilation_config.cudagraph_mm_encoder = setting == "encoder_cudagraphs"
+    config.compilation_config.decoder_replay_cudagraph_capture_sizes = (
+        [16] if setting == "decoder_replay_sizes" else []
+    )
+    layer, _ = _nvfp4_w4a16_layer(256, 256)
+    if setting in ("prompt_embeds", "mm_embeds"):
+        # One request's embeddings would set the scale of every request.
+        config.model_config = types.SimpleNamespace(
+            enable_prompt_embeds=setting == "prompt_embeds",
+            multimodal_config=types.SimpleNamespace(
+                enable_mm_embeds=setting == "mm_embeds"
+            ),
+        )
+    with pytest.raises(ValueError, match=match):
+        B12xNvFp4W4A16LinearKernel(None).process_weights_after_loading(layer)
+
+
+@pytest.mark.parametrize("a16_max_tokens", [None, 32])
+@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
+    monkeypatch, default_vllm_config, m, n, k, a16_max_tokens
+) -> None:
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 32]
+    default_vllm_config.kernel_config.b12x_nvfp4_w4a16_a16_max_tokens = a16_max_tokens
+
+    def reject_activation_quantization(*args, **kwargs):
+        pytest.fail("W4A16 must not quantize activations")
+
+    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    layer, decoded = _nvfp4_w4a16_layer(n, k)
     x_storage = torch.randn(1, m, k * 2, device="cuda", dtype=torch.bfloat16)
     x = x_storage[..., ::2]
     bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
