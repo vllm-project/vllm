@@ -315,6 +315,15 @@ class Worker(WorkerBase):
             if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             preserved.update(storage[name] for name in matches)
+        draft_names = fnmatch_filter(storage, "draft.*")
+        patterns = self.model_config.sleep_preserve_parameter_names
+        if draft_names and not any(fnmatch_filter(draft_names, p) for p in patterns):
+            logger.warning_once(
+                "Level 2 sleep discards draft model weights; reload_weights "
+                "restores only the target. Unless the draft is updated "
+                "separately, set --sleep-preserve-parameter-names 'draft.*' "
+                "to keep them."
+            )
         return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
