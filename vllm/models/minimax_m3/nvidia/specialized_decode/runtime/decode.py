@@ -59,7 +59,6 @@ def _same_tensor(a: torch.Tensor | None, b: torch.Tensor) -> bool:
 class DecodeStep(NamedTuple):
     """One captured decode step."""
 
-    rows: int
     executor: "SpecializedDecode"
     # The low-batch attention's metadata, or None to run the stock attention.
     attention: AttentionStep | None
@@ -107,7 +106,7 @@ class SpecializedDecode:
             or not captures_pure_decode()
         ):
             return None
-        return DecodeStep(rows, self, self._attention_step(rows))
+        return DecodeStep(self, self._attention_step(rows))
 
     def _attention_step(self, rows: int) -> AttentionStep | None:
         """The step's low-batch attention metadata, when its requests and

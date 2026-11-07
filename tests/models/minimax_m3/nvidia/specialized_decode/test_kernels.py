@@ -267,7 +267,9 @@ def test_low_batch_ffn_builds(layer):
 @pytest.mark.parametrize("rows", [1, 3, 8, 12, 16, 24, 32])
 def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
     """Eager calls and CUDA graph replays with new values in the captured
-    input, at each of the front's widths (8, 16, 32 rows)."""
+    input, at each of the front's widths (8, 16, 32 rows). The graph is
+    replayed twice, on other rows the second time, so a record the front
+    does not reset between replays fails it."""
     from vllm.config import set_current_vllm_config
     from vllm.forward_context import set_forward_context
 
@@ -284,6 +286,8 @@ def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
             assert ffn.accepts(x)
             if not graph:
                 out = ffn.run(x)
+                torch.accelerator.synchronize()
+                _check(out, moe, x)
             else:
                 static = torch.zeros_like(x)
                 ffn.run(static)
@@ -291,10 +295,11 @@ def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
                 cuda_graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(cuda_graph):
                     out = ffn.run(static)
-                static.copy_(x)
-                cuda_graph.replay()
-            torch.accelerator.synchronize()
-            _check(out, moe, x)
+                for step in (x, x.roll(1, 0)):
+                    static.copy_(step)
+                    cuda_graph.replay()
+                    torch.accelerator.synchronize()
+                    _check(out, moe, step)
     finally:
         moe.e_score_correction_bias.data.copy_(bias)
         moe.gate.weight.data.copy_(gate)
