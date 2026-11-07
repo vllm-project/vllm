@@ -21,7 +21,11 @@ following `quantization.quant_algo` values:
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
-  (use `quantization="modelopt_mixed"`).
+  (use `quantization="modelopt_mixed"`). A token embedding marked
+  `W4A16_NVFP4` stays packed and only the looked-up rows are dequantized; the
+  model must build its embedding with the checkpoint prefix, as Nemotron-H does.
+  Such an embedding cannot be tied to the LM head, so checkpoints that tie it
+  are rejected.
 
 For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
 when required by the GPU, for example on AMD MI300.
