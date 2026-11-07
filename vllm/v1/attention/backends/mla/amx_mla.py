@@ -44,7 +44,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -311,6 +311,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         # Overrides the default (CUDA-only concat_and_cache_mla).
         if kv_cache.numel() == 0:
