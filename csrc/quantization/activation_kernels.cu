@@ -285,7 +285,9 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
-    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e) {
+    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e,
+    // SwiGLU clamp limit (swiglu_limit); negative disables the clamp.
+    float clamp_limit) {
 #ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
 
@@ -508,8 +510,22 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
-        __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
-        res[k] = __hmul2(gate, s_up_comp[k]);
+        float2 gate_f = __bfloat1622float2(s_gate_comp[k]);
+        __nv_bfloat162 up = s_up_comp[k];
+        if (clamp_limit >= 0.0f) {
+          // Same arithmetic as the dense Triton quantizers
+          // (silu_mul_per_token_group_quant_fp8_colmajor): clamp in fp32,
+          // narrow back to bf16, then run SiLU on the narrowed value.
+          float2 up_f = __bfloat1622float2(up);
+          gate_f.x = fminf(gate_f.x, clamp_limit);
+          gate_f.y = fminf(gate_f.y, clamp_limit);
+          up_f.x = fminf(fmaxf(up_f.x, -clamp_limit), clamp_limit);
+          up_f.y = fminf(fmaxf(up_f.y, -clamp_limit), clamp_limit);
+          gate_f = __bfloat1622float2(__float22bfloat162_rn(gate_f));
+          up = __float22bfloat162_rn(up_f);
+        }
+        __nv_bfloat162 gate = silu2_v2(gate_f);
+        res[k] = __hmul2(gate, up);
       }
 
       auto _y_max2 = __hmax2(__habs2(res[0]), __habs2(res[1]));
@@ -608,7 +624,8 @@ void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& tokens_per_expert,  // (E)
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
-    bool cast_scale_ue8m0) {
+    bool cast_scale_ue8m0,
+    double clamp_limit) {  // SwiGLU clamp (swiglu_limit); negative disables it
 #ifndef USE_ROCM
 
   // This kernel currently only supports H % 128 == 0 and assumes a
@@ -672,7 +689,8 @@ void persistent_masked_m_silu_mul_quant(
                       tokens_per_expert.const_data_ptr()),                     \
                   E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
                   stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
-                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e);                  \
+                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e,                   \
+                  static_cast<float>(clamp_limit));                            \
         });
 
   #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,         \
