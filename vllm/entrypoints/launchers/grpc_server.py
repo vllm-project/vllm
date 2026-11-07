@@ -211,6 +211,9 @@ async def serve_grpc(args: argparse.Namespace):
             # Without this, gRPC Core widens the floor to a fixed two hours
             # once no streams are open, striking keepalives between requests.
             ("grpc.keepalive_permit_without_calls", True),
+            # gRPC Core sets SO_REUSEPORT by default, so a second server could
+            # bind the same port without error and take part of its traffic.
+            ("grpc.so_reuseport", 0),
         ],
     )
 
