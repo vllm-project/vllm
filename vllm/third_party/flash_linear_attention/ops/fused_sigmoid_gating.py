@@ -226,7 +226,7 @@ def fused_sigmoid_gating_delta_rule_update(
     if inplace_final_state:
         final_state = initial_state
     else:
-        final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
+        final_state = q.new_empty(B * T, HV, V, K, dtype=initial_state.dtype)
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
