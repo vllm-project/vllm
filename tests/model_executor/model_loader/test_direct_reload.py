@@ -38,11 +38,15 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 )
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_processing,
+    finalize_layerwise_reload,
     finish_reload,
+    initialize_layerwise_reload,
     record_metadata_for_reloading,
     start_reload,
 )
 from vllm.model_executor.model_loader.reload.direct import (
+    _check_supported_modules,
+    abort_direct_reload,
     begin_direct_reload,
     finish_direct_reload,
 )
@@ -358,11 +362,6 @@ class TestUnsent:
         _assert_same(after, before, names=kept, addresses=True)
         expected = dict(new, **{n: old[n] for n in unsent})
         _assert_same(after, _state(_cold_start(expected)))
-        # the bias stayed live while staged: its loader is unwrapped again
-        bias = model.deq.online.bias
-        assert getattr(bias, "weight_loader", default_weight_loader).__name__ != (
-            "online_process_loader"
-        )
 
     def test_unsent_after_aborted_processing_is_not_requantized(self):
         # an update that failed inside the staged quantization cleared the
@@ -418,10 +417,11 @@ class TestOnlineStaging:
         _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
         assert _ptrs(_state(model)) == ptrs
 
-    def test_padded_moe_is_processed_as_its_experts_arrive(self):
+    @pytest.mark.parametrize("has_bias", [False, True])
+    def test_padded_moe_is_processed_as_its_experts_arrive(self, has_bias):
         # round-up padding is never loaded, and another rank's experts load
-        # nothing: the layer completes without them instead of buffering
-        # every expert until finish
+        # nothing: the layer completes on its last local expert, not before
+        # (dropping it) and not at finish (buffering every expert)
         class _MoE(OnlineMoEMethodBase):
             def get_fused_moe_quant_config(self, layer):
                 return None
@@ -436,13 +436,13 @@ class TestOnlineStaging:
             w13_num_shards=2,
             hidden_dim_unpadded=4,
             intermediate_size_per_partition_unpadded=2,
-            has_bias=False,
+            has_bias=has_bias,
         )
 
         def load_expert(param, loaded_weight, expert_id):
             if expert_id < 2:  # local experts 0 and 1
-                rows, cols = loaded_weight.shape
-                param.data[expert_id, :rows, :cols].copy_(loaded_weight)
+                region = tuple(slice(0, n) for n in loaded_weight.shape)
+                param.data[expert_id][region].copy_(loaded_weight)
 
         layer = torch.nn.Module()
         layer.quant_method = method
@@ -456,14 +456,17 @@ class TestOnlineStaging:
                 params_dtype=torch.bfloat16,
                 weight_loader=load_expert,
             )
+        shapes = {"w13_weight": (4, 4), "w2_weight": (4, 2)}
+        if has_bias:
+            shapes |= {"w13_bias": (4,), "w2_bias": (4,)}
+        loads = [(e, n) for e in (2, 0, 3, 1) for n in shapes]
         info = get_layerwise_info(layer)
-        for expert_id in (2, 0, 3, 1):
-            for name, shape in (("w13_weight", (4, 4)), ("w2_weight", (4, 2))):
-                param = getattr(layer, name)
-                param.weight_loader(param, torch.ones(shape), expert_id=expert_id)
+        for i, (expert_id, name) in enumerate(loads):
+            param = getattr(layer, name)
+            param.weight_loader(param, torch.ones(shapes[name]), expert_id=expert_id)
             if expert_id == 2:
                 assert info.loaded_weights == []
-        assert method.processed
+            assert method.processed == (i == len(loads) - 1)
 
 
 class TestRefusals:
@@ -478,19 +481,19 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_online_requantization_refused(self, monkeypatch):
-        # post-load processing releases the checkpoint parameters it dequantizes
+    @pytest.mark.parametrize("staged", [False, True])
+    def test_online_requantization_refused(self, staged):
+        # requantization (not staged, as set_requantization_source) releases
+        # the checkpoint parameters it dequantizes; online quantization is
+        # staged and accepted
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
-        online.uses_meta_device = False  # as set_requantization_source
-        init = _ToyModel.__init__
-
-        def with_online_layer(self):
-            init(self)
-            self.proj.quant_method = online
-
-        monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        with pytest.raises(RuntimeError, match="online requantization"):
-            _cold_start(_checkpoint())
+        online.uses_meta_device = staged
+        with _DEVICE:
+            model = _ToyModel()
+        model.proj.quant_method = online
+        refused = pytest.raises(RuntimeError, match="online requantization")
+        with contextlib.nullcontext() if staged else refused:
+            _check_supported_modules(model)
 
     def test_online_shared_experts_refused(self, monkeypatch):
         # post-load processing deletes the staging parameters a reload loads
@@ -512,8 +515,7 @@ class TestRefusals:
             check_plannable(_cold_start(_checkpoint()))
 
     def test_online_quantization_with_eplb_refused(self, monkeypatch):
-        # the kernel's quant config keeps the staged scales, which EPLB does
-        # not rearrange
+        # not validated with staging (elastic EP replaces the quant method)
         init = _ToyModel.__init__
 
         def with_eplb(self):
@@ -569,30 +571,45 @@ def test_retry_after_aborted_update_matches_cold_start():
     assert _ptrs(_state(model)) == ptrs
 
 
-def test_aborted_update_unstages_online_modules():
-    # the worker recommits the lent KV cache: the staged checkpoint tensors
-    # must not outlive the update
-    from vllm.v1.worker.gpu_worker import Worker
-
+def test_abort_unstages_online_modules():
+    # the worker recommits the lent KV cache after an abort: the staged
+    # checkpoint tensors must not outlive the update
     model = _cold_start(_checkpoint())
     layer = model.deq.online
     before = _state(model)
     begin_direct_reload(model)
     model.load_weights([("deq.online.weight", _checkpoint(1.01)["deq.online.weight"])])
     assert get_layerwise_info(layer).loaded_weights
-    worker = SimpleNamespace(
-        weight_transfer_engine=SimpleNamespace(
-            model=model, reset_weight_update_target=lambda: None
-        ),
-        _weight_update_kv_cache_loan=contextlib.ExitStack(),
-        _weight_update_is_draft=False,
-    )
-    Worker._end_weight_update(worker, refresh=False)
+    abort_direct_reload(model)
     assert get_layerwise_info(layer).loaded_weights == []
     names = ["deq.online.weight", "deq.online.weight_scale", "deq.online.bias"]
     _assert_same(_state(model), before, names=names, addresses=True)
     _reload(model, _checkpoint(1.01))  # the next full update repairs the model
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+
+
+def test_layerwise_reload_keeps_a_bias_registered_after_recording():
+    # a bias the model's load_weights registers (Transformers-backend
+    # lm_head) has no meta copy: it stays live, the layer waits for it, and
+    # its loader is unwrapped once the layer is processed
+    with _DEVICE:
+        model = torch.nn.Module()
+        model.add_module("head", torch.nn.Module())
+        head = model.head
+        head.weight = torch.nn.Parameter(torch.zeros(4, 4), False)
+        record_metadata_for_reloading(model)
+        head.bias = torch.nn.Parameter(torch.zeros(4), False)
+    weight, bias = torch.rand(4, 4), torch.rand(4)
+    initialize_layerwise_reload(model)
+    for name, value in (("weight", weight), ("bias", bias)):
+        param = getattr(head, name)
+        param.weight_loader(param, value.to(_DEVICE))
+    finalize_layerwise_reload(model, _MODEL_CONFIG)
+    assert torch.equal(head.weight.cpu(), weight)
+    assert torch.equal(head.bias.cpu(), bias)
+    assert getattr(head.bias, "weight_loader", default_weight_loader) is (
+        default_weight_loader
+    )
 
 
 def test_start_and_finish_reload_run_direct_reload():

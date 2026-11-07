@@ -718,9 +718,14 @@ class Worker(WorkerBase):
             else nullcontext()
         )
         with kv_cache_loan, set_current_vllm_config(self.vllm_config):
-            self.model_runner.reload_weights(
-                weights_iterator, weights_path, is_checkpoint_format
-            )
+            try:
+                self.model_runner.reload_weights(
+                    weights_iterator, weights_path, is_checkpoint_format
+                )
+            except BaseException:
+                if is_checkpoint_format:
+                    _unstage_aborted_update(self.model_runner.get_model())
+                raise
 
     def set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
         """Whether the KV cache holds nothing to keep, so that a weight update
@@ -1854,9 +1859,9 @@ class Worker(WorkerBase):
     def _end_weight_update(self, refresh: bool) -> None:
         assert self.weight_transfer_engine is not None
         self._weight_update_active = False
-        if not refresh and direct_reload_enabled():
+        if not refresh:
             # free the staged checkpoint tensors before the KV cache is back
-            abort_direct_reload(self.weight_transfer_engine.model)
+            _unstage_aborted_update(self.weight_transfer_engine.model)
         self._weight_update_kv_cache_loan.close()
         self.weight_transfer_engine.reset_weight_update_target()
         if self._weight_update_is_draft and (
@@ -1969,3 +1974,15 @@ def init_worker_distributed_environment(
     # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
     ensure_ec_transfer_initialized(vllm_config)
+
+
+def _unstage_aborted_update(model: nn.Module) -> None:
+    """Free what an aborted direct update staged before the lent KV cache is
+    recommitted. Best effort: the next begin unstages again, and the error
+    that aborted the update must not be replaced."""
+    if not direct_reload_enabled():
+        return
+    try:
+        abort_direct_reload(model)
+    except Exception:
+        logger.exception("direct reload: unstaging an aborted update failed")

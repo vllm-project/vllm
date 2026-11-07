@@ -129,8 +129,11 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     tensor_names = (
         get_layer_tensors(layer).keys() | restore_params.keys() | restore_buffers.keys()
     )
+    # a bias registered after the metadata was recorded (by the model's
+    # load_weights) has no meta copy: it stays live and is loaded in place
+    kept = SKIP_TENSORS | ({"bias"} - restore_params.keys())
     for name in tensor_names:
-        if name not in SKIP_TENSORS and hasattr(layer, name):
+        if name not in kept and hasattr(layer, name):
             delattr(layer, name)
 
     for name, param in restore_params.items():

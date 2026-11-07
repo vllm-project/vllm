@@ -114,8 +114,9 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
             and moe_config is not None
             and moe_config.moe_parallel_config.enable_eplb
         ):
-            # a staged reload leaves the kernel's quant config on the staged
-            # scales, which an EPLB rearrangement does not move
+            # not validated: elastic EP replaces the quant method by one that
+            # is not staged (uses_meta_device unset), so BF16 bytes would be
+            # written into the quantized kernel tensors
             raise RuntimeError(
                 f"direct reload: online quantization with EPLB is not supported "
                 f"({name})"
