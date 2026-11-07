@@ -31,7 +31,10 @@ def use_spawn_for_whisper(monkeypatch):
 
 
 def create_whisper_llm(
-    enable_lora: bool = True, max_loras: int = 2, attn_backend: str | None = None
+    enable_lora: bool = True,
+    max_loras: int = 2,
+    attn_backend: str | None = None,
+    enable_tower_connector_lora: bool = False,
 ):
     """Create a Whisper LLM instance with optional LoRA support."""
     return vllm.LLM(
@@ -43,6 +46,7 @@ def create_whisper_llm(
         dtype="half",
         enforce_eager=True,  # For stability in tests
         attention_config={"backend": attn_backend},
+        enable_tower_connector_lora=enable_tower_connector_lora,
     )
 
 
@@ -131,3 +135,35 @@ def test_whisper_multi_lora(whisper_lora_files):
         f"Expected same outputs for same adapter with different IDs. "
         f"Got: {outputs_lora1} vs {outputs_lora2}"
     )
+
+
+def _tower_lora_active(worker) -> bool:
+    # A model that does not opt in never sets the attribute.
+    adapter_manager = worker.model_runner.lora_manager._adapter_manager
+    return getattr(adapter_manager, "supports_tower_connector_lora", False)
+
+
+@create_new_process_for_each_test()
+def test_whisper_tower_lora(whisper_lora_files, monkeypatch):
+    """Encoder (tower) LoRA on a single clip and on a two-clip batch."""
+    # collective_rpc ships _tower_lora_active to the worker by pickle.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = create_whisper_llm(enable_lora=True, enable_tower_connector_lora=True)
+    assert all(llm.collective_rpc(_tower_lora_active)), "tower LoRA is not active"
+
+    outputs = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
+    assert len(outputs) == 1
+    assert len(outputs[0]) > 0, "Expected non-empty transcription output"
+
+    audio_data = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    batch = [
+        {"prompt": WHISPER_PROMPT, "multi_modal_data": {"audio": audio_data}}
+        for _ in range(2)
+    ]
+    lora_request = LoRARequest("whisper_lora_1", 1, whisper_lora_files)
+    batch_outputs = llm.generate(
+        batch,
+        vllm.SamplingParams(temperature=0, max_tokens=200),
+        lora_request=lora_request,
+    )
+    assert all(len(o.outputs[0].text) > 0 for o in batch_outputs)
