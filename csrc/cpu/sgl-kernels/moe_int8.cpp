@@ -474,7 +474,8 @@ void fused_experts_int8_kernel_impl(
     int64_t E,
     int64_t topk,
     int64_t num_tokens_post_pad,
-    CPUActMethod act_func) {
+    CPUActMethod act_func,
+    bool skip_weighted) {
   // handle 2 tiles per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
@@ -698,10 +699,10 @@ void fused_experts_int8_kernel_impl(
       }
 
       // 2.b copy from C to ic2 in original order
-      //   and also mul topk_weights in float32
+      //   and also mul topk_weights in float32 (unless skip_weighted is true)
       for (int64_t m = 0; m < m_size; ++m) {
         int32_t index = A_ids[m];
-        float weight = topk_weights[index];
+        float weight = skip_weighted ? 1.0f : topk_weights[index];
         copy_mul_stub(ic2 + index * K + nb * BLOCK_N, C + m * BLOCK_N, weight, n_size);
       }
     });
@@ -744,7 +745,8 @@ void fused_experts_int8_kernel_impl(
       int64_t E,                                      \
       int64_t topk,                                   \
       int64_t num_tokens_post_pad,                    \
-      CPUActMethod act_func)
+      CPUActMethod act_func,                          \
+      bool skip_weighted)
 
 INSTANTIATE_MOE_INT8_TEMPLATE(at::BFloat16);
 INSTANTIATE_MOE_INT8_TEMPLATE(at::Half);
