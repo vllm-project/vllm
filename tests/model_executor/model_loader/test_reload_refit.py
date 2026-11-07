@@ -3,27 +3,18 @@
 """Refit equals fresh for direct weight reload (`VLLM_RELOAD_MODE=direct`).
 
 An engine that cold-started on checkpoint A, with CUDA graphs captured,
-reloads B and then A again through the worker's weight-update session
-(`start_weight_update`, the model's own `load_weights` in device-tensor
-batches, `finish_weight_update`), so every reload writes new values. After
-each reload, on every rank:
-- every tensor and host scalar the model holds equals a fresh engine on that
-  checkpoint (B: a fresh engine started in layerwise mode, so the reference
-  doesn't share direct-mode cold-start code; A: its own cold start);
-- no tensor moved (captured graphs read the old addresses); the cold-start
-  storages are kept alive, so a free and reallocation shows as a move;
+reloads B and then A through the worker's weight-update session, in
+device-tensor chunks, optionally inside a level-2 sleep. After each reload,
+on every rank:
+- every tensor and scalar reachable from the model equals the reference
+  (B: a fresh engine started in layerwise mode; A: its own cold start);
+- no tensor moved; cold-start storages are kept alive, so a free and
+  reallocation shows as a move;
 - no allocator block appeared or disappeared, and the peak stays bounded;
-- greedy logprobs match the reference engine, so values frozen into captured
-  graphs or kept where the walk can't see show up.
+- reloaded A decodes exactly as cold A, reloaded B close to fresh B.
 
-Unless a case names B, B is A with every tensor rolled by one along dim 0 and
-float tensors also scaled by 3 (constant ones get a distinct offset), so
-per-tensor and per-row maxima change too; checkpoint tensors left unchanged
-must be on a short allow-list.
-
-"Every tensor" is the registered parameters and buffers plus every tensor
-and scalar reachable from module attributes (quant methods, kernels and the
-modules they hold, quant configs), breadth first up to MAX_DEPTH hops.
+Unless a case names B, B is A perturbed by `_perturb`. A case with a known
+bug on main asserts everything but the known entries, then xfails.
 """
 
 import asyncio
@@ -67,12 +58,13 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 BATCH_SIZE = 16  # tensors per `load_weights` call, as one transfer chunk
 MAX_DEPTH = 8  # attribute hops from a registered module
-# runtime state, not weights: compared by address only
-RUNTIME_STATE = (".kv_cache", ".expert_load_view", ".num_unpadded_tokens_tensors")
-# differs between engines by construction: direct-mode bookkeeping (absent
-# from the layerwise reference), compile state and cache paths keyed by model
-# path, and a memo that cold-start backend selection fills
-ENGINE_STATE = (
+# compared by address only: runtime state (KV/Mamba caches, EPLB statistics),
+# and what differs between engines by construction (direct-mode bookkeeping,
+# compile state and paths, a memo filled by cold-start backend selection)
+NOT_COMPARED = (
+    ".kv_cache",
+    ".expert_load_view",
+    ".num_unpadded_tokens_tensors",
     "._ckpt_",
     "._direct_reload",
     "._aot_",
@@ -90,15 +82,16 @@ PROMPTS = ["The capital of France is", "def fibonacci(n):"]
 TIMEOUT_S = 300  # per engine call, below the per-test --timeout
 
 
-def _model_state(model: torch.nn.Module) -> dict[str, object]:
+def _model_state(model: torch.nn.Module) -> tuple[dict[str, object], int]:
     """Registered parameters and buffers, then the tensors and scalars
     reachable from other module attributes, keyed by name or by the shortest
-    attribute path (breadth first)."""
+    attribute path (breadth first); and how many entries are registered."""
     state: dict[str, object] = {}
     seen = {id(m) for m in model.modules()}
     for name, t in itertools.chain(model.named_parameters(), model.named_buffers()):
         state.update(_tensors(name, t))
         seen.add(id(t))
+    registered = len(state)
     queue = deque(
         (value, f"{name}.{attr}", 0)
         for name, module in model.named_modules()
@@ -135,7 +128,7 @@ def _model_state(model: torch.nn.Module) -> dict[str, object]:
         else:
             continue
         queue.extend((v, p, depth + 1) for p, v in children)
-    return state
+    return state, registered
 
 
 def _raw(t: torch.Tensor) -> torch.Tensor:
@@ -151,11 +144,10 @@ def _digest(v) -> str:
     return f"{v.device.type}:{v.dtype}{tuple(v.shape)}:{digest}"
 
 
-def _inspect(worker, keep_storages: bool = False) -> tuple[dict, dict, int]:
-    """Digests of the model state (runtime state excluded), the address of
-    every device tensor, and how many tensors the walk found off-registry."""
-    model = worker.model_runner.get_model()
-    state = _model_state(model)
+def _inspect(worker, keep_storages: bool = False) -> tuple[dict, dict, bool]:
+    """Digests of the compared model state, the address of every device
+    tensor, and whether the walk found a compared tensor off-registry."""
+    state, registered = _model_state(worker.model_runner.get_model())
     tensors = {n: t for n, t in state.items() if isinstance(t, torch.Tensor)}
     if keep_storages:
         # a tensor freed and reallocated would otherwise get its block back
@@ -163,22 +155,15 @@ def _inspect(worker, keep_storages: bool = False) -> tuple[dict, dict, int]:
             t.untyped_storage() for t in tensors.values() if t.is_cuda
         ]
     digests = {
-        n: _digest(v)
-        for n, v in state.items()
-        if not any(s in n for s in RUNTIME_STATE + ENGINE_STATE)
+        n: _digest(v) for n, v in state.items() if not any(s in n for s in NOT_COMPARED)
     }
     ptrs = {
         n: (t.data_ptr(), t.stride(), t.storage_offset())
         for n, t in tensors.items()
         if t.is_cuda
     }
-    registered = {
-        n
-        for name, t in itertools.chain(model.named_parameters(), model.named_buffers())
-        for n, _ in _tensors(name, t)
-    }
-    off_registry = [n for n in tensors if n in digests and n not in registered]
-    return digests, ptrs, len(off_registry)
+    off_registry = list(state)[registered:]
+    return digests, ptrs, any(n in tensors and n in digests for n in off_registry)
 
 
 def _safetensors(folder: str) -> list[str]:
@@ -198,11 +183,10 @@ def _active_blocks() -> set[tuple[int, int]]:
 
 
 def _stream_reload(worker, folder: str) -> dict:
-    """Reload the checkpoint in `folder` through the worker's weight-update
-    session, in device-tensor batches. Returns the reload mode seen inside the
-    session, the allocator blocks it left behind or freed, and whether its
-    peak stayed within a transfer batch plus twice the largest parameter
-    (embeddings aside, which post-load processing doesn't transform)."""
+    """Reload `folder` through the worker's weight-update session; return the
+    mode seen inside it, the allocator blocks it added or freed, and whether
+    its peak stayed within a chunk plus twice the largest transformed
+    parameter (embeddings aren't)."""
     weights = safetensors_weights_iterator(_safetensors(folder), use_tqdm_on_load=False)
     model = worker.model_runner.get_model()
     largest_param = max(
@@ -219,21 +203,15 @@ def _stream_reload(worker, folder: str) -> dict:
 
     worker.start_weight_update()
     mode = "direct" if direct_reload_active(model) else "layerwise"
-    while True:
-        batch = [
+    with set_current_vllm_config(worker.vllm_config), disable_mtp_completeness_check():
+        while batch := [
             (n, t.to(worker.device)) for n, t in itertools.islice(weights, BATCH_SIZE)
-        ]
-        if not batch:
-            break
-        largest_batch = max(largest_batch, sum(t.nbytes for _, t in batch))
-        # one call per transfer chunk, so no call sees the whole checkpoint
-        with (
-            set_current_vllm_config(worker.vllm_config),
-            disable_mtp_completeness_check(),
-        ):
+        ]:
+            largest_batch = max(largest_batch, sum(t.nbytes for _, t in batch))
+            # one call per transfer chunk, so no call sees the whole checkpoint
             model.load_weights(iter(batch))
-        torch.accelerator.synchronize()
-        del batch  # only one chunk is in flight
+            torch.accelerator.synchronize()
+            del batch  # one chunk in flight
     worker.finish_weight_update()
 
     peak = torch.accelerator.max_memory_allocated() - base
@@ -345,7 +323,13 @@ ENGINE_KWARGS = dict(
 async def _engine(model: str, case: "RefitCase", mode: str, monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     engine = AsyncLLM.from_engine_args(
-        AsyncEngineArgs(model=model, **ENGINE_KWARGS, **case.engine, **case.parallel)
+        AsyncEngineArgs(
+            model=model,
+            enable_sleep_mode=case.sleep,
+            **ENGINE_KWARGS,
+            **case.engine,
+            **case.parallel,
+        )
     )
     try:
         yield engine
@@ -377,7 +361,7 @@ async def _last(stream):
 async def _generate(engine: AsyncLLM, case: "RefitCase") -> list:
     """Greedy tokens and top logprobs for every prompt on every DP rank,
     one request at a time."""
-    dp = case.parallel.get("data_parallel_size", 1)
+    dp = case.dp
     params = SamplingParams(max_tokens=8, temperature=0, logprobs=5)
     outputs = []
     for rank, prompt in itertools.product(range(dp), PROMPTS):
@@ -415,16 +399,27 @@ class RefitCase:
     known_bug_reason: str = ""
 
     @property
+    def tp(self) -> int:
+        return self.parallel.get("tensor_parallel_size", 1)
+
+    @property
+    def dp(self) -> int:
+        return self.parallel.get("data_parallel_size", 1)
+
+    @property
     def num_gpus(self) -> int:
-        p = self.parallel
-        return p.get("tensor_parallel_size", 1) * p.get("data_parallel_size", 1)
+        return self.tp * self.dp
+
+    @property
+    def reference_key(self) -> tuple:
+        """Cases that differ only in sleep share a fresh-B reference."""
+        return (self.model, self.model_b, repr(self.parallel), repr(self.engine))
 
     @property
     def id(self) -> str:
         p = self.parallel
-        tp, dp = p.get("tensor_parallel_size", 1), p.get("data_parallel_size", 1)
-        layout = [f"tp{tp}"] if tp > 1 or dp == 1 else []
-        layout += [f"dp{dp}"] if dp > 1 else []
+        layout = [f"tp{self.tp}"] if self.tp > 1 or self.dp == 1 else []
+        layout += [f"dp{self.dp}"] if self.dp > 1 else []
         layout += ["ep"] if p.get("enable_expert_parallel") else []
         layout += ["eplb"] if p.get("enable_eplb") else []
         layout += ["sleep"] if self.sleep else []
@@ -467,9 +462,7 @@ REFIT_CASES = [
     RefitCase("gpt-oss", "mxfp4", GPT_OSS),  # padded MoE
     # level 2 must keep the state post-load processing reruns from (e.g. the
     # TRT-LLM MXFP4 permute indices)
-    RefitCase(
-        "gpt-oss", "mxfp4", GPT_OSS, engine=dict(enable_sleep_mode=True), sleep=True
-    ),
+    RefitCase("gpt-oss", "mxfp4", GPT_OSS, sleep=True),
     RefitCase("nemotron-h", "bf16", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"),
     # two GPUs
     *(
@@ -504,8 +497,7 @@ def checkpoints(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def references() -> dict:
-    """Fresh-B digests and tokens, shared by cases that differ only in sleep
-    mode, which doesn't change what a cold start computes."""
+    """Fresh-B digests and tokens by `RefitCase.reference_key`."""
     return {}
 
 
@@ -537,29 +529,19 @@ async def test_refit_equals_fresh(
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     folder_a, folder_b, unchanged = checkpoints(case)
 
-    ref_key = (
-        case.model,
-        case.model_b,
-        repr(case.parallel),
-        repr({k: v for k, v in case.engine.items() if k != "enable_sleep_mode"}),
-    )
-    if ref_key not in references:
+    if case.reference_key not in references:
         async with _engine(folder_b, case, "layerwise", monkeypatch) as fresh:
             # generate first: lazily cached attributes are then set everywhere
             fresh_tokens = await _generate(fresh, case)
-            references[ref_key] = (
-                [digests for digests, _, _ in await _rpc(fresh, _inspect)],
-                fresh_tokens,
-            )
-    fresh_b, fresh_b_tokens = references[ref_key]
+            fresh_digests, _, _ = zip(*await _rpc(fresh, _inspect))
+            references[case.reference_key] = (fresh_digests, fresh_tokens)
+    fresh_b, fresh_b_tokens = references[case.reference_key]
 
     result: dict[str, object] = {"unchanged_in_b": unchanged}
     async with _engine(folder_a, case, "direct", monkeypatch) as engine:
         cold_a_tokens = await _generate(engine, case)
-        cold = await _rpc(engine, _inspect, True)
-        cold_a = [digests for digests, _, _ in cold]
-        ptrs = [p for _, p, _ in cold]
-        result["walk_found_off_registry"] = [n > 0 for _, _, n in cold]
+        cold_a, ptrs, walked = zip(*await _rpc(engine, _inspect, True))
+        result["walk_found_off_registry"] = list(walked)
         # each reload changes every tensor that differs between A and B, and
         # the second runs on what the first left behind
         tokens: dict[str, list] = {}
@@ -576,11 +558,9 @@ async def test_refit_equals_fresh(
                     engine.wake_up(tags=["kv_cache"]), TIMEOUT_S
                 )
             tokens[name] = await _generate(engine, case)
-            got = await _rpc(engine, _inspect)
-            differs[name] = [_diff(e, d) for e, (d, _, _) in zip(expected, got)]
-            result[f"reload_{name}_moved"] = [
-                _diff(p, m) for p, (_, m, _) in zip(ptrs, got)
-            ]
+            digests, moved, _ = zip(*await _rpc(engine, _inspect))
+            differs[name] = list(map(_diff, expected, digests))
+            result[f"reload_{name}_moved"] = list(map(_diff, ptrs, moved))
 
     known = [
         {k: v for k, v in d.items() if any(s in k for s in case.known_bug)}
