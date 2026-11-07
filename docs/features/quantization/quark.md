@@ -270,6 +270,8 @@ vllm serve fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3 --tensor-parallel-siz
 
 A simulation of the matrix multiplication execution in MXFP4/MXFP6 can be run on devices that do not support OCP MX operations natively (e.g. AMD Instinct MI325, MI300 and MI250), dequantizing weights from FP4/FP6 to half precision on the fly, using a fused kernel. This is useful e.g. to evaluate FP4/FP6 models using vLLM, or alternatively to benefit from the ~2.5-4x memory savings (compared to float16 and bfloat16).
 
+On Radeon RX 7900 series GPUs (gfx1100), MXFP4 weights also run on native HIP kernels with BF16/FP16 activations. Dense layers use them by default. For MoE layers of checkpoints that request activation quantization (e.g. `w_mxfp4_a_mxfp4`, `w_mxfp4_a_fp8`), pass `--moe-backend rdna3` to use them instead of the simulation; the activation quantization is then not applied.
+
 To generate offline models quantized using MXFP4 data type, the easiest approach is to use AMD Quark's [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html), as an example:
 
 ```bash
