@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdint>
 #include <algorithm>
+#include <vector>
 
 namespace mamba_cpu {
 
@@ -118,16 +119,18 @@ inline void selective_state_update_kernel(
     // dt_bias: (nheads,) float32 — scalar per head (nullptr if not used)
     const float* __restrict__ dt_bias_ptr, out_t* __restrict__ out_ptr,
     int64_t stride_out_n, int64_t stride_out_h,
-    const int32_t* __restrict__ state_batch_indices,
-    const int32_t* __restrict__ dst_state_batch_indices, int32_t null_block_id,
-    const int32_t* __restrict__ num_accepted_tokens,
+    const int32_t* __restrict__ state_batch_indices, int64_t stride_indices_n,
+    int64_t stride_indices_t,
+    const int32_t* __restrict__ dst_state_batch_indices,
+    int64_t stride_dst_indices_n, int64_t stride_dst_indices_t,
+    int32_t null_block_id, const int32_t* __restrict__ num_accepted_tokens,
     const int32_t* __restrict__ cu_seqlens, int64_t N, int64_t nheads,
     int64_t ngroups, int64_t dim, int64_t dstate, bool dt_softplus) {
-  using state_vec_t = vec_op::vec_t<state_t>;
   using input_vec_t = vec_op::vec_t<input_t>;
   constexpr int VEC_ELEM_NUM = 8;
 
   int64_t nheads_per_group = nheads / ngroups;
+  std::vector<float> recurrent_state(nheads * dim * dstate);
 
   for (int64_t seq_idx = 0; seq_idx < N; ++seq_idx) {
     int64_t bos, seq_len;
@@ -139,18 +142,31 @@ inline void selective_state_update_kernel(
       seq_len = 1;
     }
 
-    int64_t state_read_idx = (state_batch_indices != nullptr)
-                                 ? state_batch_indices[seq_idx]
-                                 : seq_idx;
-    if (state_read_idx == null_block_id) continue;
-
-    int64_t state_write_idx = (num_accepted_tokens == nullptr)
-                                  ? ((dst_state_batch_indices != nullptr)
-                                         ? dst_state_batch_indices[seq_idx]
-                                         : state_read_idx)
-                                  : -1;
-
-    state_t* s = state_ptr + state_read_idx * stride_state_n;
+    if (seq_len == 0) continue;
+    const int64_t initial_column =
+        num_accepted_tokens != nullptr
+            ? std::max(num_accepted_tokens[seq_idx] - 1, 0)
+            : 0;
+    const int64_t state_read_idx =
+        state_batch_indices != nullptr
+            ? state_batch_indices[seq_idx * stride_indices_n +
+                                  initial_column * stride_indices_t]
+            : seq_idx;
+    // Keep the recurrence in FP32 and scatter only requested checkpoints.
+    // Source/destination tables may alias; updating the source in-place
+    // destroys earlier speculative checkpoints.
+    for (int64_t h = 0; h < nheads; ++h) {
+      for (int64_t d = 0; d < dim; ++d) {
+        for (int64_t n = 0; n < dstate; ++n) {
+          recurrent_state[(h * dim + d) * dstate + n] =
+              state_read_idx == null_block_id
+                  ? 0.0f
+                  : static_cast<float>(
+                        state_ptr[state_read_idx * stride_state_n +
+                                  h * stride_state_h + d * stride_state_d + n]);
+        }
+      }
+    }
 
     for (int64_t t = 0; t < seq_len; ++t) {
       int64_t token_idx = bos + t;
@@ -168,7 +184,7 @@ inline void selective_state_update_kernel(
         const input_t* B_g = B_tok + g * stride_BC_g;
         const input_t* C_g = C_tok + g * stride_BC_g;
         out_t* out_h = out_tok + h * stride_out_h;
-        state_t* s_h = s + h * stride_state_h;
+        float* s_h = recurrent_state.data() + h * dim * dstate;
 
         // Read scalars-per-head (A, dt, dt_bias, D) — no per-dim indexing
         float dt_val = dt_tok[h];
@@ -194,7 +210,7 @@ inline void selective_state_update_kernel(
           float x_val = static_cast<float>(x_h[d]);
 
           vec_op::FP32Vec8 out_vec(0.0f);
-          state_t* s_hd = s_h + d * stride_state_d;
+          float* s_hd = s_h + d * dstate;
           const input_t* B_g_base = B_g;
           const input_t* C_g_base = C_g;
 
@@ -206,12 +222,12 @@ inline void selective_state_update_kernel(
           for (; n <= dstate - VEC_ELEM_NUM; n += VEC_ELEM_NUM) {
             vec_op::FP32Vec8 B_v((input_vec_t(B_g_base + n)));
             vec_op::FP32Vec8 C_v((input_vec_t(C_g_base + n)));
-            vec_op::FP32Vec8 s_v((state_vec_t(s_hd + n)));
+            vec_op::FP32Vec8 s_v(s_hd + n);
 
             vec_op::FP32Vec8 dBx = B_v * x_vec * dt_vec;
             vec_op::FP32Vec8 s_new = s_v * dA + dBx;
 
-            state_vec_t(s_new).save(s_hd + n);
+            s_new.save(s_hd + n);
             out_vec = out_vec + s_new * C_v;
           }
 
@@ -220,7 +236,7 @@ inline void selective_state_update_kernel(
             // Reuse dA_scalar computed once per head — no exp() re-call
             float dBx = static_cast<float>(B_g[n]) * x_val * dt_val;
             float s_new = static_cast<float>(s_hd[n]) * dA_scalar + dBx;
-            s_hd[n] = static_cast<state_t>(s_new);
+            s_hd[n] = s_new;
             out_val += s_new * static_cast<float>(C_g[n]);
           }
 
@@ -236,20 +252,26 @@ inline void selective_state_update_kernel(
         }
       }
 
-      if (num_accepted_tokens != nullptr &&
-          dst_state_batch_indices != nullptr) {
-        int64_t token_dst_idx = dst_state_batch_indices[seq_idx * seq_len + t];
-        if (token_dst_idx != null_block_id && token_dst_idx != state_read_idx) {
-          state_t* dst_s = state_ptr + token_dst_idx * stride_state_n;
-          std::memmove(dst_s, s, nheads * stride_state_h * sizeof(state_t));
+      if (num_accepted_tokens != nullptr || t == seq_len - 1) {
+        const int64_t column = num_accepted_tokens != nullptr ? t : 0;
+        const int64_t destination =
+            dst_state_batch_indices != nullptr
+                ? dst_state_batch_indices[seq_idx * stride_dst_indices_n +
+                                          column * stride_dst_indices_t]
+                : seq_idx;
+        if (destination != null_block_id) {
+          for (int64_t h = 0; h < nheads; ++h) {
+            for (int64_t d = 0; d < dim; ++d) {
+              for (int64_t n = 0; n < dstate; ++n) {
+                state_ptr[destination * stride_state_n + h * stride_state_h +
+                          d * stride_state_d + n] =
+                    static_cast<state_t>(
+                        recurrent_state[(h * dim + d) * dstate + n]);
+              }
+            }
+          }
         }
       }
-    }
-
-    if (num_accepted_tokens == nullptr && state_write_idx != null_block_id &&
-        state_write_idx != state_read_idx) {
-      state_t* dst_s = state_ptr + state_write_idx * stride_state_n;
-      std::memmove(dst_s, s, nheads * stride_state_h * sizeof(state_t));
     }
   }
 }
