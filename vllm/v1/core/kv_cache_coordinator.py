@@ -453,6 +453,27 @@ class KVCacheCoordinator(ABC):
                 request_id, processed_computed_tokens, num_prompt_tokens
             )
 
+    def has_running_step_work(
+        self,
+        request: Request,
+        num_tokens: int,
+        processed_computed_tokens: int,
+        num_tokens_to_cache: int,
+    ) -> bool:
+        """Whether any group has work in a running request's step (see
+        ``SingleTypeKVCacheManager.has_running_step_work``)."""
+        for group_id, manager in enumerate(self.single_type_managers):
+            num_cacheable_tokens = (
+                self.get_num_cacheable_tokens(num_tokens_to_cache, group_id)
+                if manager.enable_caching
+                else 0
+            )
+            if manager.has_running_step_work(
+                request, num_tokens, processed_computed_tokens, num_cacheable_tokens
+            ):
+                return True
+        return False
+
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """Get the blocks for the request."""
         return tuple(
