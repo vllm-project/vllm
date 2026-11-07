@@ -76,7 +76,8 @@ class StructuredOutputManager:
         )
 
         self._grammar_bitmask: torch.Tensor | None = None
-        self._full_mask = torch.tensor(-1, dtype=torch.int32)
+        # Unconstrained bitmask rows, keyed by the token ids they mask.
+        self._unconstrained_rows: dict[tuple[int, ...], np.ndarray] = {}
 
         max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
         self.fill_bitmask_parallel_threshold = 128
@@ -243,14 +244,25 @@ class StructuredOutputManager:
             if apply_bitmask and not grammar.is_terminated():
                 grammar.fill_bitmask(self._grammar_bitmask, index)
             else:
-                # Note that for thinking support, we will need to
-                # reset the relevant part of the bitmask for consequent
-                # requests here.
-                self._grammar_bitmask[index].fill_(self._full_mask)
-                if masked_ids:
-                    row = self._grammar_bitmask[index].numpy().view(np.uint32)
-                    for token_id in masked_ids:
-                        row[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
+                self._fill_unconstrained({masked_ids: [index]})
+
+    def _fill_unconstrained(self, rows: dict[tuple[int, ...], list[int]]) -> None:
+        """Fill rows that allow every token except the masked ids (the key).
+
+        Rows are copied from a cached template in one numpy assignment per
+        key, since a reasoning request needs such a row on every step.
+        """
+        assert self._grammar_bitmask is not None
+        bitmask = self._grammar_bitmask.numpy()
+        for masked_ids, indices in rows.items():
+            row = self._unconstrained_rows.get(masked_ids)
+            if row is None:
+                row = np.full(bitmask.shape[1], -1, dtype=bitmask.dtype)
+                bits = row.view(np.uint32)
+                for token_id in masked_ids:
+                    bits[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
+                self._unconstrained_rows[masked_ids] = row
+            bitmask[indices] = row
 
     def _async_submit_fill_bitmask(
         self, batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]]
@@ -415,6 +427,8 @@ class StructuredOutputManager:
         # masks for each request, one for each possible bonus token position.
         # Each request owns a fixed-width block of `mask_stride` rows.
         cumulative_index = 0
+        # Rows the grammar does not constrain, keyed by the ids they mask.
+        unconstrained: dict[tuple[int, ...], list[int]] = {}
 
         # Optimized parallel filling of bitmasks for
         # non-spec, large-batch-size cases
@@ -423,7 +437,7 @@ class StructuredOutputManager:
             and max_num_spec_tokens == 0
         ):
             promises = []
-            batch = []
+            batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]] = []
             for req_id in structured_output_request_ids:
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
@@ -433,16 +447,14 @@ class StructuredOutputManager:
                 if TYPE_CHECKING:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
-                apply_bitmask = (
-                    self._get_constraint_bounds(request, ()).constraint_start == 0
-                )
-                masked_ids = (
-                    () if apply_bitmask else self._masked_reasoning_ends(request)
-                )
-                batch.append((grammar, cumulative_index, apply_bitmask, masked_ids))
-                if len(batch) == self.fill_bitmask_parallel_batch_size:
-                    promises.append(self._async_submit_fill_bitmask(batch))
-                    batch = []
+                if self._get_constraint_bounds(request, ()).constraint_start == 0:
+                    batch.append((grammar, cumulative_index, True, ()))
+                    if len(batch) == self.fill_bitmask_parallel_batch_size:
+                        promises.append(self._async_submit_fill_bitmask(batch))
+                        batch = []
+                else:
+                    masked_ids = self._masked_reasoning_ends(request)
+                    unconstrained.setdefault(masked_ids, []).append(cumulative_index)
 
                 cumulative_index += 1
             if batch:
@@ -485,14 +497,13 @@ class StructuredOutputManager:
                 padding_or_grammar_invalid = False
                 for i, token in enumerate(tokens_to_mask):
                     if padding_or_grammar_invalid:
-                        self._fill_bitmasks(((grammar, base_index + i, False, ()),))
+                        unconstrained.setdefault((), []).append(base_index + i)
                         continue
 
-                    apply_bitmask = i >= constraint_start
-                    row_masked = masked_ids if i < constraint_start else ()
-                    self._fill_bitmasks(
-                        ((grammar, base_index + i, apply_bitmask, row_masked),)
-                    )
+                    if i >= constraint_start:
+                        self._fill_bitmasks(((grammar, base_index + i, True, ()),))
+                    else:
+                        unconstrained.setdefault(masked_ids, []).append(base_index + i)
                     if token == -1:
                         padding_or_grammar_invalid = True
                     elif i >= grammar_start:
@@ -505,6 +516,7 @@ class StructuredOutputManager:
 
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
+        self._fill_unconstrained(unconstrained)
 
         bitmask_tensor = self._grammar_bitmask
         num_masks = len(structured_output_request_ids) * mask_stride
