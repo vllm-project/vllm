@@ -73,6 +73,9 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self._reqs_to_release: list[ReqId] = []
+        # D side: requests whose pull is still in flight (cleared on recv done).
+        self._reqs_receiving: set[ReqId] = set()
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -508,6 +511,8 @@ class NixlBaseConnectorScheduler:
             self._build_save_meta(meta, scheduler_output)
 
         meta.reqs_to_send = self._reqs_need_send
+        meta.reqs_to_release = self._reqs_to_release
+        self._reqs_to_release = []
         # Clock reference for reqs_to_send: deadlines above are in this
         # process's perf_counter domain; workers (possibly on other nodes,
         # where perf_counter has a different epoch) rebase against this.
@@ -534,6 +539,9 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
+            self._reqs_receiving.discard(req_id)
+        for req_id in connector_output.failed_recving:
+            self._reqs_receiving.discard(req_id)
 
     def has_pending_push_work(self) -> bool:
         return False
