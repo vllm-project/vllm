@@ -64,6 +64,7 @@ from .model import (
     maybe_init_gemm_rs,
     prepare_mega_gate_routing_metadata,
 )
+from .ops.fused_markov import FusedMarkovSampler
 
 logger = init_logger(__name__)
 
@@ -320,6 +321,25 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        # additional_config={"dspark_fused_markov": true} replaces the speculator's loop
+        # when it would sample a full draft-logits cache with plain Gumbel noise.
+        spec_config = vllm_config.speculative_config
+        extra = vllm_config.additional_config
+        if (
+            isinstance(extra, dict)
+            and extra.get("dspark_fused_markov", False)
+            and spec_config.draft_sample_method == "probabilistic"
+            and not spec_config.enable_adaptive_verification
+            and not vllm_config.model_config.use_fp64_gumbel
+            and getattr(vllm_config, "watermark_config", None) is None
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            self.sample_sequential = FusedMarkovSampler(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.config.vocab_size,
+                self.config.dspark_markov_rank,
+                self.draft_model_config.dtype,
+            )
 
     # --- Hooks used by the speculator -------------------------------------
 
