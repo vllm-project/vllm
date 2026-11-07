@@ -1261,7 +1261,18 @@ class CompilationConfig:
         ]:
             if self.backend in torch_backends:
                 return self.backend
-            return resolve_obj_by_qualname(self.backend)
+            error_message = (
+                f"Invalid compilation_config.backend {self.backend!r}. Expected "
+                "a registered PyTorch backend name or a fully-qualified "
+                "callable, such as 'vllm.compilation.backends.VllmBackend'."
+            )
+            try:
+                backend = resolve_obj_by_qualname(self.backend)
+            except (AttributeError, ImportError, ValueError) as exc:
+                raise ValueError(error_message) from exc
+            if not callable(backend):
+                raise ValueError(error_message)
+            return backend
 
         assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:

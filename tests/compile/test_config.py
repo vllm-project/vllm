@@ -16,6 +16,7 @@ from vllm.compilation.passes.utility.fix_functionalization import (
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    DeviceConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -131,6 +132,22 @@ def test_custom_op():
     for custom_ops in (["quant_fp8"], ["+"], ["-"]):
         with pytest.raises(ValueError, match="Invalid syntax '"):
             CompilationConfig(custom_ops=custom_ops)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["not-qualified", "__main__.missing_backend", "vllm.config"],
+)
+def test_invalid_torch_compile_backend_raises_clear_error(backend):
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE,
+        backend=backend,
+    )
+
+    with pytest.raises(ValueError, match="compilation_config.backend"):
+        compilation_config.init_backend(
+            VllmConfig(device_config=DeviceConfig(device="cpu"))
+        )
 
 
 @pytest.mark.parametrize(
