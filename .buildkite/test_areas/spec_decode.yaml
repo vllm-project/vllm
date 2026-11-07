@@ -34,6 +34,26 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H100) MTP idle DP batches"
+  key: mtp-idle-dp
+  device: h100
+  num_devices: 2
+  timeout_in_minutes: 30
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/input_batch.py
+    - vllm/v1/worker/gpu/model_runner.py
+    - vllm/v1/worker/gpu/dp_utils.py
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/layers/fused_moe/
+    - tests/v1/worker/test_gpu_input_batch_v2.py
+    - tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py
+  commands:
+    - >-
+      pytest -v -s
+      v1/worker/test_gpu_input_batch_v2.py
+      v1/worker/test_gpu_dp_utils.py
+    - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py::test_moe_mtp_dp_survives_idle_transitions
+
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
   automatic_shard: true
