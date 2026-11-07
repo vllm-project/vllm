@@ -223,8 +223,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Only the varlen paged MQA logits kernel takes per-request query
-        # lengths from device tensors natively. Hopper can instead flatten each
-        # query into a single-token row using device-built metadata.
+        # lengths from device tensors natively. Hopper and SM120 can instead
+        # flatten each query into a single-token row using device-built
+        # metadata.
         return _supports_varlen_paged_mqa_logits() or (
             _supports_flattened_device_query_lens()
         )
@@ -924,9 +925,15 @@ def _supports_varlen_paged_mqa_logits() -> bool:
 
 
 def _supports_flattened_device_query_lens() -> bool:
+    # SM120 shares Hopper's fp32-scale MQA logits path (see
+    # `mqa_logits_use_mx_scales`, which is SM100-only), and DeepGEMM schedules
+    # any `next_n` on SM120 via multi-atom tiles (see `native_next_n_supported`).
     return (
         current_platform.is_cuda()
-        and current_platform.is_device_capability_family(90)
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(120)
+        )
         and has_deep_gemm()
     )
 
