@@ -12,7 +12,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.layers import LoRAMapping, LoRAMappingType, LoRARouteMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
@@ -53,6 +53,12 @@ class LoRAModelRunnerMixin:
             device,
             model.embedding_modules,
         )
+        assert vllm_config.lora_config is not None
+        self._distributed_routed_lora = (
+            vllm_config.lora_config.requires_distributed_routing(
+                vllm_config.parallel_config
+            )
+        )
         return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def _set_active_loras(
@@ -60,21 +66,57 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...],
         token_lora_mapping: tuple[int, ...],
         lora_requests: set[LoRARequest],
+        lora_route_mapping: LoRARouteMapping | None = None,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+        distributed_step: bool = False,
     ) -> None:
         self._ensure_lora_enabled()
 
+        lora_mapping: LoRAMapping | LoRARouteMapping
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.
         # On cuda platforms we use the same kernels for prefill and
         # decode and this flag is generally ignored.
-        lora_mapping = LoRAMapping(
-            token_lora_mapping,
-            prompt_lora_mapping,
-            is_prefill=True,
-            type=mapping_type,
-        )
-        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+        if lora_route_mapping is None:
+            lora_mapping = LoRAMapping(
+                token_lora_mapping,
+                prompt_lora_mapping,
+                is_prefill=True,
+                type=mapping_type,
+            )
+        else:
+            lora_mapping = LoRARouteMapping(
+                token_lora_ids=lora_route_mapping.token_lora_ids,
+                token_lora_weights=lora_route_mapping.token_lora_weights,
+                prompt_mapping=prompt_lora_mapping,
+                is_prefill=True,
+                type=mapping_type,
+            )
+        if self.distributed_routed_lora:
+            assert self.lora_config is not None
+            from vllm.distributed import get_ep_group
+            from vllm.lora.routing_utils import DistributedLoRAPlan
+
+            if distributed_step:
+                self.lora_manager.prepare_distributed_adapters(
+                    tuple(lora_requests), get_ep_group().cpu_group, lora_mapping
+                )
+            else:
+                # Startup warmup/capture uses already-created dummy adapters.
+                self.lora_manager.set_active_adapters(lora_requests, None)
+                plan = DistributedLoRAPlan.from_rank_requests(
+                    [(self.lora_config.max_loras, tuple(lora_requests))]
+                )
+                self.lora_manager.set_distributed_mapping(plan, lora_mapping)
+        else:
+            self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    @property
+    def distributed_routed_lora(self) -> bool:
+        return getattr(self, "_distributed_routed_lora", False)
+
+    def prepare_idle_distributed_loras(self, num_tokens: int) -> None:
+        self._set_active_loras((), (0,) * num_tokens, set(), distributed_step=True)
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
@@ -93,11 +135,17 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
-        prompt_lora_mapping, token_lora_mapping, lora_requests = (
+        lora_route_mapping: LoRARouteMapping | None
+        prompt_lora_mapping, token_lora_mapping, lora_requests, lora_route_mapping = (
             input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
         )
         return self._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
+            prompt_lora_mapping,
+            token_lora_mapping,
+            lora_requests,
+            lora_route_mapping,
+            mapping_type,
+            distributed_step=True,
         )
 
     @contextmanager
@@ -239,7 +287,7 @@ class LoRAModelRunnerMixin:
                 tuple(sample_lora_mapping),
                 tuple(token_lora_mapping),
                 lora_requests,
-                mapping_type,
+                mapping_type=mapping_type,
             )
 
             yield

@@ -359,6 +359,10 @@ Some models, e.g., [Granite Speech](https://huggingface.co/ibm-granite/granite-s
 
 To this end, we allow registration of default multimodal LoRAs to handle this automatically, where users can map each modality to a LoRA adapter to automatically apply it when the corresponding inputs are present. Note that currently, we only allow one LoRA per prompt; if several modalities are provided, each of which are registered to a given modality, none of them will be applied.
 
+This single-adapter restriction applies to default multimodal LoRAs.
+[Fixed-weight adapter composition](#fixed-weight-adapter-composition) is a
+separate text-only offline feature; it does not combine multimodal defaults.
+
 ??? code "Example usage for offline inference"
 
     ```python
@@ -481,3 +485,134 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+## Fixed-Weight Adapter Composition
+
+Offline `LLM.generate()` accepts a `LoRARoutingRequest` to combine independently
+loaded adapters as `base(x) + sum_i weight_i * LoRA_i(x)` at each adapted
+projection. This does not average the outputs of separately executed models.
+The adapter's own LoRA scaling is applied in addition to the request coefficient.
+Coefficients are fixed for the request, must be finite and nonnegative, and
+must include at least one positive value. They are not automatically normalized
+and do not have to sum to one.
+
+```python
+from vllm import LLM
+from vllm.lora.request import LoRARequest, LoRARoutingRequest
+
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    enable_lora=True,
+    max_loras=4,
+    max_loras_per_request=2,
+    max_lora_rank=64,
+    lora_target_modules=["q_proj", "v_proj"],
+)
+mixture = LoRARoutingRequest(
+    routing_name="composition",
+    routing_int_id=100,
+    lora_requests=(
+        LoRARequest("first", 1, "/path/to/first_adapter"),
+        LoRARequest("second", 2, "/path/to/second_adapter"),
+    ),
+    lora_weights=(0.7, 0.3),
+)
+outputs = llm.generate(["Hello"], lora_request=mixture)
+```
+
+A single request broadcasts to all prompts. A sequence selects one ordinary,
+routed, or absent (`None`) adapter request per prompt; its length must match the
+prompts. A list of ordinary adapters does not imply composition.
+
+`max_loras_per_request` defaults to 1 and must not exceed `max_loras`, the
+batch-wide distinct-adapter capacity. The equivalent engine argument is
+`--max-loras-per-request`. Every referenced adapter counts, including adapters
+with a zero coefficient. Requests over the limit are rejected before scheduling.
+
+Composition supports text-only generation with supported linear-layer targets.
+Set `lora_target_modules` to the adapters' linear targets; this also avoids
+wrapping embeddings and LM heads on models that expose them as LoRA targets.
+Routed embeddings, LM-head adapters, pooling, multimodal inputs, learned gates,
+and the OpenAI-compatible server API are not supported. Prefix-cache identity includes the ordered
+component adapter names, paths, and coefficients, not the mixture's display name.
+
+### Execution Modes
+
+The following describes routed composition, not ordinary single-adapter LoRA.
+Hardware validation limits for native MoE experts are described below.
+
+| Routed targets | NVIDIA CUDA | AMD ROCm | Intel XPU |
+| --- | --- | --- | --- |
+| Dense linear projections, including Q/K/V | Eager or supported CUDA graphs | Eager reference path | Eager reference path |
+| Distributed native MoE experts | Eager or supported CUDA graphs | Eager or experimental expert-only graphs | Eager or experimental expert-only graphs |
+
+On NVIDIA GPUs, supported FP16/BF16 dense linear projections use a fused cooperative
+kernel for ranks up to 128. With `max_loras_per_request >= 2`, non-fully-sharded
+LoRA supports CUDA graphs and compiled execution. Routing buffers are reserved
+at engine initialization and updated in place, including for ordinary-adapter
+and no-adapter batches. The default capacity of 1 retains ordinary LoRA execution.
+
+For dense routed projections on other backends, fully sharded LoRA, higher ranks,
+or configurations exceeding the fused kernel's resource limits, set
+`enforce_eager=True`. Dense eager execution uses the reference implementation
+when the fused kernel is unsupported. Unsupported routed graph configurations
+are rejected; platform-level graph availability may separately disable capture.
+Composition does not support microbatching or prefill context parallelism.
+
+### Native MoE Expert Projections
+
+The modular MoE-LoRA path also composes adapters at the expert gate/up and
+down projections. Gate/up contributions are summed before the activation;
+down contributions use that combined activation. Adapter coefficients are
+independent of the base model's expert-router weights. This path reuses the
+native expert LoRA kernels, not the dense routed-linear kernel.
+
+The shared implementation carries route metadata between projections.
+On CUDA, ROCm and XPU, native MoE composition supports expert parallelism (EP) and
+data parallelism (DP), with or without EP, using
+`all2all_backend="allgather_reducescatter"` with either GPU model runner (V1 or V2).
+Ranks agree on the active adapter union before each forward, load their own
+weight shards, and translate shared adapter identities to local cache slots
+after token dispatch. Idle ranks participate too. This coordination runs
+outside device graphs; graph replay uses routing buffers updated in place.
+Native expert graph execution requires `max_loras_per_request >= 2`,
+`max_lora_rank <= 128`, and non-fully-sharded LoRA.
+On ROCm and XPU, it additionally requires distributed routing and
+`lora_target_modules=["experts"]`; other routed targets require
+`enforce_eager=True`. XPU graph execution also requires a PyTorch build with
+XPU graph support. A platform falling back to eager execution is not evidence
+of graph validation.
+Metadata uploads use independent pinned CPU snapshots and nonblocking copies,
+so subsequent CPU updates cannot overwrite an in-flight upload.
+When TP and EP split tokens across workers, route metadata follows the same
+padded token partition as the activations before dispatch.
+
+Set `max_loras_per_request >= 2`. The union of adapters requested by all ranks
+in the dispatch group must fit `max_loras` on every rank, even when each local
+batch fits independently. Overflow, conflicting adapter identities, and loading
+failures abort the step before model execution. Adapter paths must be accessible
+on every participating worker. Reusing an adapter ID with different metadata
+and `load_inplace=True` are rejected in this mode.
+
+Distributed composition requires `pipeline_parallel_size=1`,
+`prefill_context_parallel_size=1`, no microbatching, no EPLB or elastic EP,
+and non-fully-sharded LoRA. Other dispatch backends are rejected.
+Dense-model DP is unaffected. Ordinary `LoRARequest` execution
+with `max_loras_per_request=1` retains the existing MoE-LoRA restrictions.
+Expert-projection LoRA
+runs one kernel pass per route, so its cost grows roughly linearly with the
+number of composed adapters. XPU uses the same shared composition helpers with
+its native expert LoRA kernels; NVIDIA's cooperative dense-linear kernel is
+not used on XPU or ROCm.
+
+Native expert composition is experimental. Validation on one model or backend
+does not establish correctness for all quantized MoE backends or hardware.
+AMD and Intel distributed hardware validation is pending. CUDA test results
+do not establish AMD or Intel correctness or performance.
+`VLLM_GPU_SYNC_CHECK` currently instruments CUDA/ROCm, not XPU; enabling it
+does not establish the absence of host synchronization on Intel.
+Use adapter files matching the base model's existing MoE-LoRA checkpoint format.
+
+For a single-device composition example, see
+[Composition Offline](../examples/features/lora.md#composition-offline)
+([source](../../examples/features/lora/composition_offline.py)).

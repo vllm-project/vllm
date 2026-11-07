@@ -52,6 +52,7 @@ steps:
   source_file_dependencies:
     - vllm/lora
     - tests/lora
+    - vllm/model_executor/layers/fused_moe
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -114,6 +115,44 @@ steps:
       pytest -v -s lora/test_punica_ops_fp8.py &&
       pytest -v -s lora/test_punica_xpu_ops.py'
 
+- label: ":intel: (BMG) Routed LoRA Distributed"
+  key: lora-routed-distributed-xpu
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - vllm/distributed
+    - vllm/config
+    - vllm/platforms/xpu.py
+    - vllm/v1/worker
+    - vllm/v1/engine
+    - vllm/model_executor/layers/fused_moe
+    - tests/lora
+    - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      pytest -v -s
+      lora/test_lora_routing.py
+      -k "distributed or expert_route_metadata" &&
+      pytest -v -s
+      lora/test_punica_ops.py::test_lora_kernel_metadata_cpu_staging_matches_device
+      lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_dp2_ep2
+      lora/test_fused_moe_lora_kernel.py::test_distributed_lora_residency_and_collective_errors
+      lora/test_olmoe_tp.py::test_distributed_moe_composition_generation'
+
 - label: ":intel: (BMG) LoRA Models"
   key: lora-models
   timeout_in_minutes: 45
@@ -131,6 +170,16 @@ steps:
   source_file_dependencies:
     - vllm/lora
     - tests/lora
+    - vllm/model_executor/layers/fused_moe
+    - vllm/config/lora.py
+    - vllm/config/vllm.py
+    - vllm/engine/arg_utils.py
+    - vllm/entrypoints/common/offline.py
+    - vllm/entrypoints/llm.py
+    - vllm/v1/engine
+    - vllm/v1/worker
+    - vllm/v1/core/kv_cache_utils.py
+    - vllm/platforms/xpu.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -141,8 +190,12 @@ steps:
       --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]"
       --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]"
       --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
+      pytest -v -s
+      lora/test_lora_routing.py::test_generate_composition_matches_peft_and_isolates_prefix_cache
+      -k supported &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
+      pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_projections_tp2 &&
       pytest -v -s lora/test_llama_tp.py::test_llama_lora'
 
 - label: ":intel: (BMG) LoRA Multimodal"

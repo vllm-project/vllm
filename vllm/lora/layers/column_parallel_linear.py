@@ -34,6 +34,9 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     )
 
     output = layer._get_quant_method().apply(layer.base_layer, x, bias)
+    route_mapping = layer.punica_wrapper.lora_route_mapping
+    if route_mapping is not None:
+        return _mcp_apply_routed(x, output, layer, route_mapping)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
@@ -80,6 +83,42 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     output = output.view(*out_orig_shape)
     # now have column partitioned and packed output
     return output
+
+
+def _mcp_apply_routed(
+    x: torch.Tensor,
+    output: torch.Tensor,
+    layer: "ColumnParallelLinearWithLoRA",
+    route_mapping: tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    x = x.view(-1, x.shape[-1])
+    output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+    token_lora_indices, token_lora_weights = layer._validate_routed_lora_mapping(
+        x, route_mapping
+    )
+
+    offset = 0
+    for slice_idx, output_slice in enumerate(layer.output_slices):
+        lora_a = layer.lora_a_stacked[slice_idx]
+        lora_b = layer.lora_b_stacked[slice_idx]
+        output_view = output[:, offset : offset + output_slice]
+
+        for lora_idx, token_mask, route_weights in layer._iter_lora_route_groups(
+            token_lora_indices, token_lora_weights
+        ):
+            routed_x = x[token_mask].to(dtype=lora_a.dtype)
+            shrink = routed_x @ lora_a[lora_idx, 0].T
+            if layer.tp_size > 1:
+                shrink = tensor_model_parallel_all_gather(shrink)
+            delta = shrink.to(dtype=lora_b.dtype) @ lora_b[lora_idx, 0].T
+            weights = route_weights.to(dtype=delta.dtype)
+            output_view[token_mask] += (
+                delta.to(dtype=output_view.dtype) * weights[:, None]
+            )
+
+        offset += output_slice
+
+    return output.view(*out_orig_shape)
 
 
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):

@@ -10,7 +10,7 @@ from typing import Any, final
 
 import torch
 
-from vllm.lora.layers import LoRAMapping
+from vllm.lora.layers import LoRAMapping, LoRARouteMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -27,6 +27,7 @@ if HAS_TRITON:
 from vllm import _custom_ops as ops
 
 from .punica_base import PunicaWrapperBase
+from .utils import RoutedLoRATensors
 
 
 @final
@@ -46,7 +47,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
 
         self.lora_config = kwargs["lora_config"]
+        self.max_loras_per_request = self.lora_config.max_loras_per_request
         self.max_loras = self.lora_config.max_loras
+        self._init_moe_route_metadata(self.max_loras)
+        self.routed_lora_graph_mode = kwargs.get("enable_routed_lora_graphs", False)
+        if self.routed_lora_graph_mode:
+            self._lora_route_buffers = RoutedLoRATensors.make(
+                max_num_batched_tokens,
+                max_batches,
+                self.lora_config.max_loras_per_request,
+                device,
+            )
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -73,14 +84,21 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
     def update_metadata(
         self,
-        mapping: LoRAMapping,
+        mapping: LoRAMapping | LoRARouteMapping,
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         **kwargs,
     ):
-        self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+        super().update_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+
+        if self.distributed_lora_tensors is not None:
+            tokens, prompts = self._kernel_metadata_mapping(
+                mapping, lora_index_to_id, max_loras, vocab_size
+            )
+            self.token_mapping_meta.prepare_tensors(tokens)
+            self.prompt_mapping_meta.prepare_tensors(prompts)
+            return
 
         # TODO avoid gpu<->cpu sync here
         with gpu_sync_allowed():
@@ -369,6 +387,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
         token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
@@ -376,20 +395,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         When `token_lora_mapping` is provided, it overrides the global mapping
         read from `self.token_mapping_meta`. This is how EP+LoRA injects the
         per-rank-local token→LoRA map after all-to-all dispatch.
+        Routed calls use fixed resident-slot bounds rather than scalar metadata.
         """
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            _,
-            _,
-        ) = self.token_mapping_meta.meta_args(
-            num_tokens, self.lora_config.specialize_active_lora
+        token_lora_mapping, lora_ids, _, _ = self._get_moe_lora_metadata(
+            self.token_mapping_meta,
+            num_tokens,
+            self.lora_config.specialize_active_lora,
+            token_lora_mapping,
+            routed,
         )
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         # Under EP the caller passes local_num_experts but topk_ids carries
         # GLOBAL expert indices. The CUDA kernel uses num_experts to size
         # its bucketing table; with EP we must size by global_num_experts
@@ -468,27 +482,20 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
         add_inputs: bool = True,
+        routed: bool = False,
     ):
         """Perform a fused forward computation for a LoRA MoE layer."""
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            no_lora_flag,
-            num_active_loras,
-        ) = self.token_mapping_meta.meta_args(
-            x.size(0), self.lora_config.specialize_active_lora
+        token_lora_mapping, lora_ids, no_lora_flag, num_active_loras = (
+            self._get_moe_lora_metadata(
+                self.token_mapping_meta,
+                x.size(0),
+                self.lora_config.specialize_active_lora,
+                token_lora_mapping,
+                routed,
+            )
         )
-
-        assert no_lora_flag.numel() == 1
-        if no_lora_flag.item():
-            # None of the inputs require LoRA.
+        if not routed and no_lora_flag.item():
             return
-
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
             y,
             x,
@@ -546,6 +553,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         use_tuned_config: bool,
         add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -626,6 +634,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             expert_map,
             naive_block_assignment=naive_block_assignment,
             token_lora_mapping=token_lora_mapping,
+            routed=routed,
         )
 
         _sorted = sorted_token_ids_lora
@@ -651,6 +660,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             fully_sharded=fully_sharded,
             token_lora_mapping=token_lora_mapping,
             add_inputs=add_inputs,
+            routed=routed,
         )
 
         return (
@@ -682,6 +692,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         tp_rank: int,
         use_tuned_config: bool,
         add_inputs: bool = True,
+        routed: bool = False,
     ) -> None:
         import functools
 
@@ -765,4 +776,5 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             offset=offset,
             token_lora_mapping=token_lora_mapping,
             add_inputs=add_inputs,
+            routed=routed,
         )

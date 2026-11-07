@@ -3819,6 +3819,13 @@ class GPUModelRunner(
             else len(self.input_batch.lora_id_to_lora_request)
         )
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
+        if self.distributed_routed_lora and force_num_active_loras is None:
+            assert self.lora_config is not None
+            # Every replay executes the same fixed-width expert route path,
+            # including ranks whose local batch contains only base tokens.
+            # Keep explicitly requested capture descriptors distinct.
+            has_lora = True
+            num_active_loras = self.lora_config.max_loras
 
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
             return self.cudagraph_dispatcher.dispatch(
@@ -5555,12 +5562,15 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         randomize_inputs: bool = False,
+        distributed_idle: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run a dummy forward pass to warm up/profile run or capture the
         CUDA graph for the model.
 
         Args:
             num_tokens: Number of tokens to run the dummy forward pass.
+            distributed_idle: Participate in a live distributed step with base-only
+                local tokens, retaining the adapters required by peer ranks.
             cudagraph_runtime_mode: used to control the behavior.
                 - if not set will determine the cudagraph mode based on using
                     the self.cudagraph_dispatcher.
@@ -5649,6 +5659,11 @@ class GPUModelRunner(
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+
+        if distributed_idle:
+            self.prepare_idle_distributed_loras(num_tokens_unpadded)
+            assert self.lora_config is not None
+            num_active_loras = self.lora_config.max_loras
 
         _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
             self._determine_batch_execution_and_padding(
@@ -5800,12 +5815,16 @@ class GPUModelRunner(
                     use_spec_decode=self.speculative_config is not None,
                 )
 
-        with self.maybe_dummy_run_with_lora(
-            self.lora_config,
-            num_scheduled_tokens,
-            num_sampled_tokens,
-            remove_lora,
-            num_active_loras,
+        with (
+            nullcontext()
+            if distributed_idle
+            else self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                num_scheduled_tokens,
+                num_sampled_tokens,
+                remove_lora,
+                num_active_loras,
+            )
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens

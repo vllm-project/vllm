@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from vllm.utils.platform_utils import is_pin_memory_available
+
 
 @dataclass
 class LoRAKernelMeta:
@@ -114,6 +116,15 @@ class LoRAKernelMeta:
         """
         self._reset()
 
+        def copy_metadata(destination: torch.Tensor, source: torch.Tensor) -> None:
+            if (
+                source.device.type == "cpu"
+                and destination.device.type != "cpu"
+                and is_pin_memory_available()
+            ):
+                source = source.to(dtype=destination.dtype).pin_memory()
+            destination.copy_(source, non_blocking=True)
+
         # Check and record no-lora case.
         no_lora = torch.all(token_lora_mapping == -1)
         self.no_lora_flag_cpu[0] = no_lora
@@ -125,26 +136,25 @@ class LoRAKernelMeta:
         num_tokens = token_lora_mapping.size(0)
 
         # copy token lora mapping
-        self.token_lora_mapping[:num_tokens].copy_(
-            token_lora_mapping, non_blocking=True
-        )
+        copy_metadata(self.token_lora_mapping[:num_tokens], token_lora_mapping)
 
         # token_indices_sorted_by_lora_ids
         _, token_indices_sorted_by_lora_ids = torch.sort(
             token_lora_mapping, stable=True
         )
         # start gpu transfer
-        self.token_indices_sorted_by_lora_ids[:num_tokens].copy_(
-            token_indices_sorted_by_lora_ids, non_blocking=True
+        copy_metadata(
+            self.token_indices_sorted_by_lora_ids[:num_tokens],
+            token_indices_sorted_by_lora_ids,
         )
 
         # active_lora_ids, num_tokens_per_lora
         lora_ids, num_tokens_per_lora = torch.unique(
             token_lora_mapping, sorted=True, return_counts=True
         )
-        self.active_lora_ids[: lora_ids.size(0)].copy_(lora_ids, non_blocking=True)
-        self.num_tokens_per_lora[: num_tokens_per_lora.size(0)].copy_(
-            num_tokens_per_lora, non_blocking=True
+        copy_metadata(self.active_lora_ids[: lora_ids.size(0)], lora_ids)
+        copy_metadata(
+            self.num_tokens_per_lora[: num_tokens_per_lora.size(0)], num_tokens_per_lora
         )
 
         num_active_loras = lora_ids.size(0)
@@ -160,8 +170,9 @@ class LoRAKernelMeta:
 
         # lora_token_start_loc
         lora_token_start_loc = torch.cumsum(num_tokens_per_lora, dim=0)
-        self.lora_token_start_loc[1 : 1 + lora_token_start_loc.size(0)].copy_(
-            lora_token_start_loc, non_blocking=True
+        copy_metadata(
+            self.lora_token_start_loc[1 : 1 + lora_token_start_loc.size(0)],
+            lora_token_start_loc,
         )
 
     def meta_args(

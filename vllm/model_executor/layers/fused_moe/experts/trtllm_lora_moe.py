@@ -304,7 +304,6 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         # ---- 1) W13 LoRA delta -> gemm1_lora_delta (bf16, [T, top_k, 2I]) ----
         gemm1_lora_delta = None
-        w13_meta = (None, None, None, None)
 
         # zeros (not empty): under EP the punica expand kernel only writes
         # slots whose expert is local to this rank; the kernel skips the rest.
@@ -376,12 +375,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             intermediate_size,
         )  # (T*top_k, I) -- same layout as the triton path's intermediate_cache2
 
-        (
-            sorted_token_ids_lora,
-            expert_ids_lora,
-            num_tokens_post_padded_lora,
-            token_lora_mapping,
-        ) = w13_meta
+        lora_metadata = w13_meta
 
         w2_delta = torch.zeros(
             num_tokens,
@@ -395,10 +389,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             y=w2_delta,
             x=act,
             topk_weights=topk_weights,
-            sorted_token_ids_lora=sorted_token_ids_lora,
-            expert_ids_lora=expert_ids_lora,
-            num_tokens_post_padded_lora=num_tokens_post_padded_lora,
-            token_lora_mapping=token_lora_mapping,
+            lora_metadata=lora_metadata,
             num_tokens=num_tokens,
             w1=w1_cfg,
             w2=w2_cfg,
@@ -431,6 +422,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         and under CUDA graphs the branch is frozen at capture time against the
         graph's ``has_lora`` dispatch key, so it stays correct on replay.
         """
+        if (
+            lora_context.local_lora_routes is not None
+            or lora_context.punica_wrapper.lora_route_mapping is not None
+        ):
+            return False
         meta = getattr(lora_context.punica_wrapper, "token_mapping_meta", None)
         if meta is None:
             return False

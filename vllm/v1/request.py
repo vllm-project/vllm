@@ -29,7 +29,7 @@ from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-    from vllm.lora.request import LoRARequest
+    from vllm.lora.request import LoRARequestLike
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
@@ -72,7 +72,7 @@ class Request:
         prompt_embeds: torch.Tensor | None = None,
         prompt_is_token_ids: list[bool] | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
-        lora_request: "LoRARequest | None" = None,
+        lora_request: "LoRARequestLike | None" = None,
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
@@ -270,7 +270,7 @@ class Request:
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             arrival_time=request.arrival_time,
-            lora_request=request.lora_request,
+            lora_request=request.resolved_lora_request,
             cache_salt=request.cache_salt,
             priority=request.priority,
             trace_headers=request.trace_headers,

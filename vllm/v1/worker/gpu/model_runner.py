@@ -20,7 +20,7 @@ import functools
 import gc
 import time
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -889,6 +889,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        distributed_idle: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -953,12 +954,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
         max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
-        with self.maybe_dummy_run_with_lora(
-            self.lora_config,
-            num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
-            num_sampled_tokens=None,
-            remove_lora=True,
-            num_active_loras=max_loras,
+        with (
+            nullcontext()
+            if distributed_idle
+            else self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
+                num_sampled_tokens=None,
+                remove_lora=True,
+                num_active_loras=max_loras,
+            )
         ):
             # Execute the model.
             self.execute_model(
@@ -970,6 +975,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 context_len=context_len,
                 valid_dummy_state_slots=valid_dummy_state_slots,
                 randomize_inputs=randomize_inputs,
+                distributed_idle=distributed_idle,
             )
         self.kv_connector.set_disabled(False)
 
@@ -1825,6 +1831,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        distributed_idle: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             self.draft_tokens_handler.begin_step(scheduler_output)
@@ -1875,6 +1882,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras = get_num_active_loras_for_dispatch(
                 self.lora_config, self.lora_state, req_ids, dummy_run
             )
+            if self.distributed_routed_lora and (not dummy_run or distributed_idle):
+                num_active_loras = self.lora_config.max_loras + 1
 
         skip_compiled = False
         if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
@@ -1936,9 +1945,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.num_scheduled_tokens,
                     np.diff(input_batch.cu_num_logits_np),
                 )
-                self._set_active_loras(*lora_inputs)
+                self._set_active_loras(*lora_inputs, distributed_step=True)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
+            if distributed_idle:
+                self.prepare_idle_distributed_loras(batch_desc.num_tokens)
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,

@@ -14,10 +14,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, ParallelConfig
     from vllm.config.cache import CacheConfig
 else:
     ModelConfig = Any
+    ParallelConfig = Any
     CacheConfig = Any
 
 logger = init_logger(__name__)
@@ -34,6 +35,10 @@ class LoRAConfig:
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
+    max_loras_per_request: int = Field(default=1, ge=1)
+    """Maximum adapters combined by one request. Values greater than one reserve
+    routed metadata for CUDA graph execution on supported NVIDIA configurations.
+    """
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
@@ -111,6 +116,8 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        if self.max_loras_per_request > self.max_loras:
+            raise ValueError("max_loras_per_request must be <= max_loras")
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
@@ -135,6 +142,33 @@ class LoRAConfig:
             raise ValueError(
                 f"LoRA is not supported with moe_backend={moe_backend!r}. "
                 "Disable LoRA or select a MoE backend that supports LoRA."
+            )
+
+    def requires_distributed_routing(self, parallel_config: ParallelConfig) -> bool:
+        """Whether adapter residency must be shared across MoE dispatch ranks."""
+        return self.max_loras_per_request > 1 and (
+            parallel_config.enable_expert_parallel
+            or (
+                bool(parallel_config.is_moe_model)
+                and parallel_config.data_parallel_size > 1
+            )
+        )
+
+    def verify_with_parallel_config(self, parallel_config: ParallelConfig) -> None:
+        if self.requires_distributed_routing(parallel_config) and (
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu())
+            or parallel_config.all2all_backend != "allgather_reducescatter"
+            or parallel_config.pipeline_parallel_size != 1
+            or parallel_config.prefill_context_parallel_size != 1
+            or parallel_config.use_ubatching
+            or parallel_config.enable_eplb
+            or parallel_config.enable_elastic_ep
+            or self.fully_sharded_loras
+        ):
+            raise ValueError(
+                "Distributed routed LoRA requires CUDA, ROCm or XPU, "
+                "allgather_reducescatter, PP=1, PCP=1, no microbatching "
+                "and no EPLB, elastic EP or fully sharded LoRA."
             )
 
     def verify_with_model_config(self, model_config: ModelConfig):

@@ -16,7 +16,12 @@ from vllm.inputs import (
     split_enc_dec_input,
 )
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import (
+    LoRARequest,
+    LoRARequestLike,
+    LoRARoutingRequest,
+    iter_lora_requests,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -284,7 +289,7 @@ class InputProcessor:
         sampling_params.stop_token_ids = []
         sampling_params._all_stop_token_ids = set()
 
-    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
+    def _validate_lora(self, lora_request: LoRARequestLike | None) -> None:
         if lora_request is None:
             return
 
@@ -293,6 +298,60 @@ class InputProcessor:
             raise VLLMValidationError(
                 f"Got lora_request {lora_request} but LoRA is not enabled!"
             )
+
+        if (
+            len(iter_lora_requests(lora_request))
+            > self.lora_config.max_loras_per_request
+        ):
+            raise VLLMValidationError(
+                "LoRA request exceeds max_loras_per_request="
+                f"{self.lora_config.max_loras_per_request}"
+            )
+        if isinstance(lora_request, LoRARoutingRequest):
+            if self.model_config.runner_type != "generate":
+                raise VLLMValidationError("Routed LoRA only supports generation")
+            if (
+                self.vllm_config.parallel_config.use_ubatching
+                or self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise VLLMValidationError(
+                    "Routed LoRA does not support microbatching or prefill "
+                    "context parallelism. Disable these options."
+                )
+            if (
+                self.vllm_config.parallel_config.enable_expert_parallel
+                or (
+                    self.model_config.is_moe
+                    and self.vllm_config.parallel_config.data_parallel_size > 1
+                )
+            ) and self.lora_config.max_loras_per_request < 2:
+                raise VLLMValidationError(
+                    "Routed LoRA with expert parallelism or MoE data parallelism "
+                    "requires max_loras_per_request >= 2 for coordinated residency."
+                )
+            if not self.model_config.enforce_eager and (
+                not (
+                    current_platform.is_cuda()
+                    or (
+                        (current_platform.is_rocm() or current_platform.is_xpu())
+                        and self.lora_config.requires_distributed_routing(
+                            self.vllm_config.parallel_config
+                        )
+                        and self.lora_config.target_modules == ["experts"]
+                    )
+                )
+                or self.lora_config.max_loras_per_request < 2
+                or self.lora_config.fully_sharded_loras
+                or self.lora_config.max_lora_rank > 128
+            ):
+                raise VLLMValidationError(
+                    "Routed LoRA graphs require NVIDIA CUDA or distributed "
+                    "native-MoE expert-only targets on ROCm/XPU, "
+                    "max_loras_per_request >= 2, rank <= 128, and "
+                    "non-fully-sharded LoRA. Otherwise use enforce_eager=True."
+                )
+            if self.model_config.is_multimodal_model:
+                raise VLLMValidationError("Routed LoRA supports text-only models")
 
         if self.tokenizer is not None:
             logger.warning_once(
@@ -306,7 +365,7 @@ class InputProcessor:
     def _get_mm_identifier(
         self,
         mm_hash: str,
-        lora_request: LoRARequest | None,
+        lora_request: LoRARequestLike | None,
     ) -> str:
         """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
@@ -386,7 +445,7 @@ class InputProcessor:
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
-        lora_request: LoRARequest | None = None,
+        lora_request: LoRARequestLike | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
@@ -397,6 +456,10 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
+        if isinstance(lora_request, LoRARoutingRequest) and isinstance(
+            params, PoolingParams
+        ):
+            raise VLLMValidationError("Routed LoRA does not support pooling")
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
@@ -560,7 +623,12 @@ class InputProcessor:
             sampling_params=sampling_params,
             pooling_params=pooling_params,
             arrival_time=arrival_time,
-            lora_request=lora_request,
+            lora_request=lora_request
+            if isinstance(lora_request, LoRARequest)
+            else None,
+            lora_routing_request=(
+                lora_request if isinstance(lora_request, LoRARoutingRequest) else None
+            ),
             cache_salt=decoder_input.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,

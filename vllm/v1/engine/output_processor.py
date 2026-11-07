@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequestLike
 from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
@@ -188,7 +188,7 @@ class RequestState:
         external_req_id: str,
         parent_req: ParentRequest | None,
         request_index: int,
-        lora_request: LoRARequest | None,
+        lora_request: LoRARequestLike | None,
         output_kind: RequestOutputKind,
         prompt: str | None,
         prompt_token_ids: list[int] | None,
@@ -331,7 +331,7 @@ class RequestState:
             external_req_id=request.external_req_id,
             parent_req=parent_req,
             request_index=request_index,
-            lora_request=request.lora_request,
+            lora_request=request.resolved_lora_request,
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,

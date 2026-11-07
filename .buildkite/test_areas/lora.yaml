@@ -9,7 +9,15 @@ steps:
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/lora
+  - vllm/model_executor/layers/fused_moe/
   - tests/lora
+  - vllm/config/lora.py
+  - vllm/config/vllm.py
+  - vllm/engine/arg_utils.py
+  - vllm/entrypoints/common/offline.py
+  - vllm/entrypoints/llm.py
+  - vllm/v1/engine/
+  - vllm/v1/core/kv_cache_utils.py
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an
     # earlier test initialized CUDA in a way vLLM's fork check misses.
@@ -35,11 +43,46 @@ steps:
       timeout_in_minutes: 85
       source_file_dependencies:
       - vllm/lora
+      - vllm/model_executor/layers/fused_moe/
       - tests/lora
+      - vllm/config/lora.py
+      - vllm/config/vllm.py
+      - vllm/engine/arg_utils.py
+      - vllm/entrypoints/common/offline.py
+      - vllm/entrypoints/llm.py
+      - vllm/v1/engine/
+      - vllm/v1/core/kv_cache_utils.py
       - vllm/platforms/rocm.py
       depends_on:
       - image-build-amd
 
+
+- label: ":nvidia: (L4) Routed LoRA Distributed"
+  key: lora-routed-distributed
+  device: l4
+  num_devices: 2
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - vllm/lora
+  - vllm/distributed
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/worker/
+  - vllm/v1/engine/
+  - vllm/config/
+  - tests/lora
+  - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - >-
+    pytest -v -s
+    lora/test_lora_routing.py
+    -k 'distributed or expert_route_metadata'
+  - >-
+    pytest -v -s
+    lora/test_punica_ops.py::test_lora_kernel_metadata_cpu_staging_matches_device
+    lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_dp2_ep2
+    lora/test_fused_moe_lora_kernel.py::test_distributed_lora_residency_and_collective_errors
+    lora/test_olmoe_tp.py::test_distributed_moe_composition_generation
 
 - label: ":nvidia: (L4) [Nightly] LoRA TP (Distributed)"
   key: lora-tp-distributed
@@ -53,6 +96,9 @@ steps:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/models/transformers/moe.py
+  - vllm/v1/worker/
+  - vllm/config/lora.py
+  - vllm/config/vllm.py
   - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
@@ -70,6 +116,12 @@ steps:
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - pytest -v -s -x lora/test_gemma4_tp.py
     - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+    - pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_projections_tp2
+    - pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_rejected_across_ranks
+    - >-
+      pytest -v -s
+      lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_dp2_ep2
+      lora/test_fused_moe_lora_kernel.py::test_distributed_lora_residency_and_collective_errors
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
@@ -87,10 +139,24 @@ steps:
       - vllm/model_executor/layers/fused_moe/
       - vllm/model_executor/models/transformers/moe.py
       - vllm/platforms/rocm.py
+      - vllm/v1/worker/
+      - vllm/v1/engine/
+      - vllm/config/
+      - vllm/distributed/
+      - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
       - tests/lora
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       # expandable_segments breaks custom all-reduce IPC on ROCm.
+      - >-
+        pytest -v -s
+        lora/test_lora_routing.py
+        -k 'distributed or expert_route_metadata'
+      - >-
+        pytest -v -s
+        lora/test_punica_ops.py::test_lora_kernel_metadata_cpu_staging_matches_device
+        lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_dp2_ep2
+        lora/test_fused_moe_lora_kernel.py::test_distributed_lora_residency_and_collective_errors
       - pytest -v -s -x lora/test_chatglm3_tp.py
       - pytest -v -s -x lora/test_llama_tp.py
       - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
@@ -99,3 +165,5 @@ steps:
       - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
       - pytest -v -s -x lora/test_gemma4_tp.py
       - pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
+      - pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_projections_tp2
+      - pytest -v -s lora/test_fused_moe_lora_kernel.py::test_routed_expert_dispatch_rejected_across_ranks

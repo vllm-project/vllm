@@ -252,7 +252,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 "Fused MoE LoRA with EP currently only supports "
                 f"all2all_backend='allgather_reducescatter', got '{all2all_backend}'."
             )
-            assert not moe_config.moe_parallel_config.is_sequence_parallel
 
     def _verify_ep_fs(self, lora_config: LoRAConfig):
         # EP and fully_sharded LoRA both partition along the same TP group —
@@ -272,6 +271,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
         self._verify_ep_fs(lora_config)
+        if self.use_ep and self.moe_config.is_sequence_parallel:
+            assert lora_config.max_loras_per_request > 1, (
+                "Sequence-parallel MoE LoRA requires coordinated routing "
+                "with max_loras_per_request > 1."
+            )
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
         self.enable_moe_shared_loras = lora_config.enable_moe_shared_loras

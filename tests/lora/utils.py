@@ -14,6 +14,83 @@ from vllm.platforms import current_platform
 DEVICE_TYPE = current_platform.device_type
 
 
+def make_moe_lora_context(
+    num_tokens, hidden, intermediate, experts, topk, *, routed, dtype=torch.bfloat16
+):
+    """Real wrapper metadata and nonzero factors for native expert regressions."""
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.lora.punica_wrapper import get_punica_wrapper
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+
+    rank, adapters = 8, 2
+    wrapper = get_punica_wrapper(
+        num_tokens,
+        num_tokens,
+        DEVICE_TYPE,
+        lora_config=LoRAConfig(
+            max_loras=adapters, max_lora_rank=rank, max_loras_per_request=2
+        ),
+    )
+    coefficients = (0.7, 0.3) if routed else (1.0, 0.0)
+    mapping = (
+        LoRARouteMapping(
+            ((1, 2),) * num_tokens,
+            (coefficients,) * num_tokens,
+            (1,) * num_tokens,
+            False,
+        )
+        if routed
+        else LoRAMapping((1,) * num_tokens, (1,) * num_tokens, False)
+    )
+    wrapper.update_metadata(mapping, [1, 2], 3, 0)
+
+    def weight(rows, columns):
+        return (
+            torch.randn(adapters, experts, rows, columns, device=DEVICE_TYPE) * 0.05
+        ).to(dtype)
+
+    return MoELoRAContext(
+        w13_lora_a_stacked=tuple(weight(rank, hidden) for _ in range(2)),
+        w13_lora_b_stacked=tuple(weight(intermediate, rank) for _ in range(2)),
+        w2_lora_a_stacked=(weight(rank, intermediate),),
+        w2_lora_b_stacked=(weight(hidden, rank),),
+        adapter_enabled=torch.ones(3, dtype=torch.int32, device=DEVICE_TYPE),
+        max_loras=adapters,
+        top_k=topk,
+        w13_num_slices=2,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=experts,
+        punica_wrapper=wrapper,
+        use_tuned_config=False,
+    ), coefficients
+
+
+def moe_lora_reference_weights(w13, w2, ctx, coefficients):
+    """Add FP32 adapter updates to dequantized bases, never requantize them."""
+    w13, w2 = w13.float().clone(), w2.float().clone()
+    intermediate = w2.shape[-1]
+    for slot, coefficient in enumerate(coefficients):
+        for part in range(2):
+            w13[:, part * intermediate : (part + 1) * intermediate].add_(
+                coefficient
+                * (
+                    ctx.w13_lora_b_stacked[part][slot].float()
+                    @ ctx.w13_lora_a_stacked[part][slot].float()
+                )
+            )
+        w2.add_(
+            coefficient
+            * (
+                ctx.w2_lora_b_stacked[0][slot].float()
+                @ ctx.w2_lora_a_stacked[0][slot].float()
+            )
+        )
+    return w13, w2
+
+
 class DummyLoRAManager:
     def __init__(self, device: torch.device = f"{DEVICE_TYPE}:0"):
         super().__init__()

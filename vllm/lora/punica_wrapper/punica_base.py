@@ -11,11 +11,18 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .utils import compute_meta, convert_mapping
+from .utils import (
+    RoutedLoRATensors,
+    compute_meta,
+    convert_mapping,
+    convert_route_mapping,
+)
 
 if TYPE_CHECKING:
     # avoid circuit import
-    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
+    from vllm.lora.routing_utils import DistributedLoRATensors
 
 
 class PunicaWrapperABC(ABC):
@@ -24,7 +31,7 @@ class PunicaWrapperABC(ABC):
     @abstractmethod
     def update_metadata(
         self,
-        mapping: "LoRAMapping",
+        mapping: "LoRAMapping | LoRARouteMapping",
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
@@ -159,6 +166,58 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        self._lora_route_tensors: RoutedLoRATensors | None = None
+        self._lora_route_buffers: RoutedLoRATensors | None = None
+        self.routed_lora_graph_mode = False
+        self.max_loras_per_request = 1
+        self.distributed_lora_tensors: DistributedLoRATensors | None = None
+
+    def _init_moe_route_metadata(self, max_loras: int) -> None:
+        # Alignment includes the no-adapter sentinel in its launch bounds.
+        self._moe_route_lora_ids = torch.arange(
+            -1, max_loras, dtype=torch.int32, device=self.device
+        )
+        self._moe_route_num_loras = torch.tensor(
+            [max_loras + 1], dtype=torch.int32, device="cpu"
+        )
+        self._moe_route_no_lora = torch.tensor([False], device="cpu")
+
+    def _get_moe_lora_metadata(
+        self,
+        metadata: "LoRAKernelMeta",
+        num_tokens: int,
+        specialize_active_lora: bool,
+        token_lora_mapping: torch.Tensor | None,
+        routed: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if routed:
+            if token_lora_mapping is None:
+                raise ValueError(
+                    "Routed expert LoRA requires an explicit token mapping"
+                )
+            if (
+                token_lora_mapping.ndim != 1
+                or token_lora_mapping.dtype != torch.int32
+                or not token_lora_mapping.is_contiguous()
+            ):
+                raise ValueError(
+                    "Routed expert LoRA requires a contiguous int32 token mapping"
+                )
+            return (
+                token_lora_mapping,
+                self._moe_route_lora_ids,
+                self._moe_route_no_lora,
+                self._moe_route_num_loras,
+            )
+        mapping, _, _, _, ids, no_lora, count = metadata.meta_args(
+            num_tokens, specialize_active_lora
+        )
+        return (
+            mapping if token_lora_mapping is None else token_lora_mapping,
+            ids,
+            no_lora,
+            count,
+        )
 
     def _update_base_metadata(
         self,
@@ -273,22 +332,85 @@ class PunicaWrapperBase(PunicaWrapperABC):
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
 
+    @property
+    def lora_route_mapping(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self._lora_route_tensors is None:
+            return None
+        return (
+            self._lora_route_tensors.token_lora_indices,
+            self._lora_route_tensors.token_lora_weights,
+        )
+
+    @property
+    def lora_route_tensors(self) -> RoutedLoRATensors | None:
+        return self._lora_route_tensors
+
     def update_metadata(
         self,
-        mapping: "LoRAMapping",
+        mapping: "LoRAMapping | LoRARouteMapping",
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         **kwargs,
     ):
+        from vllm.lora.layers import LoRARouteMapping
+
+        if isinstance(mapping, LoRARouteMapping):
+            self._lora_route_tensors = convert_route_mapping(
+                mapping, lora_index_to_id, self.device
+            )
+            mapping = mapping.scalar_fallback_mapping()
+        else:
+            self._lora_route_tensors = None
+
+        if self._lora_route_buffers is not None:
+            if self._lora_route_tensors is None:
+                route_mapping = LoRARouteMapping(
+                    token_lora_ids=tuple(
+                        (lora_id,) for lora_id in mapping.index_mapping
+                    ),
+                    token_lora_weights=tuple(
+                        (1.0 if lora_id > 0 else 0.0,)
+                        for lora_id in mapping.index_mapping
+                    ),
+                    prompt_mapping=mapping.prompt_mapping,
+                    is_prefill=mapping.is_prefill,
+                    type=mapping.type,
+                )
+                self._lora_route_tensors = convert_route_mapping(
+                    route_mapping, lora_index_to_id, self.device
+                )
+            self._lora_route_buffers.copy_(self._lora_route_tensors)
+            self._lora_route_tensors = self._lora_route_buffers
+
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        if mapping.is_prefill:
-            # Update metadata required for prefill-related operators.
+        self.is_prefill = mapping.is_prefill
+        if self.distributed_lora_tensors is not None:
+            # Coordinated dispatch does not consume legacy SGMV metadata.
+            self.no_lora = not any(i > 0 for i in mapping.index_mapping)
+        elif mapping.is_prefill and not self.routed_lora_graph_mode:
+            # Routed CUDA graphs do not consume the legacy SGMV metadata.
             self._update_prefill_metadata(self.token_lora_indices)
-            self.is_prefill = True
-        else:
-            self.is_prefill = False
+
+    def _kernel_metadata_mapping(
+        self,
+        mapping: "LoRAMapping | LoRARouteMapping",
+        lora_index_to_id: list[int | None],
+        max_loras: int,
+        vocab_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare distributed kernel metadata without device-to-host reads."""
+        from vllm.lora.layers import LoRARouteMapping
+
+        if self.distributed_lora_tensors is None:
+            return self.token_lora_indices, self.sampler_indices
+        if isinstance(mapping, LoRARouteMapping):
+            mapping = mapping.scalar_fallback_mapping()
+        tokens, prompts, *_ = convert_mapping(
+            mapping, lora_index_to_id, max_loras, vocab_size, "cpu"
+        )
+        return tokens, prompts
 
     @abstractmethod
     def add_shrink(
@@ -449,6 +571,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
+        token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
@@ -475,6 +599,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        add_inputs: bool = True,
+        routed: bool = False,
     ):
         """Performs a fused forward computation for LoRA of
         Mixture-of-Experts (MoE) layer.
@@ -504,6 +630,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         use_tuned_config: bool,
         add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
+        routed: bool = False,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -544,6 +671,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         tp_rank: int,
         use_tuned_config: bool,
         add_inputs: bool = True,
+        routed: bool = False,
     ) -> None:
         """Apply w2 LoRA to y (intermediate_cache3) in-place before moe_sum.
 

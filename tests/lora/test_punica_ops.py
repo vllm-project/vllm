@@ -50,6 +50,28 @@ def dynamo_reset():
     yield
 
 
+@pytest.mark.parametrize("captured_counts", [None, [1, 2, 4]])
+def test_lora_kernel_metadata_cpu_staging_matches_device(captured_counts):
+    """CPU staging preserves slot grouping, graph counts, and base-only resets."""
+    staged = LoRAKernelMeta.make(3, 8, DEVICE_TYPE, captured_counts)
+    reference = LoRAKernelMeta.make(3, 8, DEVICE_TYPE, captured_counts)
+    for ids in ([2, -1, 0, 2, 0], [1], [-1, -1], [0, 1, 2, -1]):
+        cpu_ids = torch.tensor(ids, dtype=torch.int32, device="cpu")
+        staged.prepare_tensors(cpu_ids)
+        reference.prepare_tensors(cpu_ids.to(DEVICE_TYPE))
+        torch.testing.assert_close(staged.no_lora_flag_cpu, reference.no_lora_flag_cpu)
+        torch.testing.assert_close(
+            staged.num_active_loras_cpu, reference.num_active_loras_cpu
+        )
+        # The base-only fast path does not consume the stale token-index buffers.
+        start = 2 if all(i == -1 for i in ids) else 0
+        for actual, expected in zip(
+            staged.meta_args(len(ids), True)[start:5],
+            reference.meta_args(len(ids), True)[start:5],
+        ):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _bgmv_shrink(
     inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
 ):
@@ -532,9 +554,8 @@ def test_add_lora_fused_moe_early_exit(device):
     """Ensures add_lora_fused_moe does not invoke the LoRA kernel or
     modify the output tensor when no_lora_flag_cpu is True
     """
-    from types import SimpleNamespace
-
-    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+    from vllm.config import LoRAConfig
+    from vllm.lora.punica_wrapper import get_punica_wrapper
 
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
@@ -543,17 +564,18 @@ def test_add_lora_fused_moe_early_exit(device):
     num_experts, top_k, max_lora_rank = 8, 2, 16
     K, N = 256, 128
 
-    # build PunicaWrapperGPU with minimal lora_config mock
-    lora_config = SimpleNamespace(
+    lora_config = LoRAConfig(
         max_loras=max_loras,
         specialize_active_lora=False,
     )
-    wrapper = PunicaWrapperGPU(
+    wrapper = get_punica_wrapper(
         max_num_batched_tokens=num_tokens,
         max_batches=num_tokens,
         device=device,
         lora_config=lora_config,
     )
+    assert hasattr(wrapper, "token_mapping_meta")
+    metadata = wrapper.token_mapping_meta
 
     # simulate a prior LoRA batch so the internal mapping is
     # populated with stale LoRA IDs
@@ -564,7 +586,7 @@ def test_add_lora_fused_moe_early_exit(device):
     )
     lora_mapping[:8] = 1
     lora_mapping[8:] = 2
-    wrapper.token_mapping_meta.prepare_tensors(lora_mapping)
+    metadata.prepare_tensors(lora_mapping)
 
     # simulate a base-model batch (all -1)
     base_mapping = torch.full(
@@ -573,9 +595,9 @@ def test_add_lora_fused_moe_early_exit(device):
         dtype=torch.int32,
         device=device,
     )
-    wrapper.token_mapping_meta.prepare_tensors(base_mapping)
+    metadata.prepare_tensors(base_mapping)
 
-    assert wrapper.token_mapping_meta.no_lora_flag_cpu[0].item() is True
+    assert metadata.no_lora_flag_cpu[0].item() is True
 
     # dummy tensors for add_lora_fused_moe
     y = torch.rand(num_tokens, top_k, N, dtype=torch.bfloat16, device=device)

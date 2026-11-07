@@ -10,6 +10,12 @@ The "two_kernel" provider drives `fused_moe_lora_shrink` + `fused_moe_lora_expan
 directly, bypassing the dispatch and matching the legacy two-kernel path's
 work distribution. This isolates the win from kernel fusion.
 
+With --projections, compare scalar LoRA and routed composition through the
+native expert wrappers. Timing includes alignment, scratch initialization and
+weighted accumulation, but excludes base GEMMs and activation. Down projection
+uses fixed post-activation inputs. JSON artifacts record raw latency samples,
+software versions and source hashes; this is not a full-model benchmark.
+
 Run:
     .venv/bin/python -m benchmarks.kernels.benchmark_fused_moe_lora_one_shot
     .venv/bin/python -m benchmarks.kernels.benchmark_fused_moe_lora_one_shot \\
@@ -19,8 +25,13 @@ Run:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import random
+import statistics
+import subprocess
+from pathlib import Path
 
 import torch
 
@@ -344,6 +355,301 @@ M_RANGE = [16, 64, 256, 1024, 4096, 16384]
 RANK_RANGE = [8, 16, 32, 64]
 
 
+def _projection_case(preset, tokens, rank, routes, distribution, provider):
+    """Time the shared expert wrapper, including its alignment and temporaries.
+
+    Down uses fixed post-activation inputs. The combined scope measures both
+    adapter projections, not the base MoE GEMMs or activation.
+    """
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
+    from vllm.lora.punica_wrapper import get_punica_wrapper
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+    from vllm.platforms import current_platform
+
+    torch.manual_seed(0)
+    device = current_platform.device_type
+    hidden, intermediate, experts, topk = (
+        preset[k] for k in ("K", "N_per_slice", "num_experts", "top_k")
+    )
+    adapters = preset["max_loras"]
+    ids = (
+        torch.arange(tokens * topk, device=device, dtype=torch.int32).view(tokens, topk)
+        % experts
+    )
+    if distribution == "concentrated":
+        ids = (
+            torch.arange(topk, device=device, dtype=torch.int32)
+            .expand(tokens, -1)
+            .contiguous()
+        )
+    expert_weights = torch.full((tokens, topk), 1 / topk, device=device)
+    mapping_ids = tuple(
+        tuple((t + r) % adapters + 1 for r in range(routes)) for t in range(tokens)
+    )
+    if distribution == "concentrated":
+        mapping_ids = (tuple(range(1, routes + 1)),) * tokens
+    mapping_weights = ((1 / routes,) * routes,) * tokens
+    wrapper = get_punica_wrapper(
+        tokens,
+        tokens,
+        device,
+        lora_config=LoRAConfig(
+            max_loras=adapters,
+            max_lora_rank=rank,
+            max_loras_per_request=max(2, routes),
+        ),
+    )
+    mapping = (
+        LoRAMapping(tuple(row[0] for row in mapping_ids), (), False)
+        if provider == "scalar"
+        else LoRARouteMapping(mapping_ids, mapping_weights, (), False)
+    )
+    wrapper.update_metadata(mapping, list(range(1, adapters + 1)), adapters + 1, 0)
+
+    def weight(*shape):
+        return torch.randn(*shape, device=device, dtype=DTYPE) * 0.01
+
+    ctx = MoELoRAContext(
+        w13_lora_a_stacked=tuple(
+            weight(adapters, experts, rank, hidden) for _ in range(2)
+        ),
+        w13_lora_b_stacked=tuple(
+            weight(adapters, experts, intermediate, rank) for _ in range(2)
+        ),
+        w2_lora_a_stacked=(weight(adapters, experts, rank, intermediate),),
+        w2_lora_b_stacked=(weight(adapters, experts, hidden, rank),),
+        adapter_enabled=torch.ones(adapters + 1, dtype=torch.int32, device=device),
+        max_loras=adapters,
+        top_k=topk,
+        w13_num_slices=2,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=experts,
+        punica_wrapper=wrapper,
+        use_tuned_config=False,
+    )
+    layer = TritonExperts(
+        FusedMoEConfig(
+            num_experts=experts,
+            experts_per_token=topk,
+            hidden_dim=hidden,
+            intermediate_size=intermediate,
+            num_local_experts=experts,
+            num_logical_experts=experts,
+            activation=MoEActivation.SILU,
+            device=device,
+            routing_method=RoutingMethodType.Unspecified,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=DTYPE,
+        ),
+        FusedMoEQuantConfig.make(),
+    )
+    x, activated = weight(tokens, hidden), weight(tokens, topk, intermediate)
+    up = torch.empty(tokens, topk, 2 * intermediate, dtype=DTYPE, device=device)
+    down = torch.empty(tokens, topk, hidden, dtype=DTYPE, device=device)
+    w1 = torch.empty(experts, 2 * intermediate, hidden, dtype=DTYPE, device="meta")
+    w2 = torch.empty(experts, hidden, intermediate, dtype=DTYPE, device="meta")
+
+    def gate_up():
+        up.zero_()
+        return layer.apply_w13_lora(
+            ctx,
+            y=up,
+            x=x,
+            topk_ids=ids,
+            topk_weights=expert_weights,
+            expert_map=None,
+            w1=w1,
+            w2=w2,
+            num_tokens=tokens,
+            top_k_num=topk,
+        )
+
+    state = gate_up()
+    # Keep the same harness runnable on the pre-composition scalar baseline.
+    metadata_names = (
+        (
+            "sorted_token_ids_lora",
+            "expert_ids_lora",
+            "num_tokens_post_padded_lora",
+            "token_lora_mapping",
+        )
+        if isinstance(state, tuple)
+        else ("lora_metadata",)
+    )
+
+    def down_projection(metadata=state):
+        down.zero_()
+        values = metadata if isinstance(metadata, tuple) else (metadata,)
+        layer.apply_w2_lora(
+            ctx,
+            y=down,
+            x=activated.view(-1, intermediate),
+            topk_weights=expert_weights,
+            **dict(zip(metadata_names, values)),
+            num_tokens=tokens,
+            w1=w1,
+            w2=w2,
+            top_k_num=topk,
+        )
+
+    def combined():
+        down_projection(gate_up())
+
+    # Independent FP32 matmuls, grouped only to keep the oracle's memory bounded.
+    ref_up, ref_down = (
+        torch.zeros_like(up, dtype=torch.float32),
+        torch.zeros_like(down, dtype=torch.float32),
+    )
+    for route in range(routes):
+        slots = torch.tensor([row[route] - 1 for row in mapping_ids], device=device)
+        for slot in range(adapters):
+            for expert in range(experts):
+                token, choice = torch.where((ids == expert) & (slots[:, None] == slot))
+                if token.numel() == 0:
+                    continue
+                for part in range(2):
+                    delta = (
+                        x[token].float()
+                        @ ctx.w13_lora_a_stacked[part][slot, expert].float().T
+                        @ ctx.w13_lora_b_stacked[part][slot, expert].float().T
+                    )
+                    ref_up[
+                        token, choice, part * intermediate : (part + 1) * intermediate
+                    ] += delta / routes
+                delta = (
+                    activated[token, choice].float()
+                    @ ctx.w2_lora_a_stacked[0][slot, expert].float().T
+                    @ ctx.w2_lora_b_stacked[0][slot, expert].float().T
+                )
+                ref_down[token, choice] += delta / (routes * topk)
+    combined()
+    torch.testing.assert_close(up.float(), ref_up, atol=1e-5, rtol=1e-2)
+    torch.testing.assert_close(down.float(), ref_down, atol=1e-5, rtol=1e-2)
+    return {"gate_up": gate_up, "down": down_projection, "combined": combined}
+
+
+def benchmark_projections(args):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.platforms import current_platform
+
+    output = Path(args.save_path)
+    output.mkdir(parents=True, exist_ok=True)
+    sources = [
+        p
+        for root in ("vllm/lora", "vllm/model_executor/layers/fused_moe")
+        for p in Path(root).rglob("*.py")
+    ]
+    manifest = {
+        "args": vars(args),
+        "torch": torch.__version__,
+        "triton": triton.__version__,
+        "cuda": torch.version.cuda,
+        "dtype": str(DTYPE),
+        "device": current_platform.get_device_name(),
+        "commit": os.getenv("VLLM_BENCHMARK_REVISION")
+        or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "source_sha256": {
+            str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources
+        },
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    if current_platform.is_xpu() and "graph" in args.modes:
+        raise ValueError("XPU projection benchmarks currently support eager only")
+
+    def measure(fn, mode):
+        if current_platform.is_cuda():
+            from flashinfer.testing import bench_gpu_time_with_cupti
+
+            return [
+                1000 * t
+                for t in bench_gpu_time_with_cupti(
+                    fn,
+                    dry_run_iters=3,
+                    repeat_iters=20,
+                    use_cuda_graph=mode == "graph",
+                    cold_l2_cache=args.cache == "cold",
+                )
+            ]
+        if args.cache != "hot":
+            raise ValueError(
+                "XPU eager timing supports only the explicitly hot cache mode"
+            )
+        return [1000 * triton.testing.do_bench(fn) for _ in range(3)]
+
+    preset = dict(MODEL_PRESETS[args.model])
+    if args.max_loras is not None:
+        preset["max_loras"] = args.max_loras
+    if max(args.routes) > preset["max_loras"]:
+        raise ValueError("routes must not exceed max_loras")
+    with (
+        set_current_vllm_config(VllmConfig()),
+        (output / "measurements.jsonl").open("w") as log,
+    ):
+        for tokens in args.tokens:
+            for rank in args.ranks:
+                for distribution in args.distributions:
+                    cases = {}
+                    if "scalar" in args.providers:
+                        cases["scalar"] = _projection_case(
+                            preset, tokens, rank, 1, distribution, "scalar"
+                        )
+                    if "routed" in args.providers:
+                        for routes in args.routes:
+                            cases[f"routed_{routes}"] = _projection_case(
+                                preset, tokens, rank, routes, distribution, "routed"
+                            )
+                    if args.check_only:
+                        continue
+                    for scope in ("gate_up", "down", "combined"):
+                        for mode in args.modes:
+                            for trial in range(args.trials):
+                                order = (
+                                    list(cases)
+                                    if trial % 2 == 0
+                                    else list(reversed(cases))
+                                )
+                                for provider in order:
+                                    fn = cases[provider][scope]
+                                    for _ in range(3):
+                                        fn()
+                                    torch.accelerator.synchronize()
+                                    samples = measure(fn, mode)
+                                    row = dict(
+                                        tokens=tokens,
+                                        rank=rank,
+                                        distribution=distribution,
+                                        provider=provider,
+                                        scope=scope,
+                                        mode=mode,
+                                        trial=trial,
+                                        median_us=statistics.median(samples),
+                                        samples_us=samples,
+                                    )
+                                    log.write(json.dumps(row) + "\n")
+                                    log.flush()
+                                    print(
+                                        json.dumps(
+                                            {
+                                                k: v
+                                                for k, v in row.items()
+                                                if k != "samples_us"
+                                            }
+                                        ),
+                                        flush=True,
+                                    )
+
+
 def get_benchmark(model: str, max_loras: int | None = None):
     preset = dict(MODEL_PRESETS[model])
     if max_loras is not None:
@@ -446,7 +752,37 @@ if __name__ == "__main__":
         help="Override max_loras in the model preset (number of LoRA adapters "
         "active in the batch). Defaults to the preset's value.",
     )
+    parser.add_argument(
+        "--projections",
+        action="store_true",
+        help="Benchmark native expert wrappers after checking correctness",
+    )
+    parser.add_argument("--tokens", type=int, nargs="+", default=[1, 16, 128, 1024])
+    parser.add_argument("--ranks", type=int, nargs="+", default=[16, 64])
+    parser.add_argument("--routes", type=int, nargs="+", default=[1, 2, 4])
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        choices=["scalar", "routed"],
+        default=["scalar", "routed"],
+    )
+    parser.add_argument(
+        "--distributions",
+        nargs="+",
+        choices=["balanced", "concentrated"],
+        default=["balanced", "concentrated"],
+    )
+    parser.add_argument(
+        "--modes", nargs="+", choices=["eager", "graph"], default=["eager", "graph"]
+    )
+    parser.add_argument("--cache", choices=["cold", "hot"], default="cold")
+    parser.add_argument("--trials", type=int, default=3)
     args = parser.parse_args()
+    if args.projections:
+        if min(args.tokens + args.ranks + args.routes + [args.trials]) < 1:
+            parser.error("tokens, ranks, routes and trials must be positive")
+        benchmark_projections(args)
+        raise SystemExit(0)
 
     print(f"Correctness check ({args.model}):")
     calculate_diff(args.model, M=256, rank=32, max_loras=args.max_loras)

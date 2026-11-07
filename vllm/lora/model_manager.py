@@ -19,6 +19,7 @@ from vllm.lora.layers import (
     FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    LoRARouteMapping,
     TokenClassificationHeadWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
@@ -50,6 +51,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.platforms import current_platform
 from vllm.utils.cache import LRUCache
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -131,7 +133,7 @@ class LoRAModelManager:
         )
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
-        self._last_mapping: LoRAMapping | None = None
+        self._last_mapping: LoRAMapping | LoRARouteMapping | None = None
         self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
@@ -210,11 +212,31 @@ class LoRAModelManager:
                 max_batches=self.max_num_seqs,
                 device=self.device,
                 lora_config=self.lora_config,
+                enable_routed_lora_graphs=(
+                    current_platform.is_cuda()
+                    and not vllm_config.model_config.enforce_eager
+                    and self.lora_config.max_loras_per_request > 1
+                    and not self.lora_config.fully_sharded_loras
+                    and not vllm_config.parallel_config.use_ubatching
+                    and vllm_config.parallel_config.prefill_context_parallel_size == 1
+                ),
             )
 
             self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
                 llm_punica_wrapper
             )
+            if self.lora_config.requires_distributed_routing(
+                vllm_config.parallel_config
+            ):
+                from vllm.lora.routing_utils import DistributedLoRATensors
+
+                tp_size = vllm_config.parallel_config.tensor_parallel_size
+                llm_punica_wrapper.distributed_lora_tensors = DistributedLoRATensors(
+                    math.ceil(max_num_batched_tokens / tp_size) * tp_size,
+                    self.lora_config.max_loras_per_request,
+                    self.lora_config.max_loras,
+                    self.device,
+                )
 
     def _maybe_init_mm(
         self,
@@ -430,7 +452,7 @@ class LoRAModelManager:
             "Use LRUCacheLoRAModelManager for pinning"
         )  # type: ignore
 
-    def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+    def _set_adapter_mapping(self, mapping: LoRAMapping | LoRARouteMapping) -> None:
         # Default to the main language model wrapper
         if not (self.supports_mm and self.supports_tower_connector_lora):
             target_prefix = (
@@ -1420,7 +1442,7 @@ class LoRAModelManager:
         self._add_adapter(adapter)
         return True
 
-    def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+    def set_adapter_mapping(self, mapping: LoRAMapping | LoRARouteMapping) -> None:
         # The punica metadata derives from the slot layout as well as the
         # mapping: an out-of-band add_lora() can LRU-evict and reassign slots
         # while the running batch, and thus the mapping, is unchanged.

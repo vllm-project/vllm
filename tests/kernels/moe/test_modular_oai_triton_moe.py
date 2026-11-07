@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
     OAITritonExperts,
     UnfusedOAITritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.platforms import current_platform
@@ -223,6 +224,7 @@ def oai_triton_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     unfused: bool = False,
+    lora_context: MoELoRAContext | None = None,
 ) -> torch.Tensor:
     quant_config = mxfp4_w4a16_moe_quant_config(
         w1_bias=w1_bias,
@@ -230,10 +232,13 @@ def oai_triton_moe_impl(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
     )
-    moe_config = make_dummy_moe_config()
+    # The LoRA gate/up interleave follows the configured activation.
+    moe_config = make_dummy_moe_config(activation=MoEActivation.SWIGLUOAI)
 
     if unfused:
         fused_experts = UnfusedOAITritonExperts(moe_config, quant_config)
+        if lora_context is not None:
+            fused_experts.set_lora_context(lora_context)
     else:
         fused_experts = OAITritonExperts(moe_config, quant_config)
 
@@ -321,6 +326,152 @@ def test_oai_triton_moe(
         out = out[..., :k]
 
     assert_close(ref=out_ref, tri=out, maxtol=0.025, rmstol=0.005)
+
+
+def merged_lora_weights(w1, w2, ctx, coefficients):
+    """Base expert weights plus sum_i c_i * B_i @ A_i, in torch_moe_impl layout."""
+    w1, w2 = w1.float().clone(), w2.float().clone()
+    n = w2.shape[1]
+    for slot, coefficient in enumerate(coefficients):
+        for part in range(2):
+            delta = (
+                ctx.w13_lora_b_stacked[part][slot].float()
+                @ ctx.w13_lora_a_stacked[part][slot].float()
+            )
+            w1[..., part * n : (part + 1) * n] += coefficient * delta.transpose(1, 2)
+        delta = (
+            ctx.w2_lora_b_stacked[0][slot].float()
+            @ ctx.w2_lora_a_stacked[0][slot].float()
+        )
+        w2 += coefficient * delta.transpose(1, 2)
+    return w1, w2
+
+
+@pytest.mark.skipif(
+    not UnfusedOAITritonExperts._supports_current_device(),
+    reason="Unfused OAI Triton MoE is not supported on this device.",
+)
+@pytest.mark.parametrize("routed", [False, True])
+def test_unfused_oai_triton_moe_lora_matches_merged_weights(routed, workspace_init):
+    """Expert LoRA deltas land on the right (token, expert) rows although the
+    expert matmuls produce expert-sorted rows; ids returned in score order make
+    that permutation non-trivial."""
+    from vllm.config import LoRAConfig
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    m, n, k, num_experts, topk, rank, num_loras = 16, 512, 384, 32, 4, 16, 2
+    (
+        w1,
+        w2,
+        w1_bias,
+        w2_bias,
+        w1_tri,
+        w2_tri,
+        w1_bias_tri,
+        w2_bias_tri,
+        w1_precision_config,
+        w2_precision_config,
+        x_pad,
+    ) = make_weights(dtype, k, n, num_experts)
+    assert x_pad == 0
+    x = torch.randn((m, k), dtype=dtype, device="cuda")
+    router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+
+    def lora(*shape, scale):
+        weight = torch.randn(num_loras, num_experts, *shape, device="cuda")
+        return (weight * scale).to(dtype)
+
+    with set_current_vllm_config(VllmConfig()):
+        wrapper = PunicaWrapperGPU(
+            m,
+            m,
+            "cuda",
+            lora_config=LoRAConfig(
+                max_loras=num_loras, max_lora_rank=rank, max_loras_per_request=2
+            ),
+        )
+        ctx = MoELoRAContext(
+            w13_lora_a_stacked=tuple(lora(rank, k, scale=k**-0.5) for _ in range(2)),
+            w13_lora_b_stacked=tuple(lora(n, rank, scale=2.0) for _ in range(2)),
+            w2_lora_a_stacked=(lora(rank, n, scale=n**-0.5),),
+            w2_lora_b_stacked=(lora(k, rank, scale=2.0),),
+            adapter_enabled=torch.ones(num_loras + 1, dtype=torch.int32, device="cuda"),
+            max_loras=num_loras,
+            top_k=topk,
+            w13_num_slices=2,
+            fully_sharded=False,
+            tp_rank=0,
+            tp_size=1,
+            local_num_experts=num_experts,
+            punica_wrapper=wrapper,
+            use_tuned_config=False,
+        )
+        out_ref = torch.empty(m, k, device="cuda")
+        if routed:
+            coefficients = (0.7, 0.3)
+            slots = torch.tensor([[0, 1]] * m, dtype=torch.int32, device="cuda")
+            ctx.local_lora_routes = (
+                slots,
+                torch.tensor([coefficients] * m, device="cuda"),
+            )
+            w1_merged, w2_merged = merged_lora_weights(w1, w2, ctx, coefficients)
+            out_ref = torch_moe_impl(
+                x.float(),
+                w1_merged,
+                w2_merged,
+                w1_bias.float(),
+                w2_bias.float(),
+                topk_weights.float(),
+                topk_ids,
+            )
+        else:
+            # Alternate the two adapters across tokens.
+            wrapper.update_metadata(
+                LoRAMapping(
+                    index_mapping=tuple(1 + token % 2 for token in range(m)),
+                    prompt_mapping=(1,),
+                    is_prefill=True,
+                ),
+                lora_index_to_id=[1, 2],
+                max_loras=num_loras,
+                vocab_size=32,
+            )
+            for slot in range(num_loras):
+                rows = torch.arange(slot, m, 2, device="cuda")
+                coefficients = tuple(float(i == slot) for i in range(num_loras))
+                w1_merged, w2_merged = merged_lora_weights(w1, w2, ctx, coefficients)
+                out_ref[rows] = torch_moe_impl(
+                    x[rows].float(),
+                    w1_merged,
+                    w2_merged,
+                    w1_bias.float(),
+                    w2_bias.float(),
+                    topk_weights[rows].float(),
+                    topk_ids[rows],
+                )
+
+        out = oai_triton_moe_impl(
+            x,
+            w1_tri,
+            w2_tri,
+            w1_precision_config,
+            w2_precision_config,
+            w1_bias_tri,
+            w2_bias_tri,
+            num_experts,
+            topk_weights,
+            topk_ids,
+            unfused=True,
+            lora_context=ctx,
+        )[..., :k]
+
+    assert_close(ref=out_ref.to(dtype), tri=out, maxtol=0.025, rmstol=0.005)
 
 
 @pytest.mark.skipif(

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -200,12 +200,27 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         # pull the pre-cast view from token_mapping_meta.
         lora_ctx = self._lora_context
         local_token_lora_mapping = None
+        distributed_routes = None
         if lora_ctx is not None:
-            local_token_lora_mapping = (
-                lora_ctx.punica_wrapper.token_mapping_meta.token_lora_mapping[
-                    : a1.shape[0]
-                ]
-            )
+            lora_ctx.local_token_lora_mapping = None
+            lora_ctx.local_lora_routes = None
+            wrapper = lora_ctx.punica_wrapper
+            distributed_routes = wrapper.distributed_lora_tensors
+            # Check the shared configuration, not the rank-local request mix:
+            # every rank must reject before any peer enters dispatch.
+            if distributed_routes is None and (
+                wrapper.max_loras_per_request > 1
+                or wrapper.lora_route_mapping is not None
+            ):
+                raise NotImplementedError(
+                    "Routed LoRA with cross-rank MoE dispatch is not supported: "
+                    "adapter residency and slot identities are not synchronized "
+                    "across ranks. Use max_loras_per_request=1 and ordinary LoRA."
+                )
+            if distributed_routes is None:
+                local_token_lora_mapping = (
+                    wrapper.token_mapping_meta.token_lora_mapping[: a1.shape[0]]
+                )
 
         extra_tensors: list[torch.Tensor] | None = None
         if scales is not None:
@@ -214,7 +229,26 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             if extra_tensors is None:
                 extra_tensors = []
             extra_tensors.append(local_token_lora_mapping)
+        if distributed_routes is not None:
+            if extra_tensors is None:
+                extra_tensors = []
+            # Match sequence_parallel_chunk's contiguous, padded TP partition.
+            start = (
+                get_tensor_model_parallel_rank() * a1.shape[0]
+                if self.is_sequence_parallel
+                else 0
+            )
+            token_slice = slice(start, start + a1.shape[0])
+            extra_tensors.extend(
+                (
+                    distributed_routes.indices[token_slice],
+                    distributed_routes.weights[token_slice],
+                )
+            )
+            if a1q is not a1:
+                extra_tensors.append(a1)
 
+        dispatched_raw_input = distributed_routes is not None and a1q is not a1
         with self._comm_region():
             res = get_ep_group().dispatch(
                 a1q,
@@ -232,6 +266,15 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             assert len(res) == 4
             a1q, topk_weights, topk_ids, gathered_extras = res
             gathered_extras = list(gathered_extras)
+            if distributed_routes is not None:
+                assert lora_ctx is not None
+                lora_ctx.original_hidden_states = (
+                    gathered_extras.pop() if dispatched_raw_input else a1q
+                )
+                route_weights = gathered_extras.pop()
+                route_indices = gathered_extras.pop()
+                local_slots = distributed_routes.local_slots[route_indices.long()]
+                lora_ctx.local_lora_routes = (local_slots, route_weights)
             if local_token_lora_mapping is not None:
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
