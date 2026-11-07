@@ -202,6 +202,7 @@ class Plamo3AttentionMixer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=vllm_config.cache_config,
+            quant_config=quant_config,
             per_layer_sliding_window=config.interleaved_sliding_window[layer_idx],
             prefix=f"{prefix}.attn",
         )
