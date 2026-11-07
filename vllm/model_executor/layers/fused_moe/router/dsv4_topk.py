@@ -20,7 +20,7 @@ def can_use_dsv4_topk(
     indices_dtype: torch.dtype,
 ) -> bool:
     return (
-        current_platform.is_cuda()
+        current_platform.is_cuda_alike()
         and gating_output.dtype == torch.float32
         and gating_output.ndim == 2
         and gating_output.shape[1] in (256, 384)
@@ -35,7 +35,9 @@ def can_use_dsv4_topk(
     )
 
 
-if current_platform.is_cuda():
+# ROCm is included: the PDL intrinsics below sit behind a constexpr that
+# is_arch_support_pdl() leaves false off CUDA, so they compile out there.
+if current_platform.is_cuda_alike():
 
     @triton.jit
     def _dsv4_topk_kernel(
