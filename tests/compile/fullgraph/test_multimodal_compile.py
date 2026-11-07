@@ -187,6 +187,40 @@ def test_paddleocr_vl_compilation(
         pass
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.parametrize(
+    ("compile_mm_encoder", "expected_models"),
+    [
+        # The Whisper decoder is always compiled. Enabling encoder compilation
+        # adds the encoder layer stack (WhisperEncoderLayers) as one module.
+        pytest.param(False, 1, id="disabled"),
+        pytest.param(True, 2, id="enabled"),
+    ],
+)
+@create_new_process_for_each_test("spawn")
+def test_whisper_compilation(
+    vllm_runner, monkeypatch, compile_mm_encoder: bool, expected_models: int
+):
+    """Test that the Whisper encoder layer stack compiles only when enabled."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    with (
+        compilation_counter.expect(num_models_seen=expected_models),
+        vllm_runner(
+            "openai/whisper-tiny",
+            max_model_len=448,
+            limit_mm_per_prompt={"audio": 1},
+            gpu_memory_utilization=0.5,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": compile_mm_encoder,
+            },
+        ) as _,
+    ):
+        pass
+
+
 # Requires Cuda and 8 gpus as well
 @pytest.mark.skip(reason="Skipping due to CI resource constraints")
 @create_new_process_for_each_test("spawn")

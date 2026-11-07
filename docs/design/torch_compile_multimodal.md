@@ -20,6 +20,12 @@ some increase in compilation time
 This feature is off by default, but can be enabled by setting `compile_mm_encoder: true` in the compilation config when models have the
 `@support_torch_compile` decorator.
 
+The same flag also compiles the Whisper audio encoder's layer stack. This applies to Whisper and to models that reuse `WhisperEncoder`, such as Voxtral:
+
+```bash
+vllm serve openai/whisper-large-v3-turbo --compilation-config '{"compile_mm_encoder": true}'
+```
+
 ## How Compilation Works for Multimodal Components
 
 ### APIs for Enablement
