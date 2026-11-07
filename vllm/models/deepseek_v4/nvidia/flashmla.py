@@ -12,7 +12,10 @@ from vllm.models.deepseek_v4.common.ops import (
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
+    compute_fp8_einsum_recipe,
+    maybe_dequant_wo_a,
+)
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
@@ -54,6 +57,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        maybe_dequant_wo_a(self.wo_a)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         z = self.wo_a.grouped_forward(
