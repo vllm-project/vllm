@@ -118,13 +118,13 @@ class TranslationRequest(OpenAIBaseModel):
     minimum likelihood threshold during sampling.
     """
 
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     """The frequency penalty to use for sampling."""
 
     repetition_penalty: float | None = None
     """The repetition penalty to use for sampling."""
 
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     """The presence penalty to use for sampling."""
     # --8<-- [end:translation-sampling-params]
 
@@ -175,6 +175,8 @@ class TranslationRequest(OpenAIBaseModel):
     # Default sampling parameters for translation requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
         "temperature": 0,
         "top_p": 1.0,
         "top_k": 0,
@@ -252,6 +254,16 @@ class TranslationRequest(OpenAIBaseModel):
                 "repetition_penalty",
                 self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
             )
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get(
+                "presence_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["presence_penalty"],
+            )
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get(
+                "frequency_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["frequency_penalty"],
+            )
 
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -261,9 +273,9 @@ class TranslationRequest(OpenAIBaseModel):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
-            frequency_penalty=self.frequency_penalty,
+            frequency_penalty=frequency_penalty,
             repetition_penalty=repetition_penalty,
-            presence_penalty=self.presence_penalty,
+            presence_penalty=presence_penalty,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,

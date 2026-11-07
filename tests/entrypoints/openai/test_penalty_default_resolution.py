@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Unit tests for presence_penalty / frequency_penalty resolution from
-default_sampling_params in ChatCompletionRequest, BatchChatCompletionRequest
-and CompletionRequest.
+default_sampling_params in ChatCompletionRequest, BatchChatCompletionRequest,
+CompletionRequest, TranscriptionRequest and TranslationRequest.
 
 Regression test for https://github.com/vllm-project/vllm/issues/50767:
 these two penalties defaulted to 0.0 (not None) and to_sampling_params()
@@ -12,12 +12,23 @@ forwarded them straight through, so server-side defaults coming from
 discarded on the /v1/chat/completions and /v1/completions endpoints.
 """
 
+from io import BytesIO
+
+import pytest
+from fastapi import UploadFile
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
+)
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+)
+from vllm.entrypoints.speech_to_text.translation.protocol import (
+    TranslationRequest,
 )
 
 _DEFAULTS = {"presence_penalty": 1.5, "frequency_penalty": 0.5}
@@ -89,3 +100,28 @@ class TestCompletionPenaltyDefaults:
         ).to_sampling_params(16, _DEFAULTS)
         assert sp.presence_penalty == 1.5
         assert sp.frequency_penalty == 0.9
+
+
+@pytest.mark.parametrize("request_cls", [TranscriptionRequest, TranslationRequest])
+class TestSpeechToTextPenaltyDefaults:
+    @staticmethod
+    def _request(request_cls, **kwargs):
+        audio = UploadFile(file=BytesIO(b""), filename="audio.wav")
+        return request_cls(file=audio, model="test-model", **kwargs)
+
+    def test_defaults_applied_when_client_omits(self, request_cls):
+        sp = self._request(request_cls).to_sampling_params(16, _DEFAULTS)
+        assert sp.presence_penalty == 1.5
+        assert sp.frequency_penalty == 0.5
+
+    def test_client_value_overrides_default(self, request_cls):
+        sp = self._request(
+            request_cls, presence_penalty=0.0, frequency_penalty=0.9
+        ).to_sampling_params(16, _DEFAULTS)
+        assert sp.presence_penalty == 0.0
+        assert sp.frequency_penalty == 0.9
+
+    def test_falls_back_to_zero_without_default(self, request_cls):
+        sp = self._request(request_cls).to_sampling_params(16, {})
+        assert sp.presence_penalty == 0.0
+        assert sp.frequency_penalty == 0.0
