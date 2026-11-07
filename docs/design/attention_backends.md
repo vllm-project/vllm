@@ -231,7 +231,7 @@ MLA decode backends are selected using the standard
 
 --8<-- "gen:table-mla-decode"
 
-> **Note:** `nvfp4` on `FLASHINFER_MLA` also needs BF16 activations, head size 576, SM100/SM103, FlashInfer's Cake NVFP4 MLA decode and a CUDA 13.4+ toolkit; see [NVFP4 KV Cache for Dense MLA](../features/quantization/quantized_kvcache.md#nvfp4-kv-cache-for-dense-mla).
+> **Note:** `nvfp4` on `FLASHINFER_MLA` also needs BF16 activations, head size 576, SM100/SM103, FlashInfer 0.7.4 or newer (its Cake NVFP4 MLA decode) and a CUDA 13.4+ toolkit; see [NVFP4 KV Cache for Dense MLA](../features/quantization/quantized_kvcache.md#nvfp4-kv-cache-for-dense-mla).
 
 ### DeepSeek V4 Decode Backends
 
