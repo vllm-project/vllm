@@ -1044,6 +1044,8 @@ def test_triton_unified_attn_fp16_input_fp8_output(
 # The non-pow2 case mirrors real models like Phi-3-mini (head_size=96).
 HEAD_SIZES_USE_TD = [128, 256, 96]
 
+BLOCK_SIZES_USE_TD = [16, 32, 64, 128]
+
 
 def _run_use_td_case(
     seq_lens: list[tuple[int, int]],
@@ -1151,7 +1153,7 @@ def _run_use_td_case(
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES_USE_TD)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_USE_TD)
 @pytest.mark.parametrize("sliding_window", [None, 128])
 @pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
@@ -1169,12 +1171,13 @@ def test_triton_unified_attn_use_td(
 ) -> None:
     """Exercise the USE_TD (tensor-descriptor) Q/K/V load/store path.
 
-    Covers both 2D and 3D kernels via ``seq_threshold_3D``. Two routes
+    Covers both 2D and 3D kernels via ``seq_threshold_3D``. Three routes
     to the USE_TD_QO=False fallback (pointer path for Q/O with TD still
     active for KV tile loads):
 
     - non-pow2 ``num_queries_per_kv`` via ``NUM_HEADS`` entry ``(5, 1)``,
     - non-pow2 ``head_size`` via ``HEAD_SIZES_USE_TD`` entry ``96``.
+    - CUDA query lengths at or below ``MAX_3D_QUERY_LEN``.
     """
     _run_use_td_case(
         seq_lens=seq_lens,
@@ -1185,6 +1188,25 @@ def test_triton_unified_attn_use_td(
         soft_cap=soft_cap,
         seq_threshold_3D=seq_threshold_3D,
         num_blocks=num_blocks,
+    )
+
+
+@pytest.mark.parametrize("query_len", [2, MAX_3D_QUERY_LEN])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_USE_TD)
+@torch.inference_mode()
+def test_triton_unified_attn_use_td_speculative_decode(
+    query_len: int,
+    block_size: int,
+) -> None:
+    """Exercise K/V TD with pointer Q/O for CUDA speculative decode."""
+    _run_use_td_case(
+        seq_lens=[(query_len, 128), (1, 257)],
+        num_heads=(4, 4),
+        head_size=128,
+        block_size=block_size,
+        sliding_window=None,
+        soft_cap=None,
+        seq_threshold_3D=8,
     )
 
 
