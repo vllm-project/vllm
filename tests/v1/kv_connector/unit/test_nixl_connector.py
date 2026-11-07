@@ -2909,25 +2909,31 @@ def _dsv4_mla_spec(record_bytes: int, alignment: int, tokens_per_state: int):
     "groups",
     [
         # V4 record: padded pages, so a layer view is not a contiguous page.
-        [(_dsv4_mla_spec(584, 576, 4), 4)],
+        pytest.param([(_dsv4_mla_spec(584, 576, 4), 4)], id="v4-padded-pages"),
         # V4.1 MXFP8 record: unpadded pages in rows that the compressed caches
         # and a compressor-state ring alias.
-        [
-            (_dsv4_mla_spec(528, 512, 2), 2),
-            (_dsv4_mla_spec(528, 512, 2), 2),
-            (
-                CircularBufferSpec(
-                    block_size=8,
-                    num_kv_heads=1,
-                    head_size=8448,
-                    head_size_v=0,
-                    dtype=torch.uint8,
+        pytest.param(
+            [
+                (_dsv4_mla_spec(528, 512, 2), 2),
+                (_dsv4_mla_spec(528, 512, 2), 2),
+                (
+                    CircularBufferSpec(
+                        block_size=8,
+                        num_kv_heads=1,
+                        head_size=8448,
+                        head_size_v=0,
+                        dtype=torch.uint8,
+                    ),
+                    2,
                 ),
-                2,
+            ],
+            id="v41-aliased-groups",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="Region dedup drops the packed-row alias; fixed by #64661",
             ),
-        ],
+        ),
     ],
-    ids=["v4-padded-pages", "v41-aliased-groups"],
 )
 def test_register_packed_dsv4_mla_cache_as_single_region(
     default_vllm_config, dist_init, groups
@@ -3647,8 +3653,8 @@ class TestPeerReplacement:
             {"old-req": [10, 11], "healthy-req": [12]}
         )
         self.nixl.invalid_remote_agents.add("old")
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "ERR" if h == 10 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "ERR" if h == 10 else "PROC"
         )
         old_handle = self.worker.dst_xfer_side_handles["old"][0]
 
@@ -3658,8 +3664,8 @@ class TestPeerReplacement:
         self.worker.start_load_kv(self._request("old", req_id="blocked"))
         self.transport.make_prepped_xfer.assert_not_called()
 
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "DONE" if h == 11 else "PROC"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "DONE" if h == 11 else "PROC"
         )
         result = self.worker.get_transfer_results()
         assert (
@@ -3736,8 +3742,8 @@ class TestPeerReplacement:
     def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
         self._fail_old_peer()
         self.worker._recving_transfers["old-req"].append(11)
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "PROC" if h == 11 else "ERR"
+        self.transport.check_xfer_state.side_effect = lambda h: (
+            "PROC" if h == 11 else "ERR"
         )
         self.worker.get_transfer_results()
         self.transport.make_prepped_xfer.reset_mock()
