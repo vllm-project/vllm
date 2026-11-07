@@ -53,8 +53,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Export remote_blocks_expiry_time for P blocks too, plus
+#      remote_lease_extension; the consumer gates every remote read on it
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -230,6 +232,11 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pp_size: int = 1
+    # Per remote request id, the lease deadline the remote exported (its
+    # perf_counter) and the seconds each heartbeat renews it by, when the
+    # remote provided both. The worker keeps an exact model of the lease it
+    # renews from these (NixlBaseConnectorWorker._record_heartbeat_sent).
+    leases: dict[ReqId, tuple[float, int]] = field(default_factory=dict)
 
 
 @dataclass
