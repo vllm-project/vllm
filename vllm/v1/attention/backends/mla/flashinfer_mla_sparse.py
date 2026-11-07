@@ -25,7 +25,6 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     has_flashinfer_prims_ts_sparse_mla,
-    has_flashinfer_sparse_mla_sm120,
     prims_ts_sparse_mla_format_error,
     prims_ts_sparse_mla_schedules_native_heads,
 )
@@ -132,6 +131,8 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        from vllm.config import get_current_vllm_config
+
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         if (
@@ -229,6 +230,9 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        from vllm.config import get_current_vllm_config
+        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+
         if not has_flashinfer_sparse_mla_sm120():
             return (
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
@@ -659,15 +663,13 @@ def _reserve_kv_counters(device: torch.device, num_rows: int, num_heads: int) ->
         _fi_sparse_kv_counters = torch.zeros(nbytes, dtype=torch.uint8, device=device)
 
 
-def _kv_counters(
-    num_rows: int, num_heads: int, device: torch.device
-) -> dict[str, torch.Tensor]:
+def _kv_counters(num_rows: int, num_heads: int) -> dict[str, torch.Tensor]:
     """``multi_ctas_kv_counter_buffer`` for one launch when the reserved
     counters cover it; otherwise FlashInfer allocates its own."""
     counters = _fi_sparse_kv_counters
     if counters is None:
         return {}
-    if counters.nbytes < _kv_counter_bytes(num_rows, num_heads, device):
+    if counters.nbytes < _kv_counter_bytes(num_rows, num_heads, counters.device):
         return {}
     return {"multi_ctas_kv_counter_buffer": counters}
 
@@ -1152,7 +1154,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # ``out`` unwritten (flashinfer-ai/flashinfer#3125). Launch row chunks.
         for start in range(0, num_tokens, _TRTLLM_GEN_MAX_REQUESTS):
             end = min(start + _TRTLLM_GEN_MAX_REQUESTS, num_tokens)
-            extra_kwargs = _kv_counters(end - start, padded_heads, q.device)
+            extra_kwargs = _kv_counters(end - start, padded_heads)
             if topk_lens is not None:
                 extra_kwargs["sparse_mla_top_k_lens"] = topk_lens[start:end]
             if lse is not None:
