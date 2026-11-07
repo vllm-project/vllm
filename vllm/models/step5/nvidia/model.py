@@ -636,6 +636,26 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         else:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
 
+    def assert_fully_loaded(self, prefix: str) -> None:
+        """Fail unless this load covered every shard, then forget the record.
+
+        Tracking per load (instead of latching a flag on first success) is what
+        makes weight reloading safe: a reload materializes fresh uninitialized
+        storage for the whole parameter, so a shard the new weight stream omits
+        would otherwise silently become garbage.
+        """
+        loaded = self.loaded_shard_ids.pop("weight", set())
+        self.loaded_shard_ids.clear()
+        missing = [shard for shard in self.shard_ids if shard not in loaded]
+        if missing:
+            raise ValueError(
+                f"Incomplete fused qkv+indexer weight for {prefix}: "
+                f"missing shards {missing}."
+            )
+
+    def reset_load_state(self) -> None:
+        self.loaded_shard_ids.clear()
+
     def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
@@ -657,6 +677,31 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
             dim=-1,
         )
         return index_q, index_k, index_z, gate
+
+
+def _in_weight_update(model: nn.Module) -> bool:
+    """One `load_weights` call during an update may hold only some of the shards."""
+    from vllm.model_executor.model_loader.reload.direct import direct_reload_active
+    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+    return direct_reload_active(model) or get_layerwise_info(model).can_load()
+
+
+def _reset_fused_qkv_indexer_load_state(module: nn.Module) -> None:
+    for submodule in module.modules():
+        if isinstance(submodule, Step5FusedQKVIndexerLinear):
+            submodule.reset_load_state()
+
+
+def _validate_fused_qkv_indexer_weights(module: nn.Module) -> set[str]:
+    loaded_params: set[str] = set()
+    for name, submodule in module.named_modules():
+        if not isinstance(submodule, Step5FusedQKVIndexerLinear):
+            continue
+        param_name = f"{name}.weight" if name else "weight"
+        submodule.assert_fully_loaded(param_name)
+        loaded_params.add(param_name)
+    return loaded_params
 
 
 class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
@@ -2390,6 +2435,9 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        validate_completeness = not _in_weight_update(self)
+        if validate_completeness:
+            _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]
         if self.config.tie_word_embeddings:
             skip_prefixes.append("lm_head.")
@@ -2397,4 +2445,10 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             orig_to_new_prefix={prefix: None for prefix in skip_prefixes}
         )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=mapper)
+        loaded_params = loader.load_weights(weights, mapper=mapper)
+        if validate_completeness:
+            loaded_params.update(
+                f"model.{name}"
+                for name in _validate_fused_qkv_indexer_weights(self.model)
+            )
+        return loaded_params

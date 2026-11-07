@@ -37,8 +37,11 @@ from .model import (
     STEP5_PACKED_MODULES_MAPPING,
     Step5DecoderLayer,
     Step5MoE,
+    _in_weight_update,
+    _reset_fused_qkv_indexer_load_state,
     _set_step5_moe_protocol_metadata,
     _step5_sp_padding,
+    _validate_fused_qkv_indexer_weights,
 )
 
 logger = init_logger(__name__)
@@ -353,6 +356,9 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
             default_weight_loader,
         )
 
+        validate_completeness = not _in_weight_update(self)
+        if validate_completeness:
+            _reset_fused_qkv_indexer_load_state(self)
         params_dict = dict(self.named_parameters())
 
         loaded_params: set[str] = set()
@@ -400,6 +406,8 @@ class Step5MTP(nn.Module, MixtureOfExperts, SupportsMultiModal):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+        if validate_completeness:
+            loaded_params.update(_validate_fused_qkv_indexer_weights(self))
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int | None, name: str) -> str:
