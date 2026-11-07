@@ -22,7 +22,7 @@ pip install llama-index llama-index-readers-web \
 
 2. Start services:
     # Start embedding service (port 8000)
-    vllm serve ssmits/Qwen2-7B-Instruct-embed-base
+    vllm serve ssmits/Qwen2-7B-Instruct-embed-base --task embed
 
     # Start chat service (port 8001)
     vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
