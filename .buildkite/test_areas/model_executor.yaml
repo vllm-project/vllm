@@ -83,3 +83,89 @@ steps:
   dind: false
   depends_on:
   - image-build-amd
+
+- label: ":nvidia: (B200) Weight Reload Refit"
+  device: b200-k8s
+  key: weight-reload-refit
+  timeout_in_minutes: 45
+  # the reload code and what the test drives directly; the nightly steps
+  # cover the quantization, MoE, attention and model files
+  source_file_dependencies:
+  - vllm/device_allocator/
+  - vllm/model_executor/model_loader/reload/
+  - vllm/model_executor/model_loader/mtp_validation.py
+  - vllm/model_executor/model_loader/utils.py
+  - vllm/model_executor/model_loader/weight_checksum.py
+  - vllm/model_executor/model_loader/weight_utils.py
+  - vllm/distributed/weight_transfer/
+  - vllm/model_executor/utils.py
+  - vllm/model_executor/parameter.py
+  - vllm/v1/worker/extensible_kv_cache.py
+  - vllm/v1/worker/gpu_worker.py
+  - tests/model_executor/model_loader/test_direct_reload.py
+  - tests/model_executor/model_loader/test_load_plan.py
+  - tests/model_executor/model_loader/test_reload_refit.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s
+    model_executor/model_loader/test_direct_reload.py
+    model_executor/model_loader/test_load_plan.py
+  - >-
+    pytest -v -s model_executor/model_loader/test_reload_refit.py
+    -m "not distributed and not slow_test" --timeout=900 --timeout-method=thread
+
+- label: ":nvidia: (B200) [Nightly] Weight Reload Refit Extra Cases"
+  device: b200-k8s
+  key: weight-reload-refit-nightly
+  optional: true
+  timeout_in_minutes: 45
+  source_file_dependencies: &weight-reload-refit-nightly-deps
+  - vllm/config/vllm.py
+  - vllm/envs.py
+  - vllm/distributed/eplb/
+  - vllm/distributed/weight_transfer/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/parameter.py
+  - vllm/model_executor/utils.py
+  - vllm/model_executor/models/utils.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/models/llama.py
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/models/qwen3.py
+  - vllm/model_executor/models/qwen3_moe.py
+  - vllm/utils/deep_gemm.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/worker/extensible_kv_cache.py
+  - vllm/v1/worker/gpu_worker.py
+  - tests/model_executor/model_loader/test_reload_refit.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s model_executor/model_loader/test_reload_refit.py
+    -m "slow_test and not distributed" --timeout=900 --timeout-method=thread
+
+- label: ":nvidia: (2xB200) [Nightly] Weight Reload Refit"
+  device: b200-k8s
+  num_devices: 2
+  key: weight-reload-refit-2gpu
+  optional: true
+  timeout_in_minutes: 45
+  source_file_dependencies: *weight-reload-refit-nightly-deps
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s model_executor/model_loader/test_reload_refit.py
+    -m distributed --timeout=1500 --timeout-method=thread
