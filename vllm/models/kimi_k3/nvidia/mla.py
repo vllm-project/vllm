@@ -11,8 +11,10 @@ This is a self-contained MLA layer that owns the full attention path:
            prefill: fused key-concat + cache-insert kernel -> run_prefill_new_tokens
                     (+ chunked-context merge, whose per-chunk gather -> kv_b_proj
                     -> fused K/V pack loop this layer owns); dispatched by cache
-                    dtype (bf16 / plain fp8 / fp8_ds_mla)
+                    dtype (bf16 / plain fp8 / fp8_ds_mla / nvfp4; nvfp4 rotates
+                    q/k first, then writes through concat_and_cache_mla)
            decode : W_UK absorb (BMM1) -> fused q-concat + cache-insert kernel
+                    (nvfp4: RoPE + concat_and_cache_mla + torch.cat)
                     -> impl.forward_mqa -> W_UV up-proj (MQA)
       -> optional output gate
       -> o_proj
@@ -86,6 +88,7 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_key_concat_ds_mla_insert,
     fused_mla_key_concat_kv_cache_insert,
     fused_mla_kv_concat,
+    fused_mla_kv_concat_quant_fp8,
     fused_mla_kv_pack_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
@@ -381,7 +384,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             query_dtype = (
                 torch.float8_e4m3fn
                 if is_quantized_kv_cache(self.kv_cache_dtype)
-                and self.kv_cache_dtype != "fp8_ds_mla"
+                and self.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4")
                 else dtype
             )
             self.dcp_manager = MLADCPManager(
@@ -436,6 +439,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # fp8_ds_mla: 656-byte custom layout; see flashmla_sparse.py.
+            # NVFP4 is sized by FlashInferMLABackend.customize_spec.
             state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
@@ -494,12 +498,12 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         the backend reads it as E4M3 rather than fp4/E2M1 -- the latter doubles
         the perceived head dim (``head_size * 2``) and fails the kernel's
         ``head_dim_k == head_dim_q`` check. Mirrors ``MLAAttention.forward``;
-        the fp8_ds_mla layout keeps its native uint8 view.
+        the fp8_ds_mla and nvfp4 layouts keep their native uint8 view.
         """
         cache = self.kv_cache
-        if (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and self.kv_cache_dtype != "fp8_ds_mla"
+        if is_quantized_kv_cache(self.kv_cache_dtype) and self.kv_cache_dtype not in (
+            "fp8_ds_mla",
+            "nvfp4",
         ):
             return cache.view(current_platform.fp8_dtype())
         return cache
@@ -668,7 +672,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         # Decode tokens are laid out first, prefill tokens after. The fused
         # prefill covers every supported config (bf16 / plain-fp8 /
-        # fp8_ds_mla), so there is no dense-MHA (forward_mha) fallback.
+        # fp8_ds_mla / nvfp4), so there is no dense-MHA (forward_mha) fallback.
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
@@ -695,8 +699,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             )
             # BMM1: absorb q_nope into latent space. (N,B,P) x (N,P,L) -> (B,N,L)
             ql_nope = torch.bmm(mqa_q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
-            # Fused: concat mqa_q = [ql_nope | q_pe] and insert the decode-token
-            # latent into the paged cache (one launch, right before forward_mqa).
+            # Concat mqa_q = [ql_nope | q_pe] and insert the decode-token latent
+            # into the paged cache, right before forward_mqa.
             mqa_q = self._decode_concat_cache(
                 ql_nope,
                 mqa_q_pe,
@@ -737,8 +741,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         cos_sin_cache: torch.Tensor | None,
         slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
-        """Fused decode query-concat + latent cache insert, dispatched by cache
-        dtype (same policy as prefill: fp8 cache -> fp8 query)."""
+        """Decode query-concat + latent cache insert, dispatched by cache dtype.
+
+        bf16 / plain fp8 / fp8_ds_mla use the fused kernel (fp8 cache -> fp8
+        query, as in prefill); nvfp4 goes through _insert_nvfp4_latent and
+        keeps the bf16 query, which the NVFP4 decode quantizes per row."""
         if self.kv_cache_dtype == "fp8_ds_mla":
             cache = self.kv_cache
             if cache.dtype != torch.uint8:
@@ -754,6 +761,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 positions=positions,
                 cos_sin_cache=cos_sin_cache,
             )
+        if self.kv_cache_dtype == "nvfp4":
+            self._insert_nvfp4_latent(
+                q_pe, kv_c_normed, k_pe, positions, cos_sin_cache, slot_mapping
+            )
+            return torch.cat([ql_nope, q_pe], dim=-1)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             cache = self.kv_cache
             if cache.dtype != torch.float8_e4m3fn:
@@ -785,6 +797,39 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             positions=positions,
             cos_sin_cache=cos_sin_cache,
+        )
+
+    def _insert_nvfp4_latent(
+        self,
+        q_pe: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Insert the latent into the NVFP4 cache, first rotating ``q_pe`` and
+        ``k_pe`` in place on RoPE layers (the DSpark draft's).
+
+        The fused epilogues rotate as they write, but cannot write this layout,
+        so the same GPT-J rotation runs here on the fp32 cos/sin table."""
+        if positions is not None:
+            assert cos_sin_cache is not None and self.rotary_emb is not None
+            ops.rotary_embedding(
+                positions,
+                q_pe,
+                k_pe,
+                self.qk_rope_head_dim,
+                cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+            )
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.reshape(k_pe.shape[0], -1),
+            self.kv_cache,
+            slot_mapping,
+            "nvfp4",
+            self._k_scale,
         )
 
     def _fused_mla_kv_concat(
@@ -955,6 +1000,19 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 batch_size=chunk.num_requests,
                 seq_starts=chunk.starts,
             )
+        elif self.kv_cache_dtype == "nvfp4":
+            # Checked before the fp8_prefill split: NVFP4 always dequantizes
+            # into the model-dtype workspace.
+            ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+                src_cache=kv_cache,
+                dst=workspace[:toks],
+                block_table=block_table,
+                workspace_starts=chunk.cu_seq_lens,
+                batch_size=chunk.num_requests,
+                seq_starts=chunk.starts,
+                kv_cache_dtype="nvfp4",
+                scale=self._k_scale,
+            )
         elif not fp8_prefill:
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_cache,
@@ -999,6 +1057,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
           - bf16 cache        -> bf16 prefill query
           - plain fp8 cache   -> fp8 prefill query (unscaled q/k/v; cache _k_scale)
           - fp8_ds_mla cache  -> bf16 prefill query (656B per-tile self-scaled)
+          - nvfp4 cache       -> RoPE + concat_and_cache_mla, then an fp8 (unscaled
+                                 q/k/v) or bf16 prefill query
         """
         prefill = attn_metadata.prefill
         has_context = prefill.chunked_context is not None
@@ -1028,6 +1088,22 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 positions,
                 cos_sin_cache,
             )
+        elif self.kv_cache_dtype == "nvfp4":
+            self._insert_nvfp4_latent(
+                q[..., self.qk_nope_head_dim :],
+                kv_c_normed,
+                k_pe,
+                positions,
+                cos_sin_cache,
+                slot_mapping,
+            )
+            if fp8_prefill:
+                # Unscaled fp8 q/k/v as in the plain fp8 arm; the context gather
+                # dequantizes with k_scale, so both merge halves are in real units.
+                q = q.to(prefill.q_data_type)
+                k, v = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+            else:
+                k = fused_mla_kv_concat(k_nope, k_pe)
         elif is_quantized_kv_cache(self.kv_cache_dtype):
             assert fp8_prefill, (
                 "Kimi-K3 fp8 KV cache requires an fp8 prefill query; enable "

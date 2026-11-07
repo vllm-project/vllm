@@ -940,6 +940,18 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 RUN --mount=type=cache,target=/opt/pip/cache \
     PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
 
+# FlashInfer's PyPI wheel leaves out the sources of its experimental kernels.
+# vLLM JIT-compiles one of them, the Cake NVFP4 MLA decode (`nvfp4` KV cache on
+# MLA), which needs CUDA 13.4+. A fixed directory readable by any user keeps
+# them visible to the non-root image. After upgrading FlashInfer in a derived
+# image, rerun the command with --force.
+ENV FLASHINFER_EXPERIMENTAL_SOURCES_DIR=/opt/flashinfer/experimental-sources
+RUN if [ "$(printf '%s\n' 13.4 "${CUDA_VERSION}" | sort -V | head -n1)" = "13.4" ]; then \
+        flashinfer download-experimental-sources \
+        && chgrp -R 0 /opt/flashinfer \
+        && chmod -R g+rwX,a+rX /opt/flashinfer; \
+    fi
+
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
 # Pre-install these to avoid reinstalling on every vLLM wheel rebuild

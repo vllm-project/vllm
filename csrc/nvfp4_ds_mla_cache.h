@@ -14,24 +14,27 @@
 // callers must guard on the same macro.
 namespace vllm {
 
-// concat_and_cache_mla for the nvfp4_ds_mla layout.
+// concat_and_cache_mla for the nvfp4_ds_mla layout (scale == nullptr), or for
+// the dense-MLA nvfp4 cache (scale = its k_scale).
 //   kv_c:       bf16   [num_tokens, 512]
 //   k_pe:       bf16   [num_tokens, 64]
 //   kv_cache:   uint8  [num_blocks, block_size, 352]
 void launch_concat_and_cache_nvfp4_ds_mla(const void* kv_c, const void* k_pe,
                                           void* kv_cache,
                                           const int64_t* slot_mapping,
-                                          int block_stride, int entry_stride,
-                                          int kv_c_stride, int k_pe_stride,
-                                          int block_size, int num_tokens,
-                                          cudaStream_t stream);
+                                          const float* scale, int block_stride,
+                                          int entry_stride, int kv_c_stride,
+                                          int k_pe_stride, int block_size,
+                                          int num_tokens, cudaStream_t stream);
 
-// Gather an nvfp4_ds_mla cache into a bf16 [total_tokens, 576] workspace.
+// Gather an nvfp4_ds_mla cache (scale == nullptr) or a dense-MLA nvfp4 cache
+// (scale = its k_scale) into a bf16 [total_tokens, 576] workspace.
 void launch_cp_gather_and_upconvert_nvfp4_kv_cache(
     const uint8_t* src_cache, void* dst, const int32_t* block_table,
     const int32_t* workspace_starts, const int32_t* seq_starts,
-    int32_t num_reqs, int32_t block_size, int32_t total_tokens,
-    int64_t block_table_stride, int64_t cache_block_stride,
-    int64_t cache_entry_stride, int64_t dst_entry_stride, cudaStream_t stream);
+    const float* scale, int32_t num_reqs, int32_t block_size,
+    int32_t total_tokens, int64_t block_table_stride,
+    int64_t cache_block_stride, int64_t cache_entry_stride,
+    int64_t dst_entry_stride, cudaStream_t stream);
 
 }  // namespace vllm

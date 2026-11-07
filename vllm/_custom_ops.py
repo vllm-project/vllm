@@ -3494,8 +3494,10 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
     workspace_starts: torch.Tensor,
     batch_size: int,
     seq_starts: torch.Tensor | None = None,
+    kv_cache_dtype: str = "nvfp4_ds_mla",
+    scale: torch.Tensor | None = None,
 ) -> None:
-    """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
+    """Gather and upconvert an NVFP4 MLA KV cache to a BF16 workspace.
 
     Args:
         src_cache: NVFP4 KV cache [num_blocks, block_size, 352] (uint8)
@@ -3505,6 +3507,12 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         batch_size: Number of requests
         seq_starts: Per-request token offset into the context to start
             reading from [num_reqs]; None reads from the first token.
+        kv_cache_dtype: "nvfp4_ds_mla", or "nvfp4" for the dense-MLA cache
+            (same bytes per token, plain-order block scales).
+        scale: For "nvfp4", the per-tensor (global) KV scale [1], i.e. the
+            layer's k_scale: the cache stores x / scale, with a computed E4M3
+            scale per 16 values. It comes from the checkpoint, or is 1.0 when
+            the checkpoint has none. Unused for nvfp4_ds_mla.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
@@ -3514,6 +3522,8 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         workspace_starts,
         batch_size,
         seq_starts,
+        kv_cache_dtype,
+        scale,
     )
 
 
