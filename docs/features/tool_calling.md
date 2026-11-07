@@ -173,6 +173,8 @@ that contain previously generated tool calls. Hermes, Mistral and Llama models h
 template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
 
+With `qwen3_coder` and other engine-based tool parsers that keep assistant text in streaming responses, non-streaming responses return text written before, between, and after tool calls in `message.content`, next to the parsed calls in `message.tool_calls`. Some parsers, such as `deepseek_v4`, drop text that follows a tool call.
+
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 When a custom structured-output grammar includes reasoning or tool-call
