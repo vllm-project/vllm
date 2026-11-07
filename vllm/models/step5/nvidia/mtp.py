@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from copy import deepcopy
+from copy import copy, deepcopy
 
 import torch
 import torch.nn as nn
@@ -50,7 +50,10 @@ def _get_mtp_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None or speculative_config.draft_model_config is None:
         return vllm_config
-    return replace(vllm_config, model_config=speculative_config.draft_model_config)
+    # A view of already-initialized configs: do not re-run deployment-level init.
+    model_config = copy(speculative_config.draft_model_config)
+    model_config.is_submodel_config = True
+    return replace(vllm_config, model_config=model_config)
 
 
 def _get_mtp_config(vllm_config: VllmConfig) -> PreTrainedConfig:
