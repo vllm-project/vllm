@@ -1276,3 +1276,30 @@ def test_worker_layer_to_group_routing(mock_parallel_groups):
             kv_cache_config=_make_hybrid_kv_cache_config(),
         )
     assert worker.layer_to_group == {"full0": 0, "sw0": 1}
+
+
+@pytest.mark.parametrize("read_mode", [False, True], ids=["write", "read"])
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_worker_accepts_decode_context_parallelism(
+    mock_parallel_groups, monkeypatch, role, read_mode
+):
+    """Prefill and decode instances with the same DCP size start in either mode."""
+    # The test model has no attention backend with DCP; an MLA model's would.
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector."
+        "get_current_attn_backends",
+        lambda vllm_config: [SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA")],
+    )
+    vllm_config = create_vllm_config(role=role, read_mode=read_mode)
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+        {
+            "http_port": _find_free_port(),
+            "handshake_port": _find_free_port(),
+            "notify_port": _find_free_port(),
+        }
+    )
+    with set_current_vllm_config(vllm_config):
+        worker = FakeMoRIIOConnectorWorker(vllm_config, "engine0", hand_shake_latency=0)
+    assert (worker.dcp_size, worker.cp_kv_cache_interleave_size) == (2, 1)

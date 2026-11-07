@@ -1013,6 +1013,34 @@ def _make_read_request(remote_block_ids):
     )
 
 
+@pytest.mark.parametrize("peer_known", [True, False])
+def test_read_release_without_prefill_address_is_skipped(peer_known):
+    """After a failed KV load the frontend finishes a cleanup copy of the
+    request under an id that embeds no prefill address. Its release cannot be
+    routed, so it is skipped instead of failing the next connector metadata."""
+    sched = _make_read_scheduler()
+    sched._has_mamba = False
+    sched.blocks_per_sw = [0]
+    params = {
+        "do_remote_prefill": True,
+        "transfer_id": "tx",
+        "remote_engine_id": "prefill",
+        "remote_block_ids": [[10, 11]],
+    }
+    if peer_known:
+        params.update(
+            remote_host="127.0.0.1", remote_handshake_port=6000, remote_notify_port=6001
+        )
+    request = SimpleNamespace(
+        request_id="ad780c39f0ad1090", kv_transfer_params=params, status=None
+    )
+
+    assert sched.request_finished(request, []) == (False, None)
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert list(meta.reqs_to_recv) == (["ad780c39f0ad1090"] if peer_known else [])
+
+
 @pytest.mark.parametrize("external_tokens", [0, 256])
 @pytest.mark.parametrize("has_mamba", [False, True])
 @pytest.mark.parametrize("zero_ids", [None, [], [101], [101, 102, 202, 999]])
@@ -1264,6 +1292,8 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         tp_rank=0,
         dp_rank=0,
         is_producer=False,
+        dcp_size=1,
+        cp_kv_cache_interleave_size=1,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="x")),
             scheduler_config=SimpleNamespace(
