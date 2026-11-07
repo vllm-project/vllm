@@ -876,9 +876,7 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
 
     # Decode-first mixed batch: 2 decode reqs (q_len 1) then 2 prefill reqs. Long
     # prefixes so every token sees > TOPK causal blocks (non-trivial selection).
@@ -1060,10 +1058,8 @@ def test_aiter_indexer_impl_matches_reference(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads,
-        "sparse_block_size": BLOCK_SIZE,
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
+    vllm_config.model_config.hf_config.index_block_size = BLOCK_SIZE
 
     # Decode-first mixed batch; two rows see fewer than TOPK blocks.
     batch = BatchSpec(
@@ -1340,9 +1336,7 @@ def test_nvfp4_indexer_impl_matches_reference(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
 
     decode_seq_lens = [2305, 2561, 9]
     prefill = [(2624, 64), (2720, 96), (100, 100), (1500, 1500)]
@@ -1462,9 +1456,7 @@ def test_nvfp4_indexer_decode_cuda_graph_replay(
     vllm_config = create_vllm_config(
         block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
     )
-    vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
-    }
+    vllm_config.model_config.hf_config.index_n_heads = num_idx_heads
     num_reqs, max_blocks = 4, 24
     num_tokens = num_reqs * decode_query_len
     num_physical = num_reqs * max_blocks

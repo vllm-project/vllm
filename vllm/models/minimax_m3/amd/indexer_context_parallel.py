@@ -236,7 +236,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
         vllm_config = get_current_vllm_config()
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        total_heads = text_config.sparse_attention_config["sparse_num_index_heads"]
+        total_heads = text_config.index_n_heads
         comp = vllm_config.compilation_config
         max_cg = getattr(comp, "max_cudagraph_capture_size", 0) or 0
         spec = getattr(vllm_config, "speculative_config", None)
