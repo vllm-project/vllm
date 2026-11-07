@@ -1325,9 +1325,6 @@ class Glm5NextForConditionalGeneration(
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
 
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()
-
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
             layer.mlp

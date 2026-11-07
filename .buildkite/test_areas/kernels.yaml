@@ -113,12 +113,16 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/model_executor/layers/minimax_rms_norm/
+      - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
       - vllm/distributed/
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
       - tests/kernels/core/test_minimax_reduce_rms.py
+      - tests/kernels/core/test_fused_allreduce_gemma_rms_norm.py
       - tests/utils.py
+      commands:
+      - pytest -v -s kernels/core/test_minimax_reduce_rms.py kernels/core/test_fused_allreduce_gemma_rms_norm.py
 
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
@@ -580,6 +584,7 @@ steps:
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
   - vllm/models/muse_spark/nvidia/
   - vllm/distributed/device_communicators/

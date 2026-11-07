@@ -35,6 +35,17 @@ def mock_if_no_torch(mock_module: str, mock: MagicMock):
         sys.modules[mock_module] = mock
 
 
+class MockBase:
+    """Real base for classes that inherit from a mock."""
+
+    def __class_getitem__(cls, item):
+        return cls
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        return core_schema.any_schema()
+
+
 class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
@@ -45,6 +56,10 @@ class PydanticMagicMock(MagicMock):
 
     def __get_pydantic_core_schema__(self, source_type, handler):
         return core_schema.any_schema()
+
+    # A fresh type each time so two mocks can be bases of one class
+    def __mro_entries__(self, bases):
+        return (type("MockBase", (MockBase,), {}),)
 
 
 # Mock custom op code
@@ -90,7 +105,7 @@ class MockModule:
 
 # Make torch.nn.Parameter and torch.nn.Module safe to inherit from.
 # `import torch.nn` resolves the attribute on `torch`, so mock both.
-mock_nn = MagicMock(Parameter=object, Module=MockModule)
+mock_nn = PydanticMagicMock(name="torch.nn", Parameter=object, Module=MockModule)
 mock_if_no_torch("torch.nn", mock_nn)
 mock_if_no_torch("torch", PydanticMagicMock(name="torch", nn=mock_nn))
 

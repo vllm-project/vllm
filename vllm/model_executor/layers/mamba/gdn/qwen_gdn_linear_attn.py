@@ -53,10 +53,16 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
     chunk_gdn_hip_fwd,
     is_hip_gdn_available,
     is_hip_gdn_supported,
+)
+from vllm.model_executor.layers.mamba.ops.scatter_states import (
+    scatter_states,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -116,7 +122,7 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
-MAX_FUSED_GDN_MTP_TOKENS = 8
+MAX_FUSED_GDN_MTP_TOKENS = 9  # kMaxMtpTokens in fused_gdn_decode_kernel.cu
 # Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
@@ -2043,8 +2049,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 prefill_in_place = prefill_out is not None
             else:
-                initial_state = ssm_state[prefill_state_indices]
-                initial_state[~prefill_has_initial_state, ...] = 0
+                initial_state = gather_initial_states(
+                    ssm_state, prefill_state_indices, prefill_has_initial_state
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -2063,7 +2070,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
 
             if split_non_spec and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
@@ -2128,9 +2135,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         rows' final states.
         """
         has_initial_state = attn_metadata.prefill_has_initial_state
+        state_indices = attn_metadata.prefill_state_indices
         assert has_initial_state is not None
-        initial_state = ssm_state[attn_metadata.prefill_state_indices]
-        initial_state[~has_initial_state, ...] = 0
+        assert state_indices is not None
+        initial_state = gather_initial_states(
+            ssm_state, state_indices, has_initial_state
+        )
         plan = attn_metadata.flashinfer_checkpoint_plan
         if plan is None:
             return fi_chunk_gated_delta_rule(
