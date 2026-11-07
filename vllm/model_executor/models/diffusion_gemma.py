@@ -1071,7 +1071,7 @@ class DiffusionGemmaModelState(ModelState):
         return {"inputs_embeds": self._inputs_embeds_buf[:num_tokens]}
 
     def postprocess_state(
-        self, idx_mapping, num_sampled, num_computed_tokens=None
+        self, idx_mapping, num_sampled, num_computed_tokens=None, *, accepted_row=None
     ) -> None:
         return None
 
