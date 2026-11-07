@@ -1909,10 +1909,17 @@ class RowParallelLinear(LinearBase):
     def _fp16_partials_mode(self) -> Literal["gemm", "kernel"] | None:
         if not (
             envs.VLLM_TP_FP16_PARTIAL_SUMS
-            and self.reduce_results
             and self.tp_size > 1
             and self.params_dtype == torch.bfloat16
         ):
+            return None
+        if not self.reduce_results:
+            logger.warning_once(
+                "VLLM_TP_FP16_PARTIAL_SUMS: row-parallel layers whose all-reduce "
+                "is done by the caller (reduce_results=False, e.g. deferred to "
+                "the next norm) keep BF16 partial sums.",
+                scope="global",
+            )
             return None
         if not current_platform.is_cuda() or envs.VLLM_BATCH_INVARIANT:
             logger.warning_once(
