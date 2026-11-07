@@ -2963,8 +2963,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 [[package]]
 name = "pcre2"
 version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e970b0fcce0c7ee6ef662744ff711f21ccd6f11b7cf03cd187a80e89797fc67"
+source = "git+https://github.com/BugenZhao/rust-pcre2?rev=bb2f377c9f919c881860c210fad8375945c90d43#bb2f377c9f919c881860c210fad8375945c90d43"
 dependencies = [
  "libc",
  "log",
@@ -2974,8 +2973,7 @@ dependencies = [
 [[package]]
 name = "pcre2-sys"
 version = "0.2.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18b9073c1a2549bd409bf4a32c94d903bb1a09bf845bc306ae148897fa0760a4"
+source = "git+https://github.com/BugenZhao/rust-pcre2?rev=bb2f377c9f919c881860c210fad8375945c90d43#bb2f377c9f919c881860c210fad8375945c90d43"
 dependencies = [
  "cc",
  "libc",
@@ -5821,8 +5819,8 @@ dependencies = [
  "expect-test",
  "futures",
  "openai-protocol",
- "regex-automata",
- "regex-syntax",
+ "pcre2",
+ "regex",
  "serde",
  "serde_json",
  "serde_path_to_error",
