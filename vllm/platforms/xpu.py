@@ -108,7 +108,7 @@ class XPUPlatform(Platform):
     # Intel XPU's device key is "GPU" for Ray.
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
-    dist_backend: str = "xccl"  # xccl only
+    dist_backend: str = "xccl2"
     device_control_env_var: str = "ZE_AFFINITY_MASK"
     supported_quantization: list[str] = [
         "awq",
@@ -562,12 +562,8 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        if not torch.distributed.is_xccl_available():
-            # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
-            logger.warning(
-                "xccl is not enabled in this torch build, communication"
-                " is not available."
-            )
+        if not torch.distributed.is_backend_available(cls.dist_backend):
+            raise RuntimeError(f"{cls.dist_backend} backend is not available.")
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
     @classmethod
