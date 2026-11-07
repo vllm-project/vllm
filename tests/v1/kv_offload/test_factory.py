@@ -4,6 +4,7 @@
 
 import os
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -400,16 +401,27 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert worker_calls[0]["mmap_region"] is region
 
 
-def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypatch):
+@pytest.mark.parametrize(
+    "rank,replicas,expected_slot",
+    [(1, 1, 1), (3, 4, 0), (3, 2, 1)],
+    ids=["sharded", "fully-replicated", "partially-replicated"],
+)
+def test_tiering_spec_create_worker_uses_correct_population_slot(
+    monkeypatch, rank, replicas, expected_slot
+):
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
-    spec = _create_spec(
-        spec_name="TieringOffloadingSpec",
-        worker_kv_bytes_per_block=4096,
-        rank=1,
-        world_size=4,
+    config = replace(
+        make_offloading_config(
+            spec_name="TieringOffloadingSpec",
+            worker_kv_bytes_per_block=32768,
+            rank=rank,
+            world_size=4,
+        ),
+        canonical_layout=replicas > 1,
+        canonical_kv_replicas=replicas,
     )
-    assert isinstance(spec, TieringOffloadingSpec)
+    spec = TieringOffloadingSpec(config)
 
     region_calls: list[dict[str, Any]] = []
 
@@ -427,7 +439,9 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
 
     spec.create_worker(MagicMock())
 
-    assert region_calls[0]["rank"] == 1
+    args = region_calls[0]
+    assert args["rank"] == expected_slot
+    assert (args["rank"] + 1) * args["cpu_page_size"] <= args["kv_bytes_per_chunk"]
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
