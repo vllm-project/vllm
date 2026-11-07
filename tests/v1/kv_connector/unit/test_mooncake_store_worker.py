@@ -4518,10 +4518,9 @@ def _register_with_mocked_threads(
     kv_caches: dict[str, torch.Tensor],
 ) -> None:
     """Call register_kv_caches with the I/O transfer threads mocked out."""
-    prefix = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker."
     with (
-        patch(prefix + "KVCacheStoreSendingThread", side_effect=_auto_set_ready_event),
-        patch(prefix + "KVCacheStoreRecvingThread", side_effect=_auto_set_ready_event),
+        patch.object(worker, "_sending_thread_cls", side_effect=_auto_set_ready_event),
+        patch.object(worker, "_recving_thread_cls", side_effect=_auto_set_ready_event),
     ):
         worker.register_kv_caches(kv_caches)
 
@@ -6199,11 +6198,6 @@ def test_config_unknown_mode():
         _make_config(mode="something-else")
 
 
-def test_config_zero_local_buffer():
-    with pytest.raises(ValueError, match=r"local_buffer_size must be > 0"):
-        _make_config(local_buffer_size=0)
-
-
 # ---------------------------------------------------------------------------
 # End-to-end topology tests
 # Covers the two supported recipes:
@@ -6464,6 +6458,55 @@ def test_store_worker_close_swallows_store_errors():
     worker.close()
 
     assert worker.store is None
+
+
+def test_store_worker_close_hook_retains_pending_store_for_retry(monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    pending_flags = []
+
+    class GuardedWorker(worker.MooncakeStoreWorker):
+        def _close_store(self, closing_store, transfers_pending):
+            assert closing_store is store
+            pending_flags.append(transfers_pending)
+            if transfers_pending:
+                raise RuntimeError("DMA pending")
+            super()._close_store(closing_store, transfers_pending)
+
+    w = GuardedWorker(_make_vllm_config(), _make_kv_cache_config())
+    receiver = worker.KVCacheStoreRecvingThread(
+        store=store,
+        coord=w.coord,
+        token_databases=w.token_dbs,
+        block_size=w.block_size,
+        tp_rank=w.tp_rank,
+        ready_event=threading.Event(),
+        request_queue=w.recv_request_queue,
+    )
+    w.kv_recv_threads.append(receiver)
+    receiver.add_request(_make_load_req("pending", [b"a0"], token_len=16))
+    # Advance the external clock past the drain deadline without a real sleep.
+    with patch.object(worker.time, "monotonic", side_effect=[0.0, 6.0]):
+        w.close()
+
+    assert pending_flags == [True]
+    assert w.store is store
+    store.close.assert_not_called()
+
+    receiver.request_queue.get_nowait()
+    receiver.request_queue.task_done()
+    w.close()
+
+    assert pending_flags == [True, False]
+    assert w.store is None
+    store.close.assert_called_once_with()
 
 
 def test_blob_block_hashes_wire_roundtrip():

@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar, cast
 
@@ -447,6 +447,7 @@ class KVTransferThread(threading.Thread):
         name: str,
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
+        transfer_context: Callable[[], AbstractContextManager] = nullcontext,
     ):
         super().__init__(daemon=True, name=name)
         self.store = store
@@ -455,6 +456,7 @@ class KVTransferThread(threading.Thread):
         self.tp_rank = tp_rank
         self.token_databases = token_databases
         self._record_operation_cb = record_operation
+        self._transfer_context = transfer_context
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = request_queue or queue.Queue()
         self.finished_requests: set[str] = set()
@@ -484,7 +486,8 @@ class KVTransferThread(threading.Thread):
                     logger.warning("Received a None request!")
                     self.request_queue.task_done()
                     continue
-                self._handle_request(request_data)
+                with self._transfer_context():
+                    self._handle_request(request_data)
             except Exception:
                 req_id = getattr(request_data, "req_id", "<unknown>")
                 logger.exception("Error in %s (req=%s)", self.name, req_id)
@@ -543,6 +546,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
+        transfer_context: Callable[[], AbstractContextManager] = nullcontext,
     ):
         super().__init__(
             store,
@@ -552,6 +556,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreSendingThread",
             record_operation=record_operation,
+            transfer_context=transfer_context,
         )
         # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
         self.group_put_steps = group_put_steps
@@ -1235,6 +1240,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         request_queue: queue.Queue[Any] | None = None,
         group_participates: Sequence[bool] | None = None,
         is_hma_required: bool = False,
+        transfer_context: Callable[[], AbstractContextManager] = nullcontext,
     ):
         super().__init__(
             store,
@@ -1245,6 +1251,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             name="KVCacheStoreRecvingThread",
             record_operation=record_operation,
             request_queue=request_queue,
+            transfer_context=transfer_context,
         )
         self.group_participates = (
             list(group_participates)
@@ -1515,6 +1522,10 @@ class MooncakeStoreWorker:
 
     # Bare workers built with __new__ in tests read this default.
     _reuse_pd_transfer_engine: bool = False
+    _supports_host_cache_tp_layout = False
+
+    _sending_thread_cls: type[KVCacheStoreSendingThread] = KVCacheStoreSendingThread
+    _recving_thread_cls: type[KVCacheStoreRecvingThread] = KVCacheStoreRecvingThread
 
     @staticmethod
     def _create_mem_pool(
@@ -1559,10 +1570,7 @@ class MooncakeStoreWorker:
         # Resolve before connecting so a missing build identity fails fast.
         cache_prefix = _resolve_cache_prefix(vllm_config)
         try:
-            from mooncake.store import (  # type: ignore
-                MooncakeDistributedStore,
-                ReplicateConfig,
-            )
+            from mooncake.store import ReplicateConfig  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -1612,17 +1620,14 @@ class MooncakeStoreWorker:
 
         self.num_kv_head = model_config.get_total_num_kv_heads()
 
-        # Initialize MooncakeDistributedStore. reuse_pd_transfer_engine attaches
-        # this client to the MooncakeConnector TransferEngine in this process
-        # instead of creating a second one inside setup().
-        store_config = MooncakeStoreConfig.load_from_config()
+        # Initialize the Store with a private or borrowed TransferEngine.
+        store_config = self._load_store_config()
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
         self._reuse_pd_transfer_engine = (
             extra_config.get("reuse_pd_transfer_engine") is True
         )
-        shared_engine: Any | None = None
         if self._reuse_pd_transfer_engine:
             shared = _reused_transfer_engine()
             shared_engine = shared.engine.get_engine()
@@ -1635,13 +1640,10 @@ class MooncakeStoreWorker:
                 local_hostname,
                 shared.protocol,
             )
+            self._setup_store(store_config, local_hostname, engine=shared_engine)
         else:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
-
-        self.store = MooncakeDistributedStore()
-        setup_mooncake_store(
-            self.store, store_config, local_hostname, engine=shared_engine
-        )
+            self._setup_store(store_config, local_hostname)
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
@@ -1771,6 +1773,29 @@ class MooncakeStoreWorker:
                 self._record_kv_connector_operation,
             )
 
+    def _load_store_config(self) -> MooncakeStoreConfig:
+        return MooncakeStoreConfig.load_from_config()
+
+    def _setup_store(
+        self,
+        store_config: MooncakeStoreConfig,
+        local_hostname: str,
+        *,
+        engine: Any | None = None,
+    ) -> None:
+        from mooncake.store import MooncakeDistributedStore  # type: ignore
+
+        self.store = MooncakeDistributedStore()
+        setup_mooncake_store(self.store, store_config, local_hostname, engine=engine)
+
+    def _transfer_context(self) -> AbstractContextManager:
+        return nullcontext()
+
+    def _record_save_event(self) -> Any:
+        event = torch.cuda.Event()
+        event.record()
+        return event
+
     def _select_store_layout(
         self, extra_config: dict[str, Any]
     ) -> tuple[int | None, str, tuple[_StoreGroupPlan | None, ...] | None]:
@@ -1800,7 +1825,10 @@ class MooncakeStoreWorker:
         fallback_reason: str | None = None
         if requested_store_tp_size is None:
             fallback_reason = "invalid Store TP configuration"
-        elif self._kv_cache_config.hisparse_host_num_blocks is not None:
+        elif (
+            self._kv_cache_config.hisparse_host_num_blocks is not None
+            and not self._supports_host_cache_tp_layout
+        ):
             fallback_reason = (
                 "HiSparse host cache registration requires rank-local layout"
             )
@@ -2273,10 +2301,13 @@ class MooncakeStoreWorker:
             num_device_segments,
         )
 
+        self._start_transfer_threads()
+
+    def _start_transfer_threads(self) -> None:
         # Start transfer threads
         if self.can_put:
             ready_event_sending = threading.Event()
-            self.kv_send_thread = KVCacheStoreSendingThread(
+            self.kv_send_thread = self._sending_thread_cls(
                 self.store,
                 self.coord,
                 self.token_dbs,
@@ -2290,6 +2321,7 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
+                transfer_context=self._transfer_context,
                 group_participates=[
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
@@ -2301,7 +2333,7 @@ class MooncakeStoreWorker:
         ready_events_recving = []
         for i in range(self.num_recv_threads):
             ready_event_recving = threading.Event()
-            recv_thread = KVCacheStoreRecvingThread(
+            recv_thread = self._recving_thread_cls(
                 self.store,
                 self.coord,
                 self.token_dbs,
@@ -2310,6 +2342,7 @@ class MooncakeStoreWorker:
                 ready_event_recving,
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
+                transfer_context=self._transfer_context,
                 request_queue=self.recv_request_queue,
                 group_participates=[
                     group.kv_cache_spec.prefix_cacheable
@@ -2362,7 +2395,7 @@ class MooncakeStoreWorker:
         assert self.load_async, "load_async must be True for better performance."
 
     def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
-        """Issue async stores with CUDA event synchronization.
+        """Issue async stores with device event synchronization.
 
         Runs after the forward launch for compute-I/O overlap.
         """
@@ -2372,8 +2405,7 @@ class MooncakeStoreWorker:
         current_event = None
         for request in metadata.requests:
             if request.can_save:
-                current_event = torch.cuda.Event()
-                current_event.record()
+                current_event = self._record_save_event()
                 break
 
         for request in metadata.requests:
@@ -2708,6 +2740,13 @@ class MooncakeStoreWorker:
     def group_tp_replication_factors(self) -> tuple[int, ...]:
         return self._group_tp_replication_factors
 
+    def _close_store(self, store: Any, transfers_pending: bool) -> None:
+        """Close the Store; overrides may raise to retain its handle for retry."""
+        try:
+            store.close()
+        except Exception as e:
+            logger.warning("Error closing MooncakeDistributedStore: %s", e)
+
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
 
@@ -2721,7 +2760,7 @@ class MooncakeStoreWorker:
         store = getattr(self, "store", None)
         if store is None:
             return
-        self.store = None
+        transfers_pending = False
         deadline = time.monotonic() + 5.0
         for thread in (self.kv_send_thread, *self.kv_recv_threads):
             if thread is None:
@@ -2729,16 +2768,18 @@ class MooncakeStoreWorker:
             while thread.request_queue.unfinished_tasks and time.monotonic() < deadline:
                 time.sleep(0.05)
             if thread.request_queue.unfinished_tasks:
+                transfers_pending = True
                 logger.warning(
-                    "Mooncake store %s still has %d in-flight requests at "
-                    "close; closing anyway.",
+                    "Mooncake store %s still has %d in-flight requests at close.",
                     thread.name,
                     thread.request_queue.unfinished_tasks,
                 )
         try:
-            store.close()
+            self._close_store(store, transfers_pending)
         except Exception as e:
             logger.warning("Error closing MooncakeDistributedStore: %s", e)
+        else:
+            self.store = None
 
 
 # ============================================================

@@ -228,7 +228,12 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config, kv_cache_config
             )
         else:
-            self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
+            self.connector_worker = self._create_worker(vllm_config, kv_cache_config)
+
+    def _create_worker(
+        self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    ) -> MooncakeStoreWorker:
+        return MooncakeStoreWorker(vllm_config, kv_cache_config)
 
     def shutdown(self):
         """Release connector resources on teardown.

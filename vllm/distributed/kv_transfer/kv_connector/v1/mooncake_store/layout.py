@@ -9,6 +9,7 @@ import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from itertools import product
 from typing import NamedTuple, cast
 
 import numpy as np
@@ -811,6 +812,77 @@ class MambaStoreLayout(TPShardedStoreLayout):
             for spec in layer_specs
         )
         return _schema_fingerprint(layers)
+
+    def register_state_views(
+        self,
+        states: Sequence[tuple[torch.Tensor, tuple[int, ...], int]],
+        num_blocks: int,
+    ) -> None:
+        """Register separately allocated, possibly padded state tensor views.
+
+        Each entry is (tensor, local_projection_sizes, shard_axis). Tensor axis
+        zero addresses blocks; shard_axis indexes the remaining state axes.
+        Views already select persistent history and order axes as on the wire.
+        Each projection is sharded independently, as for packed Mamba states.
+        The caller retains the tensors for the lifetime of these descriptors.
+        """
+        templates: list[tuple[list[int], list[int], list[int]]] = [
+            ([], [], []) for _ in range(self.shards_per_rank)
+        ]
+        for tensor, projections, axis in states:
+            slot = tensor[0]
+            if (
+                tensor.shape[0] < num_blocks
+                or not 0 <= axis < slot.ndim
+                or not projections
+                or any(size <= 0 for size in projections)
+                or sum(projections) != slot.shape[axis]
+            ):
+                raise ValueError("State view does not match its projection geometry")
+            element_size = tensor.element_size()
+            block_stride = tensor.stride(0) * element_size
+
+            # Emit contiguous suffixes only; never copy padding between rows.
+            def append_view(
+                view: torch.Tensor,
+                bases: list[int],
+                strides: list[int],
+                sizes: list[int],
+                first_segment: int,
+                element_size: int = element_size,
+                block_stride: int = block_stride,
+            ) -> None:
+                if view.is_contiguous():
+                    address = view.data_ptr()
+                    size = view.numel() * element_size
+                    if len(bases) > first_segment and bases[-1] + sizes[-1] == address:
+                        sizes[-1] += size
+                    else:
+                        bases.append(address)
+                        strides.append(block_stride)
+                        sizes.append(size)
+                else:
+                    for row in view.unbind(0):
+                        append_view(row, bases, strides, sizes, first_segment)
+
+            for shard, (bases, strides, sizes) in enumerate(templates):
+                first_segment = len(bases)
+                for prefix in product(*(range(n) for n in slot.shape[:axis])):
+                    row = slot[prefix] if prefix else slot
+                    offset = 0
+                    for width in projections:
+                        start, count = self._shard_slice(
+                            (offset, width, 1), shard, self.shards_per_rank
+                        )
+                        append_view(
+                            row.narrow(0, start, count),
+                            bases,
+                            strides,
+                            sizes,
+                            first_segment,
+                        )
+                        offset += width
+        self._set_segment_templates([templates])
 
     def register_kv_caches(
         self,
