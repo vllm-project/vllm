@@ -519,6 +519,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             custom = self.model_state.custom_sampler(self.sampler)
 
+            if (
+                custom
+                and self.speculative_config is not None
+                and self.speculative_config.rejection_sample_method == "approximate"
+            ):
+                raise ValueError("ASD is not supported with a custom model sampler.")
+
             if custom:
                 assert draft_logits is None or draft_logits.row_mapping is None, (
                     "A custom rejection sampler cannot read batch-sharded draft logits"
@@ -1245,6 +1252,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
+        asd_state = getattr(self.rejection_sampler, "asd_state", None)
+        if asd_state is not None:
+            asd_state.finish_requests(
+                finished_req_ids, scheduler_output.preempted_req_ids
+            )
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
@@ -1318,6 +1330,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank and new_req_data.sampling_params is not None:
                 assert self.sampler is not None
                 self.sampler.add_request(req_index, new_req_data.sampling_params)
+                asd_state = getattr(self.rejection_sampler, "asd_state", None)
+                if asd_state is not None:
+                    asd_state.add_request(req_id, req_index)
                 assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
