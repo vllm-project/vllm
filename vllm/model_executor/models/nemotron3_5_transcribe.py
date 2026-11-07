@@ -11,12 +11,12 @@ Mamba, MoE and attention layers).
 
 The checkpoint uses NeMo names: the audio tower under ``perception.*``, the
 decoder under ``llm.*``, the multi-token-prediction head under ``llm.mtp.*``
-and an optional CTC timestamp head, which is not loaded, under
-``ctc_timestamp.*``.
+and an optional CTC timestamp head under ``ctc_timestamp.*``. It is loaded
+only with ``enable_ctc_timestamps=True`` and aligns completed transcripts.
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
 import torch
@@ -29,6 +29,7 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.audio_alignment import AudioAlignmentStore
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
@@ -49,6 +50,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsAudioAlignment,
     SupportsEagle3,
     SupportsMambaPrefixCaching,
     SupportsMultiModal,
@@ -66,6 +68,9 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+
+if TYPE_CHECKING:
+    from .nemotron3_5_transcribe_ctc import NemotronCTCHead
 
 logger = init_logger(__name__)
 
@@ -90,10 +95,11 @@ _MAX_TRANSCRIPTION_CLIP_S = 60 * 60
 # with speaker tags.
 _TRANSCRIPT_TOKENS_PER_S = 4.0
 
-# The languages of the model card's FLEURS evaluation.
+# The 40 ASR languages of the model card, plus the existing Norwegian entry.
 ISO639_1_SUPPORTED_LANGS = {
     "ar": "Arabic",
     "bg": "Bulgarian",
+    "bn": "Bengali",
     "cs": "Czech",
     "da": "Danish",
     "de": "German",
@@ -113,6 +119,7 @@ ISO639_1_SUPPORTED_LANGS = {
     "ko": "Korean",
     "lt": "Lithuanian",
     "lv": "Latvian",
+    "mr": "Marathi",
     "mt": "Maltese",
     "nl": "Dutch",
     "no": "Norwegian",
@@ -123,6 +130,8 @@ ISO639_1_SUPPORTED_LANGS = {
     "sk": "Slovak",
     "sl": "Slovenian",
     "sv": "Swedish",
+    "ta": "Tamil",
+    "te": "Telugu",
     "th": "Thai",
     "tl": "Filipino",
     "tr": "Turkish",
@@ -411,6 +420,7 @@ class Nemotron3_5TranscribeForConditionalGeneration(
     SupportsMambaPrefixCaching,
     SupportsEagle3,
     SupportsTranscription,
+    SupportsAudioAlignment,
 ):
     packed_modules_mapping = NemotronHForCausalLM.packed_modules_mapping
     # The BF16 checkpoint names the decoder in NeMo's layout (``llm.*``; Mamba
@@ -502,6 +512,20 @@ class Nemotron3_5TranscribeForConditionalGeneration(
         super().__init__()
         config: Nemotron3_5TranscribeConfig = vllm_config.model_config.hf_config
         self.config = config
+        offload = vllm_config.offload_config
+        if config.enable_ctc_timestamps and (
+            (
+                offload.offload_backend in ("auto", "uva")
+                and offload.uva.cpu_offload_gb > 0
+            )
+            or (
+                offload.offload_backend in ("auto", "prefetch")
+                and offload.prefetch.offload_group_size > 0
+            )
+        ):
+            raise ValueError(
+                "CTC timestamps currently do not support CPU weight offloading"
+            )
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -515,6 +539,43 @@ class Nemotron3_5TranscribeForConditionalGeneration(
                 quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
+
+        budget = config.ctc_timestamp_max_cpu_bytes
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+            raise ValueError("ctc_timestamp_max_cpu_bytes must be a positive integer")
+        self.audio_alignment_store = AudioAlignmentStore(budget)
+        self.ctc_timestamp_head: NemotronCTCHead | None = None
+        self._ctc_special_tokens: tuple[str, ...] = ()
+        if config.enable_ctc_timestamps:
+            if (
+                vllm_config.parallel_config.tensor_parallel_size != 1
+                or vllm_config.parallel_config.pipeline_parallel_size != 1
+            ):
+                raise ValueError("CTC timestamps currently require TP=1 and PP=1")
+            if vllm_config.quant_config is not None:
+                raise ValueError(
+                    "CTC timestamps currently require an unquantized model"
+                )
+            from .nemotron3_5_transcribe_ctc import NemotronCTCHead as CTCHead
+
+            tokenizer_config = config.ctc_timestamps.get("tokenizer_config", {})
+            if tokenizer_config.get("legacy", False) or not tokenizer_config.get(
+                "ignore_extra_whitespaces", True
+            ):
+                raise ValueError(
+                    "Only the released non-legacy CTC tokenizer is supported"
+                )
+            with self._mark_tower_model(vllm_config, "audio"):
+                self.ctc_timestamp_head = CTCHead(
+                    config.ctc_timestamps["decoder_config"],
+                    prefix=maybe_prefix(prefix, "ctc_timestamp_head"),
+                )
+            if not vllm_config.model_config.skip_tokenizer_init:
+                self._ctc_special_tokens = tuple(
+                    cached_tokenizer_from_config(
+                        vllm_config.model_config
+                    ).all_special_tokens
+                )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -541,6 +602,125 @@ class Nemotron3_5TranscribeForConditionalGeneration(
         return tuple(
             self.audio_tower.encode(signals, audio_input.audio_signal_length.flatten())
         )
+
+    def embed_multimodal_with_alignment(
+        self, mm_hashes: Sequence[str], **kwargs: object
+    ) -> MultiModalEmbeddings:
+        if not self.config.enable_ctc_timestamps:
+            return self.embed_multimodal(**kwargs)
+        audio_input = self._parse_audio_input(**kwargs)
+        if audio_input is None:
+            return []
+        signals = list(audio_input.audio_signal)
+        if len(signals) != len(mm_hashes):
+            raise ValueError("Audio hashes must match the encoder batch")
+        for mm_hash in mm_hashes:
+            self.audio_alignment_store.mark_cached(mm_hash)
+        flags = [self.audio_alignment_store.needs_capture(h) for h in mm_hashes]
+        if not any(flags):
+            return tuple(
+                self.audio_tower.encode(
+                    signals, audio_input.audio_signal_length.flatten()
+                )
+            )
+        lengths_cpu = audio_input.audio_signal_length.flatten()
+        embeddings, captures = self.audio_tower.encode(
+            signals, lengths_cpu, capture_flags=flags
+        )
+        sample_rate = self.config.audio_config["preprocessor"]["sample_rate"]
+        for index, (mm_hash, capture) in enumerate(zip(mm_hashes, captures)):
+            if capture is not None:
+                self.audio_alignment_store.put(
+                    mm_hash, capture, float(lengths_cpu[index]) / sample_rate
+                )
+        return tuple(embeddings)
+
+    def register_audio_alignment(self, handle: str, mm_hashes: Sequence[str]) -> None:
+        if not self.config.enable_ctc_timestamps:
+            raise ValueError("Enable CTC timestamps with enable_ctc_timestamps=True")
+        self.audio_alignment_store.register(handle, mm_hashes)
+
+    def on_audio_alignment_cache_evicted(self, mm_hash: str) -> None:
+        self.audio_alignment_store.evict(mm_hash)
+
+    def reset_audio_alignment(self) -> None:
+        self.audio_alignment_store.reset()
+
+    def release_audio_alignment(self, handles: Sequence[str]) -> None:
+        self.audio_alignment_store.release(handles)
+
+    def get_audio_alignment_stats(self) -> dict[str, Any]:
+        return {
+            **self.audio_alignment_store.stats(),
+            "enabled": self.config.enable_ctc_timestamps,
+        }
+
+    @torch.inference_mode()
+    def align_audio(self, handle: str, text: str) -> dict[str, Any]:
+        if self.ctc_timestamp_head is None:
+            return {"words": [], "error": "ctc_timestamps_not_enabled"}
+        from .nemotron3_5_transcribe_ctc import (
+            alignment_speaker_priors,
+            estimate_alignment_workspace,
+            public_words,
+        )
+
+        try:
+            capture = self.audio_alignment_store.get(handle)
+            if capture is None:
+                return {
+                    "words": [],
+                    "error": self.audio_alignment_store.error(handle)
+                    or "no_audio_alignment_capture",
+                }
+            tensors, duration = capture["tensors"], capture["duration_s"]
+            if not 0 < duration <= 3600:
+                raise ValueError(
+                    "CTC timestamps require audio lasting at most one hour"
+                )
+            online = self.config.audio_config["online"]
+            head = self.ctc_timestamp_head
+            aligner = head.make_aligner(online, self.config.ctc_timestamp_language)
+            text = aligner.clean_sot_transcript(text, self._ctc_special_tokens)
+            if not text:
+                return {"words": [], "error": None}
+            ctc_lengths = head.output_lengths(tensors["asr_encoded_lengths"])
+            frames = int(ctc_lengths[0])
+            budget = estimate_alignment_workspace(aligner, text, frames)
+            with self.audio_alignment_store.reserve_workspace(budget):
+
+                def read_columns(
+                    columns: list[list[int]], lengths: list[int]
+                ) -> list[torch.Tensor]:
+                    return head.read_columns(
+                        tensors,
+                        columns,
+                        lengths,
+                        core_length=online["window_frames"],
+                        left_context=online["left_context_frames"],
+                        right_context=online["right_context_frames"],
+                    )
+
+                speaker_probs, diarization_labels = alignment_speaker_priors(
+                    text,
+                    tensors["sortformer_sigmoids"],
+                    tensors["diarization_labels"],
+                )
+                prepared = aligner._prepare(
+                    (1, frames, head.num_classes_with_blank),
+                    read_columns,
+                    speaker_probs,
+                    [text],
+                    ctc_lengths=ctc_lengths,
+                    sortformer_lengths=tensors["sortformer_lengths"],
+                    audio_durations=[duration],
+                    diarization_labels=diarization_labels,
+                    diarization_lengths=tensors["diarization_lengths"],
+                    diarization_frame_seconds=0.01,
+                )
+                return public_words(aligner.align_prepared(prepared)[0], duration)
+        except (ValueError, ImportError) as error:
+            return {"words": [], "error": str(error)}
 
     def forward(
         self,
@@ -592,7 +772,10 @@ class Nemotron3_5TranscribeForConditionalGeneration(
                 elif name.startswith("llm.mtp."):
                     continue  # loaded by the multi-token-prediction drafter
                 elif name.startswith("ctc_timestamp."):
-                    continue  # the CTC timestamp head and its tokenizer
+                    if self.ctc_timestamp_head is not None:
+                        self.ctc_timestamp_head.load_weight(
+                            name.removeprefix("ctc_timestamp."), tensor
+                        )
                 elif name.startswith("language_model."):
                     yield name[len("language_model.") :], tensor
                 else:
@@ -605,6 +788,11 @@ class Nemotron3_5TranscribeForConditionalGeneration(
             f"language_model.{name}"
             for name in self.language_model.load_weights(decoder_weights)
         }
+        if self.ctc_timestamp_head is not None:
+            self.ctc_timestamp_head.validate_loaded()
+            loaded |= {
+                f"ctc_timestamp_head.{name}" for name in self.ctc_timestamp_head._loaded
+            }
         if load_audio:
             loaded |= {
                 f"audio_tower.{name}"

@@ -19,7 +19,7 @@ kernel. Module names follow NeMo so the checkpoint loads by prefix.
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, overload
 
 import numpy as np
 import torch
@@ -792,7 +792,11 @@ class SortformerSpeakerEncoder(nn.Module):
         left_offset: int,
         right_offset: int,
         lengths_cpu: torch.Tensor | None = None,
-    ) -> tuple[SpeakerCacheState, torch.Tensor]:
+        return_native_resolution: bool = False,
+    ) -> (
+        tuple[SpeakerCacheState, torch.Tensor]
+        | tuple[SpeakerCacheState, torch.Tensor, torch.Tensor]
+    ):
         """Process one window of ``(B, C, T)`` mel features.
 
         Returns the new state and the core frames' speaker probabilities on the
@@ -829,7 +833,10 @@ class SortformerSpeakerEncoder(nn.Module):
         chunk_preds = high_res_preds[
             :, start : start + chunk_len * modules.upsample_factor
         ]
-        return state, downsample_preds(chunk_preds, factor)
+        encoder_preds = downsample_preds(chunk_preds, factor)
+        if return_native_resolution:
+            return state, encoder_preds, chunk_preds
+        return state, encoder_preds
 
 
 class ParallelExpertEncoder(nn.Module):
@@ -904,7 +911,8 @@ class ParallelExpertEncoder(nn.Module):
         mel_lengths: torch.Tensor,
         max_feat_len: int,
         mel_lengths_cpu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        capture_alignment: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         total_feat_len = min(mel.shape[-1], max_feat_len)
         num_windows = max(1, math.ceil(total_feat_len / self.window_feat_len))
         asr_signal = normalize_per_feature(mel, mel_lengths).to(self.dtype)
@@ -913,6 +921,7 @@ class ParallelExpertEncoder(nn.Module):
 
         asr_windows: list[torch.Tensor] = []
         speaker_windows: list[torch.Tensor] = []
+        diarization_windows: list[torch.Tensor] = []
         for index in range(num_windows):
             start = index * self.window_feat_len
             end = min(start + self.window_feat_len, total_feat_len)
@@ -940,19 +949,45 @@ class ParallelExpertEncoder(nn.Module):
             core_len = max(0, min(core_len, encoded.shape[-1] - left_drop))
             asr_windows.append(encoded[:, :, left_drop : left_drop + core_len])
 
-            state, window_preds = self.diarization_model.step(
+            diarization_result = self.diarization_model.step(
                 diar_signal[:, :, context_start:context_end],
                 window_lengths,
                 state,
                 left_offset,
                 right_offset,
                 lengths_cpu=window_lengths_cpu,
+                return_native_resolution=capture_alignment,
             )
+            state, window_preds = diarization_result[:2]
+            if capture_alignment:
+                native_preds = cast(
+                    tuple[SpeakerCacheState, torch.Tensor, torch.Tensor],
+                    diarization_result,
+                )[2]
+                diarization_windows.append((native_preds > 0.5).transpose(1, 2))
             speaker_windows.append(align_frames(window_preds, core_len))
 
         asr_encoded = torch.cat(asr_windows, dim=2)
         speaker_probs = torch.cat(speaker_windows, dim=1)
-        return self._fuse(asr_encoded, speaker_probs)
+        fused = self._fuse(asr_encoded, speaker_probs)
+        if not capture_alignment:
+            return fused
+        lengths_cpu = (
+            mel_lengths_cpu if mel_lengths_cpu is not None else mel_lengths.cpu()
+        )
+        encoded_lengths = (
+            lengths_cpu + self.subsampling_factor - 1
+        ) // self.subsampling_factor
+        return fused, {
+            "asr_encoded": asr_encoded.detach(),
+            "asr_encoded_lengths": encoded_lengths,
+            "sortformer_sigmoids": speaker_probs.detach(),
+            "sortformer_lengths": encoded_lengths,
+            "diarization_labels": torch.cat(diarization_windows, dim=2)[
+                :, :, :total_feat_len
+            ],
+            "diarization_lengths": lengths_cpu,
+        }
 
     def _fuse(
         self, asr_encoded: torch.Tensor, speaker_probs: torch.Tensor
@@ -1007,9 +1042,31 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         )
         self.subsampling_factor = self.encoder.subsampling_factor
 
+    @overload
     def encode(
-        self, signals: Sequence[torch.Tensor], num_samples_cpu: torch.Tensor
-    ) -> list[torch.Tensor]:
+        self,
+        signals: Sequence[torch.Tensor],
+        num_samples_cpu: torch.Tensor,
+        capture_flags: None = None,
+    ) -> list[torch.Tensor]: ...
+
+    @overload
+    def encode(
+        self,
+        signals: Sequence[torch.Tensor],
+        num_samples_cpu: torch.Tensor,
+        capture_flags: Sequence[bool],
+    ) -> tuple[list[torch.Tensor], list[dict[str, torch.Tensor] | None]]: ...
+
+    def encode(
+        self,
+        signals: Sequence[torch.Tensor],
+        num_samples_cpu: torch.Tensor,
+        capture_flags: Sequence[bool] | None = None,
+    ) -> (
+        list[torch.Tensor]
+        | tuple[list[torch.Tensor], list[dict[str, torch.Tensor] | None]]
+    ):
         """Encode each clip into its embeddings, returned in input order.
 
         Every row of a batch runs every window of the batch's longest clip, so a
@@ -1023,8 +1080,11 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         ):
             groups.setdefault(num_windows, []).append(index)
 
+        if capture_flags is not None and len(capture_flags) != len(signals):
+            raise ValueError("One capture flag is required per audio")
         device = self.encoder.asr_norm.weight.device
         embeddings: dict[int, torch.Tensor] = {}
+        captures: dict[int, dict[str, torch.Tensor]] = {}
         for indices in groups.values():
             lengths_cpu = num_samples_cpu[indices]
             audio = torch.zeros(
@@ -1042,16 +1102,31 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
                 if device.type == "cpu"
                 else async_tensor_h2d(lengths_cpu, device=device, dtype=torch.long)
             )
-            for index, emb in zip(indices, self(audio, lengths, lengths_cpu)):
+            capture_group = capture_flags is not None and any(
+                capture_flags[i] for i in indices
+            )
+            result = self(audio, lengths, lengths_cpu, capture_alignment=capture_group)
+            if capture_group:
+                assert capture_flags is not None
+                group_embeddings, group_captures = result
+            else:
+                group_embeddings, group_captures = result, []
+            for row, (index, emb) in enumerate(zip(indices, group_embeddings)):
                 embeddings[index] = emb
-        return [embeddings[index] for index in range(len(signals))]
+                if capture_group and capture_flags is not None and capture_flags[index]:
+                    captures[index] = group_captures[row]
+        ordered = [embeddings[index] for index in range(len(signals))]
+        if capture_flags is not None:
+            return ordered, [captures.get(index) for index in range(len(signals))]
+        return ordered
 
     def forward(
         self,
         audio: torch.Tensor,
         num_samples: torch.Tensor,
         num_samples_cpu: torch.Tensor,
-    ) -> list[torch.Tensor]:
+        capture_alignment: bool = False,
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[dict[str, torch.Tensor]]]:
         """Encode padded ``(B, N)`` float32 audio into one embedding tensor per row.
 
         ``num_samples_cpu`` holds the lengths on the host, so the window bounds
@@ -1064,16 +1139,47 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         mel_lengths_cpu = self.preprocessor.featurizer.get_seq_len(
             num_samples_cpu
         ).clamp(max=mel.shape[-1])
-        encoded = self.encoder(
-            mel, mel_lengths, int(mel_lengths_cpu.max()), mel_lengths_cpu
+        result = self.encoder(
+            mel,
+            mel_lengths,
+            int(mel_lengths_cpu.max()),
+            mel_lengths_cpu,
+            capture_alignment=capture_alignment,
         )
+        if capture_alignment:
+            encoded, alignment = result
+        else:
+            encoded, alignment = result, {}
         encoded_lengths = (
             mel_lengths_cpu + self.subsampling_factor - 1
         ) // self.subsampling_factor
         embeddings = self.proj(encoded.transpose(1, 2))
-        return [
+        outputs = [
             emb[:length] for emb, length in zip(embeddings, encoded_lengths.tolist())
         ]
+        if not capture_alignment:
+            return outputs
+        captures = []
+        for row, (encoded_len, mel_len) in enumerate(
+            zip(encoded_lengths.tolist(), mel_lengths_cpu.tolist())
+        ):
+            captures.append(
+                {
+                    "asr_encoded": alignment["asr_encoded"][
+                        row : row + 1, :, :encoded_len
+                    ],
+                    "asr_encoded_lengths": encoded_lengths[row : row + 1],
+                    "sortformer_sigmoids": alignment["sortformer_sigmoids"][
+                        row : row + 1, :encoded_len
+                    ],
+                    "sortformer_lengths": encoded_lengths[row : row + 1],
+                    "diarization_labels": alignment["diarization_labels"][
+                        row : row + 1, :, :mel_len
+                    ],
+                    "diarization_lengths": mel_lengths_cpu[row : row + 1],
+                }
+            )
+        return outputs, captures
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load NeMo ``perception.*`` tensors, named without the ``perception.``."""

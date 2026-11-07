@@ -130,6 +130,7 @@ steps:
   - tests/models/registry.py
   device: cpu-medium
   commands:
+    - uv pip install --system pythainlp==5.3.4
     - >-
       pytest -v -s
       models/multimodal/processing
@@ -308,3 +309,28 @@ steps:
       - vllm/
       - "!vllm/distributed/kv_transfer/"
       - tests/models/multimodal/pooling
+
+
+- label: ":nvidia: (H100) Nemotron Transcribe Offline Word Timestamps"
+  key: multi-modal-nemotron-transcribe-word-timestamps
+  device: h100
+  num_devices: 1
+  timeout_in_minutes: 25
+  source_file_dependencies:
+  - vllm/model_executor/models/nemotron3_5_transcribe.py
+  - vllm/model_executor/models/nemotron3_5_transcribe_audio.py
+  - vllm/model_executor/models/nemotron3_5_transcribe_ctc.py
+  - vllm/model_executor/models/nemotron3_5_transcribe_alignment.py
+  - vllm/transformers_utils/configs/nemotron3_5_transcribe.py
+  - vllm/model_executor/models/interfaces.py
+  - vllm/multimodal/audio_alignment.py
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/worker_base.py
+  - vllm/entrypoints/speech_to_text/offline.py
+  - tests/models/multimodal/test_nemotron3_5_word_timestamps.py
+  - setup.py
+  commands:
+    - uv pip install --system pythainlp==5.3.4 numba==0.65.0
+    - >-
+      pytest -v -s
+      models/multimodal/test_nemotron3_5_word_timestamps.py

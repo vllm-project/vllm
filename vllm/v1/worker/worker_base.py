@@ -12,6 +12,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.models.interfaces import supports_audio_alignment
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -187,6 +188,25 @@ class WorkerBase:
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
+
+    @torch.inference_mode()
+    def align_audio(self, items: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        """Align finished offline transcripts; return only small host results."""
+        model = self.get_model()
+        if not supports_audio_alignment(model):
+            raise ValueError("This model does not support deferred audio alignment")
+        return [model.align_audio(handle, text) for handle, text in items]
+
+    def release_audio_alignment(self, handles: list[str]) -> None:
+        model = self.get_model()
+        if supports_audio_alignment(model):
+            model.release_audio_alignment(handles)
+
+    def get_audio_alignment_stats(self) -> dict[str, Any]:
+        model = self.get_model()
+        if not supports_audio_alignment(model):
+            return {"enabled": False}
+        return model.get_audio_alignment_stats()
 
     def get_model_inspection(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
