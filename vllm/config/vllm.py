@@ -591,6 +591,15 @@ class VllmConfig:
         )
 
     @property
+    def use_replayssm_trackers(self) -> bool:
+        """Mamba2 ReplaySSM whose rings follow the runner-committed trackers."""
+        return (
+            self.cache_config.use_replayssm
+            and not self.cache_config.use_kda_recoverssm
+            and (self.use_flashinfer_replayssm or self.num_speculative_tokens > 0)
+        )
+
+    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None
@@ -3934,9 +3943,26 @@ class VllmConfig:
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+        elif self.mamba_config.backend not in (
+            MambaBackendEnum.TRITON,
+            MambaBackendEnum.FLASHINFER,
+        ):
+            raise ValueError(
+                "--use-replayssm requires --mamba-backend triton or flashinfer"
+            )
+        elif (
+            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            or use_mamba_replayssm_spec
+        ):
+            is_flashinfer = self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            name = (
+                "FlashInfer ReplaySSM"
+                if is_flashinfer
+                else "Triton ReplaySSM speculative decoding"
+            )
             if (
-                self.cache_config.mamba_cache_mode == "align"
+                is_flashinfer
+                and self.cache_config.mamba_cache_mode == "align"
                 and self.model_config is not None
                 and self.model_config.dtype != torch.bfloat16
             ):
@@ -3944,30 +3970,23 @@ class VllmConfig:
                     "FlashInfer ReplaySSM align requires bfloat16 model inputs "
                     "for its replay rings; SSM state cache dtype is independent"
                 )
-            if self.parallel_config.use_ubatching:
-                raise ValueError("FlashInfer ReplaySSM does not support microbatching")
-            if self.parallel_config.pipeline_parallel_size > 1:
+            if not is_flashinfer and self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
-                    "FlashInfer ReplaySSM currently requires pipeline_parallel_size=1"
+                    f"{name} does not support --enable-mamba-cache-stochastic-rounding"
                 )
+            if self.parallel_config.use_ubatching:
+                raise ValueError(f"{name} does not support microbatching")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(f"{name} currently requires pipeline_parallel_size=1")
             if use_mamba_replayssm_spec:
                 query_len = 1 + self.num_speculative_tokens
                 if self.cache_config.replayssm_buffer_len < query_len:
                     raise ValueError(
-                        "FlashInfer ReplaySSM speculative decoding requires "
+                        "ReplaySSM speculative decoding requires "
                         "--replayssm-buffer-len >= 1 + num_speculative_tokens "
                         f"({query_len}); got "
                         f"{self.cache_config.replayssm_buffer_len}"
                     )
-        elif use_mamba_replayssm_spec:
-            raise ValueError(
-                "Mamba2 ReplaySSM speculative decoding requires "
-                "--mamba-backend flashinfer"
-            )
-        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
-            raise ValueError(
-                "--use-replayssm requires --mamba-backend triton or flashinfer"
-            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance

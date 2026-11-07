@@ -935,10 +935,10 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
-        self._use_flashinfer_replayssm = self.vllm_config.use_flashinfer_replayssm
+        self._use_replayssm_trackers = self.vllm_config.use_replayssm_trackers
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
-            if not self._use_flashinfer_replayssm:
+            if not self._use_replayssm_trackers:
                 self.num_accepted_tokens_event = torch.Event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
@@ -970,7 +970,7 @@ class GPUModelRunner(
         self._replayssm_sync_req_indices: dict[str, int] = {}
         self._replayssm_paused_accepted_tokens: dict[str, torch.Tensor] = {}
         self._replayssm_accepted_tokens: torch.Tensor | None = None
-        if self._use_flashinfer_replayssm and self.num_spec_tokens:
+        if self._use_replayssm_trackers and self.num_spec_tokens:
             # The last entry is the neutral count for new/padded requests.
             self._replayssm_accepted_tokens = torch.ones(
                 self.max_num_reqs + 1, dtype=torch.int32, device=self.device
@@ -1038,8 +1038,8 @@ class GPUModelRunner(
 
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # The postprocess sub-object is also the model-level owner of
-        # FlashInfer ReplaySSM trackers, including STP.
-        assert self._needs_prefix_state_migration or self._use_flashinfer_replayssm
+        # ReplaySSM trackers, including FlashInfer STP.
+        assert self._needs_prefix_state_migration or self._use_replayssm_trackers
         if self._mamba_bufs is None:
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
@@ -1051,7 +1051,7 @@ class GPUModelRunner(
                 with_postprocess_align=(
                     self.speculative_config is not None and self.model_config.is_hybrid
                 )
-                or self._use_flashinfer_replayssm,
+                or self._use_replayssm_trackers,
             )
         return self._mamba_bufs
 
@@ -1221,7 +1221,7 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
-            if self._use_flashinfer_replayssm:
+            if self._use_replayssm_trackers:
                 self._replayssm_sync_req_indices.pop(req_id, None)
                 self._replayssm_paused_accepted_tokens.pop(req_id, None)
 
@@ -1247,7 +1247,7 @@ class GPUModelRunner(
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
-        if self._use_flashinfer_replayssm:
+        if self._use_replayssm_trackers:
             # Preemption reconstructs state from a prefix; its old live offset
             # cannot be reused. A scheduling pause instead preserves that state.
             for req_id in resumed_req_ids:
@@ -1265,7 +1265,7 @@ class GPUModelRunner(
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
-            if self._use_flashinfer_replayssm and req_id not in resumed_req_ids:
+            if self._use_replayssm_trackers and req_id not in resumed_req_ids:
                 self._pause_replayssm_accepted_tokens(req_id)
             self.input_batch.remove_request(req_id)
 
@@ -1590,7 +1590,7 @@ class GPUModelRunner(
         based on the number of accepted tokens.
         """
         if not (
-            self._use_flashinfer_replayssm
+            self._use_replayssm_trackers
             or (self.speculative_config and self.model_config.is_hybrid)
         ):
             return
@@ -1604,7 +1604,7 @@ class GPUModelRunner(
                 dim=1
             )
 
-        if self._needs_prefix_state_migration or self._use_flashinfer_replayssm:
+        if self._needs_prefix_state_migration or self._use_replayssm_trackers:
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
@@ -1615,7 +1615,7 @@ class GPUModelRunner(
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 num_accepted_tokens_cpu_tensor=(
                     self.input_batch.num_accepted_tokens_cpu_tensor
-                    if self.num_spec_tokens and not self._use_flashinfer_replayssm
+                    if self.num_spec_tokens and not self._use_replayssm_trackers
                     else None
                 ),
                 input_batch=self.input_batch,
@@ -1625,7 +1625,7 @@ class GPUModelRunner(
                 run_prefix_state_migration=self._needs_prefix_state_migration,
             )
 
-            if self._use_flashinfer_replayssm:
+            if self._use_replayssm_trackers:
                 assert self.num_accepted_tokens_event is None
                 if self.num_spec_tokens:
                     assert self._replayssm_accepted_tokens is not None
@@ -1817,7 +1817,7 @@ class GPUModelRunner(
         """
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         prev_positions = self.prev_positions.np[:num_reqs]
-        if self._use_flashinfer_replayssm and self.num_spec_tokens:
+        if self._use_replayssm_trackers and self.num_spec_tokens:
             self.prev_positions.np[num_reqs:].fill(-1)
             if not self.use_async_scheduling:
                 prev_req_id_to_index = self._replayssm_sync_req_indices
@@ -2161,7 +2161,7 @@ class GPUModelRunner(
         # Skipped under async scheduling (non-align): the CPU copy races with
         # the in-flight D2H copy and with input-batch row moves.
         needs_cpu_accepted_counts = (
-            not self._use_flashinfer_replayssm
+            not self._use_replayssm_trackers
             and self.num_accepted_tokens_event is not None
             and (not self.use_async_scheduling or self._needs_prefix_state_migration)
         )
@@ -2198,14 +2198,14 @@ class GPUModelRunner(
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
-        if self._use_flashinfer_replayssm and self.num_spec_tokens:
+        if self._use_replayssm_trackers and self.num_spec_tokens:
             self.prev_positions.copy_to_gpu()
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
-            if not self._use_flashinfer_replayssm:
+            if not self._use_replayssm_trackers:
                 self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
@@ -2225,7 +2225,7 @@ class GPUModelRunner(
                 non_blocking=True,
             )
 
-        if self._use_flashinfer_replayssm and self.num_spec_tokens:
+        if self._use_replayssm_trackers and self.num_spec_tokens:
             # Restore normalized convolution offsets after async sequence-length
             # correction. Counts stay on GPU across batch compaction/reordering.
             self._restore_replayssm_accepted_tokens()
@@ -4155,14 +4155,14 @@ class GPUModelRunner(
                     query_start_loc_gpu=self.query_start_loc.gpu,
                     num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 )
-                if not self._use_flashinfer_replayssm:
+                if not self._use_replayssm_trackers:
                     # Generic Mamba may reset offsets after shifting state.
                     self.num_accepted_tokens.np[:num_reqs] = (
                         self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                     )
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-            elif self._use_flashinfer_replayssm:
+            elif self._use_replayssm_trackers:
                 mamba_bufs = self._get_mamba_bufs()
 
             use_spec_decode = self.speculative_config is not None
@@ -4198,7 +4198,7 @@ class GPUModelRunner(
             if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
                 mamba_ctx = mamba_bufs.postprocess_align
                 num_mamba_decodes = None
-                if self._use_flashinfer_replayssm:
+                if self._use_replayssm_trackers:
                     assert isinstance(attn_metadata, dict)
                     mamba_group = self.kv_cache_config.kv_cache_groups[
                         mamba_ctx.mamba_group_ids[0]

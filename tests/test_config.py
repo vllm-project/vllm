@@ -158,6 +158,48 @@ def test_flashinfer_replayssm_validates_config(
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize(
+    ("buffer_len", "stochastic_rounding", "pp_size", "error"),
+    [
+        (16, False, 1, None),
+        (3, False, 1, "--replayssm-buffer-len >= 1 \\+ num_speculative_tokens"),
+        (16, True, 1, "does not support --enable-mamba-cache-stochastic-rounding"),
+        (16, False, 2, "pipeline_parallel_size=1"),
+    ],
+    ids=["accepted", "short-buffer", "stochastic-rounding", "pp"],
+)
+def test_triton_replayssm_spec_decode_validates_config(
+    buffer_len, stochastic_rounding, pp_size, error
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="align",
+            replayssm_buffer_len=buffer_len,
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="NemotronHForCausalLM",
+            dtype=torch.float16,
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=stochastic_rounding,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pp_size, use_ubatching=False
+        ),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")

@@ -319,15 +319,16 @@ class CacheConfig:
     EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
     block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM logical history length B for Mamba2. Triton uses B physical
-    rows and FlashInfer uses B+T, where T is the target verification length.
-    Kimi-K3 speculative decode does not use B. Default 16."""
+    """ReplaySSM logical history length B for Mamba2. Triton standard decode
+    uses B physical rows; FlashInfer and Triton speculative decoding use B+T,
+    where T is the target verification length. Kimi-K3 speculative decode does
+    not use B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Triton supports 'none' and 'align' on Model Runner V1. FlashInfer supports
     'none' and 'align' on Model Runner V1 and V2. Mamba2 speculative
-    decoding requires FlashInfer. With prefix caching enabled, Triton supports
+    decoding supports both backends. With prefix caching enabled, Triton supports
     'align'; FlashInfer supports 'align'. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""

@@ -148,14 +148,20 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
     assert meta.num_accepted_tokens.tolist() == [1]
 
 
-def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
-    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
-    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
-        pytest.skip("requires FlashInfer ReplaySSM autotuning support")
+@pytest.mark.parametrize(
+    "mamba_backend", [MambaBackendEnum.TRITON, MambaBackendEnum.FLASHINFER]
+)
+def test_replayssm_tracker_state_indices_are_stable_for_full_cudagraph(
+    mamba_backend,
+):
+    if mamba_backend == MambaBackendEnum.FLASHINFER:
+        checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+        if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
+            pytest.skip("requires FlashInfer ReplaySSM autotuning support")
 
     builder = _create_replayssm_builder(
         16,
-        mamba_backend=MambaBackendEnum.FLASHINFER,
+        mamba_backend=mamba_backend,
         num_speculative_tokens=3,
     )
     builder.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
@@ -185,3 +191,4 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     assert second_indices is not None
     assert second_indices.data_ptr() == first_ptr
     assert torch.equal(second_indices, second.state_indices_tensor_d[:, 0])
+    assert second.write_pos_d is None and second.bc_pre_scratch is None

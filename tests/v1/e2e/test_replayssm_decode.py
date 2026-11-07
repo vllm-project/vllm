@@ -437,14 +437,20 @@ def test_flashinfer_replayssm_prefix_cache_tp2(vllm_runner, model_name, monkeypa
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+@pytest.mark.parametrize("speculative_method", [None, "ngram"], ids=["stp", "ngram"])
 def test_triton_replayssm_align_prefix_cache_matches_baseline(
-    vllm_runner, model_name, monkeypatch: pytest.MonkeyPatch, use_v2: bool
+    vllm_runner,
+    model_name,
+    monkeypatch: pytest.MonkeyPatch,
+    use_v2: bool,
+    speculative_method: str | None,
 ):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
         monkeypatch,
         use_v2=use_v2,
+        speculative_method=speculative_method,
         mamba_backend="triton",
     )
 

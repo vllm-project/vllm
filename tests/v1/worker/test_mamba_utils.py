@@ -939,7 +939,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     state = object.__new__(MambaHybridModelState)
     state.cache_config = CacheConfig(mamba_cache_mode="align")
     state._align_mode = True
-    state._use_flashinfer_replayssm = False
+    state._use_replayssm_trackers = False
     state._mamba_group_ids = []
     state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS
@@ -991,6 +991,7 @@ def _build_staging_metadata(computed, scheduled, prompt_lens, drafts, num_spec=3
     builder.use_spec_decode = num_spec > 0
     builder.reorder_batch_threshold = 1 + num_spec
     builder.use_replayssm = builder.use_flashinfer_replayssm = False
+    builder.use_replayssm_trackers = False
     builder.needs_causal_conv1d_metadata = False
     builder.decode_bc_pre_scratch = None
     builder.decode_cudagraph_max_bs = 0

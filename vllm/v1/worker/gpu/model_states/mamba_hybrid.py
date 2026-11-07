@@ -97,15 +97,15 @@ class MambaHybridModelState(DefaultModelState):
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
-        self._use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
-        if self._use_flashinfer_replayssm:
+        self._use_replayssm_trackers = vllm_config.use_replayssm_trackers
+        if self._use_replayssm_trackers:
             self._is_prefilling_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device
             )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
-        if self._align_mode or self._use_flashinfer_replayssm:
+        if self._align_mode or self._use_replayssm_trackers:
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
@@ -160,7 +160,7 @@ class MambaHybridModelState(DefaultModelState):
                 kv_cache_config,
                 self.vllm_config.compilation_config.static_forward_context,
             )
-        if not (self._align_mode or self._use_flashinfer_replayssm):
+        if not (self._align_mode or self._use_replayssm_trackers):
             return
         mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
         if self._mamba_state_copy_funcs is None:
@@ -364,7 +364,7 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
-        if self._use_flashinfer_replayssm:
+        if self._use_replayssm_trackers:
             self._replayssm_query_start_loc = None
             mamba_metadata = next(
                 (
@@ -442,19 +442,19 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
             )
 
-        self._publish_flashinfer_replayssm(
+        self._publish_replayssm_trackers(
             idx_mapping,
             num_computed_tokens,
         )
 
-    def _publish_flashinfer_replayssm(
+    def _publish_replayssm_trackers(
         self,
         idx_mapping: torch.Tensor,
         num_computed_tokens: torch.Tensor | None,
     ) -> None:
         """Commit the accepted target transition to ReplaySSM trackers."""
         num_reqs = idx_mapping.shape[0]
-        if not self._use_flashinfer_replayssm:
+        if not self._use_replayssm_trackers:
             return
 
         assert num_computed_tokens is not None

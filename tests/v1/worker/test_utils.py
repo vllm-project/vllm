@@ -1373,6 +1373,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
         self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
+        self.use_replayssm_trackers = self.use_flashinfer_replayssm
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)

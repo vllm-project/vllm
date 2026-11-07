@@ -10,6 +10,9 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
+    replayssm_materialize,
+)
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -64,7 +67,7 @@ def get_replayssm_block_copy_tensors(
     """Include shared trackers in scheduler block copies alongside packed pages."""
     tensors: list[torch.Tensor] = []
     for layer in forward_context.values():
-        if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
+        if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
             tensors.extend(
                 (layer._replayssm_ring_start, layer._replayssm_prev_num_accepted)
             )
@@ -391,7 +394,7 @@ class ReplaySSMModelContext:
         # Homogeneous groups share cache-hit lookup, logical columns, and replay
         # transitions. The scheduler still assigns each group its own slots.
         assert all(spec == first_spec for _, spec, _ in grouped), (
-            "FlashInfer ReplaySSM requires equal Mamba cache specs"
+            "ReplaySSM trackers require equal Mamba cache specs"
         )
         geometry = [(state.shape[1:], state.dtype) for state in first.kv_cache[1:]]
         assert all(
@@ -399,7 +402,7 @@ class ReplaySSMModelContext:
             and mixer.A.dtype == first.A.dtype
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
-        ), "FlashInfer ReplaySSM requires equal materialization geometry"
+        ), "ReplaySSM trackers require equal materialization geometry"
 
         device = first.kv_cache[1].device
         block_tables = [table for _, _, table in grouped]
@@ -475,10 +478,31 @@ class ReplaySSMModelContext:
             materialize_prefixes=first_spec.mamba_cache_mode == "align",
         )
 
-    def _materialize(self) -> None:
-        """Publish all canonical prefix snapshots in one FlashInfer call."""
+    def _materialize(self, num_reqs: int) -> None:
+        """Publish all canonical prefix snapshots in one kernel launch."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
+        if not first.use_flashinfer_replayssm:
+            replayssm_materialize(
+                *self.materialize_tables[:9],
+                self.src_slots,
+                self.dst_slots,
+                self.plan_ring_start,
+                self.plan_flush_count,
+                self.active_request_indices,
+                num_reqs=num_reqs,
+                state_dtype=first.kv_cache[1].dtype,
+                input_dtype=first.kv_cache[2].dtype,
+                matrixA_dtype=first.A.dtype,
+                num_heads=first.kv_cache[1].size(1),
+                dim=first.kv_cache[1].size(2),
+                dstate=first.kv_cache[1].size(3),
+                heads_per_group=(
+                    first.kv_cache[1].size(1) // first.kv_cache[4].size(1)
+                ),
+                ring_buffer_len=self.ring_buffer_len,
+            )
+            return
         rand_seed = None
         philox_rounds = 0
         if mamba_config.enable_stochastic_rounding:
@@ -582,7 +606,7 @@ class ReplaySSMModelContext:
             MAX_NUM_REQS=self.max_num_reqs,
             BLOCK_SIZE=triton.next_power_of_2(self.max_num_reqs),
         )
-        self._materialize()
+        self._materialize(num_reqs)
 
 
 def _cuda_i64_ptrs(tensors: list[torch.Tensor]) -> torch.Tensor:

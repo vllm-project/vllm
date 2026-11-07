@@ -412,7 +412,7 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
-    # FlashInfer ReplaySSM migrates temporal state through its ring materializer.
+    # ReplaySSM trackers migrate temporal state through their ring materializer.
     # Skip the generic temporal copy in that case so it cannot overwrite the
     # ReplaySSM-owned transition; canonical convolution state still needs the
     # generic snapshot at the same block boundary.
@@ -796,7 +796,7 @@ def _get_mamba_gpu_state_copy_funcs(
     copy_funcs: MambaStateCopyFuncsByType,
 ) -> MambaStateCopyFuncs:
     state_copy_funcs = copy_funcs[spec.mamba_type]
-    if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
+    if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
             or len(spec.shapes) != 5
@@ -804,7 +804,7 @@ def _get_mamba_gpu_state_copy_funcs(
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
-                "FlashInfer ReplaySSM requires two canonical Mamba2 "
+                "ReplaySSM trackers require two canonical Mamba2 "
                 "states and three ring states"
             )
         state_copy_funcs += (get_temporal_copy_spec,) * 3
@@ -1056,15 +1056,15 @@ class MambaSpecDecodeGPUContext:
                     mamba_spec, attention, mamba_state_copy_funcs
                 )
                 kv_caches: list[torch.Tensor] = attention.kv_cache
-                is_flashinfer_replayssm = (
+                uses_replayssm_trackers = (
                     isinstance(attention, MambaBase)
-                    and attention.use_flashinfer_replayssm
+                    and attention.use_replayssm_trackers
                 )
-                has_baseline_layer |= not is_flashinfer_replayssm
-                if is_flashinfer_replayssm:
+                has_baseline_layer |= not uses_replayssm_trackers
+                if uses_replayssm_trackers:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                            "ReplaySSM trackers require five bound Mamba2 states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
@@ -1155,7 +1155,7 @@ class MambaSpecDecodeGPUContext:
                 spec = kv_cache_group.kv_cache_spec
                 if not isinstance(spec, MambaSpec):
                     raise TypeError(
-                        "FlashInfer ReplaySSM layers require a Mamba cache spec; "
+                        "ReplaySSM tracker layers require a Mamba cache spec; "
                         f"got {type(spec).__name__}"
                     )
                 replayssm_groups.append(
@@ -1165,7 +1165,7 @@ class MambaSpecDecodeGPUContext:
         assert idx == self.num_states
         if replayssm_groups and has_baseline_layer:
             raise ValueError(
-                "mixed FlashInfer ReplaySSM and baseline Mamba layers are unsupported"
+                "mixed ReplaySSM tracker and baseline Mamba layers are unsupported"
             )
 
         # Cache per-group block-table base addresses and per-request stride.

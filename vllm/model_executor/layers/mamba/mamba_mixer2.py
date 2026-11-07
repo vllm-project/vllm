@@ -42,6 +42,9 @@ from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
+    selective_state_update_replayssm_spec,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -541,6 +544,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self.mamba_config = vllm_config.mamba_config
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
         self.state_alignment = mamba_state_alignment(vllm_config)
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
@@ -764,7 +768,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if self.use_replayssm:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:5]
                 ring_start = self._replayssm_ring_start
-                if self.use_flashinfer_replayssm:
+                if self.use_replayssm_trackers:
                     prev_num_accepted = self._replayssm_prev_num_accepted
             else:
                 x_cache = dt_cache = B_cache = None
@@ -907,7 +911,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 ssm_state[state_indices_tensor_p] = final_states
             if (
                 ring_start is not None
-                and not self.use_flashinfer_replayssm
+                and not self.use_replayssm_trackers
                 and self._plans_replayssm_decode
             ):
                 # Triton decode appends to the ring that prefill leaves empty.
@@ -1024,6 +1028,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         cu_seqlens=fi_cu_seqlens,
                         max_seqlen=fi_max_seqlen,
                         enable_pdl=False,
+                    )
+                elif self.use_replayssm_trackers:
+                    assert ring_start is not None
+                    assert prev_num_accepted is not None
+                    assert replayssm_state_indices_d is not None
+                    assert query_start_loc_d is not None
+                    selective_state_update_replayssm_spec(
+                        ssm_state,
+                        x_cache,
+                        B_cache,
+                        dt_cache,
+                        ring_start,
+                        prev_num_accepted,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
+                        cu_seqlens=query_start_loc_d,
+                        max_seqlen=1 + self.num_spec,
+                        state_batch_indices=replayssm_state_indices_d,
+                        D=D_d,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
                     )
                 else:
                     assert ring_start is not None

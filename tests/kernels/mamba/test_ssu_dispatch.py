@@ -667,7 +667,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.ssm_state_size = 8
     mixer.num_spec = 3
     mixer.use_replayssm = True
-    mixer.use_flashinfer_replayssm = True
+    mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")

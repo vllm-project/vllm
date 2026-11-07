@@ -128,7 +128,7 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
-    if not config.use_flashinfer_replayssm:
+    if not config.use_replayssm_trackers:
         return
     from vllm.v1.worker.extensible_kv_cache import (
         ensure_kv_cache_blocks,
@@ -157,7 +157,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 layer := config.compilation_config.static_forward_context[name],
                 MambaBase,
             )
-            and layer.use_flashinfer_replayssm
+            and layer.use_replayssm_trackers
         ]
         if not mixers:
             continue
