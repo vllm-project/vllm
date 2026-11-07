@@ -12,8 +12,9 @@ projections, which run as BF16 GEMMs at decode batch sizes.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch import nn
@@ -30,8 +31,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.platforms import current_platform
 
-Backend = Literal["cute", "dsv3_fused_a"]
-ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]
+Backend = Literal["cute", "dsv3_fused_a", "fi_warp_splitk"]
+# FlashInfer warp split-K tactic: (output_tile, token_tile, k_tile, stages,
+# b_loader_warps).
+WarpSplitKConfig = tuple[int, int, int, int, int]
+ResolvedCall = tuple[Backend, SkinnyGemmConfig | WarpSplitKConfig | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +44,7 @@ class GLM52ProjectionSpec:
     k: int
     cute_configs: tuple[tuple[int, SkinnyGemmConfig], ...]
     dsv3_tokens: frozenset[int] = frozenset()
+    warp_splitk_configs: tuple[tuple[int, WarpSplitKConfig], ...] = ()
 
     def build_plan(self) -> dict[int, ResolvedCall]:
         plan: dict[int, ResolvedCall] = {
@@ -47,6 +52,10 @@ class GLM52ProjectionSpec:
         }
         plan.update(
             (num_tokens, ("dsv3_fused_a", None)) for num_tokens in self.dsv3_tokens
+        )
+        plan.update(
+            (num_tokens, ("fi_warp_splitk", config))
+            for num_tokens, config in self.warp_splitk_configs
         )
         return plan
 
@@ -92,60 +101,91 @@ GLM52_PROJECTIONS = {
     )
 }
 
-# SM107 (VRNVL72) table: each M is listed only where it beat cuBLAS; other M use
-# cuBLAS. Times are table backend / cuBLAS at M=4 unless noted.
-# q_a + kv_a, replicated: 5.84 / 6.91 us.
+
+def _warp_splitk_rows(
+    measured: dict[int, WarpSplitKConfig], first_m: int = 1
+) -> tuple[tuple[int, WarpSplitKConfig], ...]:
+    """Serve every M up to the largest swept M with the tactic swept at the
+    smallest swept M' >= M."""
+    swept = sorted(measured)
+    return tuple(
+        (m, measured[next(s for s in swept if s >= m)])
+        for m in range(first_m, swept[-1] + 1)
+    )
+
+
+# SM107 (VRNVL72) table, swept on one VRNVL72 GPU with CUDA graph replay, cold L2
+# and PDL. FlashInfer warp split-K reduces in-kernel, so no split-K reduce kernel
+# follows it. Times are table backend / cuBLAS at M=8.
+# q_a + kv_a, replicated: 3.53 / 6.14 us.
 _SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
     n=2624,
     k=6144,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 256, 4, k_unroll=2)),
-        (2, SkinnyGemmConfig(2, 128, 2, k_unroll=2)),
-        (3, SkinnyGemmConfig(3, 128, 2, k_unroll=2)),
-        (4, SkinnyGemmConfig(4, 128, 2, k_unroll=2)),
-        (5, SkinnyGemmConfig(5, 128, 2)),
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            1: (16, 8, 256, 16, 2),
+            2: (16, 8, 256, 16, 2),
+            4: (16, 8, 256, 16, 2),
+            8: (16, 8, 256, 15, 2),
+            12: (16, 16, 256, 12, 2),
+            16: (16, 16, 256, 12, 2),
+            24: (16, 32, 256, 9, 2),
+            32: (32, 16, 256, 9, 2),
+        }
     ),
-    dsv3_tokens=frozenset(range(6, 9)),
 )
 
-# MTP eh_proj (draft M = number of requests): 12.90 / 16.96 us at M=1.
+# MTP eh_proj: 11.83 / 15.19 us.
 _SM107_EH_PROJECTION = GLM52ProjectionSpec(
     n=6144,
     k=12288,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=12288)),
-        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
-        (4, SkinnyGemmConfig(4, 128, 4)),
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            8: (32, 8, 256, 11, 2),
+            16: (32, 16, 256, 9, 2),
+            32: (32, 32, 256, 6, 2),
+        }
     ),
 )
 
-# q_b_proj at TP4 and the indexer wq_b (replicated): 4.31 / 5.71 us.
+# q_b_proj at TP4 and the indexer wq_b (replicated): 2.45 / 4.93 us.
 _SM107_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
     n=4096,
     k=2048,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 128, 4, k_unroll=2)),
-        (2, SkinnyGemmConfig(2, 128, 4, k_unroll=2)),
-        (3, SkinnyGemmConfig(3, 128, 4, k_unroll=2)),
-        (4, SkinnyGemmConfig(4, 64, 4, k_unroll=4)),
-        (5, SkinnyGemmConfig(5, 64, 2, k_unroll=2)),
-        (6, SkinnyGemmConfig(6, 64, 2, k_unroll=2)),
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            1: (32, 8, 256, 8, 2),
+            2: (32, 8, 128, 16, 2),
+            8: (32, 8, 256, 8, 2),
+            12: (32, 16, 128, 14, 2),
+            16: (32, 16, 256, 8, 2),
+            32: (32, 32, 128, 11, 2),
+        }
     ),
 )
 
-# o_proj at TP4: CuTe wins only for M<=3 (draft passes): 5.90 / 7.77 us at M=1.
+# o_proj at TP4: 4.41 / 7.09 us.
 _SM107_O_PROJ_TP4_PROJECTION = GLM52ProjectionSpec(
     n=6144,
     k=4096,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 128, 3, k_unroll=4)),
-        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 128, 4)),
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            1: (16, 8, 256, 9, 2),
+            2: (16, 8, 256, 9, 1),
+            4: (16, 8, 256, 9, 2),
+            8: (32, 8, 256, 11, 2),
+            16: (32, 16, 256, 9, 2),
+            32: (32, 32, 256, 6, 2),
+        }
     ),
 )
 
-# indexer wk + weights_proj, replicated: 2.83 / 5.43 us.
+# indexer wk + weights_proj, replicated: CuTe up to M=8 (2.44 / 4.27 us), then
+# warp split-K (2.83 / 3.74 us at M=16).
 _SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
     n=160,
     k=6144,
@@ -157,36 +197,36 @@ _SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
         (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
-        (12, SkinnyGemmConfig(12, 256, 1, k_unroll=2)),
-        (16, SkinnyGemmConfig(16, 256, 1, k_unroll=2)),
+    ),
+    warp_splitk_configs=_warp_splitk_rows(
+        {16: (16, 8, 256, 14, 2), 32: (16, 8, 256, 16, 2)}, first_m=9
     ),
 )
 
-# shared expert gate_up at TP4: 3.96 / 5.40 us.
+# shared expert gate_up at TP4: 2.91 / 4.55 us.
 _SM107_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
     n=1024,
     k=6144,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 256, 2, k_unroll=2)),
-        (2, SkinnyGemmConfig(2, 256, 2, k_unroll=2)),
-        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
-        (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
-        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
-        (6, SkinnyGemmConfig(6, 128, 1, k_unroll=2)),
-        (8, SkinnyGemmConfig(8, 128, 2, k_unroll=2)),
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            1: (16, 8, 256, 15, 2),
+            24: (16, 8, 256, 16, 2),
+            32: (16, 16, 256, 10, 2),
+        }
     ),
 )
 
-# shared expert down at TP4: 3.19 / 4.28 us.
+# shared expert down at TP4: 1.75 / 3.15 us.
 _SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
     n=6144,
     k=512,
-    cute_configs=(
-        (1, SkinnyGemmConfig(1, 64, 6, k_unroll=4)),
-        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 64, 4)),
-        (4, SkinnyGemmConfig(4, 32, 4, k_unroll=2)),
-        (6, SkinnyGemmConfig(6, 32, 4, k_unroll=2)),
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            24: (32, 8, 128, 4, 2),
+            32: (32, 8, 128, 3, 1),
+        }
     ),
 )
 
@@ -358,6 +398,75 @@ def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
     )
 
 
+@functools.cache
+def _warp_splitk_module() -> Any | None:
+    """FlashInfer's CuTe DSL warp split-K BF16 GEMM, called directly so every
+    (N, K, M) runs its measured tactic: ``flashinfer.mm_bf16`` takes no tactic
+    and would use its autotuner or heuristic default instead."""
+    try:
+        from flashinfer.gemm.kernels import dense_bf16_gemm_warp_splitk
+    except Exception:
+        return None
+    return dense_bf16_gemm_warp_splitk
+
+
+def _run_warp_splitk(
+    x: torch.Tensor, weight: torch.Tensor, config: WarpSplitKConfig
+) -> torch.Tensor | None:
+    module = _warp_splitk_module()
+    if module is None or x.data_ptr() % 32 or weight.data_ptr() % 32:
+        return None
+    output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
+    return module.run_warp_splitk_dense(
+        x, weight.t(), output, True, module.WarpSplitKTactic(*config)
+    )
+
+
+class _WarpSplitKWarmup:
+    """Compiles the planned warp split-K kernels before CUDA graph capture."""
+
+    def __init__(self) -> None:
+        self._units: set[tuple[int, int, WarpSplitKConfig]] = set()
+        self._registered = False
+
+    def request(self, n: int, k: int, configs: set[WarpSplitKConfig]) -> None:
+        if not configs or _warp_splitk_module() is None:
+            return
+        self._units.update((n, k, config) for config in configs)
+        if self._registered:
+            return
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            register_cutedsl_warmup_provider,
+        )
+
+        register_cutedsl_warmup_provider(self)
+        self._registered = True
+
+    @staticmethod
+    def _compile(n: int, k: int, config: WarpSplitKConfig) -> None:
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
+        x = torch.zeros((1, k), dtype=torch.bfloat16, device=device)
+        weight = torch.zeros((n, k), dtype=torch.bfloat16, device=device)
+        _run_warp_splitk(x, weight, config)
+
+    def get_cutedsl_warmup_compile_units(self):
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLCompileUnit
+
+        return tuple(
+            CuTeDSLCompileUnit(
+                name="FlashInfer warp split-K BF16 GEMM",
+                key=("fi-warp-splitk", n, k, config),
+                compile=functools.partial(self._compile, n, k, config),
+            )
+            for n, k, config in sorted(self._units)
+        )
+
+
+_warp_splitk_warmup = _WarpSplitKWarmup()
+
+
 def run_glm52_plan(
     plan: dict[int, ResolvedCall] | None,
     x: torch.Tensor,
@@ -370,7 +479,11 @@ def run_glm52_plan(
         return None
 
     backend, config = entry
+    if backend == "fi_warp_splitk":
+        assert isinstance(config, tuple)
+        return _run_warp_splitk(x, weight, config)
     if backend == "cute":
+        assert isinstance(config, SkinnyGemmConfig)
         if not shape_dynamic_skinny_gemm.is_available():
             return None
         return shape_dynamic_skinny_gemm(x, weight, config)
@@ -386,9 +499,13 @@ def run_glm52_plan(
     return output
 
 
-def _request_warmup(dtype: torch.dtype, configs: set[SkinnyGemmConfig]) -> None:
+def _request_warmup(dtype: torch.dtype, spec: GLM52ProjectionSpec) -> None:
+    configs = {config for _, config in spec.cute_configs}
     if configs and shape_dynamic_skinny_gemm.is_available():
         shape_dynamic_skinny_gemm.request_warmup_configs(dtype, configs)
+    _warp_splitk_warmup.request(
+        spec.n, spec.k, {config for _, config in spec.warp_splitk_configs}
+    )
 
 
 def build_glm52_plan(
@@ -405,7 +522,7 @@ def build_glm52_plan(
     spec = table.get(tuple(weight.shape))
     if spec is None:
         return None
-    _request_warmup(dtype, {config for _, config in spec.cute_configs})
+    _request_warmup(dtype, spec)
     return spec.build_plan()
 
 
@@ -437,7 +554,7 @@ def enable_glm52_low_latency_gemm(
     if table is None:
         return
 
-    warmup_configs: set[SkinnyGemmConfig] = set()
+    planned: set[GLM52ProjectionSpec] = set()
     for child in module.modules():
         if (
             not isinstance(child, LinearBase)
@@ -451,6 +568,7 @@ def enable_glm52_low_latency_gemm(
         if spec is None:
             continue
         child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())
-        warmup_configs.update(config for _, config in spec.cute_configs)
+        planned.add(spec)
 
-    _request_warmup(dtype, warmup_configs)
+    for spec in planned:
+        _request_warmup(dtype, spec)

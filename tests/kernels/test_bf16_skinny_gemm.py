@@ -91,6 +91,27 @@ GLM_CUTE_CASES = [
     for num_tokens, _ in spec.cute_configs
 ]
 
+
+def _warp_splitk_probe_tokens(spec: glm52_gemm.GLM52ProjectionSpec) -> set[int]:
+    """The smallest and largest M served by each planned warp split-K tactic."""
+    tokens_by_tactic: dict[glm52_gemm.WarpSplitKConfig, list[int]] = {}
+    for num_tokens, config in spec.warp_splitk_configs:
+        tokens_by_tactic.setdefault(config, []).append(num_tokens)
+    return {
+        num_tokens
+        for tokens in tokens_by_tactic.values()
+        for num_tokens in (min(tokens), max(tokens))
+    }
+
+
+# Derived from the tables, so a warp split-K row cannot be added untested.
+GLM_WARP_SPLITK_CASES = sorted(
+    (capability, spec.n, spec.k, num_tokens)
+    for capability, table in GLM_GPU_TABLES
+    for spec in table.values()
+    for num_tokens in _warp_splitk_probe_tokens(spec)
+)
+
 QWEN4_EXP_SM90_CASES = [
     (n, k, num_tokens, config)
     for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS.items()
@@ -511,6 +532,7 @@ def test_glm52_low_latency_table_capability_routing(
     monkeypatch.setattr(
         glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
     )
+    monkeypatch.setattr(glm52_gemm, "_warp_splitk_module", lambda: None)
     assert glm52_gemm._low_latency_table() is expected
 
     # The MTP eh_proj is a plain nn.Linear and gets its plan from the same table.
@@ -528,6 +550,59 @@ def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
     assert single_row.stride() == multiple_rows.stride() == (144, 1)
     assert not glm52_gemm._is_supported_row_major(single_row)
     assert not glm52_gemm._is_supported_row_major(multiple_rows)
+
+
+def test_glm52_sm107_warp_splitk_rows() -> None:
+    small, large = (16, 8, 256, 16, 2), (32, 16, 256, 9, 2)
+    assert dict(glm52_gemm._warp_splitk_rows({2: small, 4: large})) == {
+        1: small,
+        2: small,
+        3: large,
+        4: large,
+    }
+    assert set(dict(glm52_gemm._warp_splitk_rows({16: small}, first_m=9))) == set(
+        range(9, 17)
+    )
+
+    for spec in glm52_gemm.GLM52_PROJECTIONS_SM107.values():
+        if not spec.warp_splitk_configs:
+            continue
+        plan = spec.build_plan()
+        warp_tokens = {
+            num_tokens
+            for num_tokens, (backend, _) in plan.items()
+            if backend == "fi_warp_splitk"
+        }
+        assert warp_tokens == {num_tokens for num_tokens, _ in spec.warp_splitk_configs}
+        assert max(warp_tokens) == 32
+        # Warp split-K rows are applied last; they must not hide measured rows.
+        assert not warp_tokens & {num_tokens for num_tokens, _ in spec.cute_configs}
+        assert not warp_tokens & spec.dsv3_tokens
+
+
+def test_glm52_warp_splitk_warmup_units(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm.model_executor.warmup import cutedsl_warmup
+
+    registered: list[object] = []
+    warmup = glm52_gemm._WarpSplitKWarmup()
+    monkeypatch.setattr(glm52_gemm, "_warp_splitk_module", lambda: object())
+    monkeypatch.setattr(glm52_gemm, "_warp_splitk_warmup", warmup)
+    monkeypatch.setattr(
+        cutedsl_warmup, "register_cutedsl_warmup_provider", registered.append
+    )
+    monkeypatch.setattr(
+        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
+    spec = glm52_gemm.GLM52_PROJECTIONS_SM107[(6144, 4096)]
+
+    glm52_gemm._request_warmup(torch.bfloat16, spec)
+    glm52_gemm._request_warmup(torch.bfloat16, spec)
+
+    assert registered == [warmup]
+    assert {unit.key for unit in warmup.get_cutedsl_warmup_compile_units()} == {
+        ("fi-warp-splitk", spec.n, spec.k, config)
+        for _, config in spec.warp_splitk_configs
+    }
 
 
 @pytest.mark.parametrize("capability,table", GLM_GPU_TABLES, ids=GLM_GPU_TABLE_IDS)
@@ -587,6 +662,7 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
         "is_available",
         lambda: False,
     )
+    monkeypatch.setattr(glm52_gemm, "_warp_splitk_module", lambda: None)
 
     glm52_gemm.enable_glm52_low_latency_gemm(
         root,
@@ -1146,6 +1222,41 @@ def test_glm_cute_selected_shapes_cuda_graph_capture(
     with torch.cuda.graph(graph):
         output = glm52_gemm.run_glm52_plan(plan, x, weight)
     graph.replay()
+    torch.accelerator.synchronize()
+
+    assert output is not None
+    reference = x.float() @ weight.float().t()
+    torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
+
+
+def _require_capability_and_warp_splitk(capability: tuple[int, int]) -> None:
+    if (
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() != capability
+    ):
+        pytest.skip(f"warp split-K selection requires SM{capability[0]}{capability[1]}")
+    if glm52_gemm._warp_splitk_module() is None:
+        pytest.skip("FlashInfer warp split-K BF16 GEMM is not available")
+
+
+@pytest.mark.parametrize("cuda_graph", [False, True])
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_WARP_SPLITK_CASES)
+def test_glm_warp_splitk_selected_shapes(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int, cuda_graph: bool
+) -> None:
+    _require_capability_and_warp_splitk(capability)
+    torch.manual_seed(42)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "fi_warp_splitk")
+
+    output = glm52_gemm.run_glm52_plan(plan, x, weight)
+    if cuda_graph:
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = glm52_gemm.run_glm52_plan(plan, x, weight)
+        graph.replay()
     torch.accelerator.synchronize()
 
     assert output is not None
