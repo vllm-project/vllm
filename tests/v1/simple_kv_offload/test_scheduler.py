@@ -1628,6 +1628,89 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
     assert cpu_cached(req_c) == [True, True]
 
 
+def _cpu_cached(sched: SimpleCPUOffloadScheduler, req: Request, n: int) -> list[bool]:
+    cache_map = sched.cpu_block_pool.cached_block_hash_to_block
+    return [
+        cache_map.get_one_block(make_block_hash_with_group_id(h, 0)) is not None
+        for h in req.block_hashes[:n]
+    ]
+
+
+def _store_and_finish(fix: SchedulerFixture, request: Request, num_blocks: int) -> None:
+    sched = fix.scheduler
+    kv_blocks = _alloc_and_register(fix, request, num_blocks)
+    sched.update_state_after_alloc(request, kv_blocks, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {request.request_id: num_blocks * BLOCK_SIZE},
+            new_reqs={request.request_id: kv_blocks.get_block_ids()},
+        )
+    )
+    simulate_store_completion(sched, meta.store_event)
+    sched.request_finished_all_groups(request, kv_blocks.get_block_ids())
+
+
+def test_chunked_prompt_cpu_copy_evicts_tail_first() -> None:
+    """Eager mode: a prompt stored over two chunks keeps its head on CPU when
+    eviction takes half of it (stores land head first, so the head was LRU)."""
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=4)
+    kv_a = _alloc_and_register(fix, req_a, 4, confirmed=False)
+    ids_a = kv_a.get_block_ids()
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    for chunk in range(2):
+        req_a.num_computed_tokens = (chunk + 1) * 2 * BLOCK_SIZE
+        meta = sched.build_connector_meta(
+            make_scheduler_output(
+                {req_a.request_id: 2 * BLOCK_SIZE},
+                new_reqs={req_a.request_id: ids_a} if chunk == 0 else None,
+                cached_req_new_blocks={req_a.request_id: None} if chunk else None,
+            )
+        )
+        assert len(meta.store_cpu_blocks) == 2
+        simulate_store_completion(sched, meta.store_event)
+    sched.request_finished_all_groups(req_a, ids_a)
+
+    # All 4 usable CPU blocks hold req_a; 2 new blocks evict 2 of them.
+    _store_and_finish(fix, make_request(num_blocks=2), 2)
+
+    assert _cpu_cached(sched, req_a, 4) == [True, True, False, False]
+
+
+def test_cpu_prefix_refresh_waits_for_finish_flush() -> None:
+    """Eager mode: the request stays registered until its finish-time flush
+    lands, and the block that flush stores is evicted first."""
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    req_a = make_request(num_blocks=3)
+    kv_a = _alloc_and_register(fix, req_a, 3, confirmed=False)
+    ids_a = kv_a.get_block_ids()
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    req_a.num_computed_tokens = 2 * BLOCK_SIZE
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_a.request_id: 2 * BLOCK_SIZE}, new_reqs={req_a.request_id: ids_a}
+        )
+    )
+    simulate_store_completion(sched, meta.store_event)
+
+    # The third block is confirmed in decode; the finish-time flush stores it.
+    req_a.num_computed_tokens = 3 * BLOCK_SIZE
+    sched.request_finished_all_groups(req_a, ids_a)
+    assert sched._reqs_to_store[req_a.request_id].finished
+    flush = sched.build_connector_meta(make_scheduler_output({}))
+    assert len(flush.store_cpu_blocks) == 1
+    assert req_a.request_id in sched._reqs_to_store
+    simulate_store_completion(sched, flush.store_event)
+    assert req_a.request_id not in sched._reqs_to_store
+
+    # 2 new blocks take the one free CPU block and req_a's last block.
+    _store_and_finish(fix, make_request(num_blocks=2), 2)
+
+    assert _cpu_cached(sched, req_a, 3) == [True, True, False]
+
+
 # ---------------------------------------------------------------------------
 # Test 5: Preemption no CPU block leak
 # ---------------------------------------------------------------------------

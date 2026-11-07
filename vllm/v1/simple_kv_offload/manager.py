@@ -270,6 +270,9 @@ class SimpleCPUOffloadScheduler:
         self._store_event_to_reqs: dict[int, list[str]] = {}
         self._in_flight_store_gpu_blocks: set[int] = set()
         self._pending_finished_stores: list[TransferMeta] = []
+        # Requests whose finish-time flush is queued: they stay registered
+        # until it lands, so their CPU prefix is refreshed after it.
+        self._pending_finished_store_req_ids: list[str] = []
         self._abandoned_reqs_to_load: dict[str, LoadRequestState] = {}
 
         # Event counters
@@ -463,12 +466,7 @@ class SimpleCPUOffloadScheduler:
         if num_local_tokens := self._pending_local_hits.pop(req_id, None):
             # Eager CPU is inclusive: a GPU prefix hit also uses the CPU copy,
             # but eager stores skip it, so move it to the MRU end here.
-            prefix_hit, _, _ = self.cpu_coordinator.find_longest_cache_hit(
-                request.block_hashes, num_local_tokens
-            )
-            prefix_blocks = [b for grp in prefix_hit for b in grp if not b.is_null]
-            self.cpu_block_pool.touch(prefix_blocks)
-            self.cpu_block_pool.free_blocks(reversed(prefix_blocks))
+            self._refresh_cpu_prefix(request, num_local_tokens)
 
         # Pop the CPU hit cached by get_num_new_matched_tokens(). The
         # found blocks were pinned there to survive LRU eviction in the window
@@ -579,6 +577,9 @@ class SimpleCPUOffloadScheduler:
                 assert transfer.block_meta is not None
                 store_meta.extend(transfer.block_meta)
         self._pending_finished_stores.clear()
+        # Finished requests stay registered until their final flush lands.
+        store_req_ids.extend(self._pending_finished_store_req_ids)
+        self._pending_finished_store_req_ids.clear()
 
         if store_gpu:
             store_event = self._store_event_counter
@@ -1132,6 +1133,7 @@ class SimpleCPUOffloadScheduler:
                     continue
                 state.store_events.discard(event_idx)
                 if state.finished and not state.store_events:
+                    self._refresh_cpu_prefix(state.request, state.request.num_tokens)
                     self._cleanup_store_request(req_id)
 
     def _process_store_completion(
@@ -1287,9 +1289,13 @@ class SimpleCPUOffloadScheduler:
         if not self._lazy_mode:
             store_state = self._reqs_to_store.get(req_id)
             if store_state is not None:
-                if store_state.store_events:
+                if (
+                    store_state.store_events
+                    or req_id in self._pending_finished_store_req_ids
+                ):
                     store_state.finished = True  # Defer: stores in-flight
                 else:
+                    self._refresh_cpu_prefix(request, request.num_tokens)
                     self._cleanup_store_request(req_id)
 
         return False, None
@@ -1332,6 +1338,7 @@ class SimpleCPUOffloadScheduler:
         self._pending_finished_stores.append(
             TransferMeta(gpu_ids, [b.block_id for b in cpu_blocks], block_meta)
         )
+        self._pending_finished_store_req_ids.append(request.request_id)
         self._in_flight_store_gpu_blocks.update(gpu_ids)
         gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
 
@@ -1404,7 +1411,8 @@ class SimpleCPUOffloadScheduler:
             blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
         ]
         if blocks_to_free:
-            self.cpu_block_pool.free_blocks(blocks_to_free)
+            # Tail first, so eviction keeps the head of the prefix longest.
+            self.cpu_block_pool.free_blocks(reversed(blocks_to_free))
 
     def _cleanup_load_request(self, req_id: str) -> int:
         """Release all load resources for a request.
@@ -1432,10 +1440,10 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs
+            # Free CPU touch refs, tail first like the GPU KV cache manager.
             self.cpu_block_pool.free_blocks(
                 self.cpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.cpu_block_ids
+                for bid in reversed(state.transfer_meta.cpu_block_ids)
             )
             # Free GPU touch refs
             assert self._gpu_block_pool is not None
@@ -1447,6 +1455,23 @@ class SimpleCPUOffloadScheduler:
         if state.load_event is None:
             return 0
         return len(state.transfer_meta.gpu_block_ids)
+
+    def _refresh_cpu_prefix(self, request: "Request", num_tokens: int) -> None:
+        """Move the CPU copy of the request's first ``num_tokens`` to the MRU end.
+
+        A lookup stops at the first missing block, so the prefix is requeued
+        tail first, as the GPU KV cache manager frees blocks: eviction then
+        takes the tail and the head stays usable. Without this, the CPU order
+        is store order: a prompt stored over several chunks loses its head
+        first, and a prefix reused from the GPU cache keeps its first-store
+        position.
+        """
+        prefix_hit, _, _ = self.cpu_coordinator.find_longest_cache_hit(
+            request.block_hashes, num_tokens
+        )
+        prefix_blocks = [b for grp in prefix_hit for b in grp if not b.is_null]
+        self.cpu_block_pool.touch(prefix_blocks)
+        self.cpu_block_pool.free_blocks(reversed(prefix_blocks))
 
     def _cleanup_store_request(self, req_id: str) -> None:
         """Release store metadata for a request.
@@ -1490,6 +1515,7 @@ class SimpleCPUOffloadScheduler:
         for transfer in self._pending_finished_stores:
             self._release_transfer_refs(transfer)
         self._pending_finished_stores.clear()
+        self._pending_finished_store_req_ids.clear()
 
         self._store_event_to_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()
