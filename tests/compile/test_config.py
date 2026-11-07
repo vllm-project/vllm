@@ -37,6 +37,8 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
+from ..utils import create_new_process_for_each_test
+
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
 
@@ -76,8 +78,8 @@ def test_get_raw_stream_patch():
 
 
 # Inductor can initialize CUDA even for CPU inputs.
-@pytest.mark.forked
 @pytest.mark.parametrize("use_v2", [False, True])
+@create_new_process_for_each_test("spawn")
 def test_e8m0_custom_op_fullgraph(use_v2, use_fresh_inductor_cache):
     """E8M0 inputs must not prevent mutable custom-op decomposition."""
     with torch.library._scoped_library("test_e8m0", "FRAGMENT") as lib:
@@ -152,12 +154,13 @@ def test_reject_contradictory_custom_ops(custom_ops, config_kwargs, match):
         CompilationConfig(custom_ops=custom_ops, **config_kwargs)
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+# A separate process works around
+# https://github.com/vllm-project/vllm/issues/21073
 # NB: We don't test VLLM_DISABLE_COMPILE_CACHE=0 because that depends
 # on the state of the cache directory on the current machine, which
 # may be influenced by other tests.
 @pytest.mark.parametrize("val", ["1"])
+@create_new_process_for_each_test("spawn")
 def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -180,8 +183,8 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+# A separate process works around
+# https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.parametrize(
     "cudagraph_mode,num_cudagraph_captured",
     [
@@ -191,6 +194,7 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
         (CUDAGraphMode.FULL_AND_PIECEWISE, 14),
     ],
 )
+@create_new_process_for_each_test("spawn")
 def test_use_cudagraphs(
     vllm_runner, monkeypatch, cudagraph_mode, num_cudagraph_captured
 ):
@@ -218,9 +222,10 @@ def test_use_cudagraphs(
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+# A separate process works around
+# https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@create_new_process_for_each_test("spawn")
 def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     # Disable multiprocessing so that the counter is in the same process
@@ -239,8 +244,9 @@ def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
         assert outputs[0][0]
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+# A separate process works around
+# https://github.com/vllm-project/vllm/issues/21073
+@create_new_process_for_each_test("spawn")
 def test_no_compilation(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -256,8 +262,9 @@ def test_no_compilation(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+# A separate process works around
+# https://github.com/vllm-project/vllm/issues/21073
+@create_new_process_for_each_test("spawn")
 def test_enforce_eager(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -287,7 +294,7 @@ def test_enforce_eager_jit_warmup(enable_fault_tolerance):
     assert config.kernel_config.enable_jit_warmup == enable_fault_tolerance
 
 
-@pytest.mark.forked
+@create_new_process_for_each_test("spawn")
 def test_torch_compile_disable(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")
@@ -589,17 +596,15 @@ def _mock_config_for_cudagraph_sizes(
     )
     config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
     config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)
-    config.get_decode_cudagraph_query_lens = (
-        lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
-            config, decode_query_len
-        )
+    config.get_decode_cudagraph_query_lens = lambda decode_query_len: (
+        VllmConfig.get_decode_cudagraph_query_lens(config, decode_query_len)
     )
-    config.get_draft_decode_cudagraph_request_sizes = (
-        lambda: VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
+    config.get_draft_decode_cudagraph_request_sizes = lambda: (
+        VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
     )
     config.use_v2_model_runner = True
-    config._split_cudagraph_capture_sizes = (
-        lambda *args: VllmConfig._split_cudagraph_capture_sizes(config, *args)
+    config._split_cudagraph_capture_sizes = lambda *args: (
+        VllmConfig._split_cudagraph_capture_sizes(config, *args)
     )
     return config
 
@@ -1115,7 +1120,7 @@ def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm")
 def test_real_vllm_config_caps_widest_ngram_decode_batch():
     """Real config post-init preserves the default capture ceiling."""
     model_config = ModelConfig(model="facebook/opt-125m")
