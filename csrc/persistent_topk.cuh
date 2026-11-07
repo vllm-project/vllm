@@ -678,8 +678,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
         raw_len > 0 ? static_cast<uint32_t>(raw_len) : 0u;
     const uint32_t seq_len =
         non_negative_len < row_bound ? non_negative_len : row_bound;
-    int32_t* row_output = params.output + row_idx * params.top_k;
-    const InT* row_input = params.input + row_idx * params.stride;
+    int32_t* row_output =
+        params.output + static_cast<int64_t>(row_idx) * params.top_k;
+    const InT* row_input =
+        params.input + static_cast<int64_t>(row_idx) * params.stride;
 
     if (seq_len <= RADIX_THRESHOLD) {
       if (cta_in_group == 0) {
@@ -1088,9 +1090,10 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   const int length = lengths ? lengths[bid] : static_cast<int>(max_len);
   __shared__ FilteredTopKStorage<MAX_K, UseWideCoarse> storage;
   filtered_topk_row<DType, IdType, VEC_SIZE, MAX_K, UsePredicatedShortLoads,
-                    false, UseWideCoarse>(input + bid * max_len,
-                                          output + bid * top_k, length, top_k,
-                                          storage, num_rows);
+                    false, UseWideCoarse>(
+      input + static_cast<int64_t>(bid) * max_len,
+      output + static_cast<int64_t>(bid) * top_k, length, top_k, storage,
+      num_rows);
 }
 
 // Helper to compute GCD for VEC_SIZE selection

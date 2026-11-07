@@ -1164,6 +1164,33 @@ def test_persistent_topk_sampled_graph(
         )
 
 
+@pytest.mark.skipif(not _has_device_capability(90), reason="Requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@torch.inference_mode()
+def test_persistent_topk_rows_past_2_32_elements(top_k: int) -> None:
+    """Rows that start past element 2^32 of one call's logits (more than 4096
+    decode rows at a 1M-token max_model_len) are addressed with 64-bit offsets.
+    """
+    width, rows, length = 1 << 20, 4097, 60_000
+    if torch.accelerator.get_memory_info()[0] < rows * width * 2 + (2 << 30):
+        pytest.skip("Needs 10 GiB of free GPU memory")
+    set_random_seed(42)
+    logits = torch.empty((rows, width), dtype=torch.bfloat16, device="cuda")
+    logits[:, :length].normal_()
+    lengths = torch.full((rows,), length, dtype=torch.int32, device="cuda")
+    indices = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    _run_topk_backend("persistent_topk", logits, lengths, indices, top_k, length)
+    checked = torch.tensor([0, 1, rows - 2, rows - 1], device="cuda")
+    row_logits = logits[checked, :length].float()
+    selected = row_logits.gather(1, indices[checked].long())
+    torch.testing.assert_close(
+        selected.sort(dim=1, descending=True).values,
+        row_logits.topk(top_k, dim=1).values,
+        atol=0,
+        rtol=0,
+    )
+
+
 def run_large_context_topk_test(
     batch_size: int,
     seq_lens: list[int],
