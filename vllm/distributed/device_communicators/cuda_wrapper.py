@@ -173,6 +173,7 @@ class CudaRTLibrary:
         self.CUDART_CHECK(
             self.funcs["cudaStreamCreateWithFlags"](ctypes.byref(stream), flags)
         )
+        assert stream.value is not None
         return stream.value
 
     def cudaDeviceSynchronize(self) -> None:

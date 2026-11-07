@@ -34,7 +34,9 @@ def _set_cc(monkeypatch, enabled: bool) -> None:
 def d2h_stream(monkeypatch):
     _set_cc(monkeypatch, True)
     conf_compute_utils.install()
-    stream = new_d2h_stream(torch.device("cuda", torch.cuda.current_device()))
+    stream = new_d2h_stream(
+        torch.device("cuda", torch.accelerator.current_device_index())
+    )
     yield stream
     conf_compute_utils._d2h_streams.discard(stream.cuda_stream)
     conf_compute_utils._producer_of.pop(stream.cuda_stream, None)
@@ -52,7 +54,7 @@ def test_new_d2h_stream_is_outside_the_pool(d2h_stream):
 
 def test_new_d2h_stream_without_cc_is_a_pool_stream(monkeypatch):
     _set_cc(monkeypatch, False)
-    stream = new_d2h_stream(torch.cuda.current_device())
+    stream = new_d2h_stream(torch.accelerator.current_device_index())
     assert not isinstance(stream, torch.cuda.ExternalStream)
     assert stream.cuda_stream not in conf_compute_utils._d2h_streams
 
@@ -80,7 +82,7 @@ def test_capture_on_pool_stream_after_d2h_stream(d2h_stream):
             z = y + 1
         capture_stream.wait_stream(side)
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.equal(z, torch.full_like(x, 3))
 
 
@@ -98,4 +100,4 @@ def test_join_on_pool_stream_after_d2h_stream(d2h_stream):
     done.record(cur)
     done.synchronize()
     assert aux.query(), "compute stream ran ahead of the aux stream it joined"
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
