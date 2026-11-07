@@ -11,9 +11,9 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
-    REASONING_EFFORT_MAPPINGS,
     encode_messages,
 )
+from .deepseek_v41_reasoning import resolve_reasoning_kwargs
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
@@ -103,23 +103,9 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     conversation.insert(0, system)
                 system["tools"] = tools
 
-            thinking = bool(kwargs.get("thinking") or kwargs.get("enable_thinking"))
-            if "thinking" not in kwargs and "enable_thinking" not in kwargs:
-                thinking = True
-            effort = kwargs.get("reasoning_effort")
-            if effort == "none":
-                thinking = False
-                effort = None
-            if effort is None:
-                effort = "high"
-            if not (
-                (type(effort) is int and 1 <= effort <= 100)
-                or (isinstance(effort, str) and effort in REASONING_EFFORT_MAPPINGS)
-            ):
-                raise ValueError(
-                    "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, "
-                    "or an integer within [1, 100] in chat_template_kwargs"
-                )
+            controls = resolve_reasoning_kwargs(kwargs)
+            thinking = controls["thinking"]
+            effort = controls["reasoning_effort"] if thinking else "high"
 
             prompt = encode_messages(
                 conversation,
