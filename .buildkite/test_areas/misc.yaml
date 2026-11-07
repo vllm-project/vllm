@@ -119,7 +119,11 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
     - pytest -v -s v1/executor
-    - pytest -v -s v1/worker
+    # The real-constructor PP layout case runs in CPU-Spec Decode Tests.
+    - >-
+      pytest -v -s
+      v1/worker
+      --deselect=tests/v1/worker/test_eagle3_aux_hidden_states_pp.py::test_qwen3_5_declares_and_configures_aux_hidden_state_pp
     - pytest -v -s v1/streaming_input
   mirror:
     amd:
