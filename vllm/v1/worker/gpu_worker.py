@@ -77,6 +77,9 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
+from vllm.model_executor.model_loader.weight_utils import (
+    release_checkpoint_page_cache,
+)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -615,6 +618,10 @@ class Worker(WorkerBase):
             self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        if self.vllm_config.load_config.release_weight_page_cache:
+            # After the drafter too, which may read the same checkpoint files.
+            release_checkpoint_page_cache()
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
