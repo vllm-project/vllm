@@ -668,12 +668,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
     # Valid options mirror torch.set_float32_matmul_precision
-    "VLLM_FLOAT32_MATMUL_PRECISION": env_with_choices(
+    # Lowercased because torch ignores any other casing.
+    "VLLM_FLOAT32_MATMUL_PRECISION": lambda: env_with_choices(
         "VLLM_FLOAT32_MATMUL_PRECISION",
         "highest",
         ["highest", "high", "medium"],
         case_sensitive=False,
-    ),
+    )().lower(),
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
