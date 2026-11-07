@@ -293,6 +293,41 @@ exposes the same data through `LLM.get_metrics()` when logging is on.
 Looking at lifetime and idle time on one chart makes it easy to spot
 stranded cache or workloads that pin prompts for a long decode.
 
+### KV Cache Block States
+
+`--kv-cache-metrics` also enables the `vllm:kv_cache_blocks_by_state`
+gauge. The scheduler splits the usable blocks of each engine
+(`num_gpu_blocks - 1`, the null block is excluded) into exclusive states,
+so the series of one engine always sum to that number:
+
+- `active_shared` / `active_private` – owned by a running request,
+  with `ref_cnt > 1` (shared with another request, a deferred free,
+  copy-on-write, or an external pin) / `ref_cnt == 1`.
+- `loading_kv` – owned by a request whose async KV load is in progress.
+- `held_for_send` – owned by a finished request whose free waits for a
+  connector transfer (a KV send or store, an aborted async KV load, or an
+  EC connector transfer).
+- `waiting_hold` – owned by a waiting or preempted request.
+- `pending_free` – freed, but withheld until an in-flight step completes
+  (deferred block freeing with async scheduling or pipeline parallelism).
+- `unattributed` – in use without an owner request or a deferred free.
+- `cached_evictable` / `empty_free` – free, with / without a prefix-cache
+  hash.
+
+A block owned by several requests takes the first matching state in the
+list above. `unattributed` is not necessarily a leak: copy-on-write,
+HiSparse, and some connectors (for example Mooncake store) pin blocks
+outside any request. A persistent non-zero value on an idle engine without
+such features does indicate leaked blocks.
+
+The count is one pass over the blocks on the engine core thread, so it
+runs at most every 10 seconds while busy. When the engine goes idle after a
+busy count, it counts again so the gauge does not freeze at a busy value,
+and again whenever the idle pool state changes (for example when deferred
+frees drain). A repeated idle state with no busy count in between is not
+recounted, so the `cached_evictable` / `empty_free` split may lag after
+short bursts; the in-use states stay correct.
+
 ### Metrics Publishing - Logging
 
 The `LoggingStatLogger` metrics publisher outputs a log `INFO` message
