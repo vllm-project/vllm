@@ -43,7 +43,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensStreamResponse,
     ParseContext,
 )
-from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     resolve_finish_reason,
@@ -117,6 +120,10 @@ class OnlineDerenderer:
             is_harmony=self.use_harmony,
             tokenizer=renderer.tokenizer,
         )
+        # Like the coupled chat endpoint, report
+        # `usage.completion_tokens_details` only when a reasoning parser
+        # is configured.
+        self._include_reasoning_tokens_details = bool(reasoning_parser)
 
         self.chat_template = chat_template
         self.chat_template_content_format: ChatTemplateContentFormatOption = (
@@ -156,7 +163,14 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
+    ) -> tuple[
+        list[ChatCompletionResponseChoice],
+        PromptLogprobs | None,
+        CompletionTokenUsageInfo | None,
+    ]:
+        """Returns the choices, the resolved `prompt_logprobs`, and
+        `completion_tokens_details` (reasoning tokens summed over the
+        choices; None without a reasoning parser)."""
         return await self._derender_chat_async(
             generate_response, chat_request, prompt_token_ids
         )
@@ -274,9 +288,14 @@ class OnlineDerenderer:
         generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
-    ) -> tuple[list[ChatCompletionResponseChoice], PromptLogprobs | None]:
+    ) -> tuple[
+        list[ChatCompletionResponseChoice],
+        PromptLogprobs | None,
+        CompletionTokenUsageInfo | None,
+    ]:
         tokenizer = self.renderer.get_tokenizer()
         choices: list[ChatCompletionResponseChoice] = []
+        reasoning_tokens = 0
 
         has_parser = self.parser is not None and chat_request is not None
         skip_special, spaces_between = _decode_params(
@@ -347,7 +366,7 @@ class OnlineDerenderer:
 
             if has_parser:
                 assert chat_request is not None
-                message = self._parse_and_assemble(
+                message, choice_reasoning_tokens = self._parse_and_assemble(
                     tokenizer,
                     decoded_text,
                     choice.token_ids,
@@ -357,6 +376,7 @@ class OnlineDerenderer:
                     # be a suffix.
                     generate_response.prompt_token_ids or prompt_token_ids,
                 )
+                reasoning_tokens += choice_reasoning_tokens
             else:
                 message = ChatMessage(role="assistant", content=decoded_text)
 
@@ -376,7 +396,12 @@ class OnlineDerenderer:
         prompt_logprobs = _resolve_prompt_logprobs(
             generate_response.prompt_logprobs, tokenizer
         )
-        return choices, prompt_logprobs
+        completion_tokens_details = (
+            CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+            if self._include_reasoning_tokens_details
+            else None
+        )
+        return choices, prompt_logprobs, completion_tokens_details
 
     async def derender_text_choices(
         self,
@@ -384,7 +409,7 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
-    ) -> list[tuple[ChatMessage, str]]:
+    ) -> tuple[list[tuple[ChatMessage, str]], CompletionTokenUsageInfo | None]:
         """Parse the engine's decoded output text into assistant messages.
 
         Args:
@@ -395,7 +420,9 @@ class OnlineDerenderer:
             prompt_token_ids: Prompt token IDs, if known.
 
         Returns:
-            One message and chat `finish_reason` per output in order.
+            One message and chat `finish_reason` per output in order, and
+            `completion_tokens_details` (reasoning tokens summed over the
+            outputs; None without a reasoning parser).
 
         """
         return await self._derender_text_choices_async(
@@ -408,14 +435,15 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
-    ) -> list[tuple[ChatMessage, str]]:
+    ) -> tuple[list[tuple[ChatMessage, str]], CompletionTokenUsageInfo | None]:
         tokenizer = self.renderer.get_tokenizer()
         results: list[tuple[ChatMessage, str]] = []
+        reasoning_tokens = 0
         for output in outputs:
             if self.parser is None or chat_request is None:
                 message = ChatMessage(role="assistant", content=output.text)
             else:
-                message = self._parse_and_assemble(
+                message, choice_reasoning_tokens = self._parse_and_assemble(
                     tokenizer,
                     output.text,
                     output.token_ids,
@@ -424,11 +452,46 @@ class OnlineDerenderer:
                     prompt_token_ids,
                     history_tool_call_count=history_tool_call_cnt,
                 )
+                reasoning_tokens += choice_reasoning_tokens
             finish_reason = resolve_finish_reason(
                 output.finish_reason, chat_request, bool(message.tool_calls)
             )
             results.append((message, finish_reason))
-        return results
+        completion_tokens_details = (
+            CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+            if self._include_reasoning_tokens_details
+            else None
+        )
+        return results, completion_tokens_details
+
+    def stream_completion_tokens_details(
+        self,
+        processors: Sequence[ChatStreamProcessor],
+        output_token_ids: Sequence[Sequence[int]],
+    ) -> CompletionTokenUsageInfo | None:
+        """Count reasoning tokens over every streamed choice.
+
+        Args:
+            processors: The processor of each choice, from
+                `make_stream_processor`.
+            output_token_ids: Every token streamed so far for each choice.
+
+        Returns:
+            Reasoning tokens summed over the choices, or None without a
+            reasoning parser.
+
+        """
+        if not self._include_reasoning_tokens_details:
+            return None
+        return CompletionTokenUsageInfo(
+            reasoning_tokens=sum(
+                processor.parser.count_reasoning_tokens(token_ids)
+                for processor, token_ids in zip(
+                    processors, output_token_ids, strict=True
+                )
+                if processor.parser is not None and token_ids
+            )
+        )
 
     def make_stream_processor(
         self,
@@ -496,7 +559,7 @@ class OnlineDerenderer:
         chat_template_kwargs: dict[str, Any],
         prompt_token_ids: list[int] | None,
         history_tool_call_count: int | None = None,
-    ) -> ChatMessage:
+    ) -> tuple[ChatMessage, int]:
         """Parse decoded output text into an assistant `ChatMessage`.
 
         Args:
@@ -512,7 +575,9 @@ class OnlineDerenderer:
                 `chat_request`.
 
         Returns:
-            The assembled assistant message.
+            The assembled assistant message and the number of reasoning
+            tokens the parser counts in `token_ids` (0 without a reasoning
+            parser).
 
         """
         assert self.parser is not None
@@ -541,12 +606,18 @@ class OnlineDerenderer:
             enable_auto_tools=self.enable_auto_tools,
             parser_cls=self.parser,
         )
-        return ChatMessage(
+        message = ChatMessage(
             role="assistant",
             reasoning=fields.reasoning,
             content=fields.content,
             tool_calls=fields.tool_calls,
         )
+        reasoning_tokens = (
+            parser.count_reasoning_tokens(token_ids)
+            if self._include_reasoning_tokens_details
+            else 0
+        )
+        return message, reasoning_tokens
 
     def _detokenize_delta(
         self,
@@ -771,6 +842,7 @@ class OnlineDerenderer:
                 prompt_tokens=pt,
                 completion_tokens=ct,
                 total_tokens=pt + ct,
+                prompt_tokens_details=u.prompt_tokens_details,
             )
 
         chunk = ChatCompletionStreamResponse(
@@ -820,14 +892,15 @@ class OnlineDerenderer:
         top_limit = _chat_top_logprobs_limit(chat_request)
         return_tokens_as_token_ids = self._return_tokens_as_token_ids(chat_request)
 
+        parser = parser_cls(
+            tokenizer,
+            chat_request.tools,
+            chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
+            model_config=self.model_config,
+        )
         processor = ChatStreamProcessor(
             chat_request,
-            parser_cls(
-                tokenizer,
-                chat_request.tools,
-                chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
-                model_config=self.model_config,
-            ),
+            parser,
             enable_auto_tools=self.enable_auto_tools,
             parser_cls=parser_cls,
         )
@@ -974,10 +1047,26 @@ class OnlineDerenderer:
             u = generate_chunk.usage
             pt = resolve_prompt_tokens(prompt_tokens, u)
             ct = u.completion_tokens or 0
+            # Over every token streamed so far, not just this chunk. With
+            # n > 1 the usage chunk arrives with one index's state, so the
+            # count can't cover every choice the way `completion_tokens`
+            # does; leave the details out then.
+            count_reasoning = (
+                self._include_reasoning_tokens_details and (chat_request.n or 1) == 1
+            )
+            completion_tokens_details = (
+                CompletionTokenUsageInfo(
+                    reasoning_tokens=parser.count_reasoning_tokens(output_token_ids)
+                )
+                if count_reasoning
+                else None
+            )
             usage = UsageInfo(
                 prompt_tokens=pt,
                 completion_tokens=ct,
                 total_tokens=pt + ct,
+                prompt_tokens_details=u.prompt_tokens_details,
+                completion_tokens_details=completion_tokens_details,
             )
 
         chunk = ChatCompletionStreamResponse(
