@@ -41,6 +41,28 @@ def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
     return bounds
 
 
+def gathered_prefill_shards(
+    row_req_idx: np.ndarray, row_shard_rows: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Under PCP+DCP, group this rank's prefill rows by request and take each
+    request's slice of this rank's KV shard.
+
+    PCP gives a rank two adjacent chunk rows of a split prefill; they share
+    one context, so the workspace holds it once. ``row_shard_rows`` is
+    ``CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound``: the
+    largest DCP shard of the whole request on every row, identical on every
+    PCP rank, so the all-gather is shaped the same everywhere.
+
+    Returns the request row bounds and, per request, its shard rows.
+    """
+    row_bounds = request_row_bounds(row_req_idx)
+    shard_rows = row_shard_rows[row_bounds[:-1]].astype(np.int64)
+    assert np.all(shard_rows > 0), (
+        f"PCP+DCP prefill got an empty context: {shard_rows.tolist()}"
+    )
+    return row_bounds, shard_rows
+
+
 def align_blocks_to_rows(spec: AttentionSpec, rows: int = 1) -> AttentionSpec:
     """Sparse kernels read the cache as flat rows, viewed as ``rows``-row pages,
     so blocks must be whole pages apart."""

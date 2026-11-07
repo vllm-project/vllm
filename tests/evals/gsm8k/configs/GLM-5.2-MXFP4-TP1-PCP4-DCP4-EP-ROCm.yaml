@@ -1,0 +1,20 @@
+model_name: "amd/GLM-5.2-MXFP4"
+accuracy_threshold: 0.90
+num_questions: 1319
+num_fewshot: 5
+max_concurrency: 100
+startup_max_wait_seconds: 2400
+server_args: >-
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+  --max-model-len 4096
+  --max-num-batched-tokens 4096
+  --safetensors-load-strategy prefetch
+  --moe-backend aiter
+  --prefill-context-parallel-size 4
+  --decode-context-parallel-size 4
+  --dcp-comm-backend ag_rs
+  --enable-expert-parallel
+  --kv-cache-dtype fp8
+env:
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "1"

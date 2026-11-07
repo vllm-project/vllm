@@ -262,6 +262,41 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval PCP"
+      automatic_shard: true
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 60
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - tests/evals/gsm8k/configs/GLM-5.2-MXFP4-TP2-PCP2-EP-ROCm.yaml
+      - tests/evals/gsm8k/configs/GLM-5.2-MXFP4-TP1-PCP4-EP-ROCm.yaml
+      - tests/evals/gsm8k/configs/GLM-5.2-MXFP4-TP1-PCP4-DCP4-EP-ROCm.yaml
+      - tests/evals/gsm8k/configs/models-pcp-rocm.txt
+      - vllm/model_executor/layers/quantization
+      - vllm/config/parallel.py
+      - vllm/distributed/parallel_state.py
+      - vllm/model_executor/layers/attention/mla_attention.py
+      - vllm/v1/attention/ops/pcp.py
+      - vllm/model_executor/layers/attention/sparse_mla_attention.py
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      - vllm/models/deepseek_v32/
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/backends/mla/indexer.py
+      - vllm/v1/attention/backends/mla/sparse_utils.py
+      - vllm/v1/worker/gpu/model_runner.py
+      - vllm/v1/worker/gpu/pcp_manager.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp-rocm.txt
 
 - label: ":nvidia: (H100) LM Eval Watermark Feature Combination"
   key: lm-eval-dspark-watermark-2xh100

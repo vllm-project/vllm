@@ -577,6 +577,30 @@ class DeepseekV32Attention(MLAAttention):
         else:
             mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
 
+        attn_out = self._forward_sparse_mqa(mqa_q_arg, kv_cache, attn_metadata)
+
+        # NOTE(woosuk): While the below does not need to be in the eager region,
+        # we put it here to avoid copying the attention output. Move this back to the
+        # captured region once forward_mqa supports `out` argument.
+        x = attn_out.view(
+            num_actual, self.num_local_heads, self.kv_lora_rank
+        ).transpose(0, 1)
+        out = (
+            output[:num_actual]
+            .view(num_actual, self.num_local_heads, self.v_head_dim)
+            .transpose(0, 1)
+        )
+        torch.bmm(x, self.W_UV, out=out)
+        if self.use_pcp and num_actual < output.shape[0]:
+            output[num_actual:].zero_()
+
+    def _forward_sparse_mqa(
+        self,
+        mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+    ) -> torch.Tensor:
+        """Run sparse MQA, merging the context-parallel partial outputs."""
         shardq = getattr(attn_metadata, "shardq", None)
         mqa_metadata = attn_metadata
         if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
@@ -645,18 +669,4 @@ class DeepseekV32Attention(MLAAttention):
                 )
             if self.use_pcp:
                 attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
-
-        # NOTE(woosuk): While the below does not need to be in the eager region,
-        # we put it here to avoid copying the attention output. Move this back to the
-        # captured region once forward_mqa supports `out` argument.
-        x = attn_out.view(
-            num_actual, self.num_local_heads, self.kv_lora_rank
-        ).transpose(0, 1)
-        out = (
-            output[:num_actual]
-            .view(num_actual, self.num_local_heads, self.v_head_dim)
-            .transpose(0, 1)
-        )
-        torch.bmm(x, self.W_UV, out=out)
-        if self.use_pcp and num_actual < output.shape[0]:
-            output[num_actual:].zero_()
+        return attn_out

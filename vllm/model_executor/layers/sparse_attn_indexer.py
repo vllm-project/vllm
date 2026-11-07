@@ -1317,10 +1317,6 @@ class SparseAttnIndexer(CustomOp):
         if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
-            if self.use_pcp and self.dcp_world_size > 1:
-                raise NotImplementedError(
-                    "The ROCm sparse-indexer path does not support PCP+DCP."
-                )
             return self.forward_hip(hidden_states, q_quant, k, weights)
         elif current_platform.is_cpu():
             return self.forward_cpu(hidden_states, q_quant, k, weights)
@@ -1423,6 +1419,13 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                use_pcp=self.use_pcp,
+                pcp_shard_decode_requests=self.pcp_shard_decode_requests,
+                dcp_rank=self.dcp_rank,
+                dcp_world_size=self.dcp_world_size,
+                cp_kv_cache_interleave_size=(
+                    self._parallel_config.cp_kv_cache_interleave_size
+                ),
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "
