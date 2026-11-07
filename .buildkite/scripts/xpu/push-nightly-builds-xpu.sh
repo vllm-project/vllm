@@ -19,3 +19,6 @@ docker manifest create ${REPO}:nightly ${REPO}:nightly-x86_64 --amend
 docker manifest create ${REPO}:nightly-"$BUILDKITE_COMMIT" ${REPO}:nightly-x86_64 --amend
 docker manifest push ${REPO}:nightly
 docker manifest push ${REPO}:nightly-"$BUILDKITE_COMMIT"
+
+# mirror the mutable tag to the vllm/vllm alias (registry-side copy of a manifest list, digest kept)
+docker buildx imagetools create -t vllm/vllm:nightly-xpu ${REPO}:nightly
