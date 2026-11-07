@@ -496,7 +496,9 @@ def _attn_packed(
         tile_mask = seq_offset < max_seq_prefix_len
 
         physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
+            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE,
+            mask=tile_mask,
+            other=0,
         ).to(tl.int64)
 
         slot_in_blk = seq_offset % BLOCK_SIZE
