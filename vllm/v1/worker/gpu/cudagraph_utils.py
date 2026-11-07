@@ -764,7 +764,13 @@ class ModelCudaGraphManager(CudaGraphManager):
             if desc.num_ubatches > 1:
                 # Prepare and park threads before capture; finish runs inside it.
                 assert self.ubatch_runner is not None
-                input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+                input_batch = InputBatch.make_dummy(
+                    num_reqs,
+                    num_tokens,
+                    input_buffers,
+                    for_capture=True,
+                    cg_mode=CUDAGraphMode.FULL,
+                )
                 input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
                 set_dcp_capture_context(
                     input_batch,
@@ -904,7 +910,12 @@ def prepare_inputs_to_capture(
         # even when the dummy batch distributes one token to each request.
         max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
-        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+        num_reqs,
+        num_tokens,
+        input_buffers,
+        max_query_len=max_query_len,
+        for_capture=True,
+        cg_mode=CUDAGraphMode.FULL if full_cudagraph else CUDAGraphMode.PIECEWISE,
     )
     if pcp_manager is not None:
         input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(input_batch)
