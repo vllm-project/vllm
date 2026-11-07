@@ -72,6 +72,9 @@ class MockReasoner:
     def is_reasoning_end_streaming(self, input_ids, delta_ids):
         return self.is_reasoning_end(delta_ids)
 
+    def set_prompt_token_ids(self, prompt_token_ids):
+        self.prompt_token_ids = list(prompt_token_ids)
+
 
 class MockEngineReasoner(ParserEngineReasoningAdapter):
     """Ends reasoning implicitly on ``marker``, which is also content, and
@@ -80,6 +83,9 @@ class MockEngineReasoner(ParserEngineReasoningAdapter):
     def __init__(self, tokenizer, marker: int, end_marker: int | None = None):
         self.marker = marker
         self.end_marker = end_marker
+
+    def set_prompt_token_ids(self, prompt_token_ids):
+        pass
 
     @property
     def reasoning_end_token_ids(self):
@@ -611,6 +617,17 @@ def test_initial_constraint_activation(
         structured_req = request.structured_output_request
         assert structured_req is not None
         assert structured_req.reasoner is None
+
+
+def test_request_local_reasoner_gets_the_prompt(tokenizer):
+    """The gate reads the prompt and output ids together, so the reasoner
+    learns where the output starts from the prompt it is given."""
+    manager, request = _build_harness(
+        tokenizer, "xgrammar", prefix="{", num_spec_tokens=0
+    )
+    reasoner = manager._get_reasoner(request)
+    assert isinstance(reasoner, MockReasoner)
+    assert reasoner.prompt_token_ids == request.prompt_token_ids
 
 
 @pytest.mark.parametrize("backend", REGEX_BACKENDS)
