@@ -411,6 +411,10 @@ _MULTIMODAL_MODELS = {
         "exaone4_5",
         "Exaone4_5_ForConditionalGeneration",
     ),  # noqa: E501
+    "FireRedAsrAedLForConditionalGeneration": (
+        "fireredasr_aed_l",
+        "FireRedAsrAedLForConditionalGeneration",
+    ),
     "FireRedASR2ForConditionalGeneration": (
         "fireredasr2",
         "FireRedASR2ForConditionalGeneration",

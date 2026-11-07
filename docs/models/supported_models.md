@@ -769,6 +769,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `CanaryForConditionalGeneration` | Canary | `nvidia/canary-1b-v2` | | |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
+| `FireRedAsrAedLForConditionalGeneration` | FireRedASR2-AED | `ppxstark/FireRedASR2-AED-vllm`, etc. | | |
 | `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
 | `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
@@ -781,6 +782,12 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
+
+!!! note
+    `ppxstark/FireRedASR2-AED-vllm` is an unofficial vLLM-format conversion of
+    FireRedASR2-AED (8667 vocab). The earlier v1 conversion
+    (`Leebin/FireRedASR-AED-L-vllm`, 7832 vocab) uses different weights and
+    tokenizer and is not interchangeable.
 
 !!! note
     `Nemotron3_5TranscribeForConditionalGeneration` transcribes with speaker tags. Its chat template turns
