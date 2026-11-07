@@ -6,7 +6,7 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
 - enablement gating for ``VLLM_ROCM_USE_AITER_MOE`` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
-- gfx950 128x128 block FP8 accuracy (``AiterFp8BlockExperts``)
+- CDNA4+ 128x128 block FP8 accuracy (``AiterFp8BlockExperts``)
 - AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
   gfx950-only W4A16 accuracy and determinism
 - MoE-facing FP8 group-quant activation quality
@@ -1524,7 +1524,7 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     )
 
 
-@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.skipif(get_cdna_version() < 4, reason="CDNA4+ ROCm only")
 @pytest.mark.parametrize(
     "M,N,K,E,topk",
     [(1, 256, 7168, 16, 6), (83, 512, 512, 8, 2), (1335, 4608, 7168, 2, 1)],
