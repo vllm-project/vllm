@@ -4,6 +4,7 @@ from typing import cast
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -60,6 +61,15 @@ class ROCmLatentMoERunner(MoERunner):
                 scope="global",
             )
         self._logged_sharded_tail = False
+        self._use_aiter_up_proj = False
+        if rocm_aiter_ops.is_enabled():
+            from vllm.platforms.rocm import on_gfx1250
+
+            # aiter's Gluon gemm_a16w16 adds into the shared output in its
+            # epilogue on gfx1250, replacing hipBLASLt's addmm_.
+            self._use_aiter_up_proj = (
+                on_gfx1250() and rocm_aiter_ops.is_gemm_a16w16_accumulate_supported()
+            )
 
     def _shard_up_proj_tail(
         self,
@@ -91,11 +101,21 @@ class ROCmLatentMoERunner(MoERunner):
             if self._up_proj_preshard
             else weight.narrow(0, shard_start, shard_size)
         )
-        hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
-
         # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
         # beta-add epilogue so folding in the shared partial costs no kernel.
-        hidden_shard.addmm_(latent, up_proj_shard.t())
+        if (
+            self._use_aiter_up_proj
+            and latent.dim() == 2
+            and latent.dtype in (torch.bfloat16, torch.float16)
+            and up_proj_shard.dtype == latent.dtype
+            and shared_output.stride(-1) == 1
+        ):
+            rocm_aiter_ops.gemm_a16w16_accumulate(
+                latent, up_proj_shard, shared_output, shard_start
+            )
+        else:
+            hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
+            hidden_shard.addmm_(latent, up_proj_shard.t())
 
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
