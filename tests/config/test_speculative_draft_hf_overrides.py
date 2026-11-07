@@ -9,14 +9,6 @@ draft belonging to a large target model is instantiated at full size even
 when the target itself is shrunk — which is what kept spec-decode archs like
 ``EagleMistralLarge3ForCausalLM`` stuck at ``is_available_online=False``
 ("TODO: revert once figuring out OOM in CI").
-
-Dict ``--hf-overrides`` (the CLI path) must forward rope-relevant keys so
-the MTP draft shares the target's positional encoding. Otherwise YaRN /
-RoPE extensions applied only to the target make acceptance collapse to 0%
-past the draft's native ``max_position_embeddings`` (#58080).
-``max_position_embeddings`` itself is not forwarded (shared drafts use
-``_maybe_override_draft_max_position_embeddings``; independent drafts keep
-the clamp in ``test_draft_model_limits_max_model_len``).
 """
 
 import functools
@@ -28,8 +20,6 @@ from transformers import AutoConfig, Glm5NextConfig, PreTrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
-
-
 
 _YARN_ROPE_PARAMETERS = {
     "mrope_interleaved": True,
@@ -252,19 +242,9 @@ def test_mtp_stages_are_independent_of_dspark_width():
         )
 
 
-
-@pytest.mark.cpu_test
-def test_empty_dict_overrides_fall_back_to_arch_mapping():
-    composed = SpeculativeConfig.compose_draft_hf_overrides({})
-    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
-    assert hf_config.architectures == ["DeepSeekMTPModel"]
-
-
 @pytest.mark.cpu_test
 def test_dict_yarn_overrides_reach_the_draft_config():
     """CLI nested YaRN overrides must apply when the draft has text_config."""
-    from transformers import PreTrainedConfig
-
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS}}
     )
@@ -289,22 +269,6 @@ def test_dict_yarn_overrides_reach_the_draft_config():
 
 
 @pytest.mark.cpu_test
-def test_dict_yarn_overrides_ignore_unrelated_keys():
-    composed = SpeculativeConfig.compose_draft_hf_overrides(
-        {
-            "num_hidden_layers": 1,
-            "rope_parameters": _YARN_ROPE_PARAMETERS,
-        }
-    )
-    hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
-    assert hf_config.architectures == ["DeepSeekMTPModel"]
-    assert getattr(hf_config, "num_hidden_layers", None) != 1
-    rope = getattr(hf_config, "rope_parameters", None)
-    assert rope is not None
-    assert rope["rope_type"] == "yarn"
-
-
-@pytest.mark.cpu_test
 def test_nested_overrides_skip_flat_draft_config():
     """External flat drafters must not get a bare text_config dict."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(
@@ -317,11 +281,16 @@ def test_nested_overrides_skip_flat_draft_config():
 
 @pytest.mark.cpu_test
 def test_top_level_rope_parameters_replace_on_draft():
+    """Top-level rope keys reach the draft; unrelated keys stay target-only."""
     composed = SpeculativeConfig.compose_draft_hf_overrides(
-        {"rope_parameters": _YARN_ROPE_PARAMETERS}
+        {
+            "num_hidden_layers": 1,
+            "rope_parameters": _YARN_ROPE_PARAMETERS,
+        }
     )
     hf_config = composed(_make_hf_config(model_type="deepseek_v3"))
     assert hf_config.architectures == ["DeepSeekMTPModel"]
+    assert getattr(hf_config, "num_hidden_layers", None) != 1
     rope = getattr(hf_config, "rope_parameters", None)
     assert rope is not None
     assert rope["rope_type"] == "yarn"

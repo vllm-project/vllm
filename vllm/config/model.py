@@ -537,8 +537,9 @@ class ModelConfig:
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return factors
 
-    @staticmethod
+    @classmethod
     def _update_nested(
+        cls,
         target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
@@ -556,7 +557,7 @@ class ModelConfig:
                     isinstance(nested_target, dict)
                     or hasattr(nested_target, "__dict__")
                 ):
-                    ModelConfig._update_nested(nested_target, value)
+                    cls._update_nested(nested_target, value)
                     continue
 
             # Set the value (base case)
@@ -565,8 +566,9 @@ class ModelConfig:
             else:
                 setattr(target, key, value)
 
-    @staticmethod
+    @classmethod
     def _apply_dict_overrides(
+        cls,
         config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
@@ -577,7 +579,7 @@ class ModelConfig:
             attr = getattr(config, key, None)
             if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
-                ModelConfig._update_nested(attr, value)
+                cls._update_nested(attr, value)
             else:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
@@ -704,7 +706,7 @@ class ModelConfig:
         )
         self.hf_config = hf_config
         if dict_overrides:
-            ModelConfig._apply_dict_overrides(hf_config, dict_overrides)
+            self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(

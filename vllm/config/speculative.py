@@ -51,17 +51,9 @@ else:
 logger = init_logger(__name__)
 
 
-# Positional-encoding keys that target and draft must share. Dict
-# ``--hf-overrides`` (the CLI path) otherwise never reach the draft, so YaRN
-# / RoPE extensions applied only to the target leave the MTP draft on native
-# rope and speculative acceptance collapses past the draft's native window
-# (#58080).
-#
-# ``max_position_embeddings`` is intentionally omitted: shared-position
-# drafts already get it via ``_maybe_override_draft_max_position_embeddings``,
-# and forwarding a target override onto an independent draft breaks the
-# draft max-model-len clamp (see ``test_draft_model_limits_max_model_len``
-# and the regression fixed on #63909).
+# Positional-encoding keys the draft must share with the target (#58080).
+# ``max_position_embeddings`` is deliberately excluded: shared drafts already
+# get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
 _ROPE_HF_OVERRIDE_KEYS = frozenset(
     {
         "rope_scaling",
@@ -1376,17 +1368,12 @@ class SpeculativeConfig:
         hf_config: PreTrainedConfig,
         transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> PreTrainedConfig:
-        """Apply mapping-style rope overrides, then the draft arch rewrite.
+        """Apply dict rope overrides, then the draft arch rewrite.
 
-        Dict patches run first so nested keys such as
-        ``text_config.rope_parameters`` still exist on the original config.
-        Architecture mapping may later promote ``text_config`` to the top
-        level; applying after that would miss the nested path.
-
-        Nested overrides are only applied when the draft config actually has
-        that sub-config. External drafters (EAGLE, DFlash, ...) often ship a
-        flat config; setting ``text_config`` on them would create a bare dict
-        that ``get_text_config()`` then returns instead of the real config.
+        Dict patches run first so nested keys (``text_config.rope_parameters``)
+        apply before arch mapping may promote ``text_config``. Nested wrappers
+        are skipped on flat draft configs, where setting them would create a
+        bare ``text_config`` dict that ``get_text_config()`` picks up instead.
         """
         overrides = {
             key: value
@@ -1414,15 +1401,9 @@ class SpeculativeConfig:
         Dict overrides are mostly target-specific key patches, but
         rope-relevant keys (``rope_parameters`` / ``rope_scaling`` /
         ``rope_theta``, including nested ``text_config``) must reach the
-        draft. Otherwise the target runs extended RoPE (YaRN) while the MTP
-        draft stays on the native encoding, and acceptance drops to 0% past
-        the draft's native ``max_position_embeddings`` (#58080).
-
-        ``max_position_embeddings`` is not forwarded here: shared-position
-        drafts already get it via
-        ``_maybe_override_draft_max_position_embeddings``, and applying a
-        target override to an independent draft would defeat the draft
-        max-model-len clamp.
+        draft or a YaRN-style target override leaves the draft on native
+        rope (#58080). ``max_position_embeddings`` stays target-only so the
+        draft max-model-len clamp keeps holding (#63909).
 
         The composed override must stay picklable: the draft ``ModelConfig``
         is sent to spawned engine-core processes, so a local closure would
