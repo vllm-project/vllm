@@ -28,6 +28,9 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - `max_tokens=0` (Anthropic's prompt-cache pre-warming request) is rejected
+      with a 400. vLLM samples at least one token per request, so warm the cache
+      with `max_tokens=1` instead.
 
 ## Cohere APIs
 
