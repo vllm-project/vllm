@@ -24,6 +24,7 @@ steps:
   - requirements/build/cpu.txt
   - requirements/test/cpu.txt
   - cmake/cpu_extension.cmake
+  - vllm/_cpu_ops.py
   - vllm/model_executor/layers/utils.py
   - vllm/model_executor/kernels/linear/zentorch_utils.py
   - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
