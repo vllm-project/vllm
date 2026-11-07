@@ -7,6 +7,13 @@ by overlapping computation of two batches. This test validates that DBO works
 correctly with the DeepSeek-V2-Lite model using GSM8K evaluation.
 """
 
+import asyncio
+import inspect
+import os
+import time
+from pathlib import Path
+
+import openai
 import pytest
 import torch
 
@@ -45,6 +52,10 @@ DEEPEP_BACKENDS = [
     "deepep_low_latency",
     "deepep_high_throughput",
 ]
+
+# Longer than one peer DeepEP transport timeout (100 s by default).
+MICROBATCH_FAILURE_TIMEOUT_S = 150
+MICROBATCH_FAILURE = "injected DBO expert compute failure"
 
 
 @pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
@@ -159,3 +170,137 @@ def _run_dbo_gsm8k(
             f"DBO+DP+EP accuracy too low ({all2all_backend}): "
             f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
         )
+
+
+def install_dbo_expert_failure(arm_path: str, fired_path: str, message: str) -> None:
+    """Fail DP rank 0, microbatch 1, in expert compute, once the test arms it."""
+    from pathlib import Path
+
+    from vllm.distributed.parallel_state import get_dp_group
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEKernelModularImpl,
+    )
+    from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_enabled
+
+    fused_experts = FusedMoEKernelModularImpl._fused_experts
+
+    def failing_fused_experts(self, *args, **kwargs):
+        if (
+            dbo_enabled()
+            and dbo_current_ubatch_id() == 1
+            and get_dp_group().rank_in_group == 0
+            and Path(arm_path).exists()
+        ):
+            Path(fired_path).touch()
+            raise RuntimeError(message)
+        return fused_experts(self, *args, **kwargs)
+
+    FusedMoEKernelModularImpl._fused_experts = failing_fused_experts
+
+
+async def _send_until_engine_fails(remote_server: RemoteOpenAIServer) -> list:
+    async with remote_server.get_async_client(
+        timeout=MICROBATCH_FAILURE_TIMEOUT_S
+    ) as client:
+        return await asyncio.gather(
+            *(
+                client.completions.create(
+                    model=MODEL_NAME,
+                    prompt="Hello my name is",
+                    max_tokens=256,
+                    temperature=0,
+                    extra_body={"ignore_eos": True},
+                )
+                for _ in range(2 * MAX_NUM_SEQS)
+            ),
+            return_exceptions=True,
+        )
+
+
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
+def test_dbo_microbatch_failure_reports_original_error(
+    num_gpus_available, tmp_path: Path, capfd
+):
+    """A failed microbatch unwinds its sibling and stops the server.
+
+    The sibling is parked in a CPU handoff when the failure happens, and the
+    runner only reports after joining both workers, so the reported failure
+    also shows that the sibling unwound.
+    """
+    if num_gpus_available < DP_SIZE:
+        pytest.skip(f"Need at least {DP_SIZE} GPUs")
+
+    arm_path = tmp_path / "armed"
+    fired_path = tmp_path / "fired"
+    # Workers are spawned, so they only see the failure through sitecustomize.
+    (tmp_path / "sitecustomize.py").write_text(
+        f"{inspect.getsource(install_dbo_expert_failure)}\n"
+        f"{install_dbo_expert_failure.__name__}"
+        f"({str(arm_path)!r}, {str(fired_path)!r}, {MICROBATCH_FAILURE!r})\n"
+    )
+    pythonpath = [str(tmp_path), os.environ.get("PYTHONPATH")]
+
+    server_args = [
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        str(MAX_NUM_SEQS),
+        "--trust-remote-code",
+        # Graph replay would not run the Python expert path that fails.
+        "--enforce-eager",
+        "--data-parallel-size",
+        str(DP_SIZE),
+        "--enable-expert-parallel",
+        "--enable-dbo",
+        "--dbo-decode-token-threshold",
+        "16",
+        "--dbo-prefill-token-threshold",
+        "32",
+        "--all2all-backend",
+        "deepep_high_throughput",
+    ]
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        server_args,
+        env_dict={
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "PYTHONPATH": os.pathsep.join(filter(None, pythonpath)),
+        },
+        max_wait_seconds=600,
+    ) as remote_server:
+        arm_path.touch()
+        deadline = time.monotonic() + MICROBATCH_FAILURE_TIMEOUT_S
+        results = asyncio.run(_send_until_engine_fails(remote_server))
+        assert fired_path.exists(), "No step split into two microbatches"
+
+        errors = [r for r in results if isinstance(r, Exception)]
+        assert errors, "Every request succeeded after the microbatch failed"
+        assert not any(isinstance(e, openai.APITimeoutError) for e in errors), (
+            f"Requests did not fail within {MICROBATCH_FAILURE_TIMEOUT_S} s"
+        )
+
+        # Workers may wait for the peer's transport timeout, not any longer.
+        server_group = remote_server.proc.pid
+        while _process_group_alive(server_group) and time.monotonic() < deadline:
+            remote_server._poll()
+            time.sleep(1)
+        assert not _process_group_alive(server_group), (
+            f"Server processes alive {MICROBATCH_FAILURE_TIMEOUT_S} s after the failure"
+        )
+
+    captured = capfd.readouterr()
+    with capfd.disabled():
+        print(captured.out, end="")
+        print(captured.err, end="")
+    output = captured.out + captured.err
+    assert "Microbatch 1 of 2 failed" in output
+    assert MICROBATCH_FAILURE in output
