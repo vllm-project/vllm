@@ -20,6 +20,7 @@ from vllm.utils.cpu_resource_utils import (
     get_memory_node_info,
     get_visible_memory_node,
 )
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
@@ -244,6 +245,24 @@ class CPUWorker(Worker):
                     "`--kv-cache-memory-bytes` or VLLM_CPU_KVCACHE_SPACE."
                 )
             if requested_memory_for_kv > available_memory:
+                # Largest reservation the node can still back right now, less
+                # 1 GiB of headroom: the worker and the rest of the node keep
+                # allocating after the KV cache, and free memory drifts between
+                # runs, so a reservation at the exact boundary gets OOM-killed.
+                fitting = math.floor(
+                    (consumed_memory + available_memory - GiB_bytes)
+                    / memory_status.total_memory
+                    * 100
+                )
+                remedy = "reduce CPU memory used by other processes."
+                if fitting / 100 * memory_status.total_memory > consumed_memory:
+                    remedy = (
+                        "decrease `--gpu-memory-utilization` to "
+                        f"{fitting / 100:.2f} or lower (free memory varies "
+                        "between runs), set the KV cache size explicitly "
+                        "with `--kv-cache-memory-bytes` or "
+                        f"VLLM_CPU_KVCACHE_SPACE, or {remedy}"
+                    )
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
                     f"({format_gib(available_memory)}/"
@@ -251,7 +270,9 @@ class CPUWorker(Worker):
                     f" allocation is less than requested memory for kv "
                     f"({format_gib(requested_memory_for_kv)}/"
                     f"{format_gib(self.requested_cpu_memory)} GiB). "
-                    "Reduce CPU memory used by other processes."
+                    "On the CPU backend, the `--gpu-memory-utilization` flag "
+                    "controls the fraction of CPU memory reserved (despite its "
+                    f"name). To resolve: {remedy}"
                 )
             kv_cache_size = requested_memory_for_kv
             msg = (
