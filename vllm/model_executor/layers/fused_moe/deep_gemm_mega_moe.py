@@ -513,15 +513,16 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return False if return_success else None
         is_global_scale = weight_name.endswith("weight_scale_2")
         is_scale = weight_name.endswith("weight_scale")
+        dst = param.data
+        if is_global_scale and shard_id != "w2":
+            # One row per shard; row 0 (w1) is the kernel's L1 alpha.
+            dst = dst[{"w1": 0, "w3": 1}[shard_id]]
         for local_expert_id in local_expert_ids:
             if is_global_scale:
-                dst = param.data
-                if shard_id != "w2":
-                    dst = dst[0 if shard_id == "w1" else 1]
                 dst[local_expert_id].copy_(loaded_weight.reshape(()))
             else:
                 self._load_weight(
-                    param.data[local_expert_id], loaded_weight, shard_id, is_scale
+                    dst[local_expert_id], loaded_weight, shard_id, is_scale
                 )
         return True if return_success else None
 
