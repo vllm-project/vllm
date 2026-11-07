@@ -3,6 +3,7 @@
 
 
 import math
+from collections.abc import Callable
 
 import numpy
 import torch
@@ -19,7 +20,7 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .quant_utils import pack_cols, unpack_cols
+from .quant_utils import get_pack_factor, pack_cols, unpack_cols
 
 logger = init_logger(__name__)
 
@@ -535,16 +536,15 @@ def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
 def marlin_moe_permute_scales(
     s: torch.Tensor, size_k: int, size_n: int, group_size: int
 ):
+    # Same permutation as marlin_permute_scales, applied to all experts at once.
+    scale_perm, scale_perm_single = get_scale_perms()
+    perm = scale_perm if group_size < size_k and group_size != -1 else scale_perm_single
     num_experts = s.shape[0]
-    output = torch.empty(
-        (num_experts, s.shape[1], s.shape[2]),
-        device=s.device,
-        dtype=s.dtype,
+    return (
+        s.reshape((num_experts, -1, len(perm)))[:, :, perm]
+        .reshape(s.shape)
+        .contiguous()
     )
-
-    for e in range(num_experts):
-        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size)
-    return output
 
 
 def marlin_zero_points(
@@ -597,21 +597,71 @@ def awq_to_marlin_zero_points(
     return marlin_zp
 
 
+def _zero_point_interleave(num_bits: int) -> list[int]:
+    if num_bits == 4:
+        return [0, 2, 4, 6, 1, 3, 5, 7]
+    if num_bits == 8:
+        return [0, 2, 1, 3]
+    raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+
+# Unpacked zero points take up to 8x the packed memory, so the MoE conversions
+# unpack at most this many elements at a time.
+_MOE_ZERO_POINT_CHUNK_ELEMS = 1 << 22
+
+
+def _moe_convert_in_chunks(
+    convert: Callable[[torch.Tensor], torch.Tensor],
+    q_zp_packed: torch.Tensor,
+    elems_per_expert: int,
+) -> torch.Tensor:
+    chunk = max(1, _MOE_ZERO_POINT_CHUNK_ELEMS // elems_per_expert)
+    out = [convert(c) for c in q_zp_packed.split(chunk)]
+    return (out[0] if len(out) == 1 else torch.cat(out)).to(q_zp_packed.dtype)
+
+
+def _moe_unpack_cols(packed: torch.Tensor, num_bits: int) -> torch.Tensor:
+    # unpack_cols for all experts at once, without leaving the device.
+    shifts = torch.arange(0, 32, num_bits, device=packed.device, dtype=torch.int32)
+    q = (packed.to(torch.int32).unsqueeze(-1) >> shifts) & ((1 << num_bits) - 1)
+    return q.reshape(*packed.shape[:-1], -1)
+
+
+def _moe_marlin_zero_points(zp: torch.Tensor, num_bits: int) -> torch.Tensor:
+    # marlin_zero_points for all experts at once, zp is (E, size_k, size_n).
+    scale_perm, _ = get_scale_perms()
+    interleave = _zero_point_interleave(num_bits)
+    shape = zp.shape
+    zp = zp.reshape((shape[0], -1, len(scale_perm)))[:, :, scale_perm]
+    zp = zp.reshape((shape[0], -1, len(interleave)))[:, :, interleave]
+
+    # pack_cols on the device. The shift into the sign bit wraps like uint32.
+    pack_factor = get_pack_factor(num_bits)
+    zp = zp.reshape(*shape[:-1], -1, pack_factor)
+    packed = torch.zeros(zp.shape[:-1], dtype=torch.int32, device=zp.device)
+    for i in range(pack_factor):
+        packed |= zp[..., i] << (num_bits * i)
+    return packed
+
+
 def moe_awq_to_marlin_zero_points(
     q_zp_packed: torch.Tensor,
     size_k: int,
     size_n: int,
     num_bits: int,
 ):
-    num_experts = q_zp_packed.shape[0]
-    output = torch.empty(
-        (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
-        device=q_zp_packed.device,
-        dtype=q_zp_packed.dtype,
-    )
-    for e in range(num_experts):
-        output[e] = awq_to_marlin_zero_points(q_zp_packed[e], size_k, size_n, num_bits)
-    return output
+    # awq_to_marlin_zero_points for all experts at once.
+    undo_interleave = numpy.argsort(_zero_point_interleave(num_bits)).tolist()
+
+    def convert(packed: torch.Tensor) -> torch.Tensor:
+        n = packed.shape[0]
+        q_zp = _moe_unpack_cols(packed, num_bits)
+        q_zp = q_zp.reshape((n, -1, len(undo_interleave)))[
+            :, :, undo_interleave
+        ].reshape((n, size_k, size_n))
+        return _moe_marlin_zero_points(q_zp, num_bits)
+
+    return _moe_convert_in_chunks(convert, q_zp_packed, size_k * size_n)
 
 
 def maybe_warn_marlin_atomic_add(device, dtype):
@@ -637,16 +687,13 @@ def moe_packed_to_marlin_zero_points(
     Unlike AWQ, compressed-tensors uses standard bit packing without
     interleaving, so we just unpack and apply Marlin permutation directly.
     """
-    num_experts = q_zp_packed.shape[0]
-    output = torch.empty(
-        (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
-        device=q_zp_packed.device,
-        dtype=q_zp_packed.dtype,
-    )
-    for e in range(num_experts):
-        q_zp = unpack_cols(q_zp_packed[e], num_bits, size_k, size_n)
-        output[e] = marlin_zero_points(q_zp, size_k, size_n, num_bits)
-    return output
+
+    def convert(packed: torch.Tensor) -> torch.Tensor:
+        q_zp = _moe_unpack_cols(packed, num_bits)
+        q_zp = q_zp.reshape((packed.shape[0], size_k, size_n))
+        return _moe_marlin_zero_points(q_zp, num_bits)
+
+    return _moe_convert_in_chunks(convert, q_zp_packed, size_k * size_n)
 
 
 def maybe_warn_marlin_atomic_add_env():
