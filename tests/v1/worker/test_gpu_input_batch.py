@@ -3,6 +3,7 @@
 
 import inspect
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.structured_output import utils as structured_output_utils
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -538,6 +540,49 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         "mutations to num_prompt_tokens_cpu_tensor corrupted prompt_lens. "
         f"Expected {prompt_lens_snapshot}, got {metadata.prompt_lens}"
     )
+
+
+def test_grammar_bitmask_buffer_reuses_pinned_storage():
+    input_batch = _make_input_batch()
+
+    first = input_batch.get_grammar_bitmask_buffer(1, 32, torch.int32)
+    reused = input_batch.get_grammar_bitmask_buffer(2, 32, torch.int32)
+    resized = input_batch.get_grammar_bitmask_buffer(3, 32, torch.int32)
+
+    assert first.cpu.data_ptr() == reused.cpu.data_ptr()
+    assert reused.cpu.shape == (2, 32)
+    assert resized.cpu.shape == (3, 32)
+    assert resized.cpu.data_ptr() != first.cpu.data_ptr()
+
+
+def test_apply_grammar_bitmask_reuses_input_batch_staging_buffer(monkeypatch):
+    input_batch = _make_input_batch()
+    input_batch._req_ids = ["request-0"]
+    scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={})
+    grammar_output = SimpleNamespace(structured_output_request_ids=["request-0"])
+    logits = torch.zeros((1, 32), dtype=torch.float32)
+    received_bitmasks = []
+
+    class FakeXGrammar:
+        @staticmethod
+        def apply_token_bitmask_inplace(logits, bitmask, indices=None):
+            received_bitmasks.append(bitmask.clone())
+
+    monkeypatch.setattr(structured_output_utils, "xgr", FakeXGrammar)
+
+    grammar_output.grammar_bitmask = np.array([[1]], dtype=np.int32)
+    structured_output_utils.apply_grammar_bitmask(
+        scheduler_output, grammar_output, input_batch, logits
+    )
+    first_ptr = input_batch._grammar_bitmask_buffer.cpu.data_ptr()
+
+    grammar_output.grammar_bitmask = np.array([[2]], dtype=np.int32)
+    structured_output_utils.apply_grammar_bitmask(
+        scheduler_output, grammar_output, input_batch, logits
+    )
+
+    assert input_batch._grammar_bitmask_buffer.cpu.data_ptr() == first_ptr
+    assert [bitmask.item() for bitmask in received_bitmasks] == [1, 2]
 
 
 def test_placeholder_spec_token_ids_written_verbatim():
