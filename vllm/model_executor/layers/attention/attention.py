@@ -152,6 +152,9 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
         layer.register_buffer("_v_scale", torch.tensor(1.0, dtype=torch.float32))
         layer.register_buffer("_q_scale", torch.tensor(1.0, dtype=torch.float32))
         layer.register_buffer("_prob_scale", torch.tensor(1.0, dtype=torch.float32))
+        # Checkpoints never hold these; dummy loading must keep the default.
+        for name in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
+            getattr(layer, name).dummy_weight_value = 1.0
     else:
         layer._k_scale.fill_(1.0)
         layer._v_scale.fill_(1.0)
