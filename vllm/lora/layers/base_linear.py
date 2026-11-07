@@ -219,6 +219,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_lora_to_output(
         self, x: torch.Tensor, output: torch.Tensor
     ) -> torch.Tensor:
+        if self.should_skip_lora():
+            return output
+
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
@@ -250,6 +253,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         """
         assert envs.VLLM_LORA_ENABLE_DUAL_STREAM
         assert x.ndim in (2, 3)
+        if self.should_skip_lora():
+            return self._get_quant_method().apply(self.base_layer, x, bias)
+
         num_tokens = x.size(0) if x.ndim == 2 else x.size(1)
         output_size = sum(self.output_slices)
 
