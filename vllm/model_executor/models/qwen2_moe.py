@@ -421,9 +421,19 @@ class Qwen2MoeModel(nn.Module):
         return hidden_states
 
 
+def _unsqueeze_gguf_shared_expert_gate(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, loaded_weight in weights:
+        if "mlp.shared_expert_gate" in name and loaded_weight.dim() == 1:
+            loaded_weight = loaded_weight[None, :]
+        yield name, loaded_weight
+
+
 class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     fall_back_to_pt_during_load = False
     hf_to_vllm_mapper = WeightsMapper(
+        weights_transforms=[_unsqueeze_gguf_shared_expert_gate],
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),
@@ -434,7 +444,7 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_expert.gate_proj": (".shared_expert.gate_up_proj", 0),
             ".shared_expert.up_proj": (".shared_expert.gate_up_proj", 1),
-        }
+        },
     )
     packed_modules_mapping = {
         "qkv_proj": [
@@ -496,16 +506,5 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        def _maybe_reshape(
-            weights: Iterable[tuple[str, torch.Tensor]],
-        ) -> Iterable[tuple[str, torch.Tensor]]:
-            for name, loaded_weight in weights:
-                # GGUF: make sure that shared_expert_gate is a 2D tensor.
-                if "mlp.shared_expert_gate" in name and loaded_weight.dim() == 1:
-                    loaded_weight = loaded_weight[None, :]
-                yield name, loaded_weight
-
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            _maybe_reshape(weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
