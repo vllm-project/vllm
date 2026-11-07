@@ -176,3 +176,49 @@ The script will convert the ShareGPT dataset to a dataset with the standard user
 The flag `--max-items=128` is used to sample 128 conversations from the original dataset (change as needed).
 
 Use the output JSON file `sharegpt_conv_128.json` as the `--input-file` for `benchmark_serving_multi_turn.py`.
+
+## v2 (asyncio, no multiprocessing)
+
+`benchmark_serving_multi_turn_v2.py` is an alternative version of the benchmark
+that replaces the `multiprocessing` architecture with a single-process `asyncio`
+event loop.  It is a drop-in replacement — all CLI arguments from the original
+script are supported, plus two additions:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--generate-only` | off | Generate conversations from a config file and save to `--output-file` without running the benchmark |
+| `--benchmark-timeout-sec` | 3600 | Global timeout in seconds; remaining clients are cancelled if exceeded |
+
+### Why v2?
+
+The original script uses `mp.Process` + three `mp.Queue` objects for
+inter-process communication.  This can deadlock when
+`mp.Queue.join_thread()` waits for a feeder thread that cannot flush a
+full OS pipe (~1 MB on Linux).  `mp.Queue.empty()` is documented as
+unreliable, so the queue drain loop exits prematurely, leaving data in
+the pipe that `join_thread()` then waits for indefinitely
+([#42226](https://github.com/vllm-project/vllm/issues/42226)).
+
+v2 eliminates all `mp.Queue` usage by keeping everything in one process:
+
+- `mp.Process` → `asyncio.create_task`
+- `mp.Queue` (task distribution) → `asyncio.Queue`
+- `mp.Queue` (results / conversations) → shared in-process `list` / `dict`
+- `mp.Event` → `asyncio.Event`
+- `task_queue.get()` has a 1-second timeout so `stop_event` is always checked
+- A shared `aiohttp.ClientSession` with `TCPConnector` reuses connections
+
+### Usage
+
+```bash
+# Step 1: Generate a dataset (only once)
+python benchmark_serving_multi_turn_v2.py \
+  --model $MODEL_PATH --served-model-name Llama \
+  --input-file generate_multi_turn.json \
+  --output-file dataset.json --generate-only
+
+# Step 2: Run the benchmark with the pre-generated dataset
+python benchmark_serving_multi_turn_v2.py \
+  --model $MODEL_PATH --served-model-name Llama \
+  --input-file dataset.json --num-clients 50
+```
