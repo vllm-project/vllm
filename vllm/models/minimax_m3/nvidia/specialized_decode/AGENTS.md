@@ -46,10 +46,11 @@ configuration decides both:
     - the SwiGLU-OAI constants the kernels are compiled with.
 
 The low-batch attention needs no check of its own: a sparse attention layer
-without 16 query heads on one KV head and one index head of 128, NVFP4 KV and
-index caches, 16 top-k blocks, unit KV global scales and a FlashInfer
-`cute-dsl` MXFP8 o_proj gets no `LowBatchAttention`
-(`attention.build_low_batch_attention` returns None) and keeps its stock
+without the CUTLASS decode and an NVFP4 index cache (`indexer_kv_dtype`, bf16
+by default) builds none, and one without 16 query heads on one KV head and one
+index head of 128, an NVFP4 KV cache, 16 top-k blocks, unit KV global scales
+and a FlashInfer `cute-dsl` MXFP8 o_proj gets none
+(`attention.build_low_batch_attention` returns None); either keeps its stock
 modules. The configuration decides this, so every rank agrees.
 
 ## Structure
@@ -110,8 +111,10 @@ while the forward is being captured into a FULL CUDA graph
 (`captures_pure_decode`), and then hands its layers to `DecodeStep.run`.
 The step carries the attention metadata of the first sparse layer with a
 `LowBatchAttention` (decode block table, seq_lens and query length, through
-`attention.prepare_step`) when the step is all decode and its request and
-query counts fit `accepts`; each sparse layer with a `LowBatchAttention` then
+`attention.prepare_step`) when the step is all decode, its request and query
+counts fit `accepts`, the block table is at most 8192 pages wide and every
+layer with a `LowBatchAttention` reads that same table for its KV and its index
+cache (one KV-cache group); each sparse layer with a `LowBatchAttention` then
 hands its q and index q to it after the KV insert, the others run their stock
 attention. A MoE layer runs its `LowBatchFfn` when it defers its finalize for the
 step's rows (`defers_finalize`) and `accepts(x)` (1-32 contiguous BF16 rows,

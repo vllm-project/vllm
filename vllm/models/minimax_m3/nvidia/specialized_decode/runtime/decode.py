@@ -40,11 +40,20 @@ from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetada
 from vllm.sequence import IntermediateTensors
 
 from .. import captures_pure_decode
-from ..attention import AttentionStep, prepare_step
+from ..attention import MAX_PAGES, AttentionStep, prepare_step
 from ..moe import MAX_ROWS
 
 if TYPE_CHECKING:
     from ...model import MiniMaxM3DecoderLayer, MiniMaxM3Model
+
+
+def _same_tensor(a: torch.Tensor | None, b: torch.Tensor) -> bool:
+    return (
+        a is not None
+        and a.data_ptr() == b.data_ptr()
+        and a.shape == b.shape
+        and a.stride() == b.stride()
+    )
 
 
 class DecodeStep(NamedTuple):
@@ -101,8 +110,10 @@ class SpecializedDecode:
         return DecodeStep(rows, self, self._attention_step(rows))
 
     def _attention_step(self, rows: int) -> AttentionStep | None:
-        """The step's low-batch attention metadata (every sparse layer shares
-        its KV-cache group's), when its requests and queries fit."""
+        """The step's low-batch attention metadata, when its requests and
+        queries fit and every layer with the low-batch path reads the same
+        decode block table, of at most ``MAX_PAGES`` pages, for its KV and
+        its index cache."""
         built = [a for a in self.sparse if a.low_batch_attention is not None]
         attn_metadata = get_forward_context().attn_metadata
         if not built or not isinstance(attn_metadata, dict):
@@ -114,11 +125,26 @@ class SpecializedDecode:
         decode = md.decode
         if decode is None or md.num_prefills or md.num_decode_tokens != rows:
             return None
-        if not low_batch.accepts(md.num_decodes, decode.decode_query_len):
+        table = decode.block_table
+        if table.shape[1] > MAX_PAGES or not low_batch.accepts(
+            md.num_decodes, decode.decode_query_len
+        ):
             return None
-        return prepare_step(
-            decode.block_table, decode.seq_lens, decode.decode_query_len
-        )
+        for attn in built:
+            main = attn_metadata.get(attn.layer_name)
+            index = attn_metadata.get(attn.indexer.index_cache.prefix)
+            # Metadata of one KV-cache group shares its slot mapping, so the
+            # index cache's pages follow the same block table.
+            if (
+                not isinstance(main, MiniMaxM3SparseMetadata)
+                or main.decode is None
+                or not _same_tensor(main.decode.block_table, table)
+                or not _same_tensor(
+                    getattr(index, "slot_mapping", None), md.slot_mapping
+                )
+            ):
+                return None
+        return prepare_step(table, decode.seq_lens, decode.decode_query_len)
 
     def run(
         self,
